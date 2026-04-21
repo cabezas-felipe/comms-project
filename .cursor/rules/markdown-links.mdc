@@ -1,0 +1,15 @@
+---
+description: Prefer Markdown hyperlinks for internal docs and external sources in this repo
+alwaysApply: true
+---
+
+# Internal and external references
+
+When editing Markdown in this workspace (research notes, briefs, synthesis, READMEs):
+
+- **Prefer Markdown links** with readable anchor text: `[Interview synthesis](../interview-synthesis--zero-to-one--mercedes-osma.md)` rather than bare `` `path/to/file.md` `` or naked paths, so navigation and previews stay one-click.
+- **Paths:** use paths **relative to the file you are editing** (standard Markdown behavior in GitHub, Cursor, and VS Code).
+- **External URLs** (Granola, Linear, docs): use the **full** `https://...` string inside the link target; do not shorten.
+- **When bare paths are OK:** terminal copy-paste, `grep`/CI config, or when the path itself is the subject of discussion.
+
+This does not replace traceability requirements in research synthesis (still cite source + id); links are the default *presentation* for human readers.
