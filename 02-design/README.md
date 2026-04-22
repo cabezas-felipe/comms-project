@@ -34,7 +34,7 @@ Archive guardrail: files under `02-design/archive/` are historical context only;
 
 ## Research linkage
 
-Evidence and persona context live under [01-research](../01-research/); primary snapshot: [research-context](../01-research/00-ops/research-context.md).
+Evidence and persona context live under [01-research](../01-research/); primary snapshot: [research-context](../01-research/ops/research-context.md).
 
 ## Changelog
 

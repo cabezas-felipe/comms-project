@@ -10,7 +10,7 @@ This pattern translates research findings into UI structure for the v0 prototype
 
 Sources:
 
-- [Research context](../../01-research/00-ops/research-context.md)
+- [Research context](../../01-research/ops/research-context.md)
 - [Interview synthesis (Mercedes)](../../01-research/interview-synthesis--zero-to-one--mercedes-osma.md)
 
 ## Pattern goals

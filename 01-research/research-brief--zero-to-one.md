@@ -14,7 +14,7 @@
 
 ## Links
 
-- [Research backlog](00-ops/research-backlog.md)
-- [Session log](00-ops/session-log.md)
-- [Research context](00-ops/research-context.md)
-- [Quote library](00-ops/quote-library.md)
+- [Research backlog](ops/research-backlog.md)
+- [Session log](ops/session-log.md)
+- [Research context](ops/research-context.md)
+- [Quote library](ops/quote-library.md)

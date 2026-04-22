@@ -23,9 +23,9 @@ Interview Guides → Sessions → Synthesis → Context Map → Backlog → Deci
 
 **Key files (read these first when resuming work):**
 
-- `01-research/00-ops/research-context.md` — living snapshot of current beliefs, personas, open questions, and confidence levels
-- `01-research/00-ops/session-log.md` — interview timeline, verdicts, and decision impact per session
-- `01-research/00-ops/quote-library.md` — verbatim evidence indexed by theme
+- `01-research/ops/research-context.md` — living snapshot of current beliefs, personas, open questions, and confidence levels
+- `01-research/ops/session-log.md` — interview timeline, verdicts, and decision impact per session
+- `01-research/ops/quote-library.md` — verbatim evidence indexed by theme
 - `01-research/interview-synthesis--zero-to-one--mercedes-osma.md` — primary evidence base (N=1, two sessions, Apr 16–17 2026)
 
 **Supporting files:**

@@ -58,6 +58,6 @@ For each issue:
 
 ## Immediately after the call (10 min)
 
-1. Update [Session log](00-ops/session-log.md) with top 3, verdict, and next step.
+1. Update [Session log](ops/session-log.md) with top 3, verdict, and next step.
 2. Update [Research brief](research-brief--zero-to-one.md) with ranked pains and proposed #1 v0 target.
-3. If useful, add redacted verbatims to [Quote library](00-ops/quote-library.md).
+3. If useful, add redacted verbatims to [Quote library](ops/quote-library.md).
