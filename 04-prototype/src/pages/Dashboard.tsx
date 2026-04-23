@@ -1,10 +1,39 @@
-import { useMemo, useState } from "react";
-import { GEOGRAPHIES, Geography, STORIES, Source, Story, TOPICS, Topic, findSource } from "@/data/stories";
+import { useEffect, useMemo, useState } from "react";
+import { GEOGRAPHIES, Geography, STORIES, Source, Story, TOPICS, Topic } from "@/data/stories";
 import { deriveSignals, keySources, Trend } from "@/lib/derive";
 import { timeAgo } from "@/lib/format";
 import { ArrowUpRight, ArrowDownRight, Minus, ThumbsUp, ThumbsDown } from "lucide-react";
 import SourceReader from "@/components/SourceReader";
+import { trackDashboardViewed, trackSourceOpenError, trackSourceOpened, trackStoryExpanded } from "@/lib/analytics";
+import { fetchDashboardPayload } from "@/lib/api";
+import { type StoryDto } from "@tempo/contracts";
 import { toast } from "sonner";
+
+function dtoToStory(dto: StoryDto): Story {
+  return {
+    id: dto.id,
+    title: dto.title,
+    geographies: dto.geographies,
+    topic: dto.topic,
+    takeaway: dto.takeaway,
+    summary: dto.summary,
+    whyItMatters: dto.whyItMatters,
+    whatChanged: dto.whatChanged,
+    priority: dto.priority,
+    outletCount: dto.outletCount,
+    sources: dto.sources.map((s) => ({
+      id: s.id,
+      outlet: s.outlet,
+      byline: s.byline,
+      kind: s.kind,
+      weight: s.weight,
+      url: s.url,
+      minutesAgo: s.minutesAgo,
+      headline: s.headline,
+      body: s.body,
+    })),
+  };
+}
 
 type TopicFilter = Topic | "All";
 type GeoFilter = Geography | "All";
@@ -20,15 +49,18 @@ export default function Dashboard() {
   const [geo, setGeo] = useState<GeoFilter>("All");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
+  const [stories, setStories] = useState<Story[]>(STORIES);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const filtered = useMemo(
     () =>
-      STORIES.filter(
+      stories.filter(
         (s) =>
           (topic === "All" || s.topic === topic) &&
           (geo === "All" || s.geographies.includes(geo))
       ).map((s) => ({ story: s, sig: deriveSignals(s) })),
-    [topic, geo]
+    [stories, topic, geo]
   );
 
   const counts = useMemo(() => {
@@ -39,10 +71,48 @@ export default function Dashboard() {
 
   const headline = useMemo(() => buildHeadline(counts), [counts]);
 
-  const activeSource: Source | null = activeSourceId ? findSource(activeSourceId)?.source ?? null : null;
-  const activeSourceStory: Story | null = activeSourceId ? findSource(activeSourceId)?.story ?? null : null;
+  const activeSourcePair = useMemo(
+    () => (activeSourceId ? findSourceInStories(stories, activeSourceId) : null),
+    [stories, activeSourceId]
+  );
+  const activeSource: Source | null = activeSourcePair?.source ?? null;
+  const activeSourceStory: Story | null = activeSourcePair?.story ?? null;
 
   const railOpen = !!activeSource;
+
+  useEffect(() => {
+    trackDashboardViewed();
+  }, []);
+
+  useEffect(() => {
+    let canceled = false;
+    setIsLoading(true);
+    fetchDashboardPayload()
+      .then((payload) => {
+        if (canceled) return;
+        setStories(payload.stories.map(dtoToStory));
+        setLoadError(null);
+      })
+      .catch((error: unknown) => {
+        if (canceled) return;
+        const message = error instanceof Error ? error.message : "Failed to load dashboard data.";
+        setLoadError(message);
+        trackSourceOpenError({
+          message,
+          code: "dashboard_payload_load_failed",
+        });
+        toast.error("We couldn't refresh stories. Showing cached data.");
+      })
+      .finally(() => {
+        if (!canceled) {
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   return (
     <div
@@ -56,6 +126,16 @@ export default function Dashboard() {
           <h1 className="font-display text-[32px] font-semibold leading-tight tracking-tight">
             {headline}
           </h1>
+          {isLoading && (
+            <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+              Refreshing stories...
+            </p>
+          )}
+          {loadError && (
+            <p className="mt-2 text-[12px] text-muted-foreground">
+              Using cached stories while refresh recovers.
+            </p>
+          )}
 
           {/* Pill row */}
           <div className="mt-5 flex flex-wrap items-center gap-1.5">
@@ -91,7 +171,10 @@ export default function Dashboard() {
                   activityScore={sig.activityScore}
                   expanded={expandedId === story.id}
                   onToggle={() => setExpandedId(expandedId === story.id ? null : story.id)}
-                  onOpenSource={(id) => setActiveSourceId(id)}
+                  onOpenSource={(id) => {
+                    trackSourceOpened(story.id, id);
+                    setActiveSourceId(id);
+                  }}
                 />
               </li>
             ))}
@@ -122,6 +205,14 @@ export default function Dashboard() {
   );
 }
 
+function findSourceInStories(stories: Story[], sourceId: string): { story: Story; source: Source } | null {
+  for (const story of stories) {
+    const source = story.sources.find((s) => s.id === sourceId);
+    if (source) return { story, source };
+  }
+  return null;
+}
+
 function buildHeadline(counts: { rising: number; steady: number; falling: number }): string {
   const total = counts.rising + counts.steady + counts.falling;
   if (total === 0) return "Steady tempo across your beat.";
@@ -144,6 +235,12 @@ interface ItemProps {
 }
 
 function StoryItem({ story, trend, freshestMinutes, activityScore, expanded, onToggle, onOpenSource }: ItemProps) {
+  useEffect(() => {
+    if (expanded) {
+      trackStoryExpanded(story.id);
+    }
+  }, [expanded, story.id]);
+
   const t = TREND[trend];
   const Icon = t.icon;
   const titleColor = trend === "falling" ? "text-foreground/70" : "text-foreground";

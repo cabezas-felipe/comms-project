@@ -40,8 +40,18 @@ export default function EvidenceDesk() {
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <Select value={topic} onChange={(v) => setTopic(v as any)} options={["All", ...TOPICS]} label="Topic" />
-            <Select value={geo} onChange={(v) => setGeo(v as any)} options={["All", ...GEOGRAPHIES]} label="Geo" />
+            <Select<Topic | "All">
+              value={topic}
+              onChange={setTopic}
+              options={["All", ...TOPICS]}
+              label="Topic"
+            />
+            <Select<Geography | "All">
+              value={geo}
+              onChange={setGeo}
+              options={["All", ...GEOGRAPHIES]}
+              label="Geo"
+            />
             <Select
               value={sort}
               onChange={(v) => setSort(v as SortKey)}
@@ -191,15 +201,15 @@ function ConfidenceMeter({ score, label }: { score: number; label: string }) {
   );
 }
 
-function Select({
+function Select<T extends string>({
   value,
   onChange,
   options,
   label,
 }: {
-  value: string;
-  onChange: (v: string) => void;
-  options: string[];
+  value: T;
+  onChange: (v: T) => void;
+  options: T[];
   label: string;
 }) {
   return (
@@ -208,7 +218,7 @@ function Select({
       <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">{label}</span>
       <select
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => onChange(e.target.value as T)}
         className="bg-transparent text-xs focus:outline-none"
       >
         {options.map((o) => (

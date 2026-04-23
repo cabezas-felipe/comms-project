@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Nature
 
-This is a **product discovery research repository**, not a software project. There are no build, lint, or test commands. All work is in Markdown documents.
+This is primarily a **product discovery research repository** (Markdown-first). Engineering for the Tempo prototype and shared packages lives under [`05-engineering`](05-engineering): run **`cd 05-engineering && npm install`** then **`npm run dev`**, **`npm run build`**, **`npm run test:packages`**, etc. See [`05-engineering/README.md`](05-engineering/README.md).
 
 ## Linking Convention
 
