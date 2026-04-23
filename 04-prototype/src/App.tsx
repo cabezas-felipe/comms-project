@@ -12,6 +12,8 @@ import SignalRadar from "./pages/archive/SignalRadar.tsx";
 import EvidenceDesk from "./pages/archive/EvidenceDesk.tsx";
 import AnalystBriefing from "./pages/archive/AnalystBriefing.tsx";
 import AppHeader from "./components/AppHeader.tsx";
+import ProtectedRoute from "./components/ProtectedRoute.tsx";
+import { AuthProvider } from "./lib/auth.tsx";
 
 const queryClient = new QueryClient();
 
@@ -20,25 +22,69 @@ const App = () => (
     <TooltipProvider>
       <Toaster />
       <Sonner />
-      <BrowserRouter>
-        <AppHeader />
-        <Routes>
-          <Route path="/" element={<Navigate to="/onboarding" replace />} />
-          <Route path="/onboarding" element={<Onboarding />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/archive" element={<ArchiveIndex />} />
-          <Route path="/archive/signal-radar" element={<SignalRadar />} />
-          <Route path="/archive/evidence-desk" element={<EvidenceDesk />} />
-          <Route path="/archive/analyst-briefing" element={<AnalystBriefing />} />
-          {/* Legacy redirects */}
-          <Route path="/d/signal-radar" element={<Navigate to="/archive/signal-radar" replace />} />
-          <Route path="/d/evidence-desk" element={<Navigate to="/archive/evidence-desk" replace />} />
-          <Route path="/d/analyst-briefing" element={<Navigate to="/archive/analyst-briefing" replace />} />
-          <Route path="/directions" element={<Navigate to="/archive" replace />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
+      <AuthProvider>
+        <BrowserRouter>
+          <AppHeader />
+          <Routes>
+            <Route path="/" element={<Navigate to="/onboarding" replace />} />
+            <Route path="/onboarding" element={<Onboarding />} />
+            <Route
+              path="/dashboard"
+              element={
+                <ProtectedRoute>
+                  <Dashboard />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <ProtectedRoute>
+                  <Settings />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/archive"
+              element={
+                <ProtectedRoute>
+                  <ArchiveIndex />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/archive/signal-radar"
+              element={
+                <ProtectedRoute>
+                  <SignalRadar />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/archive/evidence-desk"
+              element={
+                <ProtectedRoute>
+                  <EvidenceDesk />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/archive/analyst-briefing"
+              element={
+                <ProtectedRoute>
+                  <AnalystBriefing />
+                </ProtectedRoute>
+              }
+            />
+            {/* Legacy redirects */}
+            <Route path="/d/signal-radar" element={<Navigate to="/archive/signal-radar" replace />} />
+            <Route path="/d/evidence-desk" element={<Navigate to="/archive/evidence-desk" replace />} />
+            <Route path="/d/analyst-briefing" element={<Navigate to="/archive/analyst-briefing" replace />} />
+            <Route path="/directions" element={<Navigate to="/archive" replace />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
     </TooltipProvider>
   </QueryClientProvider>
 );

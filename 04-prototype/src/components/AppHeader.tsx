@@ -1,7 +1,8 @@
 import { NavLink, useLocation } from "react-router-dom";
 import { formatClock } from "@/lib/format";
 import { useEffect, useState } from "react";
-import { Settings as SettingsIcon } from "lucide-react";
+import { LogOut, Settings as SettingsIcon } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 
 const NAV = [
   { to: "/dashboard", label: "Feed" },
@@ -12,13 +13,14 @@ const NAV = [
 export default function AppHeader() {
   const [now, setNow] = useState(new Date());
   const location = useLocation();
+  const { isAuthenticated, logout } = useAuth();
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30_000);
     return () => clearInterval(id);
   }, []);
 
   // Hide chrome on onboarding
-  if (location.pathname === "/" || location.pathname === "/onboarding") return null;
+  if (location.pathname === "/" || location.pathname === "/onboarding" || !isAuthenticated) return null;
 
   return (
     <header className="sticky top-0 z-30 border-b border-rule/60 bg-background/85 backdrop-blur">
@@ -46,6 +48,14 @@ export default function AppHeader() {
           >
             <SettingsIcon className="h-4 w-4" />
           </NavLink>
+          <button
+            type="button"
+            onClick={logout}
+            aria-label="Sign out"
+            className="rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+          >
+            <LogOut className="h-4 w-4" />
+          </button>
         </div>
       </div>
     </header>

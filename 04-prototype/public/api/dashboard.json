@@ -1,0 +1,90 @@
+{
+  "contractVersion": "2026-04-22-slice1",
+  "stories": [
+    {
+      "id": "ofac-colombia",
+      "title": "OFAC scrutiny expands around Colombia leadership narrative",
+      "geographies": ["US", "Colombia"],
+      "topic": "Diplomatic relations",
+      "takeaway": "Story is moving from policy reporting into political reaction — response cycle likely within the day.",
+      "summary": "Coverage across US and Colombian outlets frames possible sanctions implications and response pressure. Narrative is widening from policy reporting to political reaction.",
+      "whyItMatters": "A pivot from policy framing to political reaction signals the story is moving toward a response cycle — comms posture should be prepared, not reactive.",
+      "whatChanged": "Two major outlets added legal-context framing in the last hour.",
+      "priority": "top",
+      "outletCount": 14,
+      "sources": [
+        {
+          "id": "ofac-nyt",
+          "outlet": "The New York Times",
+          "byline": "By Maria Hernandez",
+          "kind": "traditional",
+          "weight": 95,
+          "url": "#",
+          "minutesAgo": 20,
+          "headline": "Treasury Weighs Expanded Scrutiny of Colombia Officials",
+          "body": [
+            "WASHINGTON — The Treasury Department's Office of Foreign Assets Control is examining a broader set of names tied to Colombia's leadership circle, according to three people briefed on the review.",
+            "The internal assessment does not yet contemplate sanctions, the people said, but it widens the scope of an inquiry that began as a narrow policy question.",
+            "A spokesperson for OFAC declined to comment. The Colombian embassy did not immediately respond to a request for comment."
+          ]
+        },
+        {
+          "id": "ofac-reuters",
+          "outlet": "Reuters",
+          "byline": "By Reuters Staff",
+          "kind": "traditional",
+          "weight": 88,
+          "url": "#",
+          "minutesAgo": 62,
+          "headline": "U.S. Treasury Reviewing Colombia-Linked Names, Sources Say",
+          "body": [
+            "The U.S. Treasury is reviewing a list of Colombia-linked individuals as part of a broader compliance examination, three sources familiar with the matter told Reuters on Tuesday.",
+            "The review remains preliminary and may not result in any action, the sources cautioned."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deportation-rwanda",
+      "title": "US deportation-routing discussion involving Rwanda resurfaces",
+      "geographies": ["US", "Colombia"],
+      "topic": "Migration policy",
+      "takeaway": "Bilateral framing is back; expect inbound press questions for Colombia-adjacent statements within 24h.",
+      "summary": "Early signals from policy and regional outlets suggest renewed attention on deportation routing and bilateral implications.",
+      "whyItMatters": "Bilateral framing creates exposure for Colombia-adjacent statements; expect inbound questions within 24h.",
+      "whatChanged": "Local coverage volume increased and one new government statement appeared.",
+      "priority": "top",
+      "outletCount": 9,
+      "sources": [
+        {
+          "id": "dep-reuters",
+          "outlet": "Reuters",
+          "byline": "By Reuters Staff",
+          "kind": "traditional",
+          "weight": 88,
+          "url": "#",
+          "minutesAgo": 15,
+          "headline": "Rwanda Routing Discussion Returns to U.S. Migration Debate",
+          "body": [
+            "The idea of routing certain deportation cases through Rwanda has reappeared in U.S. policy discussions, two officials confirmed, reviving a proposal that had quieted earlier this year.",
+            "The renewed interest, the officials said, is driven by capacity pressures rather than a settled policy direction."
+          ]
+        },
+        {
+          "id": "dep-ap",
+          "outlet": "Associated Press",
+          "byline": "By AP Staff",
+          "kind": "traditional",
+          "weight": 85,
+          "url": "#",
+          "minutesAgo": 55,
+          "headline": "Officials Confirm Renewed Look at Third-Country Routing",
+          "body": [
+            "U.S. officials confirmed Tuesday that the administration is again examining third-country routing options as part of a broader effort to manage migration capacity.",
+            "Rwanda is among the countries under discussion, though no agreement is imminent."
+          ]
+        }
+      ]
+    }
+  ]
+}

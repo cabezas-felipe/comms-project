@@ -1,0 +1,9 @@
+# Engineering decisions path
+
+For this repository, all **engineering/build execution** decisions must be logged in:
+
+- [`05-engineering/DECISIONS.md`](../../05-engineering/DECISIONS.md)
+
+Do not create a root-level `DECISIONS.md` for engineering decisions.
+
+If any skill template references project-root `DECISIONS.md`, interpret that as this repo's canonical engineering decisions file above.

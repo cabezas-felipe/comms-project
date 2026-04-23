@@ -28,6 +28,18 @@ describe("fetchDashboardPayload", () => {
     });
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenNthCalledWith(1, 200);
+    expect(sleep).toHaveBeenNthCalledWith(2, 400);
+    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
+    expect(payload.stories.length).toBe(STORIES.length);
+  });
+
+  it("falls back immediately when retries is 0", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error("network down"));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const payload = await fetchDashboardPayload({ fetcher, retries: 0, sleep });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
     expect(payload.contractVersion).toBe(CONTRACT_VERSION);
     expect(payload.stories.length).toBe(STORIES.length);
   });

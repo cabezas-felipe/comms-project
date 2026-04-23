@@ -2,6 +2,205 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-04-23 - D-027 - Slice 10 audit pass: AI router hardening verified, snapshot isolation test added
+
+#### Context
+
+Audit pass of Slice 10 (branch `audit/claude-rebuild-slice10`). In-scope files reviewed: `apps/api/src/ai/prompts.mjs`, `apps/api/src/ai/providers/openai-compatible.mjs`, `apps/api/src/ai/model-router.mjs`, `apps/api/src/ai/model-router.test.mjs`, `apps/api/src/server.mjs`. Objective: harden the AI model-routing layer with prompt versioning, provider-ready path, and runtime telemetry counters.
+
+#### Decision
+
+- No functional code changes required. All Slice 10 functional requirements were already present and correct.
+- Added one test to `[apps/api/src/ai/model-router.test.mjs](apps/api/src/ai/model-router.test.mjs)`:
+  1. `getAiMetrics returns an isolated snapshot, not a live reference` — mutates the returned copy and verifies that a subsequent `getAiMetrics()` call is unaffected. This pins `return { ...aiMetrics }` as an explicit regression guard on the accessor contract.
+
+#### Why
+
+- `getAiMetrics()` returns `{ ...aiMetrics }` to prevent callers from directly mutating the internal counter state. The existing tests did not verify this isolation guarantee; without the test, a regression from `return { ...aiMetrics }` to `return aiMetrics` would be invisible to CI.
+- All other Slice 10 requirements were verified in place: `SUMMARY_PROMPT_VERSION` propagated in both success and fallback `meta`, all four counter increments wired in the correct branches (`summarizationRequests` on every call; `providerErrors` + `summarizationFallbacks` on every error; `summarizationTimeouts` conditionally on timeout-message match), `GET /api/ai/metrics` endpoint returns `{ metrics: getAiMetrics() }`, and the `openai-compatible` provider path is activated when the model prefix is `openai:` and `TEMPO_OPENAI_API_KEY` is set.
+
+#### Consequences
+
+- `cd 05-engineering && npm run test:api` now runs 19 tests (8 model-router + 6 settings-schema + 5 route-level). All pass.
+- `npm run build` exits 0. `npm run test:prototype` exits 0 (9 tests). `npx eslint src/lib/api.ts vite.config.ts` exits 0. `node --check server.mjs` exits 0. `node --check model-router.mjs` exits 0.
+- Known gap: `summarizationFallbacks`, `providerErrors`, and `summarizationTimeouts` counter increments are not covered by tests. `CAPABILITY_DEFAULTS` is frozen at module load time; triggering the catch block requires either a mock injection seam or a separate test file run in a fresh process with `TEMPO_AI_SUMMARY_MODEL=openai:test` (no API key). Flagged as follow-up for the next hardening slice.
+- Slice 10 is closed; AI router hardening (prompt versioning, provider-ready path, telemetry counters) is ready for any future slice that wires production provider credentials.
+
+### 2026-04-23 - D-026 - Slice 9 audit pass: AI architecture verified, guardrail + fallback test coverage added
+
+#### Context
+
+Audit pass of Slice 9 (branch `audit/claude-rebuild-slice9`). In-scope files reviewed: `apps/api/src/ai/providers/mock-openai.mjs`, `apps/api/src/ai/providers/mock-anthropic.mjs`, `apps/api/src/ai/guardrails.mjs`, `apps/api/src/ai/model-router.mjs`, `apps/api/src/ai/model-router.test.mjs`, `apps/api/src/server.mjs`. Objective: introduce an MVP AI model architecture with capability routing and guardrailed summarization integrated into dashboard payload generation.
+
+#### Decision
+
+- No functional code changes required. All Slice 9 functional requirements were already present and correct.
+- Added four tests to `[apps/api/src/ai/model-router.test.mjs](apps/api/src/ai/model-router.test.mjs)`:
+  1. `summarizeCluster meta contains all expected fields on success path` — verifies every `meta` field is present and typed (capability, model, provider, elapsedMs, timedOut, fallbackUsed, promptTokens, outputTokens, costUsd, promptVersion) and that `timedOut` and `fallbackUsed` are false on the happy path.
+  2. `withTimeout resolves when promise completes before deadline` — direct unit test of the `withTimeout` guardrail with a fast promise and long deadline.
+  3. `withTimeout rejects with timeout message when deadline is exceeded` — direct unit test: a never-resolving promise + 10ms deadline → rejects with the exact error message `"AI summarization timed out"`. This pins the timeout mechanism and error message as an explicit assertion.
+  4. `heuristicSummary returns non-empty string that includes cluster title` — verifies the fallback text generator returns a non-empty string and includes the cluster title, confirming the heuristic path is exercisable without provider dependency.
+
+#### Why
+
+- The timeout/fallback execution path is the critical reliability guarantee of Slice 9. The prior test suite only covered the happy path; any regression in `withTimeout` or `heuristicSummary` would have been invisible to CI.
+- Testing `withTimeout` and `heuristicSummary` as direct unit tests (imported into `model-router.test.mjs`) avoids needing a mocking framework — both functions are pure enough to test in isolation with `node:test` alone.
+- The complete meta-field assertion pins the cost-observability contract; if any field is dropped from `summarizeCluster`'s return shape, the test fails immediately.
+
+#### Consequences
+
+- `cd 05-engineering && npm run test:api` now runs 18 tests (7 model-router + 6 settings-schema + 5 route-level). All pass.
+- `npm run build` exits 0. `npm run test:prototype` exits 0 (9 tests). `npx eslint src/lib/api.ts vite.config.ts` exits 0. `node --check server.mjs` exits 0.
+- The `withTimeout` deadline-exceeded test is the authoritative regression guard for the timeout guardrail; changing the timeout message or the error shape will fail it.
+- Slice 9 is closed; AI architecture MVP (mock providers + capability routing + guardrailed summarization + cost metadata) is ready for Slice 10 (AI router hardening).
+
+### 2026-04-23 - D-025 - Slice 8 audit pass: ingestion + ranking endpoint verified, dashboard route test added
+
+#### Context
+
+Audit pass of Slice 8 (branch `audit/claude-rebuild-slice8`). In-scope files reviewed: `apps/api/data/source-items.json`, `apps/api/src/server.mjs`, `04-prototype/src/lib/api.ts`, `04-prototype/vite.config.ts`. Objective: implement a local ingestion and ranking path for Dashboard payload generation, replacing static dashboard JSON reads.
+
+#### Decision
+
+- No functional code changes required. All Slice 8 functional requirements were already present and correct.
+- Added one route-level test for `GET /api/dashboard` to `[apps/api/src/server.routes.test.mjs](apps/api/src/server.routes.test.mjs)`, per the D-017 pattern ("Any future route addition should include a corresponding entry in `server.routes.test.mjs`").
+- Test seeds a minimal `source-items.json` fixture to the isolated `tmpDir` before server import; verifies HTTP 200, `contractVersion`, stories array length, `dashboardPayloadSchema` conformance, and `aiSummaryMeta` stripping (D-016).
+
+#### Why
+
+- D-017 established that route additions require route-level HTTP tests. The dashboard endpoint was added in Slice 8 but lacked HTTP-level verification. The functional implementation was correct; only the test gap needed closing.
+- Without the test, a regression in dataset loading, filtering, clustering, or response-stripping logic would be invisible to the API test suite.
+
+#### Consequences
+
+- `cd 05-engineering/apps/api && npm test` now runs 14 tests (3 model-router + 6 settings-schema + 5 route-level). All pass.
+- `npm run build` exits 0. `npm run test:prototype` exits 0 (9 tests). `npx eslint src/lib/api.ts vite.config.ts` exits 0. `node --check server.mjs` exits 0.
+- Slice 8 is closed; ingestion v0 + ranking endpoint is ready for Slice 9 (AI architecture summary).
+
+### 2026-04-23 - D-024 - Slice 7 audit pass: auth baseline + guarded routes verified, no code changes required
+
+#### Context
+
+Audit pass of Slice 7 (branch `audit/claude-rebuild-slice7`). In-scope files reviewed: `04-prototype/src/lib/auth.tsx`, `04-prototype/src/components/ProtectedRoute.tsx`, `04-prototype/src/App.tsx`, `04-prototype/src/pages/Onboarding.tsx`, `04-prototype/src/components/AppHeader.tsx`. Objective: implement a minimal auth baseline that protects private routes while preserving the existing onboarding and app UI flow.
+
+#### Decision
+
+- No code changes required. All Slice 7 functional requirements were already present and correct.
+- `AuthProvider` uses localStorage-backed session (`tempo.auth.session.v1`) with stable `useMemo` value to avoid unnecessary re-renders.
+- `ProtectedRoute` redirects unauthenticated users to `/onboarding` with `state={{ from: location.pathname }}` preserved for future post-login redirect use.
+- All private routes (`/dashboard`, `/settings`, `/archive`, `/archive/signal-radar`, `/archive/evidence-desk`, `/archive/analyst-briefing`) are wrapped in `ProtectedRoute`.
+- `Onboarding` calls `login()` on valid submit and navigates to `/dashboard`; redirects authenticated users immediately with `<Navigate>`.
+- `AppHeader` hides for `/`, `/onboarding`, and any unauthenticated state; shows logout button for authenticated sessions.
+- All 9 prototype tests pass. `npm run build` exits 0. ESLint exits with warnings only (1 pre-existing `react-refresh/only-export-components` in `auth.tsx` — acceptable, documented in slice artifact).
+
+#### Why
+
+- The audit obligation is to verify correctness against the slice objective. Confirming a passing gate with no regressions is a valid and complete audit outcome.
+
+#### Consequences
+
+- `npm run build` exits 0.
+- `cd 05-engineering && npm run test:prototype` exits 0 (9 tests: 6 api adapter + 2 settings-api + 1 example).
+- `npx eslint src/App.tsx src/pages/Onboarding.tsx src/components/AppHeader.tsx src/components/ProtectedRoute.tsx src/lib/auth.tsx` exits with warnings only.
+- Slice 7 is closed; auth baseline is ready for Slice 8 (ingestion pipeline v0 + ranking endpoint).
+
+### 2026-04-23 - D-023 - Slice 6 audit pass: HTTP + local DB settings flow verified, no code changes required
+
+#### Context
+
+Audit pass of Slice 6 (branch `audit/claude-rebuild-slice6`). In-scope files reviewed: `apps/api/src/server.mjs`, `apps/api/data/settings.json`, `apps/api/package.json`, `05-engineering/package.json`, `04-prototype/vite.config.ts`, `04-prototype/src/lib/settings-api.ts`, `04-prototype/src/lib/settings-api.test.ts`. Objective: replace Settings adapter internals from browser-only localStorage to HTTP-first GET/PUT with localStorage fallback, backed by a local JSON file via the `@tempo/api` Express service.
+
+#### Decision
+
+- No code changes required. All Slice 6 functional requirements were already present and correct.
+- All 13 `@tempo/api` tests pass (3 model-router, 4 route tests via supertest, 6 schema unit tests).
+- All 9 prototype tests pass (2 settings-api + 6 api adapter + 1 example).
+- ESLint on all four in-scope prototype files exits 0.
+- `npm run build` exits 0.
+
+#### Why
+
+- `server.mjs` correctly exports `app`, guards `listen` behind direct-run check, and overrides `DATA_DIR` via `TEMPO_DATA_DIR` for test isolation.
+- `settings-api.ts` implements HTTP-first with localStorage write-through on success and graceful fallback (mock latency + localStorage or default seed) on any fetch error.
+- `vite.config.ts` proxies `/api/settings` and `/api/dashboard` to `http://localhost:8787`.
+- `server.routes.test.mjs` exercises the full HTTP route surface (health, invalid→400, valid→200+schema, GET-after-PUT) using supertest with an isolated temp data dir.
+
+#### Consequences
+
+- `npm run build` exits 0.
+- `cd 05-engineering/apps/api && npm test` exits 0 (13 tests).
+- `cd 05-engineering && npm run test:prototype` exits 0 (9 tests).
+- `npx eslint src/lib/settings-api.ts src/lib/settings-api.test.ts src/pages/Settings.tsx vite.config.ts` exits 0.
+- Slice 6 is closed; the Settings HTTP/local-DB boundary is ready for Slice 7 (auth baseline + guarded routes).
+
+### 2026-04-23 - D-022 - Slice 5 audit pass: settings persistence verified, one comment correction
+
+#### Context
+
+Audit pass of Slice 5 (branch `audit/claude-rebuild-slice5`). The three in-scope files — `src/lib/settings-api.ts`, `src/lib/settings-api.test.ts`, and `src/pages/Settings.tsx` — were reviewed against the Slice 5 objective (typed, persistent Settings read/write path). All functional requirements were already present: `settingsPayloadSchema` contract validation on both read and write paths, localStorage persistence with graceful fallback to defaults on empty or corrupt state, Settings page `useEffect` load-on-mount with cancellation guard, and `loading`/`saving` UI states. One minor documentation error was found: the JSDoc on `fetchSettingsPayload` referenced "Slice 4 adapter" instead of "Slice 5 adapter".
+
+#### Decision
+
+- Fix JSDoc comment in `settings-api.ts`: "Slice 4 adapter" → "Slice 5 adapter".
+- No functional code changes required.
+
+#### Why
+
+- The incorrect slice reference in the comment would mislead future readers about when this module was introduced.
+- All validation gates (build, test, lint) passed before and after the fix without any functional change.
+
+#### Consequences
+
+- `npm run build` exits 0.
+- `npm run test:prototype` exits 0 (9 tests pass: 6 api adapter + 2 settings-api + 1 example).
+- ESLint on the three in-scope files exits 0.
+- Slice 5 is closed; the settings persistence boundary is ready for Slice 6 (HTTP/local DB swap).
+
+### 2026-04-23 - D-021 - Slice 4 audit pass: lint baseline verified, no code changes required
+
+#### Context
+
+Audit pass of Slice 4 (branch `audit/claude-rebuild-slice4`). The four in-scope files — `src/components/ui/command.tsx`, `src/components/ui/textarea.tsx`, `src/pages/archive/EvidenceDesk.tsx`, and `tailwind.config.ts` — were reviewed against the Slice 4 objective (clear error-level ESLint failures). All fixes described in the original implementation summary were already present: `CommandDialogProps` and `TextareaProps` use type aliases (not empty interfaces), `Select` is a generic over `T extends string` eliminating `any` casts, and `tailwind.config.ts` uses an ESM `import` instead of `require()`.
+
+#### Decision
+
+- No code changes. Implementation matched the objective exactly.
+- Run all required validation commands to confirm gate state before closing the slice.
+
+#### Why
+
+- The audit obligation is to verify correctness, not to add changes. Confirming a passing gate is a valid and complete audit outcome.
+
+#### Consequences
+
+- Targeted ESLint on the four slice files exits 0.
+- `npm run lint` exits 0 with 8 warnings (Fast Refresh export warnings in unrelated scaffold files, pre-existing and out of scope).
+- `npm run build` and `npm run test:prototype` both exit 0 (9 tests pass).
+- Slice 4 is closed; lint can be relied on as a reliable error gate for future slices.
+
+### 2026-04-23 - D-020 - Slice 3 rebuild pass: backoff duration assertions + zero-retry boundary test
+
+#### Context
+
+Audit pass of Slice 3 (branch `audit/claude-rebuild-slice3`). The `api.ts` implementation was already correct — HTTP fetch to `/api/dashboard`, `dashboardPayloadSchema` contract validation, AbortError-first guard in the catch block (corrected in D-019), and linear backoff with local fallback were all in place. Two narrow test gaps remained: (1) the retry test asserted `sleep` was called twice but did not assert the actual backoff duration arguments (200ms, 400ms), leaving the schedule itself unverified by the test suite; (2) there was no test for the `retries: 0` boundary — the path where the adapter falls back immediately on the first failure with no sleep call.
+
+#### Decision
+
+- Add `expect(sleep).toHaveBeenNthCalledWith(1, 200)` and `expect(sleep).toHaveBeenNthCalledWith(2, 400)` to the existing "retries and then falls back" test, making the linear backoff schedule an explicit assertion.
+- Add a new `retries: 0` test: fetcher called once, sleep not called, payload returns with correct `contractVersion` and `stories.length`. This pins the loop's boundary termination behavior.
+- No changes to `api.ts` — implementation was already correct.
+
+#### Why
+
+- Unasserted sleep arguments mean the test only verifies retry count, not the backoff amounts. A regression that doubled all delays (400ms, 800ms) would pass the prior test without detection.
+- The zero-retry path is the worst-case first-failure scenario (one attempt, immediate fallback, no delay); verifying it confirms the loop boundary condition at `retries: 0`.
+
+#### Consequences
+
+- `test:prototype` now runs 9 tests (6 api adapter + 2 settings-api + 1 example). All pass.
+- Backoff schedule (200ms, 400ms linear) is an explicit assertion; any change to `RETRY_BACKOFF_MS` or the multiplier formula will fail the test.
+- ESLint on `api.ts`, `api.test.ts`, `Dashboard.tsx` exits 0.
+
 ### 2026-04-23 - D-019 - Slice 2 rebuild pass: AbortError ordering + cast removal + test coverage
 
 #### Context

@@ -1,0 +1,8 @@
+{
+  "contractVersion": "2026-04-22-slice1",
+  "topics": ["Diplomatic relations", "Migration policy", "Security cooperation"],
+  "keywords": ["OFAC", "sanctions", "deportation routing", "bilateral"],
+  "geographies": ["US", "Colombia"],
+  "traditionalSources": ["The New York Times", "Reuters", "El Tiempo"],
+  "socialSources": ["@latamwatcher"]
+}

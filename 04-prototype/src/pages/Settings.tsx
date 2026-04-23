@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { X, Plus, Save } from "lucide-react";
@@ -15,6 +15,8 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { STORIES } from "@/data/stories";
+import { CONTRACT_VERSION } from "@tempo/contracts";
+import { fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
 
 interface ListSectionProps {
   title: string;
@@ -104,9 +106,11 @@ export default function Settings() {
   const [geographies, setGeographies] = useState(["US", "Colombia"]);
   const [saved, setSaved] = useState(true);
   const [sourceTab, setSourceTab] = useState<SourceTab>("traditional");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   // Seed sources from story data on first render
-  const seed = useMemo(() => {
+  const seed = (() => {
     const seenT = new Set<string>();
     const seenS = new Set<string>();
     const trad: string[] = [];
@@ -124,7 +128,7 @@ export default function Settings() {
       })
     );
     return { trad, soc };
-  }, []);
+  })();
 
   const [traditional, setTraditional] = useState<string[]>(seed.trad);
   const [social, setSocial] = useState<string[]>(seed.soc);
@@ -135,9 +139,24 @@ export default function Settings() {
     setSaved(false);
   };
 
-  const handleSave = () => {
-    setSaved(true);
-    toast.success("Scope updated. Next refresh will use these settings.");
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await saveSettingsPayload({
+        contractVersion: CONTRACT_VERSION,
+        topics,
+        keywords,
+        geographies,
+        traditionalSources: traditional,
+        socialSources: social,
+      });
+      setSaved(true);
+      toast.success("Scope updated. Next refresh will use these settings.");
+    } catch {
+      toast.error("Could not save settings. Please try again.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const list = sourceTab === "traditional" ? traditional : social;
@@ -156,6 +175,33 @@ export default function Settings() {
 
   const removeSource = (s: string) => setList(list.filter((x) => x !== s));
 
+  useEffect(() => {
+    let canceled = false;
+    fetchSettingsPayload()
+      .then((payload) => {
+        if (canceled) return;
+        setTopics(payload.topics);
+        setKeywords(payload.keywords);
+        setGeographies(payload.geographies);
+        setTraditional(payload.traditionalSources);
+        setSocial(payload.socialSources);
+        setSaved(true);
+      })
+      .catch(() => {
+        if (canceled) return;
+        toast.error("Could not load settings. Using defaults.");
+      })
+      .finally(() => {
+        if (!canceled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
   return (
     <div className="mx-auto max-w-[1400px]">
       <div className="px-6 py-12">
@@ -168,10 +214,15 @@ export default function Settings() {
               <p className="mt-1.5 max-w-[52ch] font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
                 The cleaner your beat, the steadier your tempo.
               </p>
+              {loading && (
+                <p className="mt-2 text-[12px] text-muted-foreground">
+                  Loading your saved scope...
+                </p>
+              )}
             </div>
-            <Button onClick={handleSave} className="shrink-0 gap-2" disabled={saved}>
+            <Button onClick={handleSave} className="shrink-0 gap-2" disabled={saved || loading || saving}>
               <Save className="h-4 w-4" />
-              {saved ? "Saved" : "Save changes"}
+              {saving ? "Saving..." : saved ? "Saved" : "Save changes"}
             </Button>
           </div>
 

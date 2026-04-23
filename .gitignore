@@ -1,1 +1,4 @@
 .DS_Store
+node_modules/
+**/dist/
+04-prototype/node_modules/

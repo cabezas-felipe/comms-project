@@ -1,16 +1,18 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Mic, Keyboard, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
+import { useAuth } from "@/lib/auth";
 
 type Mode = "type" | "voice";
 
 export default function Onboarding() {
   const navigate = useNavigate();
+  const { isAuthenticated, login } = useAuth();
   const [mode, setMode] = useState<Mode>("type");
   const [topics, setTopics] = useState("Diplomatic relations, Migration policy, Security cooperation");
   const [keywords, setKeywords] = useState("OFAC, sanctions, deportation routing, bilateral");
@@ -20,12 +22,17 @@ export default function Onboarding() {
   const toggleGeo = (g: string) =>
     setGeos((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]));
 
+  if (isAuthenticated) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!topics.trim() || !geos.length) {
       toast.error("Add at least one topic and one geography to continue.");
       return;
     }
+    login();
     toast.success("Tempo set. Welcome.");
     setTimeout(() => navigate("/dashboard"), 400);
   };
