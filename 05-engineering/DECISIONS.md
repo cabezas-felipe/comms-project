@@ -1,0 +1,479 @@
+# Decisions log
+
+Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
+
+### 2026-04-23 - D-019 - Slice 2 rebuild pass: AbortError ordering + cast removal + test coverage
+
+#### Context
+
+Audit pass of Slice 2 (branch `audit/claude-rebuild-s1-s10`) found three narrow gaps. (1) The `AbortError` guard in `fetchDashboardPayload` was placed after `await sleep()` and after the final-attempt fallback `return`, making it dead code on the last attempt and causing unnecessary backoff on earlier abort attempts. (2) Three `as` type casts in `dtoToStory` (for `Geography[]`, `Topic`, `SourceKind`) suppressed TypeScript checking at the DTO→UI boundary even though the contract types and local types are structurally identical. (3) `api.test.ts` had no coverage for non-2xx HTTP responses, contract validation failure, or AbortError propagation — the three most important failure modes of the adapter.
+
+#### Decision
+
+- Move `AbortError` guard to the first check in the `catch` block, before the sleep and before the final-attempt fallback. This ensures aborts propagate immediately with no retry delay on any attempt.
+- Remove the three `as` casts in `dtoToStory` in `Dashboard.tsx`. `GeographyDto`, `TopicDto`, and `SourceKindDto` from `@tempo/contracts` are structurally identical string-literal unions to their counterparts in `stories.ts`; TypeScript verifies the boundary without a cast.
+- Add three adapter tests to `api.test.ts`: (a) non-2xx HTTP → retries then falls back, (b) contract parse failure → retries then falls back, (c) AbortError → rethrows immediately, fetcher called once, sleep never called.
+- Remove the stale "Slice 3 adapter" JSDoc comment that incorrectly attributed HTTP fetch behavior to Slice 3 only.
+
+#### Why
+
+- The inverted `AbortError` check was a silent correctness bug: any abort that hit the retry limit would be swallowed and return stale fallback data instead of surfacing the abort signal to the caller.
+- Unchecked `as` casts hide future type drift; if either `stories.ts` or `@tempo/contracts` ever diverges, the compiler would not flag `dtoToStory` as broken.
+- The three missing test scenarios cover the adapter's most important non-happy-path behaviors; without them a regression in any of those paths would be invisible to CI.
+
+#### Consequences
+
+- `test:prototype` now runs 8 tests (was 5): 5 adapter tests + 2 settings-api tests + 1 example.
+- `build`, `test:prototype`, and `lint:prototype:slice` all pass (exit 0).
+- AbortError now propagates to the caller on every attempt, not just non-final ones; callers may handle it if needed (current Dashboard `useEffect` cleanup does not explicitly catch AbortError, which is acceptable since the component unmounts the effect on cancel).
+
+### 2026-04-22 - D-018 - Slice 1 rebuild pass 2: url constraint + StoryPriorityDto + test coverage gaps
+
+#### Context
+
+Second audit pass of Slice 1 (branch `audit/claude-rebuild-s1-s10`, after D-015). Found four narrow gaps not caught in the first pass: `sourceSchema.url` accepted empty string; `StoryPriorityDto` type was the only enum without a DTO alias; `buildSourceOpenError` had no dedicated describe block; contracts rejection tests covered only `storySchema`, leaving `dashboardPayloadSchema` and `settingsPayloadSchema` untested for invalid input.
+
+#### Decision
+
+- Add `.min(1)` to `sourceSchema.url` — empty string is not a valid source URL.
+- Add `StoryPriorityDto = z.infer<typeof storyPrioritySchema>` and re-export from `index.ts` — consistent with all other enum type aliases.
+- Add `describe("buildSourceOpenError")` with happy-path and empty-message rejection tests — brings all four event builders to parity.
+- Add rejection tests for `dashboardPayloadSchema` (wrong version) and `settingsPayloadSchema` (missing required field), and an explicit `sourceSchema` describe block (empty url rejection).
+- Refactor test fixtures to shared `minimalSource` / `minimalStory` constants to eliminate repetition.
+
+#### Why
+
+- An empty `url` on a source would silently pass contract validation and produce a broken link in the UI. The `.min(1)` guard catches it at the API boundary.
+- Missing DTO type alias is an API inconsistency; any consumer needing to type a priority variable would reach for the raw enum string instead of the canonical alias.
+- Uncovered event builder paths reduce confidence that builders enforce their own invariants; adding the describe block closes the gap.
+
+#### Consequences
+
+- `test:packages` now runs 8 contracts tests + 11 analytics tests (was 4 + 9).
+- `build:packages`, `build`, and `lint:prototype:slice` all still pass (exit 0).
+- `StoryPriorityDto` is now a public export of `@tempo/contracts`; consumers can import the type directly.
+
+### 2026-04-22 - D-017 - Follow-up: route-level test coverage for PUT /api/settings
+
+#### Context
+
+D-016 added `settingsPayloadSchema.safeParse()` to `PUT /api/settings` and accompanying schema-only unit tests. A follow-up review (Codex) identified that those tests validate the Zod schema directly but do not exercise actual HTTP route behavior — a handler bug, wrong status code, or missing `express.json()` middleware would go undetected.
+
+#### Decision
+
+- Refactor `[apps/api/src/server.mjs](apps/api/src/server.mjs)` for testability:
+  - `DATA_DIR` is now overridable via `TEMPO_DATA_DIR` env var so tests can target an isolated temp directory.
+  - `app` is exported; `app.listen()` is guarded behind a direct-run check (`process.argv[1] === __filename`) so importing the module in tests does not start a real server.
+- Add `supertest` as a dev dependency to `[apps/api/package.json](apps/api/package.json)`.
+- Add `[apps/api/src/server.routes.test.mjs](apps/api/src/server.routes.test.mjs)` with four route-level tests:
+  1. `GET /health` sanity check.
+  2. `PUT /api/settings` with invalid payload → HTTP 400 + `{message, errors}` shape.
+  3. `PUT /api/settings` with valid payload → HTTP 200, response validates against `settingsPayloadSchema`.
+  4. `GET /api/settings` after valid PUT → persisted data returned.
+- Each test run writes to a fresh `mkdtemp` directory and deletes it in an `after()` hook; no shared state with the production `data/` directory.
+
+#### Why
+
+- Schema-only tests prove the Zod schema works, not that the route wires it correctly.
+- Route-level tests catch handler bugs, wrong status codes, and middleware gaps that schema tests miss.
+- `TEMPO_DATA_DIR` override is the minimal seam needed; no interface changes, no mocking.
+
+#### Consequences
+
+- `test:api` now runs 13 tests (3 model-router + 6 settings-schema + 4 route-level).
+- `server.mjs` runtime behavior for `npm run dev` / `npm start` is unchanged.
+- Any future route addition should include a corresponding entry in `server.routes.test.mjs`.
+
+### 2026-04-22 - D-016 - Codex reviewer fix pass: settings validation, contract drift, unsafe cast
+
+#### Context
+
+Codex review of branch `audit/claude-rebuild-s1-s10` found four issues: unvalidated settings writes (HIGH), `aiSummaryMeta` returned in API payload but absent from dashboard contract (MEDIUM), unsafe `as Story[]` cast in Dashboard (MEDIUM), and localStorage auth with no documented risk (LOW).
+
+#### Decision
+
+- **Settings validation (HIGH):** Add `settingsPayloadSchema.safeParse(req.body)` guard to `PUT /api/settings` in `[apps/api/src/server.mjs](apps/api/src/server.mjs)`. Return HTTP 400 with Zod error detail on invalid payload; only call `writeSettings` on validated data. Add `@tempo/contracts` as a workspace dependency to `@tempo/api` so the server can use the canonical schema without duplicating it.
+- **Contract drift (MEDIUM):** Choose Option B — strip `aiSummaryMeta` from stories before sending the dashboard HTTP response. The field is internal AI telemetry used for cost logging; it does not belong in the public contract. API response now conforms exactly to `dashboardPayloadSchema`. No schema change required.
+- **Unsafe cast (MEDIUM):** Replace `payload.stories as Story[]` with an explicit `dtoToStory(dto: StoryDto): Story` mapper in `[04-prototype/src/pages/Dashboard.tsx](../04-prototype/src/pages/Dashboard.tsx)`. The mapper does a full property-by-property construction, making the DTO→UI type boundary explicit and type-safe.
+- **Auth risk (LOW, documented here):** The current auth baseline (D-011) uses `sessionStorage` on the client with no server-side session validation. Any user can access guarded routes by writing a valid session key. This is acceptable for the current prototype stage but must be replaced before any production or shared-access deployment. Next auth slice should introduce server-side session tokens or an identity provider.
+
+#### Why
+
+- Unvalidated writes allow arbitrary JSON to overwrite the settings file, breaking all downstream filtering without any error signal.
+- Returning undocumented fields in the API payload creates silent client-side schema divergence that is hard to diagnose.
+- The `as Story[]` cast masked a real type boundary; the explicit mapper surfaces it.
+- Auth risk documentation prevents the "good enough for now" pattern from going unnoticed at handoff.
+
+#### Consequences
+
+- `PUT /api/settings` now returns 400 on invalid payload; callers must send a conformant `SettingsPayload`.
+- `GET /api/dashboard` response stories no longer include `aiSummaryMeta`; cost telemetry is server-side only.
+- `dtoToStory` is the single mapping point between the contracts DTO and the prototype UI type; update it if either type changes.
+- `test:api` now runs 9 tests (3 model-router + 6 settings-validation).
+- Auth risk is documented; current localStorage/sessionStorage pattern is baseline-only and must not be carried to production.
+
+### 2026-04-22 - D-015 - Slice 1 audit rebuild: emit signature + test coverage + lint script
+
+#### Context
+
+- Slice 1 review (branch `audit/claude-rebuild-s1-s10`) identified three issues: `emitAnalyticsEvent` double-validated events already built by typed builders (unnecessary overhead, looser types); `buildStoryExpanded` / `buildSourceOpened` / `setAnalyticsSink` had no test coverage; `lint:prototype:slice` npm script was broken (ESLint ran in wrong CWD, always exited 2).
+
+#### Decision
+
+- Change `emitAnalyticsEvent` signature from `(raw: unknown)` to `(event: AnalyticsEvent)` and remove the internal `analyticsEventSchema.parse()` re-parse. Callers needing to validate untrusted input must call `analyticsEventSchema.parse()` explicitly before emit.
+- Expand `packages/analytics/src/events.test.ts` from 3 → 9 tests: add coverage for `buildStoryExpanded`, `buildSourceOpened`, invalid-input rejections, and `setAnalyticsSink` custom-sink routing + null-restore.
+- Add one negative rejection test to `packages/contracts/src/schemas.test.ts` (missing required fields).
+- Fix `lint:prototype:slice` script: replace broken `npm --prefix exec` form with `sh -c 'cd ../04-prototype && npx eslint …'`.
+
+#### Why
+
+- Double-validation was silent overhead on every user action; removing it makes the type boundary explicit (builders own validation, emit owns dispatch).
+- Uncovered code paths reduce confidence in the analytics tier model; every event builder and the sink switch now have a test.
+- A broken lint gate is as bad as no lint gate — the script now actually verifies the slice files.
+
+#### Consequences
+
+- `emitAnalyticsEvent` is now a typed dispatch function, not a parse-and-dispatch function. Any caller using it with a raw `unknown` payload must add an explicit `analyticsEventSchema.parse()` step.
+- `test:packages` now runs 9 analytics tests + 4 contracts tests (was 3 + 3).
+- `lint:prototype:slice` exits 0 cleanly.
+
+### 2026-04-22 - D-014 - AI router hardening: prompt versioning + telemetry
+
+#### Context
+
+- AI summarization architecture existed with mock providers and fallback, but lacked explicit prompt version controls and aggregated failure telemetry.
+
+#### Decision
+
+- Add prompt builder/version module `[apps/api/src/ai/prompts.mjs](apps/api/src/ai/prompts.mjs)` with `summary-v1`.
+- Add OpenAI-compatible provider path `[apps/api/src/ai/providers/openai-compatible.mjs](apps/api/src/ai/providers/openai-compatible.mjs)` enabled when `TEMPO_OPENAI_API_KEY` is present and summarization model is `openai:<model>`.
+- Extend router `[apps/api/src/ai/model-router.mjs](apps/api/src/ai/model-router.mjs)` with in-memory metrics:
+  - `summarizationRequests`
+  - `summarizationFallbacks`
+  - `summarizationTimeouts`
+  - `providerErrors`
+- Expose telemetry endpoint `GET /api/ai/metrics`.
+
+#### Why
+
+- Preserves pluggability while adding operator visibility and safer rollout controls.
+- Enables versioned prompt iteration without implicit behavior drift.
+
+#### Consequences
+
+- API now reports capability map and runtime AI metrics separately.
+- Next step can add persistent telemetry sink and production provider credentials flow.
+
+### 2026-04-22 - D-013 - AI capability map + guardrailed summarization
+
+#### Context
+
+- Ingestion/ranking endpoint existed but summary generation remained static text.
+- MVP required early AI model architecture with capability mapping and reliability/cost guardrails.
+
+#### Decision
+
+- Add capability-to-model router in `[apps/api/src/ai/model-router.mjs](apps/api/src/ai/model-router.mjs)`:
+  - summarization -> `mock-openai-mini`
+  - classification -> `mock-anthropic-haiku`
+  - safety -> `mock-openai-mini`
+- Add mock provider implementations and guardrails:
+  - timeout wrapper
+  - heuristic fallback summary
+  - per-request cost estimate metadata
+- Enrich `GET /api/dashboard` to run AI summarization per ranked cluster and expose model map via `GET /api/ai/models`.
+
+#### Why
+
+- Establishes pluggable model architecture now, before vendor/API lock-in.
+- Adds baseline reliability and cost observability for AI features in MVP flow.
+
+#### Consequences
+
+- Dashboard summaries are now generated by the AI router layer (with fallback).
+- Next roadmap step can focus on production provider wiring and additional AI capabilities.
+
+### 2026-04-22 - D-012 - Ingestion v0 + ranking endpoint for dashboard
+
+#### Context
+
+- Roadmap required a first ingestion/ranking slice after auth baseline.
+- Dashboard adapter already supported HTTP with retry/backoff but used static payload files.
+
+#### Decision
+
+- Add source-item ingestion input at `[apps/api/data/source-items.json](apps/api/data/source-items.json)`.
+- Add `GET /api/dashboard` in `[apps/api/src/server.mjs](apps/api/src/server.mjs)`:
+  - filters source items by settings scope
+  - clusters by `clusterId`
+  - computes ranked stories (weight+freshness heuristic)
+  - returns contract-shaped dashboard payload
+- Update frontend adapter endpoint to `/api/dashboard` and add Vite proxy route.
+
+#### Why
+
+- Creates an end-to-end v0 ingestion path with ranking behavior and contract output.
+- Keeps implementation local and reversible while progressing roadmap sequence.
+
+#### Consequences
+
+- Dashboard payload now comes from ingestion+ranking logic rather than static dashboard JSON.
+- Next roadmap slice remains AI summarization guardrailed path.
+
+### 2026-04-22 - D-011 - Auth baseline with guarded routes
+
+#### Context
+
+- Roadmap next slice after settings HTTP/local DB was auth baseline + guarded routes.
+- App previously allowed direct access to dashboard/settings/archive routes without session checks.
+
+#### Decision
+
+- Add client auth baseline in `[04-prototype/src/lib/auth.tsx](../04-prototype/src/lib/auth.tsx)` using local session storage.
+- Add route guard component `[04-prototype/src/components/ProtectedRoute.tsx](../04-prototype/src/components/ProtectedRoute.tsx)`.
+- Wrap private routes (`/dashboard`, `/settings`, `/archive/*`) in `ProtectedRoute`.
+- Update onboarding to establish session on submit and redirect authenticated users to `/dashboard`.
+- Add header logout action and hide app chrome when unauthenticated.
+
+#### Why
+
+- Establishes the minimal auth contract needed before deeper backend/user identity work.
+- Protects private surfaces while keeping the implementation bounded and reversible.
+
+#### Consequences
+
+- Unauthenticated users are redirected to onboarding for private routes.
+- Auth state remains local/session-like for now; next steps can replace internals with server-backed auth.
+
+### 2026-04-22 - D-010 - Settings adapter switched to HTTP local DB
+
+#### Context
+
+- Settings were persisted only in browser `localStorage`, which limited continuity and API realism.
+- The roadmap required moving toward production-style boundaries without full backend rollout.
+
+#### Decision
+
+- Add local API service `[05-engineering/apps/api](apps/api)` with `GET/PUT /api/settings` backed by a local JSON DB file.
+- Update `[04-prototype/src/lib/settings-api.ts](../04-prototype/src/lib/settings-api.ts)` to use HTTP as the primary read/write path.
+- Keep `localStorage` as resilience fallback (offline or API failure) to preserve current UX.
+- Update dev orchestration so `cd 05-engineering && npm run dev` runs both API and web.
+
+#### Why
+
+- Introduces production-like transport and persistence boundaries now, while keeping slice scope small.
+- Preserves user-facing behavior and adds safer fallback semantics.
+
+#### Consequences
+
+- Settings now persist through a local HTTP API + DB file by default.
+- Original roadmap is now back on track; next planned slice is **Auth baseline + guarded routes**.
+
+### 2026-04-22 - D-009 - Settings persistence via typed storage adapter
+
+#### Context
+
+- Dashboard already moved behind typed read adapters.
+- Settings still used in-memory defaults per render without persistence boundary.
+
+#### Decision
+
+- Add `fetchSettingsPayload()` and `saveSettingsPayload()` in `[04-prototype/src/lib/settings-api.ts](../04-prototype/src/lib/settings-api.ts)`.
+- Validate payloads with `settingsPayloadSchema` and `CONTRACT_VERSION`.
+- Persist settings to `localStorage` under `tempo.settings.v1` with safe fallback to defaults.
+- Wire `[04-prototype/src/pages/Settings.tsx](../04-prototype/src/pages/Settings.tsx)` to load on mount and save through the adapter.
+
+#### Why
+
+- Establishes a swap-ready API boundary while preserving existing Settings UX.
+- Gives users durable settings behavior now, without backend dependency.
+
+#### Consequences
+
+- Settings survive page reloads.
+- Next slice can replace localStorage internals with HTTP/local DB while reusing page-level logic.
+
+### 2026-04-22 - D-008 - Lint baseline cleanup (error-level)
+
+#### Context
+
+- Full prototype lint failed with 5 error-level issues carried from generated scaffold files.
+- These failures created noise and reduced confidence in slice-level lint gates.
+
+#### Decision
+
+- Fix only error-level lint violations in:
+  - `[src/components/ui/command.tsx](../04-prototype/src/components/ui/command.tsx)`
+  - `[src/components/ui/textarea.tsx](../04-prototype/src/components/ui/textarea.tsx)`
+  - `[src/pages/archive/EvidenceDesk.tsx](../04-prototype/src/pages/archive/EvidenceDesk.tsx)`
+  - `[tailwind.config.ts](../04-prototype/tailwind.config.ts)`
+- Leave existing `react-refresh/only-export-components` warnings unchanged for a future optional cleanup.
+
+#### Why
+
+- Restores a clean error baseline without broad UI refactors.
+- Keeps this quality slice small and reversible while unblocking future strict lint checks.
+
+#### Consequences
+
+- `npm run lint` now exits successfully (warnings only).
+- Future slices can treat lint failures as new regressions rather than inherited debt.
+
+### 2026-04-22 - D-007 - Slice 3 HTTP adapter with retry/backoff
+
+#### Context
+
+- Slice 2 introduced a typed dashboard adapter but still sourced data directly from in-memory constants.
+- Next step required a real HTTP-style read path and retry policy without introducing backend infrastructure yet.
+
+#### Decision
+
+- Update `[04-prototype/src/lib/api.ts](../04-prototype/src/lib/api.ts)` to fetch from `[04-prototype/public/api/dashboard.json](../04-prototype/public/api/dashboard.json)`.
+- Validate the fetched payload against `dashboardPayloadSchema`.
+- Add bounded retry/backoff (2 retries, linear 200ms step) and fallback to local in-memory payload when retries are exhausted.
+- Add adapter tests for HTTP success and retry/fallback behavior.
+
+#### Why
+
+- Keeps the slice narrow while moving the dashboard to a production-like network boundary.
+- Improves resilience and observability before introducing a full backend service.
+
+#### Consequences
+
+- Dashboard can now run against static API-like payloads and later swap to a real endpoint with minimal UI changes.
+- Temporary static payload currently includes two stories; fallback path still retains full local dataset.
+
+### 2026-04-22 - D-006 - Slice 2 dashboard read path via typed API adapter
+
+#### Context
+
+- Slice 1 established shared contracts and analytics package boundaries.
+- Dashboard still read directly from `STORIES` without a typed data-access boundary.
+
+#### Decision
+
+- Add `fetchDashboardPayload()` in `[04-prototype/src/lib/api.ts](../04-prototype/src/lib/api.ts)` as the dashboard read adapter.
+- Validate payloads at runtime using `@tempo/contracts` (`dashboardPayloadSchema` + `CONTRACT_VERSION`).
+- Keep dashboard UI and interaction behavior unchanged; show subtle loading and fallback copy during refresh.
+- Emit guardrail analytics on fetch failure via `trackSourceOpenError`.
+
+#### Why
+
+- Creates a stable seam for a future real API without coupling UI components to transport details.
+- Keeps this slice bounded to one flow (Dashboard read path) while improving correctness and observability.
+
+#### Consequences
+
+- Dashboard state now hydrates from the adapter, not only module-local constants.
+- Next slice can swap adapter internals from in-memory mock to HTTP without redesigning the screen.
+
+### 2026-04-22 - D-005 - Engineering decisions log location
+
+#### Context
+
+- Root `DECISIONS.md` previously held only engineering entries, while research decisions live under `[01-research/ops](../01-research/ops)`.
+
+#### Decision
+
+- Canonical engineering log is this file: `[DECISIONS.md](DECISIONS.md)`.
+- Remove root-level `DECISIONS.md` to avoid duplicate navigation points.
+
+#### Why
+
+- Matches the split between research Markdown and engineering execution.
+
+#### Consequences
+
+- Log new engineering decisions here; prepend new blocks at the top.
+- Any historical references to root `DECISIONS.md` are superseded by this location.
+
+### 2026-04-22 - D-004 - Engineering npm workspace under `05-engineering/`
+
+#### Context
+
+- Slice 1 added `package.json`, `apps/web`, and `packages/`* at the repository root, which mixed engineering tooling with the top-level repo layout.
+
+#### Decision
+
+- Move the Node workspace (`package.json`, `package-lock.json`, `apps/`, `packages/`) into this folder (`[package.json](package.json)`).
+- Keep `[04-prototype](../04-prototype)` as the UI package; link `@tempo/`* with `file:../05-engineering/packages/...`.
+- Run install/dev/build scripts from here (see `[README.md](README.md)`).
+
+#### Why
+
+- Matches the information hierarchy: all engineering-specific tooling and shared packages live next to other engineering artifacts.
+- Prototype folder stays a clean Lovable reference without owning the monorepo root.
+
+#### Consequences
+
+- No `package.json` at repo root; onboarding starts at `[README.md](../README.md)` → `cd 05-engineering && npm install`.
+- Historical docs that said “repo root” for npm mean `05-engineering/` from D-004 onward.
+
+### 2026-04-22 - D-003 - Mode 2 slice 1: monorepo + contracts + analytics
+
+#### Context
+
+- Mode 1 kickoff approved; first vertical slice is platform skeleton, typed contracts, and analytics event schema without backend/auth/DB.
+
+#### Decision
+
+- ~~Add root `package.json` npm workspaces linking `04-prototype`, `apps/web`, `packages/contracts`, and `packages/analytics`.~~ **Update (D-004):** workspace lives under `[package.json](package.json)` (no `04-prototype` workspace member; prototype installs separately).
+- Use `@tempo/contracts` (Zod + versioned dashboard/settings payloads) and `@tempo/analytics` (primary/secondary/guardrail events + validated emit).
+- Keep the Lovable UI in `[04-prototype](../04-prototype)`; `[apps/web](apps/web)` is a typed placeholder until migration.
+- Link `@tempo/`* from the prototype with `file:../05-engineering/packages/...` (avoids `workspace:`* on older npm).
+
+#### Why
+
+- Establishes shared contracts and analytics before API and ingestion work.
+- Preserves the dashboard UX while wiring real event validation and a replaceable sink.
+
+#### Consequences
+
+- ~~From repo root: `npm run build:packages` before `npm run dev` (root script runs both).~~ **Update (D-004):** run those scripts from `[05-engineering/README.md](README.md)`.
+- Full-repo `npm run lint` in the prototype still reports pre-existing UI issues; slice hygiene uses targeted lint on changed files until a follow-up cleanup slice.
+
+### 2026-04-22 - D-002 - Separate Prototype and Engineering Artifacts
+
+#### Context
+
+- `[04-prototype](../04-prototype)` contains the Lovable-built reference implementation and related prototype assets.
+- Mode 1 kickoff output is an engineering execution artifact used to run rebuild slices and quality gates.
+
+#### Decision
+
+- Keep prototype assets in `[04-prototype](../04-prototype)` only.
+- Store engineering execution artifacts here, starting with `[MODE1-KICKOFF.md](MODE1-KICKOFF.md)`.
+
+#### Why
+
+- Preserves a clean boundary between reference prototype work and implementation execution work.
+- Reduces accidental coupling or edits to prototype-origin files during engineering phases.
+- Makes execution history easier to navigate as more artifacts are added.
+
+#### Consequences
+
+- Future mode outputs, slice briefs, gate checklists, and engineering runbooks go under `05-engineering`.
+- `[04-prototype](../04-prototype)` remains the frozen reference baseline unless explicitly updated as prototype work.
+
+### 2026-04-22 - D-001 - Use Skill A as Orchestrator
+
+#### Context
+
+- The current implementation target is the Lovable prototype in `[04-prototype](../04-prototype)`.
+- Execution model is locked: `engineer-intake-rebuild` in Mode 1 first, then Mode 2 only after explicit approval.
+
+#### Decision
+
+- Adopt `engineer-intake-rebuild` as the project orchestrator for all execution phases.
+- Keep this run in Mode 1 and produce a bounded first-slice recommendation before any build work.
+
+#### Why
+
+- The prototype is UI-heavy and production architecture is not yet present (backend/auth/persistence/CI gates).
+- Mode 1 reduces architecture and delivery risk before coding.
+- The specialist skill routing is already defined and can be applied per slice.
+
+#### Consequences
+
+- No broad rewrites or multi-slice implementation starts until the first Mode 2 slice is approved.
+- Every major tradeoff or scope shift is recorded here before execution.
