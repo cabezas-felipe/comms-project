@@ -2,6 +2,106 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-04-23 - D-034 - Slice 16: staging handoff runbook (no code changes)
+
+#### Context
+
+Slice 16 (branch `build/slice16-next`). In-scope: `MODE2-SLICE-16-STAGING-HANDOFF.md` (new), `DECISIONS.md` (this entry). Objective: produce a staging-handoff artifact targeted at deploying to a remote host and granting the first external user access — distinct from Slice 15's local/internal beta checklist.
+
+#### Decision
+
+- Added `05-engineering/MODE2-SLICE-16-STAGING-HANDOFF.md` documenting:
+  - **Env var matrix** for both API and frontend layers, with staging-specific values (absolute `TEMPO_DATA_DIR` path, `TEMPO_AI_MOCK_ONLY=true` as the safe staging default, `VITE_*` vars baked at build time, EU PostHog host option).
+  - **Exact startup commands** for a remote host: `npm install` → `npm run build` → `node apps/api/src/server.mjs` in the background → static frontend served via `npx serve` or reverse proxy. Includes reverse-proxy guidance (nginx / Caddy) for same-domain `/api/*` forwarding.
+  - **Smoke-test checklist** executed from outside the staging host (external `curl` and clean browser session), covering infrastructure reachability, auth redirect flow, persistence across API restart, and PostHog event confirmation.
+  - **Failure and rollback steps** for the three most likely staging failure modes: API won't start (env misconfiguration paths named), data lost after restart (file path vs Supabase seat), blank frontend (reverse proxy or CORS). Full rollback is git checkout + rebuild + data restore.
+  - **Go/no-go checklist** with 7 technical gates (T1–T7) and 5 operational gates (O1–O5), each with explicit GO criteria and a binary pass/fail status column. A single NO-GO item blocks handoff.
+- No code changes made. All four validation gates pass unchanged.
+
+#### Why
+
+- Slice 15 addressed internal operator readiness (single developer, local machine, no external users). Slice 16 is necessary because staging introduces three qualitatively different constraints: (1) the operator is not physically present when the external user first accesses the system, (2) the frontend is a static build (not Vite dev server) requiring explicit build-time env var baking, and (3) a formal go/no-go gate is needed before any external party touches the system.
+- The reverse proxy startup path and `VITE_*` build-time variable note are staging-specific concerns not covered in Slice 15 and not derivable from reading the local dev setup.
+- The go/no-go table gives the operator a single, auditable decision artifact — important when handing off to a non-technical external user who cannot diagnose failures independently.
+
+#### Consequences
+
+- `npm run test:api` → 51 tests, 0 failures (unchanged).
+- `npm run test:packages` → 18 tests, 0 failures (unchanged).
+- `npm run test:prototype` → 9 tests, 0 failures (unchanged).
+- `npm run build` → exits 0 (unchanged).
+- No behavioral changes to the API, prototype, or shared packages.
+- Slice 16 is closed. The staging handoff runbook is the canonical artifact for first external-user deployment.
+
+### 2026-04-23 - D-033 - Slice 15: beta readiness checklist (no code changes)
+
+#### Context
+
+Slice 15 (branch `build/slice14-observability-posthog`). In-scope: `MODE2-SLICE-15-BETA-READINESS-CHECKLIST.md` (new), `DECISIONS.md` (this entry). Objective: produce a production-readiness artifact for beta handoff — env var reference, startup steps, smoke-test checklist, rollback procedure, and launch day checklist — without any UI, auth, or feature changes.
+
+#### Decision
+
+- Added `05-engineering/MODE2-SLICE-15-BETA-READINESS-CHECKLIST.md` documenting:
+  - **Required env vars** for both API and frontend layers, grouped by service (Supabase, AI model routing, PostHog), with Required/Optional/Conditional classification and safe defaults noted.
+  - **Local startup steps** covering the common `npm run dev` path plus optional splits for API-only and web-only.
+  - **Smoke-test checklist** covering all nine API routes (`/health`, `/api/settings` GET/PUT, `/api/dashboard`, `/api/dashboard?limit`, `/api/ai/models`, `/api/ai/metrics`, `/api/ingestion/sources`), all frontend flows (auth redirect, onboarding, dashboard render, settings persistence, logout), and a persistence verification step.
+  - **Rollback checklist** covering process stop, settings file restoration, Supabase row restoration, and PostHog disable.
+  - **Launch day checklist** split into pre-launch validation, launch sequence, and 30-minute post-launch monitoring steps.
+  - **Known risks at beta** table documenting the four accepted risks: localStorage auth, static ingestion data, unbounded AI cost, and Supabase anon-key RLS gap — each with a severity level and mitigation note.
+- No code changes made. All four validation gates passed unchanged before and after this slice.
+
+#### Why
+
+- Slices 11–14 completed the core technical foundation (Supabase persistence, Anthropic wiring, ingestion normalization, PostHog observability). The system can now be handed to a beta operator, but there was no single document describing how to stand it up, verify it, or recover from a failure.
+- A runbook-style checklist reduces the risk of misconfiguration during handoff without requiring any further feature work.
+- Documenting known risks explicitly (auth model, static ingestion, AI cost, RLS) ensures the beta operator understands the constraints without discovering them in production.
+
+#### Consequences
+
+- `npm run test:api` → 51 tests, 0 failures (unchanged).
+- `npm run test:packages` → 18 tests, 0 failures (unchanged).
+- `npm run test:prototype` → 9 tests, 0 failures (unchanged).
+- `npm run build` → exits 0 (unchanged).
+- No behavioral changes to the API, prototype, or shared packages.
+- Slice 15 is closed. The beta readiness checklist is the canonical handoff artifact for this build phase.
+
+### 2026-04-23 - D-032 - Slice 14: observability + PostHog analytics wiring
+
+#### Context
+
+Slice 14 (branch `build/slice14-observability-posthog`). In-scope: `packages/analytics/src/` (event schema additions + new PostHog sink module), `apps/api/src/telemetry.mjs` (new), `apps/api/src/server.mjs` (telemetry wiring), `apps/api/src/telemetry.test.mjs` (new), `apps/api/.env.example` (new vars), `apps/api/package.json` (test script), `04-prototype/src/lib/analytics.ts` (PostHog init helper). Objective: wire a production-ready PostHog integration at both the API and frontend layers while keeping fail-safe behavior when env vars are absent.
+
+#### Decision
+
+- Added three server-side event schemas to `packages/analytics/src/events.ts`:
+  - `api_dashboard_requested` (tier: primary) — payload: `storyCount`, `normErrorCount`, `limitApplied`, `fallbackCount`, `totalCostUsd`, `aiModel`.
+  - `api_error` (tier: guardrail) — payload: `route`, `statusCode`, `message`.
+  - `settings_updated` (tier: secondary) — payload: `topicCount`, `geoCount`, `sourceCount`.
+  - Each has a matching Zod schema, a typed builder function, and is included in the `analyticsEventSchema` discriminated union.
+- Added `packages/analytics/src/posthog-sink.ts`: exports `createPostHogSink({ apiKey, host?, distinctId? })`. Uses platform `fetch` (Node 18+ and browsers) to POST to PostHog's `/capture/` endpoint. No new npm dependency. All fetch failures are swallowed — the sink never throws. Updated `tsconfig.build.json` to include the new file; added `"types": ["node"]` to the base `tsconfig.json` so `fetch` is typed for IDE and vitest.
+- Added `apps/api/src/telemetry.mjs`: exports `trackServerEvent(name, properties)`. Reads `POSTHOG_API_KEY` and `POSTHOG_HOST` lazily (at call time, not import time) so test isolation is clean without module re-import tricks. No-op when key is absent. Uses `distinct_id: "tempo-api-server"` (server-side events are not user-attributable at this stage).
+- Updated `apps/api/src/server.mjs`: imports `trackServerEvent` and calls it on three paths — `api_dashboard_requested` on successful dashboard response (with story count, cost, fallback count, AI model), `settings_updated` on successful settings write, and `api_error` on 500 failures in both routes.
+- Added `apps/api/src/telemetry.test.mjs`: 4 tests covering the no-key no-op path, correct fetch payload when key is set, custom `POSTHOG_HOST` override, and swallowed fetch errors.
+- Added `packages/analytics/src/posthog-sink.test.ts`: 7 tests covering sink creation, correct fetch call shape, default host/distinctId fallbacks, error swallowing, and server-side event schema compatibility.
+- Added PostHog section to `apps/api/.env.example`: documents `POSTHOG_API_KEY` and `POSTHOG_HOST` with comments about EU cloud and no-key behavior.
+- Updated `04-prototype/src/lib/analytics.ts`: added `initPostHog()` — reads `VITE_POSTHOG_API_KEY` and `VITE_POSTHOG_HOST` from the Vite env, generates a session-scoped `distinctId` stored in `sessionStorage` (falls back to `"tempo-anonymous"` when storage is unavailable), and calls `setAnalyticsSink(createPostHogSink(...))`. Must be called from `main.tsx` at app startup; no-op if key is absent.
+
+#### Why
+
+- Fetch-based PostHog capture avoids a new runtime dependency (`posthog-node` / `posthog-js`). The PostHog HTTP capture endpoint is stable and has no SDK requirement for basic event ingestion.
+- Lazy env reads in `telemetry.mjs` match the pattern established in D-031 (model-router lazy reads) and keep tests isolated without module lifecycle hacks.
+- Adding server-side event schemas to `packages/analytics` (rather than keeping them inline in `.mjs`) gives TypeScript consumers a single canonical reference for all events in the system, even though the API doesn't validate them at runtime.
+- Session-scoped `distinctId` in `sessionStorage` avoids persistent user fingerprinting while still allowing funnel analysis within a session — appropriate for a private enterprise tool with a single operator.
+- `api_dashboard_requested` captures AI cost and fallback telemetry that was previously only logged to stdout, making it queryable in PostHog dashboards without changing the existing `console.log` paths.
+
+#### Consequences
+
+- `npm run test:api` now runs 51 tests (up from 38; 4 new telemetry tests). All pass.
+- `npm run test:packages` now runs 18 analytics tests (up from 11; 7 new posthog-sink tests). All pass.
+- `npm run build` exits 0. `npm run test:prototype` exits 0 (9 tests). `npx eslint` exits 0. `node --check server.mjs` exits 0.
+- When `POSTHOG_API_KEY` is absent (default dev/test mode), zero PostHog traffic is generated. No runtime crashes, no network calls.
+- Frontend PostHog activation requires adding `VITE_POSTHOG_API_KEY` to `04-prototype/.env.local` and calling `initPostHog()` from `main.tsx` (one line, not in scope for this slice).
+
 ### 2026-04-23 - D-031 - Slice 13: real Anthropic provider wiring, lazy env, mock-only flag
 
 #### Context

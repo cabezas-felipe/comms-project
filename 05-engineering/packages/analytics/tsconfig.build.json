@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/index.ts", "src/events.ts", "src/sink.ts"]
+  "include": ["src/index.ts", "src/events.ts", "src/sink.ts", "src/posthog-sink.ts"]
 }

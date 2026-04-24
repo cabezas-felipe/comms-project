@@ -53,11 +53,58 @@ export const sourceOpenErrorEventSchema = z.object({
   payload: sourceOpenErrorPayloadSchema,
 });
 
+// ─── Server-side events ─────────────────────────────────────────────────────
+
+export const apiDashboardRequestedPayloadSchema = z.object({
+  storyCount: z.number().int().nonnegative(),
+  normErrorCount: z.number().int().nonnegative(),
+  limitApplied: z.number().int().positive(),
+  fallbackCount: z.number().int().nonnegative(),
+  totalCostUsd: z.number().nonnegative(),
+  aiModel: z.string().min(1),
+});
+
+export const apiErrorPayloadSchema = z.object({
+  route: z.string().min(1),
+  statusCode: z.number().int(),
+  message: z.string().min(1),
+});
+
+export const settingsUpdatedPayloadSchema = z.object({
+  topicCount: z.number().int().nonnegative(),
+  geoCount: z.number().int().nonnegative(),
+  sourceCount: z.number().int().nonnegative(),
+});
+
+export const apiDashboardRequestedEventSchema = z.object({
+  name: z.literal("api_dashboard_requested"),
+  tier: z.literal("primary"),
+  occurredAt: occurredAtSchema,
+  payload: apiDashboardRequestedPayloadSchema,
+});
+
+export const apiErrorEventSchema = z.object({
+  name: z.literal("api_error"),
+  tier: z.literal("guardrail"),
+  occurredAt: occurredAtSchema,
+  payload: apiErrorPayloadSchema,
+});
+
+export const settingsUpdatedEventSchema = z.object({
+  name: z.literal("settings_updated"),
+  tier: z.literal("secondary"),
+  occurredAt: occurredAtSchema,
+  payload: settingsUpdatedPayloadSchema,
+});
+
 export const analyticsEventSchema = z.discriminatedUnion("name", [
   dashboardViewedEventSchema,
   storyExpandedEventSchema,
   sourceOpenedEventSchema,
   sourceOpenErrorEventSchema,
+  apiDashboardRequestedEventSchema,
+  apiErrorEventSchema,
+  settingsUpdatedEventSchema,
 ]);
 
 export type EventTier = z.infer<typeof eventTierSchema>;
@@ -106,6 +153,42 @@ export function buildSourceOpenError(
   return sourceOpenErrorEventSchema.parse({
     name: "source_open_error",
     tier: "guardrail",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildApiDashboardRequested(
+  payload: z.infer<typeof apiDashboardRequestedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof apiDashboardRequestedEventSchema> {
+  return apiDashboardRequestedEventSchema.parse({
+    name: "api_dashboard_requested",
+    tier: "primary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildApiError(
+  payload: z.infer<typeof apiErrorPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof apiErrorEventSchema> {
+  return apiErrorEventSchema.parse({
+    name: "api_error",
+    tier: "guardrail",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildSettingsUpdated(
+  payload: z.infer<typeof settingsUpdatedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof settingsUpdatedEventSchema> {
+  return settingsUpdatedEventSchema.parse({
+    name: "settings_updated",
+    tier: "secondary",
     occurredAt,
     payload,
   });

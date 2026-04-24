@@ -7,6 +7,7 @@ import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } fr
 import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
+import { trackServerEvent } from "./telemetry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -125,8 +126,18 @@ app.put("/api/settings", async (req, res) => {
   }
   try {
     await writeSettings(result.data);
+    trackServerEvent("settings_updated", {
+      topicCount: result.data.topics?.length ?? 0,
+      geoCount: result.data.geographies?.length ?? 0,
+      sourceCount: (result.data.traditionalSources?.length ?? 0) + (result.data.socialSources?.length ?? 0),
+    });
     res.json(result.data);
   } catch (error) {
+    trackServerEvent("api_error", {
+      route: "/api/settings",
+      statusCode: 500,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
     res.status(500).json({
       message: "Failed to write settings.",
       detail: error instanceof Error ? error.message : "Unknown error",
@@ -154,8 +165,9 @@ app.get("/api/dashboard", async (req, res) => {
     if (normErrors.length > 0) {
       console.warn(`[ingestion.normalize] ${normErrors.length} item(s) skipped:`, normErrors);
     }
-    const limit = Number(req.query.limit ?? 10);
-    const payload = await buildDashboardPayload(sourceItems, settings, Number.isFinite(limit) ? limit : 10);
+    const rawLimit = Number(req.query.limit ?? 10);
+    const resolvedLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.trunc(rawLimit) : 10;
+    const payload = await buildDashboardPayload(sourceItems, settings, resolvedLimit);
     const aiConfig = getAiCapabilityMap();
     const estimatedCostUsd = payload.stories.reduce(
       (sum, story) => sum + (story.aiSummaryMeta?.costUsd ?? 0),
@@ -168,8 +180,21 @@ app.get("/api/dashboard", async (req, res) => {
       );
     }
     const responseStories = payload.stories.map(({ aiSummaryMeta: _meta, ...story }) => story);
+    trackServerEvent("api_dashboard_requested", {
+      storyCount: responseStories.length,
+      normErrorCount: normErrors.length,
+      limitApplied: resolvedLimit,
+      fallbackCount,
+      totalCostUsd: estimatedCostUsd,
+      aiModel: aiConfig.summarization,
+    });
     res.json({ contractVersion: payload.contractVersion, stories: responseStories });
   } catch (error) {
+    trackServerEvent("api_error", {
+      route: "/api/dashboard",
+      statusCode: 500,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
     res.status(500).json({
       message: "Failed to build dashboard payload.",
       detail: error instanceof Error ? error.message : "Unknown error",
