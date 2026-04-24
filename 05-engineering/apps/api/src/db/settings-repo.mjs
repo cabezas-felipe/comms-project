@@ -8,8 +8,6 @@ const __dirname = path.dirname(__filename);
 // Resolve two levels up from src/db/ → package root
 const PACKAGE_ROOT = path.resolve(__dirname, "../..");
 
-const SETTINGS_KEY = "global_settings";
-
 export const DEFAULT_SETTINGS = {
   contractVersion: "2026-04-22-slice1",
   topics: ["Diplomatic relations", "Migration policy", "Security cooperation"],
@@ -19,11 +17,18 @@ export const DEFAULT_SETTINGS = {
   socialSources: ["@latamwatcher"],
 };
 
+const GLOBAL_KEY = "global_settings";
+
+function userKey(userId) {
+  return `user:${userId}`;
+}
+
 // ─── File adapter ─────────────────────────────────────────────────────────────
 
-function resolveSettingsFile() {
+function resolveSettingsFile(userId = null) {
   const dataDir = process.env.TEMPO_DATA_DIR ?? path.join(PACKAGE_ROOT, "data");
-  return path.join(dataDir, "settings.json");
+  const filename = userId ? `settings_user_${userId}.json` : "settings.json";
+  return path.join(dataDir, filename);
 }
 
 async function ensureSettingsFile(settingsFile) {
@@ -35,36 +40,38 @@ async function ensureSettingsFile(settingsFile) {
   }
 }
 
-async function readSettingsFile() {
-  const file = resolveSettingsFile();
+async function readSettingsFile(userId = null) {
+  const file = resolveSettingsFile(userId);
   await ensureSettingsFile(file);
   const content = await fs.readFile(file, "utf8");
   return JSON.parse(content);
 }
 
-async function writeSettingsFile(payload) {
-  const file = resolveSettingsFile();
+async function writeSettingsFile(payload, userId = null) {
+  const file = resolveSettingsFile(userId);
   await ensureSettingsFile(file);
   await fs.writeFile(file, JSON.stringify(payload, null, 2), "utf8");
 }
 
 // ─── Supabase adapter ─────────────────────────────────────────────────────────
 
-async function readSettingsSupabase() {
+async function readSettingsSupabase(userId = null) {
   const client = getSupabaseClient();
+  const key = userId ? userKey(userId) : GLOBAL_KEY;
   const { data, error } = await client
     .from("settings")
     .select("data")
-    .eq("key", SETTINGS_KEY)
+    .eq("key", key)
     .maybeSingle();
   if (error) throw new Error(`[supabase] settings read failed: ${error.message}`);
   return data?.data ?? DEFAULT_SETTINGS;
 }
 
-async function writeSettingsSupabase(payload) {
+async function writeSettingsSupabase(payload, userId = null) {
   const client = getSupabaseClient();
+  const key = userId ? userKey(userId) : GLOBAL_KEY;
   const { error } = await client.from("settings").upsert({
-    key: SETTINGS_KEY,
+    key,
     data: payload,
     updated_at: new Date().toISOString(),
   });
@@ -73,20 +80,26 @@ async function writeSettingsSupabase(payload) {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/** Read current settings. Uses Supabase if SUPABASE_URL is set (fails fast on partial config), file-based otherwise. */
-export async function readSettings() {
+/**
+ * Read settings for a user (or global when userId is null).
+ * Uses Supabase if SUPABASE_URL is set, file-based otherwise.
+ */
+export async function readSettings(userId = null) {
   if (process.env.SUPABASE_URL) {
     assertSupabaseEnv();
-    return readSettingsSupabase();
+    return readSettingsSupabase(userId);
   }
-  return readSettingsFile();
+  return readSettingsFile(userId);
 }
 
-/** Persist settings. Uses Supabase if SUPABASE_URL is set (fails fast on partial config), file-based otherwise. */
-export async function writeSettings(payload) {
+/**
+ * Persist settings for a user (or global when userId is null).
+ * Uses Supabase if SUPABASE_URL is set, file-based otherwise.
+ */
+export async function writeSettings(payload, userId = null) {
   if (process.env.SUPABASE_URL) {
     assertSupabaseEnv();
-    return writeSettingsSupabase(payload);
+    return writeSettingsSupabase(payload, userId);
   }
-  return writeSettingsFile(payload);
+  return writeSettingsFile(payload, userId);
 }

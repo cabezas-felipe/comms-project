@@ -36,9 +36,13 @@ await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_S
 const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app } = await import("./server.mjs");
+const { app, _auth } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
+
+// Inject a deterministic test user so protected routes authenticate without a live Supabase instance.
+const TEST_USER_ID = "test-user-id";
+_auth.resolver = async () => TEST_USER_ID;
 
 after(async () => {
   await rm(tmpDir, { recursive: true, force: true });
@@ -53,11 +57,15 @@ const VALID_BODY = {
   socialSources: ["@latamwatcher"],
 };
 
+// ─── Public routes ────────────────────────────────────────────────────────────
+
 test("GET /health returns ok", async () => {
   const res = await request(app).get("/health");
   assert.equal(res.status, 200);
   assert.equal(res.body.ok, true);
 });
+
+// ─── Settings — authenticated happy path ──────────────────────────────────────
 
 test("PUT /api/settings rejects invalid payload with 400", async () => {
   const res = await request(app)
@@ -107,4 +115,45 @@ test("GET /api/ingestion/sources returns declared feed configuration", async () 
   assert.equal(res.body.feeds[0].id, "nyt-politics");
   assert.equal(typeof res.body.feeds[0].kind, "string");
   assert.equal(typeof res.body.feeds[0].weight, "number");
+});
+
+// ─── Auth enforcement — 401 on missing/invalid token ─────────────────────────
+
+test("GET /api/settings returns 401 without valid token", async () => {
+  const prev = _auth.resolver;
+  _auth.resolver = async () => null;
+  try {
+    const res = await request(app).get("/api/settings");
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _auth.resolver = prev;
+  }
+});
+
+test("PUT /api/settings returns 401 without valid token", async () => {
+  const prev = _auth.resolver;
+  _auth.resolver = async () => null;
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send(VALID_BODY)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _auth.resolver = prev;
+  }
+});
+
+test("GET /api/dashboard returns 401 without valid token", async () => {
+  const prev = _auth.resolver;
+  _auth.resolver = async () => null;
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _auth.resolver = prev;
+  }
 });
