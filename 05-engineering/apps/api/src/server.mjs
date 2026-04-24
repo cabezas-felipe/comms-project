@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { settingsPayloadSchema } from "@tempo/contracts";
-import { getAiCapabilityMap, getAiMetrics, summarizeCluster } from "./ai/model-router.mjs";
+import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
 import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
@@ -17,6 +17,12 @@ const PORT = Number(process.env.TEMPO_API_PORT || 8787);
 const app = express();
 app.use(express.json());
 
+try {
+  assertAiConfig();
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  console.warn(`[ai.config] Misconfiguration detected: ${message}`);
+}
 function rankStories(stories) {
   return [...stories].sort((a, b) => {
     const scoreA = a.sources.reduce((sum, s) => sum + s.weight, 0) - Math.min(...a.sources.map((s) => s.minutesAgo));
@@ -174,6 +180,7 @@ app.get("/api/dashboard", async (req, res) => {
 app.get("/api/ai/models", (_req, res) => {
   res.json({
     capabilityMap: getAiCapabilityMap(),
+    mockOnly: process.env.TEMPO_AI_MOCK_ONLY === "true",
   });
 });
 

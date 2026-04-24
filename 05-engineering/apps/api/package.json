@@ -9,6 +9,7 @@
     "test": "node --test src/ai/model-router.test.mjs src/server.settings.test.mjs src/server.routes.test.mjs src/db/settings-repo.test.mjs src/ingestion/source-normalizer.test.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.0",
     "@supabase/supabase-js": "^2.0.0",
     "@tempo/contracts": "*",
     "express": "^4.21.2"
