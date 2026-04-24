@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { settingsPayloadSchema } from "@tempo/contracts";
-import { getAiCapabilityMap, getAiMetrics, summarizeCluster } from "./ai/model-router.mjs";
+import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
 import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,6 +15,12 @@ const PORT = Number(process.env.TEMPO_API_PORT || 8787);
 
 const app = express();
 app.use(express.json());
+
+try {
+  assertAiConfig();
+} catch (err) {
+  console.warn(`[ai.config] Misconfiguration detected: ${err.message}`);
+}
 
 async function readSourceItems() {
   const content = await fs.readFile(SOURCE_ITEMS_FILE, "utf8");
@@ -161,6 +167,7 @@ app.get("/api/dashboard", async (req, res) => {
 app.get("/api/ai/models", (_req, res) => {
   res.json({
     capabilityMap: getAiCapabilityMap(),
+    mockOnly: process.env.TEMPO_AI_MOCK_ONLY === "true",
   });
 });
 

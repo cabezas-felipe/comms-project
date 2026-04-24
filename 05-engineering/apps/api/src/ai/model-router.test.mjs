@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getAiCapabilityMap, getAiMetrics, summarizeCluster } from "./model-router.mjs";
+import {
+  getAiCapabilityMap,
+  getAiMetrics,
+  summarizeCluster,
+  providerFor,
+  assertAiConfig,
+} from "./model-router.mjs";
 import { withTimeout, heuristicSummary } from "./guardrails.mjs";
 
 const SAMPLE_CLUSTER = {
@@ -14,6 +20,8 @@ const SAMPLE_CLUSTER = {
     { outlet: "NYT", minutesAgo: 30, weight: 80 },
   ],
 };
+
+// ── Existing capability/summary tests ────────────────────────────────────────
 
 test("capability map exposes model assignments", () => {
   const map = getAiCapabilityMap();
@@ -79,4 +87,129 @@ test("getAiMetrics returns an isolated snapshot, not a live reference", () => {
   snap.summarizationRequests = 99999;
   const check = getAiMetrics();
   assert.notEqual(check.summarizationRequests, 99999);
+});
+
+// ── Provider routing ──────────────────────────────────────────────────────────
+
+test("providerFor routes mock-openai-mini to mock-openai", () => {
+  assert.equal(providerFor("mock-openai-mini"), "mock-openai");
+});
+
+test("providerFor routes mock-anthropic-haiku to mock-anthropic", () => {
+  assert.equal(providerFor("mock-anthropic-haiku"), "mock-anthropic");
+});
+
+test("providerFor routes anthropic:<model> to anthropic", () => {
+  assert.equal(providerFor("anthropic:claude-haiku-4-5-20251001"), "anthropic");
+  assert.equal(providerFor("anthropic:claude-sonnet-4-6"), "anthropic");
+});
+
+test("providerFor routes openai:<model> to openai-compatible", () => {
+  assert.equal(providerFor("openai:gpt-4o-mini"), "openai-compatible");
+});
+
+test("providerFor defaults unknown models to mock-openai", () => {
+  assert.equal(providerFor("unknown-model"), "mock-openai");
+});
+
+// ── TEMPO_AI_MOCK_ONLY flag ───────────────────────────────────────────────────
+
+test("TEMPO_AI_MOCK_ONLY=true routes anthropic: model to mock-openai", () => {
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  try {
+    assert.equal(providerFor("anthropic:claude-haiku-4-5-20251001"), "mock-openai");
+  } finally {
+    delete process.env.TEMPO_AI_MOCK_ONLY;
+  }
+});
+
+test("TEMPO_AI_MOCK_ONLY=true routes openai: model to mock-openai", () => {
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  try {
+    assert.equal(providerFor("openai:gpt-4o-mini"), "mock-openai");
+  } finally {
+    delete process.env.TEMPO_AI_MOCK_ONLY;
+  }
+});
+
+// ── assertAiConfig validation ─────────────────────────────────────────────────
+
+test("assertAiConfig does not throw for mock-only capability map", () => {
+  assert.doesNotThrow(() =>
+    assertAiConfig({ summarization: "mock-openai-mini", classification: "mock-anthropic-haiku" })
+  );
+});
+
+test("assertAiConfig throws when anthropic: model has no API key", () => {
+  const saved = {
+    TEMPO_ANTHROPIC_API_KEY: process.env.TEMPO_ANTHROPIC_API_KEY,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  };
+  delete process.env.TEMPO_ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    assert.throws(
+      () => assertAiConfig({ summarization: "anthropic:claude-haiku-4-5-20251001" }),
+      /TEMPO_ANTHROPIC_API_KEY/
+    );
+  } finally {
+    if (saved.TEMPO_ANTHROPIC_API_KEY) process.env.TEMPO_ANTHROPIC_API_KEY = saved.TEMPO_ANTHROPIC_API_KEY;
+    if (saved.ANTHROPIC_API_KEY) process.env.ANTHROPIC_API_KEY = saved.ANTHROPIC_API_KEY;
+  }
+});
+
+test("assertAiConfig throws when openai: model has no TEMPO_OPENAI_API_KEY", () => {
+  const saved = process.env.TEMPO_OPENAI_API_KEY;
+  delete process.env.TEMPO_OPENAI_API_KEY;
+  try {
+    assert.throws(
+      () => assertAiConfig({ summarization: "openai:gpt-4o-mini" }),
+      /TEMPO_OPENAI_API_KEY/
+    );
+  } finally {
+    if (saved) process.env.TEMPO_OPENAI_API_KEY = saved;
+  }
+});
+
+// ── Fallback path coverage (closes Slice 10 gap) ──────────────────────────────
+
+test("summarizeCluster falls back to heuristic when anthropic key is missing", async () => {
+  const savedModel = process.env.TEMPO_AI_SUMMARY_MODEL;
+  const savedKey1 = process.env.TEMPO_ANTHROPIC_API_KEY;
+  const savedKey2 = process.env.ANTHROPIC_API_KEY;
+  process.env.TEMPO_AI_SUMMARY_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  delete process.env.TEMPO_ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    const result = await summarizeCluster(SAMPLE_CLUSTER);
+    assert.equal(result.meta.fallbackUsed, true);
+    assert.equal(result.meta.timedOut, false);
+    assert.ok(result.summary.includes(SAMPLE_CLUSTER.title));
+  } finally {
+    if (savedModel !== undefined) process.env.TEMPO_AI_SUMMARY_MODEL = savedModel;
+    else delete process.env.TEMPO_AI_SUMMARY_MODEL;
+    if (savedKey1) process.env.TEMPO_ANTHROPIC_API_KEY = savedKey1;
+    if (savedKey2) process.env.ANTHROPIC_API_KEY = savedKey2;
+  }
+});
+
+test("provider error increments providerErrors and summarizationFallbacks", async () => {
+  const savedModel = process.env.TEMPO_AI_SUMMARY_MODEL;
+  const savedKey1 = process.env.TEMPO_ANTHROPIC_API_KEY;
+  const savedKey2 = process.env.ANTHROPIC_API_KEY;
+  process.env.TEMPO_AI_SUMMARY_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  delete process.env.TEMPO_ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  const before = getAiMetrics();
+  try {
+    await summarizeCluster(SAMPLE_CLUSTER);
+    const after = getAiMetrics();
+    assert.ok(after.providerErrors >= before.providerErrors + 1);
+    assert.ok(after.summarizationFallbacks >= before.summarizationFallbacks + 1);
+  } finally {
+    if (savedModel !== undefined) process.env.TEMPO_AI_SUMMARY_MODEL = savedModel;
+    else delete process.env.TEMPO_AI_SUMMARY_MODEL;
+    if (savedKey1) process.env.TEMPO_ANTHROPIC_API_KEY = savedKey1;
+    if (savedKey2) process.env.ANTHROPIC_API_KEY = savedKey2;
+  }
 });

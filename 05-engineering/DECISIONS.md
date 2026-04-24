@@ -2,6 +2,42 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-04-23 - D-031 - Slice 13: real Anthropic provider wiring, lazy env, mock-only flag
+
+#### Context
+
+Slice 13 (branch `build/slice13-real-ai-provider-wiring`). In-scope: `apps/api/src/ai/providers/anthropic.mjs` (new), `apps/api/src/ai/model-router.mjs` (updated), `apps/api/src/ai/model-router.test.mjs` (extended), `apps/api/package.json` (new dependency), `apps/api/.env.example` (new vars), `apps/api/src/server.mjs` (startup validation + model endpoint). Objective: wire a production-ready Anthropic execution path through the existing model-router abstraction while keeping mock and fallback paths fully intact.
+
+#### Decision
+
+- Added `src/ai/providers/anthropic.mjs`: wraps `@anthropic-ai/sdk`. Accepts `{ apiKey, model, prompt, timeoutMs }`, creates a scoped `Anthropic` client with SDK-level timeout, calls `messages.create` (max_tokens=256, temperature=0.2), and returns `{ summary, inputTokens, outputTokens }` from actual API usage. Empty-response guard throws rather than silently returning garbage.
+- Updated `src/ai/model-router.mjs`:
+  - Converted `CAPABILITY_DEFAULTS` from a module-level constant to `getCapabilityDefaults()` (lazy env read), so tests can set `TEMPO_AI_SUMMARY_MODEL` after import without module re-import hacks.
+  - `providerFor(model)` now exported. Reads `TEMPO_AI_MOCK_ONLY` at call time; if `"true"`, forces all providers to their mock equivalent regardless of model prefix.
+  - Added `resolveModelName(model)` to strip the `anthropic:` or `openai:` prefix before handing the bare model ID to the provider.
+  - Added `ANTHROPIC_COSTS` table with per-MTok input/output pricing for Haiku 4.5, Sonnet 4.6, Opus 4.7. When real token counts are available (Anthropic path), the cost calculation uses actuals; all other paths keep the existing heuristic estimate.
+  - Added `assertAiConfig(capabilityMap?)` (exported): iterates configured models, throws a human-readable error if a real provider is configured without its API key. Accepts an optional `capabilityMap` argument for testability.
+  - `summarizeCluster` routes through the Anthropic provider when `provider === "anthropic"`. Prefers `TEMPO_ANTHROPIC_API_KEY`; falls back to `ANTHROPIC_API_KEY` (SDK default env). Missing key throws immediately (caught by existing fallback handler — no silent failure).
+  - All other existing paths (openai-compatible, mock-openai, mock-anthropic) and the heuristic fallback are unchanged.
+- Updated `src/server.mjs`: imports `assertAiConfig`; calls it at app init and logs a `console.warn` if misconfigured (non-crashing — fallback keeps the server functional). `GET /api/ai/models` now includes `mockOnly: bool`.
+- Added `@anthropic-ai/sdk ^0.91.0` to `apps/api` dependencies.
+- Extended `model-router.test.mjs`: 12 new tests covering provider routing (`providerFor` unit tests), `TEMPO_AI_MOCK_ONLY` enforcement, `assertAiConfig` validation (pass/throw cases for both providers), and the full fallback path via lazy env reads (closes the Slice 10 known coverage gap for `providerErrors`/`summarizationFallbacks` counter increments).
+
+#### Why
+
+- The existing `openai-compatible` path required `TEMPO_OPENAI_API_KEY` and showed the correct pattern for real provider wiring; Anthropic follows the same shape.
+- Lazy env reads (`getCapabilityDefaults()` at call time) eliminate the need for separate test processes or module re-import tricks to test different model configs — a direct improvement in test ergonomics without changing the public API contract.
+- `TEMPO_AI_MOCK_ONLY=true` gives operators a single env toggle to run in mock mode for dev/CI without changing model config. Cheaper than per-model overrides.
+- Actual token counts from the Anthropic response replace token estimation on the Anthropic path, making cost telemetry accurate rather than approximate for real API calls.
+- `assertAiConfig()` at startup surfaces misconfiguration (real model, missing key) at the first API call via a logged warning rather than silently falling back, matching the fail-fast philosophy established in D-029.
+
+#### Consequences
+
+- `npm run test:api` now runs 38 tests (20 model-router + 6 settings-schema + 5 route-level + 7 settings-repo). All pass. Up from 26.
+- `npm run build` exits 0. `npm run test:prototype` exits 0 (9 tests). `npx eslint` exits 0. Both `node --check` commands exit 0.
+- No real Anthropic API calls are made in tests or default dev mode (default model is `mock-openai-mini`). Real provider activation requires explicit `TEMPO_AI_SUMMARY_MODEL=anthropic:<model>` + API key.
+- Cost estimates for mock/openai paths remain heuristic (unchanged); Anthropic path uses actual token counts from API response.
+
 ### 2026-04-23 - D-029 - Slice 11 durability fix: fail fast on partial Supabase config
 
 #### Context
