@@ -2,6 +2,64 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-04-23 - D-029 - Slice 11 durability fix: fail fast on partial Supabase config
+
+#### Context
+
+Post-build audit of Slice 11 (branch `build/slice11-supabase-foundation`). The original `readSettings()` / `writeSettings()` routing used `isSupabaseEnabled()`, which returns `false` when `SUPABASE_URL` is set but key vars are absent. This means a partially configured deployment (URL present, key missing) silently falls through to file storage — masking misconfiguration instead of surfacing it.
+
+In-scope: `apps/api/src/db/settings-repo.mjs`, `apps/api/src/db/settings-repo.test.mjs`.
+
+#### Decision
+
+- Replace `isSupabaseEnabled()` routing in `readSettings()` and `writeSettings()` with an explicit `process.env.SUPABASE_URL` check followed by an `assertSupabaseEnv()` call.
+- Behavior: if `SUPABASE_URL` is set → call `assertSupabaseEnv()` (throws on missing key) then use Supabase path. If `SUPABASE_URL` is unset → use file adapter. Silent fallback is no longer possible when `SUPABASE_URL` is present.
+- Import: swap `isSupabaseEnabled` import for `assertSupabaseEnv` in `settings-repo.mjs`; `isSupabaseEnabled` is still exported from `client.mjs` for external callers.
+- Add two tests to `settings-repo.test.mjs`: (1) `SUPABASE_URL` set + no key → `readSettings()` rejects with missing key message; (2) `SUPABASE_URL` unset → file adapter returns valid settings object. Existing 5 tests unchanged.
+
+#### Why
+
+- Silent fallback hides operator misconfiguration: a deployment with `SUPABASE_URL` set but no key would appear to work (using file storage) while never writing to Supabase. The error only surfaces later, at a data-loss point, not at startup.
+- `assertSupabaseEnv()` already existed in `client.mjs` with the correct error message; applying it at the routing call site costs nothing and gives a human-readable failure on first use.
+
+#### Consequences
+
+- `readSettings()` / `writeSettings()` now throw immediately if `SUPABASE_URL` is set without a key — operators see a clear error at the first API call rather than silent file fallback.
+- Deployments without `SUPABASE_URL` are unaffected; file adapter path is unchanged.
+- `npm run test:api` now runs 26 tests (8 model-router + 6 settings-schema + 5 route-level + 7 settings-repo). All pass.
+- `npm run build` exits 0. `npm run test:prototype` exits 0 (9 tests). Validation gates unchanged.
+
+### 2026-04-23 - D-028 - Slice 11: Supabase production data foundation (Free-tier-first, Pro-ready)
+
+#### Context
+
+Slice 11 (branch `build/slice11-supabase-foundation`). In-scope: `apps/api/src/db/` (new), `apps/api/.env.example` (new), `apps/api/src/server.mjs` (settings wiring), `apps/api/package.json` (dependency + test script), `MODE2-SLICE-11-SUPABASE-FOUNDATION.md` (new). Objective: introduce a Supabase-backed persistence layer for settings while preserving existing file-based behavior in tests and local dev.
+
+#### Decision
+
+- Added `src/db/client.mjs`: Supabase client factory with `isSupabaseEnabled()`, `assertSupabaseEnv()`, and `getSupabaseClient()`. Client is only initialized when `SUPABASE_URL` + (`SUPABASE_SERVICE_ROLE_KEY` or `SUPABASE_ANON_KEY`) are present; otherwise no Supabase code runs.
+- Added `src/db/settings-repo.mjs`: adapter that routes `readSettings()`/`writeSettings()` to either the file-based or Supabase implementation based on env. Exports `DEFAULT_SETTINGS` so server.mjs can reference `contractVersion` without a local duplicate.
+- Added `src/db/schema.sql`: initial schema for `settings`, `stories` (placeholder), and `summaries` (placeholder). RLS enabled on all tables; server-side access via `SUPABASE_SERVICE_ROLE_KEY` bypasses RLS. Anon-key policies deferred to the auth slice.
+- Added `src/db/settings-repo.test.mjs`: 5 tests covering file-adapter read/write, `isSupabaseEnabled` returns false without env, `assertSupabaseEnv` error messages for each missing-var case.
+- Modified `src/server.mjs`: removed local `ensureSettingsFile`, `readSettings`, `writeSettings`, and `DEFAULT_SETTINGS`; imported equivalents from `./db/settings-repo.mjs`. `SETTINGS_FILE` constant removed; file path is now encapsulated in the repo.
+- Added `@supabase/supabase-js ^2.0.0` to `apps/api` dependencies.
+- Added `.env.example` documenting all env vars with inline notes on Free vs. Pro usage.
+
+#### Why
+
+- Adapter pattern keeps existing file-based path intact — tests and local dev need zero credentials.
+- `SUPABASE_SERVICE_ROLE_KEY` is preferred over `SUPABASE_ANON_KEY` for server-side to bypass RLS (correct pattern for a trusted backend). Both are supported so operators can start with the anon key if they have not yet rotated credentials.
+- `assertSupabaseEnv()` gives a human-readable startup error rather than a cryptic `createClient` failure when an operator partially configures the env.
+- Schema separates `settings` (in use), `stories`, and `summaries` (placeholders) so future ingestion slices have a documented landing zone without schema churn.
+
+#### Consequences
+
+- `cd 05-engineering && npm run test:api` now runs 24 tests (8 model-router + 6 settings-schema + 5 route-level + 5 settings-repo). All pass.
+- `npm run build` exits 0. `npm run test:prototype` exits 0 (9 tests). `npx eslint src/lib/api.ts vite.config.ts` exits 0. `node --check server.mjs` exits 0.
+- Supabase is inactive unless both `SUPABASE_URL` and a key var are set — no behavioral change for existing deployments.
+- Auth is unchanged (localStorage-backed). Migration path to Supabase Auth is documented in `MODE2-SLICE-11-SUPABASE-FOUNDATION.md`; implementation is deferred to a future slice.
+- Pro triggers: pg_cron for scheduled ingestion, DB size past 500 MB, realtime for live monitoring feeds — all documented in the slice artifact.
+
 ### 2026-04-23 - D-027 - Slice 10 audit pass: AI router hardening verified, snapshot isolation test added
 
 #### Context
