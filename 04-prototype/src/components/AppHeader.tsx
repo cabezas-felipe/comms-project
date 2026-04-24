@@ -1,8 +1,15 @@
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { formatClock } from "@/lib/format";
 import { useEffect, useState } from "react";
-import { LogOut, Settings as SettingsIcon } from "lucide-react";
+import { Settings as SettingsIcon, LogOut } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 const NAV = [
   { to: "/dashboard", label: "Feed" },
@@ -13,6 +20,7 @@ const NAV = [
 export default function AppHeader() {
   const [now, setNow] = useState(new Date());
   const location = useLocation();
+  const navigate = useNavigate();
   const { isAuthenticated, logout } = useAuth();
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30_000);
@@ -41,21 +49,28 @@ export default function AppHeader() {
             <div className="eyebrow leading-none">Last refresh</div>
             <div className="font-mono text-xs text-foreground">{formatClock(now)}</div>
           </div>
-          <NavLink
-            to="/settings"
-            aria-label="Open settings"
-            className="rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          >
-            <SettingsIcon className="h-4 w-4" />
-          </NavLink>
-          <button
-            type="button"
-            onClick={logout}
-            aria-label="Sign out"
-            className="rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          >
-            <LogOut className="h-4 w-4" />
-          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label="Open menu"
+                className="rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              >
+                <SettingsIcon className="h-4 w-4" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-40">
+              <DropdownMenuItem onClick={() => navigate("/settings")}>
+                <SettingsIcon className="mr-2 h-4 w-4" />
+                Settings
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={logout}>
+                <LogOut className="mr-2 h-4 w-4" />
+                Log out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </header>
