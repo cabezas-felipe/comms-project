@@ -2,3 +2,13 @@
 node_modules/
 **/dist/
 04-prototype/node_modules/
+
+# Secrets and local env files
+.env
+.env.*
+*.pem
+*.key
+
+# Project-specific local env files
+05-engineering/apps/api/.env
+04-prototype/.env.local

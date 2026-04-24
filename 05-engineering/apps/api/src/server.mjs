@@ -4,46 +4,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { settingsPayloadSchema } from "@tempo/contracts";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster } from "./ai/model-router.mjs";
+import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = process.env.TEMPO_DATA_DIR ?? path.join(ROOT, "data");
-const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const SOURCE_ITEMS_FILE = path.join(DATA_DIR, "source-items.json");
 const PORT = Number(process.env.TEMPO_API_PORT || 8787);
 
 const app = express();
 app.use(express.json());
-
-const DEFAULT_SETTINGS = {
-  contractVersion: "2026-04-22-slice1",
-  topics: ["Diplomatic relations", "Migration policy", "Security cooperation"],
-  keywords: ["OFAC", "sanctions", "deportation routing", "bilateral"],
-  geographies: ["US", "Colombia"],
-  traditionalSources: ["The New York Times", "Reuters", "El Tiempo"],
-  socialSources: ["@latamwatcher"],
-};
-
-async function ensureSettingsFile() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  try {
-    await fs.access(SETTINGS_FILE);
-  } catch {
-    await fs.writeFile(SETTINGS_FILE, JSON.stringify(DEFAULT_SETTINGS, null, 2), "utf8");
-  }
-}
-
-async function readSettings() {
-  await ensureSettingsFile();
-  const content = await fs.readFile(SETTINGS_FILE, "utf8");
-  return JSON.parse(content);
-}
-
-async function writeSettings(payload) {
-  await ensureSettingsFile();
-  await fs.writeFile(SETTINGS_FILE, JSON.stringify(payload, null, 2), "utf8");
-}
 
 async function readSourceItems() {
   const content = await fs.readFile(SOURCE_ITEMS_FILE, "utf8");
