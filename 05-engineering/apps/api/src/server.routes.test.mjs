@@ -32,6 +32,9 @@ const tmpDir = await mkdtemp(path.join(tmpdir(), "tempo-api-test-"));
 process.env.TEMPO_DATA_DIR = tmpDir;
 // Seed source-items fixture before server import so GET /api/dashboard can read it.
 await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
+// Seed source-feeds fixture for GET /api/ingestion/sources.
+const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
+await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
 const { app } = await import("./server.mjs");
 const { default: request } = await import("supertest");
@@ -94,4 +97,14 @@ test("GET /api/dashboard returns schema-conformant payload with ranked stories",
   const parsed = dashboardPayloadSchema.safeParse(res.body);
   assert.ok(parsed.success, `response must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
   assert.ok(!("aiSummaryMeta" in res.body.stories[0]), "aiSummaryMeta must be stripped from response");
+});
+
+test("GET /api/ingestion/sources returns declared feed configuration", async () => {
+  const res = await request(app).get("/api/ingestion/sources");
+  assert.equal(res.status, 200);
+  assert.ok(Array.isArray(res.body.feeds), "feeds must be an array");
+  assert.equal(res.body.feeds.length, 1);
+  assert.equal(res.body.feeds[0].id, "nyt-politics");
+  assert.equal(typeof res.body.feeds[0].kind, "string");
+  assert.equal(typeof res.body.feeds[0].weight, "number");
 });

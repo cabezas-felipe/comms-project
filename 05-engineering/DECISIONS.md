@@ -2,6 +2,40 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-04-23 - D-030 - Slice 12: ingestion sources foundation — normalization layer + feed declaration
+
+#### Context
+
+Slice 12 (branch `build/slice12-ingestion-sources`). In-scope: `apps/api/src/ingestion/` (new), `apps/api/data/source-feeds.json` (new), `apps/api/src/server.mjs` (wiring), `apps/api/src/server.routes.test.mjs` (new test + seed), `apps/api/package.json` (test script), `MODE2-SLICE-12-INGESTION-SOURCES.md` (new). Objective: move ingestion from a direct static-file read to an explicit normalized pipeline while keeping the dashboard contract and all existing behavior stable.
+
+#### Decision
+
+- Added `src/ingestion/source-normalizer.mjs`: exports `normalizeSourceItem(raw)` and `normalizeSourceItems(rawItems)`.
+  - `normalizeSourceItem` coerces known fields to canonical types, defaults optional fields, and throws on any missing required field (`clusterId`, `sourceId`, `outlet`, `kind`, `weight`, `url`, `minutesAgo`, `headline`, `body`).
+  - `normalizeSourceItems` processes an array, skips invalid items (reports `{ index, error }` in an `errors[]` array) rather than aborting — one bad feed item must not kill the pipeline.
+- Added `src/ingestion/feed-reader.mjs`: exports `readFeedItems(dataDir)` — thin abstraction over `source-items.json`. Swap this function to activate RSS, DB, or HTTP-based ingestion without touching normalization or downstream logic.
+- Added `src/ingestion/source-normalizer.test.mjs`: 8 unit tests covering the happy path, optional-field defaults, string-body coercion, two missing-required-field cases, valid-batch pass-through, mixed-batch skipping with error reporting, and non-array TypeError.
+- Modified `src/server.mjs`: removed `readSourceItems()` and `SOURCE_ITEMS_FILE`; imported `readFeedItems` and `normalizeSourceItems`; dashboard handler now passes through the normalization step and logs any skipped items. Added `GET /api/ingestion/sources` route (reads `source-feeds.json`; 500 on error).
+- Added `data/source-feeds.json`: declares 6 source feeds (4 RSS + 2 social) with `id`, `name`, `kind`, `url`, `weight`, `active` fields. URLs are placeholders — no live fetching in this slice.
+- Updated `src/server.routes.test.mjs`: seeds `source-feeds.json` in the isolated tmpDir; added test asserting `GET /api/ingestion/sources` returns 200 with a typed `feeds[]` array.
+- Updated `package.json` test script: added `src/ingestion/source-normalizer.test.mjs`.
+
+#### Why
+
+- The direct `readSourceItems()` → `buildDashboardPayload()` path had no normalization seam: raw JSON was consumed as-is with no field coercion or validation. A single malformed item (wrong type, missing field) would either silently produce wrong output or throw inside the dashboard handler with no actionable error.
+- Introducing a named normalization boundary makes the ingestion contract explicit: anything upstream of `normalizeSourceItems` can change shape; anything downstream (clustering, ranking, AI summarization) sees a consistent object.
+- `readFeedItems` makes the data source swappable in one place. The next ingestion slice can replace the file read with RSS fetching, a Supabase query, or a webhook payload without modifying any of the ranking or AI layers.
+- `source-feeds.json` documents declared sources as a machine-readable manifest. This is the intended config surface for a future feed-management UI and for the operator to understand which outlets are in scope.
+
+#### Consequences
+
+- `cd 05-engineering && npm run test:api` now runs 35 tests (8 model-router + 6 settings-schema + 6 route-level + 7 settings-repo + 8 normalizer). All pass.
+- `npm run build` exits 0. `npm run test:prototype` exits 0 (9 tests). `npx eslint src/lib/api.ts vite.config.ts` exits 0. `node --check server.mjs` exits 0.
+- Dashboard contract (`dashboardPayloadSchema`) and all existing route behaviors are unchanged. Frontend consumers see no difference.
+- `GET /api/ingestion/sources` is a new read-only endpoint; no auth guard in this slice (consistent with other API routes at this stage).
+- Gap: `readFeedItems` still reads from `source-items.json` — no live RSS fetching yet. Next ingestion slice should replace `feed-reader.mjs` internals and add an RSS parsing/normalization path.
+- Gap: `stories` and `summaries` Supabase tables remain unpopulated. Slice 13 can wire normalized items into the `stories` table behind the ingestion-repo boundary.
+
 ### 2026-04-23 - D-029 - Slice 11 durability fix: fail fast on partial Supabase config
 
 #### Context

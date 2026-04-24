@@ -1,0 +1,53 @@
+{
+  "_note": "Declared feed sources. URLs are not fetched in this slice — source-items.json provides fixture content. Replace readFeedItems() in feed-reader.mjs to activate live ingestion.",
+  "feeds": [
+    {
+      "id": "nyt-politics",
+      "name": "The New York Times — Politics",
+      "kind": "rss",
+      "url": "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
+      "weight": 95,
+      "active": true
+    },
+    {
+      "id": "reuters-world",
+      "name": "Reuters — World News",
+      "kind": "rss",
+      "url": "https://feeds.reuters.com/reuters/worldNews",
+      "weight": 88,
+      "active": true
+    },
+    {
+      "id": "el-tiempo-politics",
+      "name": "El Tiempo — Política",
+      "kind": "rss",
+      "url": "https://www.eltiempo.com/rss/politica.xml",
+      "weight": 82,
+      "active": true
+    },
+    {
+      "id": "politico-congress",
+      "name": "Politico — Congress",
+      "kind": "rss",
+      "url": "https://www.politico.com/rss/politicopicks.xml",
+      "weight": 80,
+      "active": true
+    },
+    {
+      "id": "latamwatcher",
+      "name": "@latamwatcher",
+      "kind": "social",
+      "url": "https://twitter.com/latamwatcher",
+      "weight": 65,
+      "active": true
+    },
+    {
+      "id": "migrationdesk",
+      "name": "@migrationdesk",
+      "kind": "social",
+      "url": "https://twitter.com/migrationdesk",
+      "weight": 50,
+      "active": false
+    }
+  ]
+}
