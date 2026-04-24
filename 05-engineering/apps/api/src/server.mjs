@@ -5,21 +5,17 @@ import { fileURLToPath } from "node:url";
 import { settingsPayloadSchema } from "@tempo/contracts";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster } from "./ai/model-router.mjs";
 import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
+import { readFeedItems } from "./ingestion/feed-reader.mjs";
+import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = process.env.TEMPO_DATA_DIR ?? path.join(ROOT, "data");
-const SOURCE_ITEMS_FILE = path.join(DATA_DIR, "source-items.json");
 const PORT = Number(process.env.TEMPO_API_PORT || 8787);
 
 const app = express();
 app.use(express.json());
-
-async function readSourceItems() {
-  const content = await fs.readFile(SOURCE_ITEMS_FILE, "utf8");
-  return JSON.parse(content);
-}
 
 function rankStories(stories) {
   return [...stories].sort((a, b) => {
@@ -132,9 +128,26 @@ app.put("/api/settings", async (req, res) => {
   }
 });
 
+app.get("/api/ingestion/sources", async (_req, res) => {
+  try {
+    const feedsFile = path.join(DATA_DIR, "source-feeds.json");
+    const content = await fs.readFile(feedsFile, "utf8");
+    res.json(JSON.parse(content));
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to read source feeds.",
+      detail: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
 app.get("/api/dashboard", async (req, res) => {
   try {
-    const [settings, sourceItems] = await Promise.all([readSettings(), readSourceItems()]);
+    const [settings, rawItems] = await Promise.all([readSettings(), readFeedItems(DATA_DIR)]);
+    const { items: sourceItems, errors: normErrors } = normalizeSourceItems(rawItems);
+    if (normErrors.length > 0) {
+      console.warn(`[ingestion.normalize] ${normErrors.length} item(s) skipped:`, normErrors);
+    }
     const limit = Number(req.query.limit ?? 10);
     const payload = await buildDashboardPayload(sourceItems, settings, Number.isFinite(limit) ? limit : 10);
     const aiConfig = getAiCapabilityMap();
