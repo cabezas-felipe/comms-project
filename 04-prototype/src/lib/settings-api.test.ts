@@ -2,6 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTRACT_VERSION } from "@tempo/contracts";
 import { fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
 
+vi.mock("@/lib/supabase", () => ({
+  supabase: {
+    auth: {
+      getSession: vi.fn().mockResolvedValue({
+        data: { session: { access_token: "test-token", user: { id: "test-user-id" } } },
+      }),
+    },
+  },
+}));
+
 describe("settings-api", () => {
   beforeEach(() => {
     localStorage.clear();

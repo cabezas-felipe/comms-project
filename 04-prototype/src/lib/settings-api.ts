@@ -4,8 +4,9 @@ import {
   type SettingsPayload,
 } from "@tempo/contracts";
 import { STORIES } from "@/data/stories";
+import { supabase } from "./supabase";
 
-const SETTINGS_STORAGE_KEY = "tempo.settings.v1";
+const SETTINGS_STORAGE_KEY_BASE = "tempo.settings.v1";
 const SETTINGS_API_ENDPOINT = "/api/settings";
 const MOCK_LATENCY_MS = 120;
 
@@ -13,6 +14,28 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+async function getStorageKey(): Promise<string> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    if (data.session?.user?.id) return `${SETTINGS_STORAGE_KEY_BASE}.${data.session.user.id}`;
+  } catch {
+    // supabase not configured — use global key
+  }
+  return SETTINGS_STORAGE_KEY_BASE;
+}
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    if (data.session?.access_token) {
+      return { Authorization: `Bearer ${data.session.access_token}` };
+    }
+  } catch {
+    // supabase not configured — no auth header
+  }
+  return {};
 }
 
 function seedSourcesFromStories(): { traditionalSources: string[]; socialSources: string[] } {
@@ -49,37 +72,32 @@ function defaultSettingsPayload(): SettingsPayload {
   });
 }
 
-/**
- * Slice 5 adapter: local persistence with contract validation.
- * This boundary can be swapped to a real API later.
- */
 export async function fetchSettingsPayload(): Promise<SettingsPayload> {
+  const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
   try {
     const response = await fetch(SETTINGS_API_ENDPOINT, {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-      },
+      headers: { Accept: "application/json", ...authHeaders },
     });
     if (!response.ok) {
       throw new Error(`Settings API returned HTTP ${response.status}`);
     }
     const payload = settingsPayloadSchema.parse(await response.json());
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(storageKey, JSON.stringify(payload));
     return payload;
   } catch {
     await wait(MOCK_LATENCY_MS);
-    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (!raw) {
       const fallback = defaultSettingsPayload();
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(fallback));
+      localStorage.setItem(storageKey, JSON.stringify(fallback));
       return fallback;
     }
     try {
       return settingsPayloadSchema.parse(JSON.parse(raw));
     } catch {
       const fallback = defaultSettingsPayload();
-      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(fallback));
+      localStorage.setItem(storageKey, JSON.stringify(fallback));
       return fallback;
     }
   }
@@ -87,23 +105,22 @@ export async function fetchSettingsPayload(): Promise<SettingsPayload> {
 
 export async function saveSettingsPayload(payload: SettingsPayload): Promise<SettingsPayload> {
   const validated = settingsPayloadSchema.parse(payload);
+  const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
   try {
     const response = await fetch(SETTINGS_API_ENDPOINT, {
       method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json", ...authHeaders },
       body: JSON.stringify(validated),
     });
     if (!response.ok) {
       throw new Error(`Settings API returned HTTP ${response.status}`);
     }
     const persisted = settingsPayloadSchema.parse(await response.json());
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(persisted));
+    localStorage.setItem(storageKey, JSON.stringify(persisted));
     return persisted;
   } catch {
     await wait(MOCK_LATENCY_MS);
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(validated));
+    localStorage.setItem(storageKey, JSON.stringify(validated));
   }
   return validated;
 }

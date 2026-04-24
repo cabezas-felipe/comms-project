@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { settingsPayloadSchema } from "@tempo/contracts";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
 import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
+import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
@@ -17,6 +18,43 @@ const PORT = Number(process.env.TEMPO_API_PORT || 8787);
 
 const app = express();
 app.use(express.json());
+
+/**
+ * Extracts the authenticated user ID from the Bearer token in the Authorization header.
+ * Returns null when no token is present, Supabase is unconfigured, or the token is invalid.
+ */
+async function resolveUserId(req) {
+  const authHeader = req.headers["authorization"];
+  if (!authHeader?.startsWith("Bearer ")) return null;
+  if (!isSupabaseEnabled()) return null;
+  const token = authHeader.slice(7);
+  try {
+    const { data, error } = await getSupabaseClient().auth.getUser(token);
+    if (error || !data?.user) return null;
+    return data.user.id;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Mutable resolver hook. Tests override _auth.resolver to inject a deterministic user ID
+ * without a live Supabase instance. Do not use in production code paths.
+ */
+export const _auth = { resolver: resolveUserId };
+
+/**
+ * Enforces authentication on a route. Sends 401 and returns null when the resolver
+ * cannot identify the caller. Callers must guard: `if (!userId) return;`
+ */
+async function requireAuth(req, res) {
+  const userId = await _auth.resolver(req);
+  if (!userId) {
+    res.status(401).json({ message: "Authentication required. Provide a valid Bearer token." });
+    return null;
+  }
+  return userId;
+}
 
 try {
   assertAiConfig();
@@ -103,9 +141,11 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "@tempo/api" });
 });
 
-app.get("/api/settings", async (_req, res) => {
+app.get("/api/settings", async (req, res) => {
+  const userId = await requireAuth(req, res);
+  if (!userId) return;
   try {
-    const payload = await readSettings();
+    const payload = await readSettings(userId);
     res.json(payload);
   } catch (error) {
     res.status(500).json({
@@ -116,6 +156,8 @@ app.get("/api/settings", async (_req, res) => {
 });
 
 app.put("/api/settings", async (req, res) => {
+  const userId = await requireAuth(req, res);
+  if (!userId) return;
   const result = settingsPayloadSchema.safeParse(req.body);
   if (!result.success) {
     res.status(400).json({
@@ -125,7 +167,7 @@ app.put("/api/settings", async (req, res) => {
     return;
   }
   try {
-    await writeSettings(result.data);
+    await writeSettings(result.data, userId);
     trackServerEvent("settings_updated", {
       topicCount: result.data.topics?.length ?? 0,
       geoCount: result.data.geographies?.length ?? 0,
@@ -159,8 +201,10 @@ app.get("/api/ingestion/sources", async (_req, res) => {
 });
 
 app.get("/api/dashboard", async (req, res) => {
+  const userId = await requireAuth(req, res);
+  if (!userId) return;
   try {
-    const [settings, rawItems] = await Promise.all([readSettings(), readFeedItems(DATA_DIR)]);
+    const [settings, rawItems] = await Promise.all([readSettings(userId), readFeedItems(DATA_DIR)]);
     const { items: sourceItems, errors: normErrors } = normalizeSourceItems(rawItems);
     if (normErrors.length > 0) {
       console.warn(`[ingestion.normalize] ${normErrors.length} item(s) skipped:`, normErrors);

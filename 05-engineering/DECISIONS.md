@@ -2,6 +2,64 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-04-24 - D-036 - Slice 18 hardening: enforce 401 on protected API routes
+
+#### Context
+
+Follow-on to D-035 on the same branch. Slice 18's initial implementation called `resolveUserId` on the three protected routes but silently fell back to global settings when the resolver returned null. The policy change requires an explicit 401 gate — no silent fallback — on `GET /api/settings`, `PUT /api/settings`, and `GET /api/dashboard`.
+
+#### Decision
+
+- **`server.mjs`:** Introduced `export const _auth = { resolver: resolveUserId }` — a mutable hook on a plain object so tests can inject a deterministic resolver without a live Supabase instance. Introduced `requireAuth(req, res)` that calls `_auth.resolver`, sends `401 { message }` on null, and returns the user ID on success. Applied to all three protected routes. On `PUT /api/settings`, the auth check now precedes payload validation (previously it was after). `GET /api/dashboard` now passes `userId` to `readSettings` instead of reading the global key.
+- **`server.routes.test.mjs`:** Added `_auth` to the import. Set `_auth.resolver = async () => TEST_USER_ID` at module level so all existing tests authenticate deterministically without Supabase. Added three new 401 tests (one per protected route) using `try/finally` to safely override and restore the resolver. Test count: 51 → 54.
+- **`04-prototype/.env.example`:** Fixed misleading single-port example for the Supabase redirect URL allowlist. Clarified that the callback URL is built from `window.location.origin` at runtime and that operators must register every origin they use (Supabase does not support port wildcards for localhost).
+
+#### Why
+
+- The silent-fallback pattern let any unauthenticated caller read and overwrite any user's settings (or the global key), which violates the per-user isolation goal of slice 18.
+- The `_auth` object hook (mutable property on an exported const) is the idiomatic ESM approach for test injection without a mocking library — exported `let` bindings cannot be reassigned from outside the module.
+- Moving the auth check before payload validation on PUT ensures the API never leaks whether a payload is valid to an unauthenticated caller.
+
+#### Consequences
+
+- `npm run test:api` → 54 tests, 0 failures.
+- `npm run test:packages` → 18 tests, 0 failures (unchanged).
+- `npm run test:prototype` → 9 tests, 0 failures (unchanged).
+- `npm run build` → exits 0 (unchanged).
+- Unauthenticated callers to the three protected routes now always receive 401; no partial data is returned.
+
+### 2026-04-24 - D-035 - Slice 18: real Supabase Auth (magic link) + per-user settings
+
+#### Context
+
+Slice 18 (branch `build/slice17-auth-flow-import`). In-scope: frontend auth wiring (`04-prototype`), API auth middleware (`05-engineering/apps/api`), settings persistence keyed by user ID, and required env var / redirect-URL documentation. Out of scope: UI redesign, mobile changes, onboarding settings save, broad refactor.
+
+#### Decision
+
+- **Frontend auth (`src/lib/auth.tsx`):** Replaced the simulated `localStorage.getItem === "1"` pattern with real Supabase Auth. `AuthProvider` initializes from `supabase.auth.getSession()`, subscribes to `onAuthStateChange`, and exposes `user`, `session`, and `loading` in context. `signIn(email, type)` calls `signInWithOtp` with an `emailRedirectTo` that embeds the `type` query param so the callback can distinguish new vs. returning users.
+- **New `AuthCallback` page:** Handles the Supabase magic-link redirect at `/auth/callback`. Routes to `/onboarding` for `type=signup` and `/dashboard` for `type=login`. The Supabase JS SDK processes the URL fragment automatically; `onAuthStateChange` fires in the provider and flips `isAuthenticated`.
+- **Settings scoping (frontend):** `fetchSettingsPayload` and `saveSettingsPayload` now call `supabase.auth.getSession()` before each request. They scope the localStorage cache key to `tempo.settings.v1.{user_id}` and include `Authorization: Bearer {access_token}` in API calls. Degrades gracefully when Supabase is unconfigured.
+- **API auth middleware (`server.mjs`):** Added `resolveUserId(req)` which extracts the Bearer token, calls `supabase.auth.getUser(token)` with the service-role client (JWT verification), and returns the user UUID. Returns `null` when no token or Supabase is unconfigured. `GET /api/settings` and `PUT /api/settings` pass the resolved ID to the repo layer.
+- **Settings repo (`settings-repo.mjs`):** `readSettings(userId)` and `writeSettings(payload, userId)` now accept an optional `userId`. Supabase adapter uses key `user:{uuid}`; file adapter uses `settings_user_{userId}.json`. Unauthenticated calls (no userId) continue to use the global key — all existing tests pass unchanged.
+- **Schema:** No DDL change. Per-user settings use a key-prefix convention (`user:{uuid}`) within the existing `settings` table. A migration file (`002_user_settings.sql`) documents the convention and provides RLS policy snippets for a future slice.
+- **`ProtectedRoute`:** Added `loading` guard to prevent flash-redirect to `/` while session is being restored on initial load.
+
+#### Why
+
+- The simulated auth (`localStorage === "1"`) had no user identity, making per-user settings impossible. Real Supabase Auth provides a stable `user.id` that can key both the client-side localStorage cache and the server-side DB row.
+- Key-prefix approach (`user:{uuid}`) avoids a schema migration on the `settings` table while preserving backward compatibility with file-adapter deployments and all existing tests.
+- `supabase.auth.getUser(token)` with the service-role client is the recommended Supabase pattern for server-side JWT verification — it validates the token against the Auth server, not just locally.
+
+#### Consequences
+
+- `npm run test:api` → 51 tests, 0 failures (unchanged).
+- `npm run test:packages` → 18 tests, 0 failures (unchanged).
+- `npm run test:prototype` → 9 tests, 0 failures (unchanged).
+- `npm run build` → exits 0 (unchanged).
+- Operator must add `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` to `04-prototype/.env` and `SUPABASE_SERVICE_ROLE_KEY` to the API `.env` for real auth to function. Without these vars both layers degrade gracefully (settings fall back to global key; auth UX shows a toast error on submit).
+- Operator must whitelist `/auth/callback` in Supabase Auth → URL Configuration → Redirect URLs.
+- Slice 18 is closed.
+
 ### 2026-04-23 - D-034 - Slice 16: staging handoff runbook (no code changes)
 
 #### Context

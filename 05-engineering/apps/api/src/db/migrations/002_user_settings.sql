@@ -1,0 +1,25 @@
+-- Migration 002: Per-user settings (slice 18)
+--
+-- No DDL change required. Per-user settings are stored in the existing
+-- `settings` table using a key prefix:
+--
+--   key = 'user:{supabase_user_uuid}'   → per-authenticated-user
+--   key = 'global_settings'              → legacy / file-adapter fallback
+--
+-- The API server verifies the caller's Bearer JWT via supabase.auth.getUser()
+-- (using the service-role client), extracts the user UUID, and reads/writes
+-- the `user:{uuid}` key. Unauthenticated requests continue to use
+-- 'global_settings' for backward compatibility with existing tests and
+-- file-adapter deployments.
+--
+-- RLS note: the server-side API uses SUPABASE_SERVICE_ROLE_KEY which bypasses
+-- RLS. If a future slice exposes settings directly to the browser (anon key),
+-- add per-user RLS policies:
+--
+--   CREATE POLICY "users can read own settings"
+--     ON settings FOR SELECT
+--     USING (key = 'user:' || auth.uid()::text);
+--
+--   CREATE POLICY "users can write own settings"
+--     ON settings FOR ALL
+--     USING (key = 'user:' || auth.uid()::text);
