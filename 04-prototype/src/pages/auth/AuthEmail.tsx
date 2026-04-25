@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
+import { isRateLimitError } from "@/lib/auth-errors";
 
 type Mode = "login" | "signup";
 
@@ -44,13 +45,39 @@ export default function AuthEmail() {
       return;
     }
     setSending(true);
+    const type = isSignup ? "signup" : "login";
     try {
-      await signIn(trimmed, isSignup ? "signup" : "login");
-      navigate(
-        `/auth/check-email?mode=${isSignup ? "signup" : "login"}&email=${encodeURIComponent(trimmed)}`
-      );
-    } catch {
-      toast.error("Could not send the magic link. Please try again.");
+      await signIn(trimmed, type);
+      navigate(`/auth/check-email?mode=${type}&email=${encodeURIComponent(trimmed)}`);
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        if (import.meta.env.DEV) {
+          // In local dev only: try the backend fallback that mints a link directly
+          // via Supabase Admin API, bypassing email delivery.
+          try {
+            const res = await fetch("/api/auth/dev-magic-link", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                email: trimmed,
+                type,
+                redirectTo: `${window.location.origin}/auth/callback?type=${type}`,
+              }),
+            });
+            if (res.ok) {
+              const { url } = (await res.json()) as { url: string };
+              toast.info("Dev mode: opening magic link directly.");
+              window.location.assign(url);
+              return; // navigation pending; finally still runs
+            }
+          } catch {
+            // dev fallback failed; fall through to rate-limit message
+          }
+        }
+        toast.error("Too many requests — please wait a minute and try again.");
+      } else {
+        toast.error("Could not send the magic link. Please try again.");
+      }
     } finally {
       setSending(false);
     }
