@@ -97,6 +97,92 @@ export const settingsUpdatedEventSchema = z.object({
   payload: settingsUpdatedPayloadSchema,
 });
 
+// ─── Auth funnel events ──────────────────────────────────────────────────────
+
+export const landingViewedPayloadSchema = z.object({
+  route: z.string().min(1),
+});
+
+export const authCtaClickedPayloadSchema = z.object({
+  ctaType: z.enum(["login", "signup"]),
+  route: z.string().min(1),
+});
+
+export const authStartedPayloadSchema = z.object({
+  mode: z.enum(["login", "signup"]),
+  route: z.string().min(1),
+  authAttemptId: z.string().min(1),
+});
+
+export const authSucceededPayloadSchema = z.object({
+  mode: z.enum(["login", "signup"]),
+  route: z.string().min(1),
+  authAttemptId: z.string().min(1),
+});
+
+export const landingViewedEventSchema = z.object({
+  name: z.literal("landing_viewed"),
+  tier: z.literal("primary"),
+  occurredAt: occurredAtSchema,
+  payload: landingViewedPayloadSchema,
+});
+
+export const authCtaClickedEventSchema = z.object({
+  name: z.literal("auth_cta_clicked"),
+  tier: z.literal("secondary"),
+  occurredAt: occurredAtSchema,
+  payload: authCtaClickedPayloadSchema,
+});
+
+export const authStartedEventSchema = z.object({
+  name: z.literal("auth_started"),
+  tier: z.literal("primary"),
+  occurredAt: occurredAtSchema,
+  payload: authStartedPayloadSchema,
+});
+
+export const authSucceededEventSchema = z.object({
+  name: z.literal("auth_succeeded"),
+  tier: z.literal("primary"),
+  occurredAt: occurredAtSchema,
+  payload: authSucceededPayloadSchema,
+});
+
+// ─── Onboarding funnel events ────────────────────────────────────────────────
+
+export const onboardingViewedPayloadSchema = z.object({
+  route: z.string().min(1),
+});
+
+export const onboardingSubmittedPayloadSchema = z.object({
+  route: z.string().min(1),
+});
+
+export const onboardingCompletedPayloadSchema = z.object({
+  route: z.string().min(1),
+});
+
+export const onboardingViewedEventSchema = z.object({
+  name: z.literal("onboarding_viewed"),
+  tier: z.literal("primary"),
+  occurredAt: occurredAtSchema,
+  payload: onboardingViewedPayloadSchema,
+});
+
+export const onboardingSubmittedEventSchema = z.object({
+  name: z.literal("onboarding_submitted"),
+  tier: z.literal("secondary"),
+  occurredAt: occurredAtSchema,
+  payload: onboardingSubmittedPayloadSchema,
+});
+
+export const onboardingCompletedEventSchema = z.object({
+  name: z.literal("onboarding_completed"),
+  tier: z.literal("primary"),
+  occurredAt: occurredAtSchema,
+  payload: onboardingCompletedPayloadSchema,
+});
+
 export const analyticsEventSchema = z.discriminatedUnion("name", [
   dashboardViewedEventSchema,
   storyExpandedEventSchema,
@@ -105,6 +191,13 @@ export const analyticsEventSchema = z.discriminatedUnion("name", [
   apiDashboardRequestedEventSchema,
   apiErrorEventSchema,
   settingsUpdatedEventSchema,
+  landingViewedEventSchema,
+  authCtaClickedEventSchema,
+  authStartedEventSchema,
+  authSucceededEventSchema,
+  onboardingViewedEventSchema,
+  onboardingSubmittedEventSchema,
+  onboardingCompletedEventSchema,
 ]);
 
 export type EventTier = z.infer<typeof eventTierSchema>;
@@ -189,6 +282,90 @@ export function buildSettingsUpdated(
   return settingsUpdatedEventSchema.parse({
     name: "settings_updated",
     tier: "secondary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildLandingViewed(
+  payload: z.infer<typeof landingViewedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof landingViewedEventSchema> {
+  return landingViewedEventSchema.parse({
+    name: "landing_viewed",
+    tier: "primary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildAuthCtaClicked(
+  payload: z.infer<typeof authCtaClickedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof authCtaClickedEventSchema> {
+  return authCtaClickedEventSchema.parse({
+    name: "auth_cta_clicked",
+    tier: "secondary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildAuthStarted(
+  payload: z.infer<typeof authStartedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof authStartedEventSchema> {
+  return authStartedEventSchema.parse({
+    name: "auth_started",
+    tier: "primary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildAuthSucceeded(
+  payload: z.infer<typeof authSucceededPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof authSucceededEventSchema> {
+  return authSucceededEventSchema.parse({
+    name: "auth_succeeded",
+    tier: "primary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildOnboardingViewed(
+  payload: z.infer<typeof onboardingViewedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof onboardingViewedEventSchema> {
+  return onboardingViewedEventSchema.parse({
+    name: "onboarding_viewed",
+    tier: "primary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildOnboardingSubmitted(
+  payload: z.infer<typeof onboardingSubmittedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof onboardingSubmittedEventSchema> {
+  return onboardingSubmittedEventSchema.parse({
+    name: "onboarding_submitted",
+    tier: "secondary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildOnboardingCompleted(
+  payload: z.infer<typeof onboardingCompletedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof onboardingCompletedEventSchema> {
+  return onboardingCompletedEventSchema.parse({
+    name: "onboarding_completed",
+    tier: "primary",
     occurredAt,
     payload,
   });

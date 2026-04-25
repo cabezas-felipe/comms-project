@@ -1,9 +1,15 @@
+import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { ArrowRight } from "lucide-react";
+import { trackAuthCtaClicked, trackLandingViewed } from "@/lib/analytics";
 
 export default function Landing() {
   const navigate = useNavigate();
+
+  useEffect(() => {
+    trackLandingViewed();
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-paper">
@@ -35,7 +41,7 @@ export default function Landing() {
             type="button"
             size="lg"
             className="w-full gap-2 rounded-sm"
-            onClick={() => navigate("/auth/login")}
+            onClick={() => { trackAuthCtaClicked("login"); navigate("/auth/login"); }}
           >
             Log in
             <ArrowRight className="h-4 w-4" />
@@ -45,7 +51,7 @@ export default function Landing() {
             variant="outline"
             size="lg"
             className="w-full rounded-sm border-rule/60"
-            onClick={() => navigate("/auth/signup")}
+            onClick={() => { trackAuthCtaClicked("signup"); navigate("/auth/signup"); }}
           >
             Sign up
           </Button>
