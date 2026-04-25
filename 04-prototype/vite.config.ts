@@ -38,6 +38,14 @@ export default defineConfig(({ mode }) => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@tempo/analytics": path.resolve(
+        __dirname,
+        "../05-engineering/packages/analytics/src/index.ts"
+      ),
+      "@tempo/contracts": path.resolve(
+        __dirname,
+        "../05-engineering/packages/contracts/src/index.ts"
+      ),
     },
     dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
   },
