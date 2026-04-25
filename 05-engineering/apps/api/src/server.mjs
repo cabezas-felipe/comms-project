@@ -2,6 +2,7 @@ import express from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "@tempo/contracts";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
 import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
@@ -257,6 +258,96 @@ app.get("/api/ai/metrics", (_req, res) => {
   res.json({
     metrics: getAiMetrics(),
   });
+});
+
+// ─── Dev-only QA: mint a magic link via Supabase Admin API ───────────────────
+// Disabled by default. Enable for local QA only: TEMPO_ENABLE_DEV_MAGIC_LINK=true
+// NEVER enable in staging or production — uses service-role credentials.
+
+// Maps the frontend auth mode to the Supabase admin.generateLink type.
+// login → magiclink  (OTP sign-in for an existing user)
+// signup → signup    (creates user if needed + signs in)
+const LINK_TYPE_MAP = Object.freeze({ login: "magiclink", signup: "signup" });
+
+// Only localhost origins are permitted as redirectTo destinations.
+const DEV_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+
+function isAllowedRedirectOrigin(urlStr) {
+  if (!urlStr) return true; // omitted redirectTo is fine; Supabase uses its default
+  try {
+    const { protocol, hostname, port } = new URL(urlStr);
+    return DEV_ORIGIN_RE.test(`${protocol}//${hostname}${port ? `:${port}` : ""}`);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mutable hook so tests can replace generateLink without live Supabase.
+ * Same pattern as _auth.resolver. Do not use in production code paths.
+ */
+export const _devMagicLink = {
+  generateLink: async ({ email, supabaseType, redirectTo }) => {
+    const adminClient = createClient(
+      /** @type {string} */ (process.env.SUPABASE_URL),
+      /** @type {string} */ (process.env.SUPABASE_SERVICE_ROLE_KEY),
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+    const opts = redirectTo ? { options: { redirectTo } } : {};
+    const { data, error } = await adminClient.auth.admin.generateLink({
+      type: supabaseType,
+      email,
+      ...opts,
+    });
+    if (error) throw error;
+    return data.properties.action_link;
+  },
+};
+
+app.post("/api/auth/dev-magic-link", async (req, res) => {
+  if (process.env.TEMPO_ENABLE_DEV_MAGIC_LINK !== "true") {
+    res.status(404).json({ message: "Not found." });
+    return;
+  }
+
+  const { email, type, redirectTo } = req.body ?? {};
+
+  if (!email || typeof email !== "string" || !email.includes("@")) {
+    res.status(400).json({ message: "email is required and must contain @." });
+    return;
+  }
+  if (type !== "login" && type !== "signup") {
+    res.status(400).json({ message: "type must be 'login' or 'signup'." });
+    return;
+  }
+  if (redirectTo !== undefined && typeof redirectTo !== "string") {
+    res.status(400).json({ message: "redirectTo must be a string when provided." });
+    return;
+  }
+  if (!isAllowedRedirectOrigin(redirectTo)) {
+    res.status(400).json({
+      message: "redirectTo must point to a localhost origin (this endpoint is dev-only).",
+    });
+    return;
+  }
+
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    res.status(503).json({
+      message: "Magic link generation requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
+    });
+    return;
+  }
+
+  try {
+    const supabaseType = LINK_TYPE_MAP[type];
+    const url = await _devMagicLink.generateLink({ email, supabaseType, redirectTo });
+    res.json({ url });
+  } catch (err) {
+    console.error(
+      `[auth.dev-magic-link] generateLink failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+    res.status(502).json({ message: "Could not generate magic link." });
+  }
 });
 
 export { app };
