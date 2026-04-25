@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
-import { settingsPayloadSchema } from "@tempo/contracts";
+import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
 import { extractOnboarding } from "./ai/onboarding-extractor.mjs";
 import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
