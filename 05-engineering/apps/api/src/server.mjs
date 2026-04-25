@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "@tempo/contracts";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
+import { extractOnboarding } from "./ai/onboarding-extractor.mjs";
 import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
@@ -43,6 +44,12 @@ async function resolveUserId(req) {
  * without a live Supabase instance. Do not use in production code paths.
  */
 export const _auth = { resolver: resolveUserId };
+
+/**
+ * Mutable extraction hook. Tests override _extraction.extract to simulate primary/fallback
+ * success or failure without calling a live AI provider. Do not use in production code paths.
+ */
+export const _extraction = { extract: extractOnboarding };
 
 /**
  * Enforces authentication on a route. Sends 401 and returns null when the resolver
@@ -347,6 +354,96 @@ app.post("/api/auth/dev-magic-link", async (req, res) => {
       `[auth.dev-magic-link] generateLink failed: ${err instanceof Error ? err.message : String(err)}`
     );
     res.status(502).json({ message: "Could not generate magic link." });
+  }
+});
+
+// ─── Onboarding text extraction ──────────────────────────────────────────────
+// Tries primary model first; if it fails and a different fallback is configured,
+// retries with the fallback. Returns 500 only when both are unavailable.
+app.post("/api/onboarding/extract", async (req, res) => {
+  const { text } = req.body ?? {};
+  if (!text || typeof text !== "string" || !text.trim()) {
+    res.status(400).json({ message: "text is required." });
+    return;
+  }
+
+  const primary = process.env.TEMPO_AI_CLASSIFIER_MODEL || "mock-anthropic-haiku";
+  const fallback = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+
+  try {
+    const result = await _extraction.extract(text, primary);
+    return res.json(result);
+  } catch (primaryErr) {
+    console.warn(
+      `[onboarding.extract] primary (${primary}) failed: ${primaryErr instanceof Error ? primaryErr.message : primaryErr}`
+    );
+  }
+
+  if (fallback && fallback !== primary) {
+    console.log(`[onboarding.extract] attempting fallback: ${fallback}`);
+    try {
+      const result = await _extraction.extract(text, fallback);
+      console.log(`[onboarding.extract] fallback (${fallback}) succeeded`);
+      return res.json(result);
+    } catch (fallbackErr) {
+      console.warn(
+        `[onboarding.extract] fallback (${fallback}) failed: ${fallbackErr instanceof Error ? fallbackErr.message : fallbackErr}`
+      );
+    }
+  }
+
+  res.status(500).json({ message: "Extraction failed: all configured models unavailable." });
+});
+
+// ─── Voice transcription ──────────────────────────────────────────────────────
+// Accepts raw audio body; uses OpenAI Whisper when TEMPO_OPENAI_API_KEY is set.
+// Without a key in development: returns a deterministic mock transcript.
+// Without a key in production: returns 503 — no silent mock outside dev.
+app.post("/api/transcribe", express.raw({ type: "*/*", limit: "25mb" }), async (req, res) => {
+  const audioBuffer = req.body;
+  if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0) {
+    res.status(400).json({ message: "Audio body is required." });
+    return;
+  }
+
+  const apiKey = process.env.TEMPO_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    if (process.env.NODE_ENV !== "production") {
+      res.json({
+        transcript:
+          "Track US and Colombia diplomatic stories — especially OFAC and migration. Trust NYT, Reuters, El Tiempo, and Semana.",
+      });
+      return;
+    }
+    res.status(503).json({ message: "Transcription unavailable: API key not configured." });
+    return;
+  }
+
+  const rawType = (req.headers["content-type"] || "audio/webm").split(";")[0].trim();
+  const extMap = { "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "mp4", "audio/mpeg": "mp3", "audio/wav": "wav" };
+  const ext = extMap[rawType] ?? "webm";
+
+  try {
+    const formData = new FormData();
+    formData.append("file", new Blob([audioBuffer], { type: rawType }), `audio.${ext}`);
+    formData.append("model", "whisper-1");
+    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: formData,
+    });
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      console.error(`[transcribe] Whisper error ${response.status}: ${errText}`);
+      res.status(502).json({ message: "Transcription service error." });
+      return;
+    }
+    const data = await response.json();
+    res.json({ transcript: data.text ?? "" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[transcribe] ${message}`);
+    res.status(500).json({ message: "Transcription failed." });
   }
 });
 

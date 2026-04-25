@@ -12,7 +12,8 @@ import { Label } from "@/components/ui/label";
 import { ArrowRight, Keyboard, Loader2, Mic } from "lucide-react";
 import { toast } from "sonner";
 import { transcribeAudio, uploadVoiceNote } from "@/lib/voice-upload";
-import { extractOnboardingText, saveSettingsPayload } from "@/lib/settings-api";
+import { ExtractionApiError, extractOnboardingText, saveSettingsPayload } from "@/lib/settings-api";
+import { classifySources } from "@/lib/source-classification";
 import { CONTRACT_VERSION, settingsPayloadSchema, type SettingsPayload } from "@tempo/contracts";
 
 type Mode = "type" | "voice";
@@ -141,38 +142,63 @@ export default function Onboarding() {
     trackOnboardingSubmitted();
 
     let payload: SettingsPayload;
+    let bothFailed = false;
     try {
       const extracted = await extractOnboardingText(topics.trim());
+      const { traditionalSources, socialSources } = classifySources(extracted.sources);
       payload = settingsPayloadSchema.parse({
         contractVersion: CONTRACT_VERSION,
         topics: extracted.topics,
         keywords: extracted.keywords,
         geographies: extracted.geographies.length ? extracted.geographies : geos,
-        traditionalSources: extracted.sources,
-        socialSources: [],
+        traditionalSources,
+        socialSources,
       });
-    } catch {
-      toast.info("Could not extract preferences — continuing with your entered values.");
-      const splitTrim = (s: string) => s.split(/[,\n]+/).map((v) => v.trim()).filter(Boolean);
-      payload = settingsPayloadSchema.parse({
-        contractVersion: CONTRACT_VERSION,
-        topics: splitTrim(topics),
-        keywords: splitTrim(keywords),
-        geographies: geos,
-        traditionalSources: splitTrim(sources),
-        socialSources: [],
-      });
+    } catch (err) {
+      bothFailed = err instanceof ExtractionApiError && err.status === 500;
+      if (bothFailed) {
+        payload = settingsPayloadSchema.parse({
+          contractVersion: CONTRACT_VERSION,
+          topics: [],
+          keywords: [],
+          geographies: [],
+          traditionalSources: [],
+          socialSources: [],
+        });
+      } else {
+        toast.info("Could not extract preferences — continuing with your entered values.");
+        const splitTrim = (s: string) => s.split(/[,\n]+/).map((v) => v.trim()).filter(Boolean);
+        payload = settingsPayloadSchema.parse({
+          contractVersion: CONTRACT_VERSION,
+          topics: splitTrim(topics),
+          keywords: splitTrim(keywords),
+          geographies: geos,
+          traditionalSources: splitTrim(sources),
+          socialSources: [],
+        });
+      }
     }
 
     try {
       await saveSettingsPayload(payload);
     } catch {
-      // saveSettingsPayload has a localStorage fallback; reaching here is unexpected
+      toast.error("Couldn't save your settings. Please try again.");
+      setSubmitting(false);
+      return;
     }
 
     trackOnboardingCompleted();
-    toast.success("Tempo set. Welcome.");
-    navigate("/dashboard");
+    if (bothFailed) {
+      toast.info("We couldn't auto-configure your watchlist yet. You can refine it in Settings.");
+    } else {
+      toast.success("Tempo set. Welcome.");
+    }
+    setSubmitting(false);
+    navigate(
+      bothFailed
+        ? import.meta.env.DEV ? "/dashboard?preview=1&empty=1" : "/dashboard?empty=1"
+        : import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard"
+    );
   };
 
   return (

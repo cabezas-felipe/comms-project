@@ -79,6 +79,13 @@ export type ExtractionResult = {
   sources: string[];
 };
 
+export class ExtractionApiError extends Error {
+  constructor(public readonly status: number) {
+    super(`Extraction API returned HTTP ${status}`);
+    this.name = "ExtractionApiError";
+  }
+}
+
 export async function extractOnboardingText(text: string): Promise<ExtractionResult> {
   const authHeaders = await getAuthHeaders();
   const response = await fetch("/api/onboarding/extract", {
@@ -87,13 +94,14 @@ export async function extractOnboardingText(text: string): Promise<ExtractionRes
     body: JSON.stringify({ text }),
   });
   if (!response.ok) {
-    throw new Error(`Extraction API returned HTTP ${response.status}`);
+    throw new ExtractionApiError(response.status);
   }
   return response.json() as Promise<ExtractionResult>;
 }
 
 export async function fetchSettingsPayload(): Promise<SettingsPayload> {
   const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
+  const authenticated = "Authorization" in authHeaders;
   try {
     const response = await fetch(SETTINGS_API_ENDPOINT, {
       method: "GET",
@@ -105,7 +113,10 @@ export async function fetchSettingsPayload(): Promise<SettingsPayload> {
     const payload = settingsPayloadSchema.parse(await response.json());
     localStorage.setItem(storageKey, JSON.stringify(payload));
     return payload;
-  } catch {
+  } catch (err) {
+    if (authenticated) {
+      throw new Error("Authenticated settings read failed (API unavailable).");
+    }
     await wait(MOCK_LATENCY_MS);
     const raw = localStorage.getItem(storageKey);
     if (!raw) {
@@ -126,6 +137,7 @@ export async function fetchSettingsPayload(): Promise<SettingsPayload> {
 export async function saveSettingsPayload(payload: SettingsPayload): Promise<SettingsPayload> {
   const validated = settingsPayloadSchema.parse(payload);
   const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
+  const authenticated = "Authorization" in authHeaders;
   try {
     const response = await fetch(SETTINGS_API_ENDPOINT, {
       method: "PUT",
@@ -138,7 +150,10 @@ export async function saveSettingsPayload(payload: SettingsPayload): Promise<Set
     const persisted = settingsPayloadSchema.parse(await response.json());
     localStorage.setItem(storageKey, JSON.stringify(persisted));
     return persisted;
-  } catch {
+  } catch (err) {
+    if (authenticated) {
+      throw new Error("Authenticated settings write failed (API unavailable).");
+    }
     await wait(MOCK_LATENCY_MS);
     localStorage.setItem(storageKey, JSON.stringify(validated));
   }

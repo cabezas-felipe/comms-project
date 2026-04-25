@@ -24,6 +24,14 @@ export default defineConfig(({ mode }) => ({
         target: "http://localhost:8787",
         changeOrigin: true,
       },
+      "/api/transcribe": {
+        target: "http://localhost:8787",
+        changeOrigin: true,
+      },
+      "/api/onboarding": {
+        target: "http://localhost:8787",
+        changeOrigin: true,
+      },
     },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),

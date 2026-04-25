@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { GEOGRAPHIES, Geography, STORIES, Source, Story, TOPICS, Topic } from "@/data/stories";
 import { deriveSignals, keySources, Trend } from "@/lib/derive";
 import { timeAgo } from "@/lib/format";
@@ -45,12 +46,15 @@ const TREND: Record<Trend, { icon: typeof ArrowUpRight; label: string; tone: str
 };
 
 export default function Dashboard() {
+  const [searchParams] = useSearchParams();
+  const emptyMode = searchParams.get("empty") === "1";
+
   const [topic, setTopic] = useState<TopicFilter>("All");
   const [geo, setGeo] = useState<GeoFilter>("All");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
-  const [stories, setStories] = useState<Story[]>(STORIES);
-  const [isLoading, setIsLoading] = useState(true);
+  const [stories, setStories] = useState<Story[]>(emptyMode ? [] : STORIES);
+  const [isLoading, setIsLoading] = useState(!emptyMode);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const filtered = useMemo(
@@ -85,6 +89,7 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    if (emptyMode) return;
     let canceled = false;
     setIsLoading(true);
     fetchDashboardPayload()
@@ -112,7 +117,7 @@ export default function Dashboard() {
     return () => {
       canceled = true;
     };
-  }, []);
+  }, [emptyMode]);
 
   return (
     <div
