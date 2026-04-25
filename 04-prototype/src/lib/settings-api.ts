@@ -60,7 +60,7 @@ function seedSourcesFromStories(): { traditionalSources: string[]; socialSources
   return { traditionalSources, socialSources };
 }
 
-function defaultSettingsPayload(): SettingsPayload {
+export function defaultSettingsPayload(): SettingsPayload {
   const seeds = seedSourcesFromStories();
   return settingsPayloadSchema.parse({
     contractVersion: CONTRACT_VERSION,
@@ -70,6 +70,26 @@ function defaultSettingsPayload(): SettingsPayload {
     traditionalSources: seeds.traditionalSources,
     socialSources: seeds.socialSources,
   });
+}
+
+export type ExtractionResult = {
+  topics: string[];
+  keywords: string[];
+  geographies: string[];
+  sources: string[];
+};
+
+export async function extractOnboardingText(text: string): Promise<ExtractionResult> {
+  const authHeaders = await getAuthHeaders();
+  const response = await fetch("/api/onboarding/extract", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) {
+    throw new Error(`Extraction API returned HTTP ${response.status}`);
+  }
+  return response.json() as Promise<ExtractionResult>;
 }
 
 export async function fetchSettingsPayload(): Promise<SettingsPayload> {

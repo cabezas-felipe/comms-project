@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
+import { consumeAuthAttemptId, trackAuthSucceeded } from "@/lib/analytics";
 
 export default function AuthCallback() {
   const navigate = useNavigate();
@@ -10,6 +11,9 @@ export default function AuthCallback() {
 
   useEffect(() => {
     if (!loading && isAuthenticated) {
+      const mode = type === "signup" ? "signup" : "login";
+      const attemptId = consumeAuthAttemptId() ?? "missing_attempt_id";
+      trackAuthSucceeded(mode, attemptId);
       navigate(type === "signup" ? "/onboarding" : "/dashboard", { replace: true });
     }
   }, [isAuthenticated, loading, navigate, type]);

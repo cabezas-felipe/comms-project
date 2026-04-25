@@ -22,13 +22,21 @@ export default function AppHeader() {
   const location = useLocation();
   const navigate = useNavigate();
   const { isAuthenticated, logout } = useAuth();
+  const isDevPreview =
+    import.meta.env.DEV &&
+    new URLSearchParams(location.search).get("preview") === "1";
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30_000);
     return () => clearInterval(id);
   }, []);
 
   // Hide chrome on onboarding
-  if (location.pathname === "/" || location.pathname === "/onboarding" || !isAuthenticated) return null;
+  if (
+    location.pathname === "/" ||
+    location.pathname === "/onboarding" ||
+    (!isAuthenticated && !isDevPreview)
+  )
+    return null;
 
   return (
     <header className="sticky top-0 z-30 border-b border-rule/60 bg-background/85 backdrop-blur">
