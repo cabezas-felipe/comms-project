@@ -80,6 +80,40 @@ async function writeSettingsSupabase(payload, userId = null) {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+async function hasSettingsFile(userId = null) {
+  const file = resolveSettingsFile(userId);
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasSettingsSupabase(userId = null) {
+  const client = getSupabaseClient();
+  const key = userId ? userKey(userId) : GLOBAL_KEY;
+  const { data, error } = await client
+    .from("settings")
+    .select("key")
+    .eq("key", key)
+    .maybeSingle();
+  if (error) throw new Error(`[supabase] settings check failed: ${error.message}`);
+  return data !== null;
+}
+
+/**
+ * Non-destructive existence check. Returns true if settings exist for the user.
+ * Never auto-creates defaults. Uses Supabase if SUPABASE_URL is set, file-based otherwise.
+ */
+export async function hasSettings(userId = null) {
+  if (process.env.SUPABASE_URL) {
+    assertSupabaseEnv();
+    return hasSettingsSupabase(userId);
+  }
+  return hasSettingsFile(userId);
+}
+
 /**
  * Read settings for a user (or global when userId is null).
  * Uses Supabase if SUPABASE_URL is set, file-based otherwise.

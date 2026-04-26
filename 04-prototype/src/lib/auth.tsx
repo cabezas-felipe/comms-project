@@ -7,7 +7,7 @@ interface AuthContextValue {
   user: User | null;
   session: Session | null;
   loading: boolean;
-  signIn: (email: string, type?: "login" | "signup") => Promise<void>;
+  signIn: (email: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -39,11 +39,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       user: session?.user ?? null,
       session,
       loading,
-      signIn: async (email: string, type: "login" | "signup" = "login") => {
+      signIn: async (email: string) => {
         const { error } = await supabase.auth.signInWithOtp({
           email,
           options: {
-            emailRedirectTo: `${window.location.origin}/auth/callback?type=${type}`,
+            emailRedirectTo: `${window.location.origin}/auth/callback`,
           },
         });
         if (error) throw error;

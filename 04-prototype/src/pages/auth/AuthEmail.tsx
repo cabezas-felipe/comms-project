@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ArrowLeft, ArrowRight } from "lucide-react";
@@ -7,35 +7,11 @@ import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import { isRateLimitError } from "@/lib/auth-errors";
 
-type Mode = "login" | "signup";
-
 export default function AuthEmail() {
   const navigate = useNavigate();
-  const { mode } = useParams<{ mode: Mode }>();
-  const isSignup = mode === "signup";
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
   const { signIn } = useAuth();
-
-  const copy = isSignup
-    ? {
-        eyebrow: "Create your account",
-        title: "Get in sync from the start.",
-        sub: "Enter your email to set up Tempo and follow meaningful narrative shifts across trusted sources.",
-        cta: "Get in sync",
-        switchPrompt: "Already have an account?",
-        switchAction: "Stay in sync",
-        switchTo: "/auth/login",
-      }
-    : {
-        eyebrow: "Welcome back",
-        title: "Stay in sync with what changed.",
-        sub: "Enter your email and we'll send a magic link so you can pick up the narrative where you left off.",
-        cta: "Stay in sync",
-        switchPrompt: "New to Tempo?",
-        switchAction: "Get in sync",
-        switchTo: "/auth/signup",
-      };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -45,10 +21,9 @@ export default function AuthEmail() {
       return;
     }
     setSending(true);
-    const type = isSignup ? "signup" : "login";
     try {
-      await signIn(trimmed, type);
-      navigate(`/auth/check-email?mode=${type}&email=${encodeURIComponent(trimmed)}`);
+      await signIn(trimmed);
+      navigate(`/auth/check-email?email=${encodeURIComponent(trimmed)}`);
     } catch (err) {
       if (isRateLimitError(err)) {
         if (import.meta.env.DEV) {
@@ -60,8 +35,8 @@ export default function AuthEmail() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 email: trimmed,
-                type,
-                redirectTo: `${window.location.origin}/auth/callback?type=${type}`,
+                type: "login",
+                redirectTo: `${window.location.origin}/auth/callback`,
               }),
             });
             if (res.ok) {
@@ -108,12 +83,13 @@ export default function AuthEmail() {
 
         {/* Hero */}
         <div className="mb-8">
-          <span className="eyebrow">{copy.eyebrow}</span>
+          <span className="eyebrow">Sign in to Tempo</span>
           <h1 className="mt-2 font-display text-[32px] font-semibold leading-[1.1] tracking-tight">
-            {copy.title}
+            Stay in sync with what changed.
           </h1>
           <p className="mt-3 max-w-[48ch] text-[15px] leading-relaxed text-muted-foreground">
-            {copy.sub}
+            Enter your email and we&apos;ll send a magic link. New or returning — it works the same
+            way.
           </p>
         </div>
 
@@ -133,20 +109,9 @@ export default function AuthEmail() {
           </div>
 
           <Button type="submit" size="lg" className="w-full gap-2 rounded-sm" disabled={sending}>
-            {sending ? "Sending…" : copy.cta}
+            {sending ? "Sending…" : "Stay in sync"}
             <ArrowRight className="h-4 w-4" />
           </Button>
-
-          <p className="pt-1 text-center text-[13px] text-muted-foreground">
-            {copy.switchPrompt}{" "}
-            <button
-              type="button"
-              onClick={() => navigate(copy.switchTo)}
-              className="font-medium text-foreground underline-offset-4 hover:underline"
-            >
-              {copy.switchAction}
-            </button>
-          </p>
         </form>
       </div>
     </div>
