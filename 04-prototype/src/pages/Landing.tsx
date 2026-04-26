@@ -41,7 +41,7 @@ export default function Landing() {
             type="button"
             size="lg"
             className="w-full gap-2 rounded-sm"
-            onClick={() => { trackAuthCtaClicked("login"); navigate("/auth/login"); }}
+            onClick={() => { trackAuthCtaClicked("login"); navigate("/auth"); }}
           >
             Stay in sync
             <ArrowRight className="h-4 w-4" />
@@ -51,7 +51,7 @@ export default function Landing() {
             variant="outline"
             size="lg"
             className="w-full rounded-sm border-rule/60"
-            onClick={() => { trackAuthCtaClicked("signup"); navigate("/auth/signup"); }}
+            onClick={() => { trackAuthCtaClicked("signup"); navigate("/auth"); }}
           >
             Get in sync
           </Button>

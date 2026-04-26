@@ -36,9 +36,12 @@ const App = () => (
           <AppHeader />
           <Routes>
             <Route path="/" element={<Landing />} />
+            <Route path="/auth" element={<AuthEmail />} />
             <Route path="/auth/check-email" element={<CheckEmail />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
-            <Route path="/auth/:mode" element={<AuthEmail />} />
+            {/* Auth compat: legacy login/signup routes redirect to canonical /auth */}
+            <Route path="/auth/login" element={<Navigate to="/auth" replace />} />
+            <Route path="/auth/signup" element={<Navigate to="/auth" replace />} />
             <Route path="/onboarding" element={<Onboarding />} />
             <Route
               path="/dashboard"
