@@ -5,10 +5,11 @@ Lightweight tokens + docs for a **single-user, zero-to-one** prototype. Optimize
 ## Start here
 
 1. **[Principles](principles.md)** — tone, UX guardrails, what v0 is not.
-2. **[Tokens — JSON](tokens/design-tokens.json)** — canonical values for codegen / agents.
-3. **[Tokens — CSS](tokens/tokens.css)** — `var(--...)` mirror for HTML/CSS prototypes.
+2. **[Tokens — JSON](tokens/design-tokens.json)** — canonical values for codegen / agents (mirrors `04-prototype` runtime).
+3. **[Tokens — CSS](tokens/tokens.css)** — `var(--...)` CSS custom properties matching `04-prototype/src/index.css`.
 4. **[Color preview](color-preview.html)** — single canonical swatch + rationale file for this design system.
 5. **[AI usage](ai-usage.md)** — copy-paste instructions for prompts.
+6. **[DS mapping](ds-mapping.md)** — source-of-truth declaration, old→new token mapping, retired vars.
 
 Archive guardrail: files under `02-design/archive/` are historical context only; agents should default to `foundations/`, `tokens/`, and `components/` unless explicitly asked to use archive artifacts.
 

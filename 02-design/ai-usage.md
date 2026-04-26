@@ -17,14 +17,14 @@ Required references:
 Constraints:
 
 - Do not use `02-design/archive/` as source of truth unless explicitly requested; default to `foundations/`, `tokens/`, and `components/`.
-- Use spacing tokens including `space.0` (2px) only for intentional hairlines; follow list vs card density guidance in [foundations/spacing.md](foundations/spacing.md).
+- Use Tailwind spacing classes (`p-4`, `gap-3`, etc.) for layout; see list vs card density guidance in [foundations/spacing.md](foundations/spacing.md).
 - Honor `prefers-reduced-motion` (see [tokens.css](tokens/tokens.css) and [foundations/motion-and-feedback.md](foundations/motion-and-feedback.md)); no lateral shimmer on feed skeletons.
-- Do not invent new hex values unless asked.
+- Do not invent new color values unless asked. Use `hsl(var(--token))` with named CSS vars from [tokens/tokens.css](tokens/tokens.css).
 - Prefer semantic tokens over hard-coded styles.
-- Use `color.surface.selected` / `color.border.selected` for row selection; reserve `accent` for actions and “new” cues (see [foundations/color.md](foundations/color.md)).
-- Keep warning/critical meanings distinct.
+- Use `--secondary` (`hsl(36 18% 88%)`) for row selection; reserve `--primary` for actions and `--ember` for priority/emphasis cues (see [foundations/color.md](foundations/color.md)).
+- Keep `--signal-warning` and `--destructive` meanings distinct.
 - Keep layout stable between calm and fast-public modes.
-- Follow typography roles: `font.family.heading` for titles/nav; `font.family.ui` (sans) for dense feed metadata and tables; `font.family.body` (Calluna) for paragraphs and drafting. Prefer `type.size.sm`+ for scan metadata (see [foundations/typography.md](foundations/typography.md)).
+- Follow typography roles: `font-display` (Fraunces) for titles/nav; `font-sans` (Inter) for dense feed metadata, tables, and body copy; `font-mono` (JetBrains Mono) for code. Prefer `text-sm` minimum for scan metadata (see [foundations/typography.md](foundations/typography.md)).
 
 ## Prompt template
 
