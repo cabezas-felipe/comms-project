@@ -63,7 +63,7 @@ function ListSection({ title, description, items, onChange, placeholder }: ListS
                   <AlertDialogHeader>
                     <AlertDialogTitle className="font-display">Remove &ldquo;{item}&rdquo;?</AlertDialogTitle>
                     <AlertDialogDescription>
-                      This will stop appearing in your scope until you add it back.
+                      Tempo will stop tracking this until you add it back.
                     </AlertDialogDescription>
                   </AlertDialogHeader>
                   <AlertDialogFooter>
@@ -88,7 +88,7 @@ function ListSection({ title, description, items, onChange, placeholder }: ListS
               placeholder={placeholder}
               className="max-w-sm"
             />
-            <Button type="button" variant="outline" onClick={add} className="gap-1.5">
+            <Button type="button" variant="outline" onClick={add} disabled={!draft.trim()} className="gap-1.5">
               <Plus className="h-3.5 w-3.5" /> Add
             </Button>
           </div>
@@ -211,8 +211,8 @@ export default function Settings() {
               <h1 className="font-display text-[34px] font-semibold leading-tight tracking-tight">
                 What you&apos;re monitoring
               </h1>
-              <p className="mt-1.5 max-w-[52ch] font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-                The cleaner your beat, the steadier your tempo.
+              <p className="mt-1.5 max-w-[60ch] text-[13px] leading-relaxed text-muted-foreground">
+                Refine what Tempo watches. Changes take effect at the next refresh.
               </p>
               {loading && (
                 <p className="mt-2 text-[12px] text-muted-foreground">
@@ -229,21 +229,21 @@ export default function Settings() {
           <div>
             <ListSection
               title="Topics"
-              description="Broad themes Tempo uses to cluster stories."
+              description="Broad themes Tempo clusters stories around."
               items={topics}
               onChange={markDirty(setTopics)}
               placeholder="Add a topic"
             />
             <ListSection
               title="Keywords"
-              description="Specific terms that signal relevance — sharper than topics."
+              description="Specific terms Tempo treats as signal."
               items={keywords}
               onChange={markDirty(setKeywords)}
               placeholder="Add a keyword"
             />
             <ListSection
               title="Geographies"
-              description="Regions Tempo should track — add or remove to shape your beat."
+              description="Regions Tempo tracks."
               items={geographies}
               onChange={markDirty(setGeographies)}
               placeholder="Add a geography"
@@ -255,7 +255,7 @@ export default function Settings() {
                 <div>
                   <h2 className="font-display text-xl font-semibold tracking-tight">Sources</h2>
                   <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
-                    Outlets and accounts Tempo should monitor — friend or foe.
+                    Outlets and accounts Tempo watches.
                   </p>
                 </div>
                 <div>
