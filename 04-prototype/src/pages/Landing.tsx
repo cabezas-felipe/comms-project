@@ -25,7 +25,7 @@ export default function Landing() {
         </div>
 
         {/* Hero */}
-        <div className="mb-12 text-center">
+        <div className="mb-10 text-center">
           <h1 className="font-display text-[40px] font-semibold leading-[1.05] tracking-tight">
             Stay on top of what changed while the narrative keeps moving.
           </h1>
@@ -55,7 +55,10 @@ export default function Landing() {
           >
             Get in sync
           </Button>
-          <p className="pt-2 text-center font-mono text-[11px] text-muted-foreground">
+          <p className="pt-1 text-center text-[13px] text-muted-foreground">
+            New here? We&apos;ll set you up. Returning? Welcome back.
+          </p>
+          <p className="pt-1 text-center font-mono text-[11px] text-muted-foreground">
             No password. We&apos;ll send a magic link.
           </p>
         </div>
