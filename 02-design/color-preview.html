@@ -3,103 +3,105 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Comms v0 — color decisions</title>
+  <title>Comms v1 — color decisions</title>
   <style>
-    :root { font-family: system-ui, sans-serif; color: #454545; background: #f7f8fa; }
+    :root {
+      font-family: 'Inter', system-ui, sans-serif;
+      color: hsl(222 25% 12%);
+      background: hsl(38 30% 96%);
+    }
     body { margin: 0; padding: 1.5rem; max-width: 60rem; }
     h1 { font-size: 1.35rem; margin: 0 0 0.5rem; }
-    h2 { font-size: 1rem; margin: 1.5rem 0 0.5rem; color: #32465f; }
-    p, li { margin: 0 0 0.7rem; font-size: 0.875rem; color: #5f6672; line-height: 1.45; }
+    h2 { font-size: 1rem; margin: 1.5rem 0 0.5rem; color: hsl(222 30% 25%); }
+    p, li { margin: 0 0 0.7rem; font-size: 0.875rem; color: hsl(222 10% 40%); line-height: 1.45; }
     .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
-    .swatch { border-radius: 0.625rem; overflow: hidden; border: 1px solid #d7dde5; background: #fff; }
+    .swatch { border-radius: 0.25rem; overflow: hidden; border: 1px solid hsl(36 14% 82%); background: hsl(0 0% 100%); }
     .color { height: 4.2rem; }
     .meta { padding: 0.65rem 0.85rem; font-size: 0.78rem; }
-    .meta strong { display: block; font-size: 0.86rem; margin-bottom: 0.2rem; color: #454545; }
-    code { font-size: 0.73rem; background: #f1f3f6; padding: 0.1rem 0.35rem; border-radius: 4px; }
-    .box { background: #fff; border: 1px solid #d7dde5; border-radius: 0.625rem; padding: 1rem 1.15rem; margin: 1rem 0; }
-    .traffic { display: flex; border-radius: 0.5rem; overflow: hidden; border: 1px solid #d7dde5; max-width: 34rem; }
+    .meta strong { display: block; font-size: 0.86rem; margin-bottom: 0.2rem; color: hsl(222 25% 12%); }
+    code { font-size: 0.73rem; background: hsl(36 24% 93%); padding: 0.1rem 0.35rem; border-radius: 3px; }
+    .box { background: hsl(0 0% 100%); border: 1px solid hsl(36 14% 82%); border-radius: 0.25rem; padding: 1rem 1.15rem; margin: 1rem 0; }
+    .traffic { display: flex; border-radius: 0.25rem; overflow: hidden; border: 1px solid hsl(36 14% 82%); max-width: 34rem; }
     .traffic div { flex: 1; padding: 0.7rem 0.4rem; text-align: center; font-size: 0.72rem; font-weight: 600; }
-    .note { font-size: 0.8rem; color: #6b5f00; background: #faf6e8; border: 1px solid #ceba71; border-radius: 0.45rem; padding: 0.6rem 0.75rem; }
+    .note { font-size: 0.8rem; color: hsl(14 50% 30%); background: hsl(18 70% 94%); border: 1px solid hsl(14 80% 48% / 0.3); border-radius: 0.25rem; padding: 0.6rem 0.75rem; }
   </style>
 </head>
 <body>
-  <h1>Comms design system — final color decisions</h1>
-  <p>This is the single color preview file for the v0 design system. Canonical tokens live in <code>tokens/design-tokens.json</code>.</p>
+  <h1>Comms design system — v1 editorial (paper + ink + ember)</h1>
+  <p>Single color preview for the v1 design system. Canonical tokens live in <code>tokens/design-tokens.json</code> and <code>tokens/tokens.css</code>. All colors are HSL triplets consumed as <code>hsl(var(--token))</code>.</p>
 
   <div class="box">
-    <h2>Final semantic mapping</h2>
+    <h2>Runtime semantic mapping</h2>
     <ul>
-      <li><strong>Accent:</strong> <code>#4F6887</code> (primary actions, links, new-since-last-check cues).</li>
-      <li><strong>Warning:</strong> <code>#D15400</code> (time-bound escalation / pay-attention-soon).</li>
-      <li><strong>Critical:</strong> <code>#922B2E</code> (highest urgency, immediate response path).</li>
-      <li><strong>Success:</strong> <code>#68874F</code> (resolved / stable / low-drama state).</li>
-      <li><strong>Highlight:</strong> <code>#CEBA71</code> (non-urgent notice; use as fill with dark text).</li>
-      <li><strong>Text primary:</strong> <code>#454545</code>.</li>
-      <li><strong>Secondary purple:</strong> removed from the UI token schema.</li>
+      <li><strong>Primary / ink:</strong> <code>--primary</code> <code>hsl(222 30% 14%)</code> — deep dark blue for primary actions, links, default interactive.</li>
+      <li><strong>Ember:</strong> <code>--ember</code> <code>hsl(14 80% 48%)</code> — warm orange-red for priority cues, "what changed," urgency emphasis.</li>
+      <li><strong>Signal positive:</strong> <code>--signal-positive</code> <code>hsl(152 45% 32%)</code> — resolved / stable / low-drama state.</li>
+      <li><strong>Signal warning:</strong> <code>--signal-warning</code> <code>hsl(36 85% 42%)</code> — time-bound escalation / pay-attention-soon.</li>
+      <li><strong>Destructive:</strong> <code>--destructive</code> <code>hsl(0 70% 42%)</code> — highest urgency, irreversible actions.</li>
+      <li><strong>Background / paper:</strong> <code>--background</code> <code>hsl(38 30% 96%)</code> — warm off-white page surface.</li>
+      <li><strong>Foreground / ink:</strong> <code>--foreground</code> <code>hsl(222 25% 12%)</code> — default text.</li>
     </ul>
   </div>
 
   <div class="box">
     <h2>Why these decisions</h2>
     <ul>
-      <li><strong>Accent + warning separation:</strong> blue and orange are clearly distinct for scanning.</li>
-      <li><strong>Critical red differs from warning orange:</strong> avoids merge at small badge/rail sizes.</li>
-      <li><strong>Highlight is not warning:</strong> yellow is a “look here” cue, not escalation by itself.</li>
-      <li><strong>Single non-status hue strategy:</strong> removing purple keeps the system quieter and easier to parse under monitoring load.</li>
-      <li><strong>Text pairing:</strong> white on accent (~5.73:1), accent on white (~5.73:1), primary text on white (~9.59:1).</li>
+      <li><strong>Paper + ink metaphor:</strong> warm background and dark ink foreground evoke editorial newsroom legibility under monitoring load.</li>
+      <li><strong>Ember as single emphasis accent:</strong> a single warm orange-red for "what changed" prevents attention fragmentation from multiple competing accent hues.</li>
+      <li><strong>Primary (ink) vs ember:</strong> deep ink handles actions/navigation; ember handles urgency/priority — never mixed to avoid misreading an action as an alert.</li>
+      <li><strong>Signal positive is intentionally calm:</strong> green stays muted to avoid visual parity with ember; success should feel resolved, not excited.</li>
+      <li><strong>Signal warning and destructive separation:</strong> amber vs red — clearly distinct at small badge/rail sizes.</li>
     </ul>
-    <p class="note"><strong>Note:</strong> success green <code>#68874F</code> is intentionally calm. Keep icon + label with status colors; do not rely on color alone.</p>
+    <p class="note"><strong>Note:</strong> keep icon + label with status colors; do not rely on color alone.</p>
   </div>
 
   <h2>Core token swatches</h2>
   <div class="grid" id="core"></div>
 
-  <h2>Structure / support swatches</h2>
+  <h2>Surface / support swatches</h2>
   <div class="grid" id="support"></div>
 
   <h2>Status lane preview (monitoring mental model)</h2>
   <div class="traffic">
-    <div style="background:#68874F;color:#fff">SUCCESS<br/><code>#68874F</code></div>
-    <div style="background:#CEBA71;color:#454545">HIGHLIGHT<br/><code>#CEBA71</code></div>
-    <div style="background:#D15400;color:#fff">WARNING<br/><code>#D15400</code></div>
-    <div style="background:#922B2E;color:#fff">CRITICAL<br/><code>#922B2E</code></div>
+    <div style="background:hsl(152 45% 32%);color:#fff">POSITIVE<br/><code style="color:#fff">signal-positive</code></div>
+    <div style="background:hsl(18 70% 94%);color:hsl(14 80% 48%)">EMBER SOFT<br/><code>ember-soft</code></div>
+    <div style="background:hsl(36 85% 42%);color:#fff">WARNING<br/><code style="color:#fff">signal-warning</code></div>
+    <div style="background:hsl(0 70% 42%);color:#fff">DESTRUCTIVE<br/><code style="color:#fff">destructive</code></div>
   </div>
 
   <script>
     const core = [
-      ["Accent", "#4F6887", "color.accent.base"],
-      ["Warning", "#D15400", "color.warning.base"],
-      ["Critical", "#922B2E", "color.critical.base"],
-      ["Success", "#68874F", "color.success.base"],
-      ["Highlight", "#CEBA71", "color.highlight.base"],
-      ["Text primary", "#454545", "color.text.primary"],
-      ["Focus ring", "#4F6887", "color.focusRing"],
+      ["Ember", "hsl(14 80% 48%)", "--ember"],
+      ["Primary", "hsl(222 30% 14%)", "--primary"],
+      ["Signal positive", "hsl(152 45% 32%)", "--signal-positive"],
+      ["Signal warning", "hsl(36 85% 42%)", "--signal-warning"],
+      ["Destructive", "hsl(0 70% 42%)", "--destructive"],
+      ["Foreground / ink", "hsl(222 25% 12%)", "--foreground"],
+      ["Ring / focus", "hsl(222 30% 14%)", "--ring"],
     ];
     const support = [
-      ["Background", "#F7F8FA", "color.bg.default"],
-      ["Background subtle", "#F1F3F6", "color.bg.subtle"],
-      ["Surface", "#FFFFFF", "color.surface.default"],
-      ["Surface raised", "#FCFCFD", "color.surface.raised"],
-      ["Surface selected", "#EDF2F7", "color.surface.selected"],
-      ["Border", "#D7DDE5", "color.border.default"],
-      ["Border strong", "#C3CBD6", "color.border.strong"],
-      ["Border selected", "#B3C0D4", "color.border.selected"],
-      ["Accent soft", "#E8EDF3", "color.accent.soft"],
-      ["Warning soft", "#FCEEDF", "color.warning.soft"],
-      ["Critical soft", "#F4E6E7", "color.critical.soft"],
-      ["Success soft", "#ECF2E8", "color.success.soft"],
-      ["Highlight soft", "#FAF6E8", "color.highlight.soft"],
-      ["Text muted", "#5F6672", "color.text.muted"],
-      ["Text inverse", "#FFFFFF", "color.text.inverse"],
+      ["Background", "hsl(38 30% 96%)", "--background"],
+      ["Surface", "hsl(36 24% 93%)", "--surface"],
+      ["Card / raised", "hsl(0 0% 100%)", "--card / --surface-raised"],
+      ["Secondary", "hsl(36 18% 88%)", "--secondary"],
+      ["Accent", "hsl(36 22% 87%)", "--accent"],
+      ["Muted", "hsl(36 18% 90%)", "--muted"],
+      ["Muted foreground", "hsl(222 10% 40%)", "--muted-foreground"],
+      ["Primary foreground", "hsl(38 30% 96%)", "--primary-foreground"],
+      ["Ember soft", "hsl(18 70% 94%)", "--ember-soft"],
+      ["Destructive fg", "hsl(38 30% 97%)", "--destructive-foreground"],
+      ["Border", "hsl(36 14% 82%)", "--border"],
+      ["Rule / hairline", "hsl(222 12% 70%)", "--rule"],
+      ["Input", "hsl(36 14% 82%)", "--input"],
     ];
     function render(id, rows) {
       document.getElementById(id).innerHTML = rows.map(r => `
         <div class="swatch">
-          <div class="color" style="background:${r[1]}"></div>
+          <div class="color" style="background:${r[0]}"></div>
           <div class="meta">
-            <strong>${r[0]}</strong>
-            <code>${r[1]}</code><br/>
-            ${r[2]}
+            <strong>${r[1]}</strong>
+            <code>${r[0]}</code><br/>
+            <code>${r[2]}</code>
           </div>
         </div>`).join('');
     }

@@ -29,26 +29,26 @@ Source of truth: [design-tokens.json](../tokens/design-tokens.json) and [tokens/
 ## Type scale
 
 
-| Token           | Size |
-| --------------- | ---- |
-| `type.size.xs`  | 12px |
-| `type.size.sm`  | 14px |
-| `type.size.md`  | 16px |
-| `type.size.lg`  | 18px |
-| `type.size.xl`  | 20px |
-| `type.size.xxl` | 24px |
+| Tailwind class | Size  |
+| -------------- | ----- |
+| `text-xs`      | 12px  |
+| `text-sm`      | 14px  |
+| `text-base`    | 16px  |
+| `text-lg`      | 18px  |
+| `text-xl`      | 20px  |
+| `text-2xl`     | 24px  |
 
 
 ### Metadata and scan-heavy lines
 
-- Prefer `**type.size.sm` (14px) minimum** for feed metadata (time, source, channel) when paired with `font.family.ui`.
-- Reserve `**type.size.xs`** for badges, pills, and non-essential labels — not as the default for primary scanning text.
+- Prefer `text-sm` (14px) minimum for feed metadata (time, source, channel).
+- Reserve `text-xs` for badges, pills, and non-essential labels — not as the default for primary scanning text.
 
 ## Line height and weight
 
-- Body default line-height: `1.5` (`type.leading.normal`)
-- Heading line-height: `1.25` (`type.leading.tight`)
-- Weights: `400`, `500`, `600`
+- Body default line-height: `1.5` (`leading-normal`)
+- Heading line-height: `1.25` (`leading-tight`)
+- Weights: `font-normal` (400), `font-medium` (500), `font-semibold` (600)
 
 ## Rules
 

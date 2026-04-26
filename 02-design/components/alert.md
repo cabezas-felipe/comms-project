@@ -9,10 +9,10 @@ Show contextual system or workflow states requiring attention.
 
 ## Variants
 
-- `info`: `color.accent.soft` background + `color.accent.base` title/icon
-- `success`: `color.success.soft` + `color.success.base`
-- `warning`: `color.warning.soft` + `color.warning.base`
-- `critical`: `color.critical.soft` + `color.critical.base`
+- `info`: `--accent` background + `--ember` title/icon (neutral emphasis)
+- `success`: `--accent` background + `--signal-positive` title/icon
+- `warning`: `--ember-soft` background + `--signal-warning` title/icon
+- `critical`: `--destructive-foreground` text on `--destructive` background, or `--destructive` left-rail on `--card` bg for softer treatment
 
 ## Required content
 
@@ -22,10 +22,10 @@ Show contextual system or workflow states requiring attention.
 
 ## Token usage
 
-- Radius: `radius.lg` when the alert is a panel; `radius.md` for compact inline banners
-- Padding: `space.4`; gap icon → text `space.3`
-- Border (optional): `color.border.default` or variant-colored **≥ 3px** left rail per [color](../foundations/color.md) minimums
-- Motion: appear/settle with opacity ≤ `motion.duration.fast`; no lateral shimmer ([motion](../foundations/motion-and-feedback.md))
+- Radius: `rounded-lg` when the alert is a panel; `rounded-md` for compact inline banners
+- Padding: `p-4`; gap icon → text `gap-3`
+- Border (optional): `--border` or variant-colored **≥ 3px** left rail per [color](../foundations/color.md) minimums
+- Motion: appear/settle with opacity ≤ `--transition-base`; no lateral shimmer ([motion](../foundations/motion-and-feedback.md))
 
 ## Rules
 

@@ -17,11 +17,11 @@ Compact categorical or state labeling in lists, cards, and timelines.
 
 ## Token usage
 
-- Font: `font.family.ui`, `type.size.xs`, `font.weight.medium` ([typography](../foundations/typography.md) — `xs` reserved for badges)
-- Shape: `radius.pill`
-- Padding: `space.1` vertical, `space.2` horizontal; use `space.0` only between stacked icon + badge if needed ([spacing](../foundations/spacing.md))
+- Font: `font-sans`, `text-xs`, `font-medium` ([typography](../foundations/typography.md) — `text-xs` reserved for badges)
+- Shape: `rounded-full`
+- Padding: `py-1 px-2`; use `gap-px` only between stacked icon + badge if needed ([spacing](../foundations/spacing.md))
 - Min height: **22px** target for tap/readability ([color](../foundations/color.md) minimums table)
-- Semantic fills: pair `*.soft` background with `*.base` text for warning/critical/success variants
+- Semantic fills: pair `--ember-soft` bg with `--ember` text for warning/emphasis; `--accent` bg with `--signal-positive` text for success; `--destructive` text for critical treatment
 
 ## Rules
 
