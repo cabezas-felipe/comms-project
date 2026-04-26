@@ -28,7 +28,7 @@ export default function CheckEmail() {
           </div>
           <span className="eyebrow">Check your email</span>
           <h1 className="mt-2 font-display text-[28px] font-semibold leading-[1.15] tracking-tight">
-            We sent a magic link
+            Your magic link is on the way
             {email ? (
               <>
                 {" "}
@@ -38,9 +38,8 @@ export default function CheckEmail() {
             .
           </h1>
           <p className="mx-auto mt-3 max-w-[44ch] text-[14px] leading-relaxed text-muted-foreground">
-            Open the email and tap the link to{" "}
-            {isSignup ? "finish setting up your account" : "sign in"}. The link expires in 15
-            minutes.
+            Open the email and tap the link to {isSignup ? "get in sync" : "stay in sync"}. The
+            link expires in 15 minutes.
           </p>
         </div>
 

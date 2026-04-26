@@ -27,11 +27,11 @@ export default function Landing() {
         {/* Hero */}
         <div className="mb-12 text-center">
           <h1 className="font-display text-[40px] font-semibold leading-[1.05] tracking-tight">
-            Stop refreshing twelve tabs to find what actually moved.
+            Stay on top of what changed while the narrative keeps moving.
           </h1>
           <p className="mx-auto mt-4 max-w-[52ch] text-[15px] leading-relaxed text-muted-foreground">
-            Tell Tempo what you watch. We cluster, dedupe, and source-check coverage so the news
-            arrives in one calm place — however fast it moves.
+            Tempo surfaces meaningful shifts across trusted sources so you can monitor, draft, and
+            respond without losing focus.
           </p>
         </div>
 
@@ -43,7 +43,7 @@ export default function Landing() {
             className="w-full gap-2 rounded-sm"
             onClick={() => { trackAuthCtaClicked("login"); navigate("/auth/login"); }}
           >
-            Log in
+            Stay in sync
             <ArrowRight className="h-4 w-4" />
           </Button>
           <Button
@@ -53,7 +53,7 @@ export default function Landing() {
             className="w-full rounded-sm border-rule/60"
             onClick={() => { trackAuthCtaClicked("signup"); navigate("/auth/signup"); }}
           >
-            Sign up
+            Get in sync
           </Button>
           <p className="pt-2 text-center font-mono text-[11px] text-muted-foreground">
             No password. We&apos;ll send a magic link.

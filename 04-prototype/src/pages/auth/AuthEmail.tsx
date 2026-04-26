@@ -20,20 +20,20 @@ export default function AuthEmail() {
   const copy = isSignup
     ? {
         eyebrow: "Create your account",
-        title: "Start your tempo.",
-        sub: "Enter your email — we'll send a magic link to set things up.",
-        cta: "Send magic link",
+        title: "Get in sync from the start.",
+        sub: "Enter your email to set up Tempo and follow meaningful narrative shifts across trusted sources.",
+        cta: "Get in sync",
         switchPrompt: "Already have an account?",
-        switchAction: "Log in",
+        switchAction: "Stay in sync",
         switchTo: "/auth/login",
       }
     : {
         eyebrow: "Welcome back",
-        title: "Pick up where you left off.",
-        sub: "Enter your email — we'll send a magic link to sign you in.",
-        cta: "Send magic link",
+        title: "Stay in sync with what changed.",
+        sub: "Enter your email and we'll send a magic link so you can pick up the narrative where you left off.",
+        cta: "Stay in sync",
         switchPrompt: "New to Tempo?",
-        switchAction: "Sign up",
+        switchAction: "Get in sync",
         switchTo: "/auth/signup",
       };
 
