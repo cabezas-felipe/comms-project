@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 — 2026-04-26
+
+- **DS alignment slice** (`feat/lovable-ds`): `02-design` now documents the active runtime DS from `04-prototype/src/index.css + tailwind.config.ts`.
+- **`tokens/design-tokens.json`** — replaced: old flat-hex / `comms-v0-design-system` token set replaced with HSL-triplet / shadcn-pattern tokens matching the prototype; added `color-dark` section; bumped meta to `comms-v1-editorial-system` v0.3.0.
+- **`tokens/tokens.css`** — replaced: old `--color-*`/`--font-*`/`--type-*`/`--space-*`/`--radius-*`/`--motion-*` vars replaced with the actual `:root {}` and `.dark {}` blocks from the prototype; includes gradients, shadows, and `prefers-reduced-motion` override.
+- **`foundations/typography.md`** — updated font table: Helvetica Neue/Calluna retired; Fraunces (display), Inter (sans), JetBrains Mono (mono) documented.
+- **`foundations/color.md`** — updated semantic group table and usage rules to use prototype token names (`--ember`, `--primary`, `--signal-*`, `--destructive`); brand-hex values moved to archive note.
+- **`ai-usage.md`** — updated constraint block: old token names replaced with correct CSS var and Tailwind class references.
+- **`ds-mapping.md`** — new file documenting old→new token mapping, retired vars, source of truth, and ember-vs-accent split. See [ds-mapping.md](ds-mapping.md).
+- 04-prototype runtime unchanged.
+
 ## 0.2.1 — 2026-04-18
 
 - Final color decisions confirmed and consolidated: accent `#4F6887`, warning `#D15400`, critical `#922B2E`, success `#68874F`, highlight `#CEBA71`, text primary `#454545`; secondary purple stays removed from UI schema.

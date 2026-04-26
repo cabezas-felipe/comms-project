@@ -16,11 +16,11 @@ Provide a stable frame for monitoring + drafting without constant visual reorien
 
 ## Token usage
 
-- Page padding: `space.6`
-- Panel gaps: `space.4`
-- Section spacing: `space.6` to `space.8`
-- Top bar / rail interiors: horizontal `space.4`, vertical `space.3`
-- Surfaces: `color.bg.default` page, `color.surface.default` or `color.surface.raised` for elevated panes
+- Page padding: `p-6`
+- Panel gaps: `gap-4`
+- Section spacing: `gap-6` to `gap-8`
+- Top bar / rail interiors: horizontal `px-4`, vertical `py-3`
+- Surfaces: `--background` page, `--card` or `--surface-raised` for elevated panes
 - Mode emphasis changes: prefer **color + label**, not large motion; respect [motion / reduced motion](../foundations/motion-and-feedback.md)
 
 ## Rules

@@ -9,46 +9,49 @@ The system is built for monitoring-heavy workflows: calm base surfaces, clear pr
 ## Semantic groups
 
 
-| Group                                 | Purpose                                                                                    |
-| ------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `bg`, `surface`, `border`             | Page structure and panel hierarchy                                                         |
-| `surface.selected`, `border.selected` | **List/table selection** — neutral cool tint; keeps `accent` for actions and “new”         |
-| `text`                                | Readability for scanning and drafting                                                      |
-| `accent`                              | Primary actions, links, “new since last check” emphasis — **not** whole-row selection fill |
-| `success`, `warning`, `critical`      | Operational status and urgency                                                             |
-| `highlight`                           | Non-urgent “look here” (chips, soft fills) — distinct from warning escalation              |
-| `focusRing`                           | Keyboard accessibility visibility                                                          |
+| Token group                                          | Purpose                                                                                     |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `--background`, `--surface`, `--surface-raised`      | Page structure and panel hierarchy                                                          |
+| `--secondary`, `--accent`                            | **List/table selection** — warm paper tints; keeps `--primary` and `--ember` for actions   |
+| `--foreground`, `--muted-foreground`                 | Readability for scanning and drafting                                                       |
+| `--primary`                                          | Primary actions, links, deep ink — the default action color                                 |
+| `--ember`, `--ember-soft`                            | Priority emphasis, “what changed” cues, urgency indicators — **not** for primary nav        |
+| `--signal-positive`, `--signal-warning`              | Operational status and urgency                                                              |
+| `--destructive`                                      | Irreversible actions and error states                                                       |
+| `--ring`                                             | Keyboard focus visibility                                                                   |
 
 
 ## Brand-based mappings
 
-- Accent: blue `#4F6887`
-- Warning: orange `#D15400`
-- Critical: UI red `#922B2E` (tokens; clearer vs warning orange). Brand reference red-brown `#87524F` remains in [archive/brand-seed.md](../archive/brand-seed.md).
-- Success: green `#68874F`
-- Highlight: yellow `#CEBA71`
-- Primary text dark: `#454545`
+- Primary action / ink: `--primary` → `hsl(222 30% 14%)` (deep ink)
+- Emphasis / priority: `--ember` → `hsl(14 80% 48%)` (warm orange-red)
+- Signal positive: `--signal-positive` → `hsl(152 45% 32%)`
+- Signal warning: `--signal-warning` → `hsl(36 85% 42%)`
+- Destructive: `--destructive` → `hsl(0 70% 42%)`
+- Background: `--background` → `hsl(38 30% 96%)` (warm paper)
+
+Legacy brand reference hex values (`#4F6887`, `#D15400`, `#922B2E`, `#68874F`, `#CEBA71`) are archived in [archive/brand-seed.md](../archive/brand-seed.md). They do not map 1:1 to running prototype tokens.
 
 ## Usage rules
 
-1. Keep warning and critical paired with **icon + visible text label** (not color-only dots).
-2. Never use `critical` for default actions.
-3. Use highlight yellow as background or pill fill; avoid yellow body text on light surfaces.
-4. New information indicators should use **accent** patterns (left rail + label), not success.
+1. Keep `--signal-warning` and `--destructive` paired with **icon + visible text label** (not color-only dots).
+2. Never use `--destructive` for default actions.
+3. Use `--ember` for urgency/priority cues and “what changed” indicators; do not use it as a general accent fill.
+4. New information indicators should use `--ember` patterns (left rail + label), not `--signal-positive`.
 5. Preserve contrast for body text at AA targets.
-6. **Selection:** use `color.surface.selected` and optionally `color.border.selected` for the active row or cell. Do **not** fill an entire selected row with `accent.soft` — reserve accent for actions and “new” cues.
+6. **Selection:** use `--secondary` (`hsl(36 18% 88%)`) for the active row or cell. Do **not** fill an entire selected row with `--ember-soft` — reserve ember for priority cues.
 
-## Minimums (Step 1 — recommended defaults for prototypes)
+## Minimums (recommended defaults for prototypes)
 
 These exist so v0/Cursor builds do not collapse into unreadable 1px cues.
 
 
-| Cue                                                   | Minimum                                             | Notes                                             |
-| ----------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------- |
-| Status left rail (`warning` / `critical` / `success`) | **3px** wide                                        | Full row height or card height segment            |
-| “New” accent rail                                     | **3px**                                             | Pair with a text label or badge                   |
-| Status badge                                          | **height 22px**; **padding** ≥ `space.2` horizontal | Use `type.size.xs` or `sm` inside                 |
-| Warning / critical in a list                          | **Icon + label**                                    | Label can be short (`Urgent`) but must be present |
+| Cue                                                         | Minimum                                    | Notes                                              |
+| ----------------------------------------------------------- | ------------------------------------------ | -------------------------------------------------- |
+| Status left rail (`signal-warning` / `destructive` / positive) | **3px** wide                            | Full row height or card height segment             |
+| “New” ember rail                                            | **3px**                                    | Pair with a text label or badge                    |
+| Status badge                                                | **height 22px**; **padding** ≥ `p-2` horizontal | Use `text-xs` or `text-sm` inside           |
+| Warning / destructive in a list                             | **Icon + label**                           | Label can be short (`Urgent`) but must be present  |
 
 
 ## Preview
