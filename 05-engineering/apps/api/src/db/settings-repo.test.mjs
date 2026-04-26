@@ -11,7 +11,7 @@ delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 delete process.env.SUPABASE_ANON_KEY;
 
-const { readSettings, writeSettings, DEFAULT_SETTINGS } = await import("./settings-repo.mjs");
+const { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } = await import("./settings-repo.mjs");
 const { isSupabaseEnabled, assertSupabaseEnv } = await import("./client.mjs");
 
 after(async () => {
@@ -107,4 +107,27 @@ test("readSettings uses file adapter when SUPABASE_URL is unset", async () => {
   assert.ok(typeof settings === "object");
   assert.ok(Array.isArray(settings.topics));
   assert.ok(settings.topics.length > 0);
+});
+
+test("hasSettings returns false when no settings file exists for a user", async () => {
+  const result = await hasSettings("has-settings-new-user");
+  assert.equal(result, false);
+});
+
+test("hasSettings returns true after writeSettings is called for a user", async () => {
+  const userId = "has-settings-existing-user";
+  await writeSettings(DEFAULT_SETTINGS, userId);
+  const result = await hasSettings(userId);
+  assert.equal(result, true);
+});
+
+test("hasSettings does not create a settings file as a side effect", async () => {
+  const { access } = await import("node:fs/promises");
+  const userId = "has-settings-no-side-effect";
+  const filePath = path.join(tmpDir, `settings_user_${userId}.json`);
+  await hasSettings(userId);
+  await assert.rejects(
+    () => access(filePath),
+    "settings file must not exist after hasSettings call on a new user"
+  );
 });

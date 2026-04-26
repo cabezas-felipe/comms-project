@@ -22,8 +22,8 @@ export default function AuthEmail() {
     }
     setSending(true);
     try {
-      await signIn(trimmed, "login");
-      navigate(`/auth/check-email?mode=login&email=${encodeURIComponent(trimmed)}`);
+      await signIn(trimmed);
+      navigate(`/auth/check-email?email=${encodeURIComponent(trimmed)}`);
     } catch (err) {
       if (isRateLimitError(err)) {
         if (import.meta.env.DEV) {
@@ -36,7 +36,7 @@ export default function AuthEmail() {
               body: JSON.stringify({
                 email: trimmed,
                 type: "login",
-                redirectTo: `${window.location.origin}/auth/callback?type=login`,
+                redirectTo: `${window.location.origin}/auth/callback`,
               }),
             });
             if (res.ok) {

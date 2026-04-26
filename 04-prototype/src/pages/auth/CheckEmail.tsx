@@ -5,14 +5,11 @@ import { Mail, ArrowRight } from "lucide-react";
 export default function CheckEmail() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const mode = (params.get("mode") as "signup" | "login") ?? "login";
   const email = params.get("email") ?? "";
-  const isSignup = mode === "signup";
 
-  // Prototype: simulate clicking the magic link.
-  // New users land in onboarding; returning users go straight to the dashboard.
+  // Prototype shortcut: simulate the magic link click → /dashboard (backend decides in real flow).
   const handleSimulateClick = () => {
-    navigate(isSignup ? "/onboarding" : "/dashboard");
+    navigate("/dashboard");
   };
 
   return (
