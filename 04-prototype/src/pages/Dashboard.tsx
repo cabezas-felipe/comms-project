@@ -120,93 +120,118 @@ export default function Dashboard() {
   }, [emptyMode]);
 
   return (
-    <div
-      className={`mx-auto grid max-w-[1400px] transition-[grid-template-columns] duration-300 ease-editorial ${
-        railOpen ? "grid-cols-1 lg:grid-cols-[minmax(0,1fr)_480px]" : "grid-cols-1"
-      }`}
-    >
-      <section className="min-w-0">
-        {/* Header zone */}
-        <div className="border-b border-rule/60 px-6 py-7">
-          <h1 className="font-display text-[32px] font-semibold leading-tight tracking-tight">
-            {headline}
-          </h1>
-          {isLoading && (
-            <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-              Refreshing stories...
-            </p>
-          )}
-          {loadError && (
-            <p className="mt-2 text-[12px] text-muted-foreground">
-              Using cached stories while refresh recovers.
-            </p>
-          )}
+    <>
+      {/* Layout shell — pushes the feed on lg+, leaves it full-width below */}
+      <div
+        className={`mx-auto grid max-w-[1400px] transition-[grid-template-columns] duration-300 ease-editorial ${
+          railOpen ? "grid-cols-1 lg:grid-cols-[minmax(0,1fr)_480px]" : "grid-cols-1"
+        }`}
+      >
+        <section className="min-w-0">
+          {/* Header zone */}
+          <div className="border-b border-rule/60 px-6 py-7">
+            <h1 className="font-display text-[32px] font-semibold leading-tight tracking-tight">
+              {headline}
+            </h1>
+            {isLoading && (
+              <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+                Refreshing stories...
+              </p>
+            )}
+            {loadError && (
+              <p className="mt-2 text-[12px] text-muted-foreground">
+                Using cached stories while refresh recovers.
+              </p>
+            )}
 
-          {/* Pill row */}
-          <div className="mt-5 flex flex-wrap items-center gap-1.5">
-            <Pill active={topic === "All" && geo === "All"} onClick={() => { setTopic("All"); setGeo("All"); }}>
-              All
-            </Pill>
-            <span className="mx-1 text-rule">·</span>
-            {TOPICS.map((t) => (
-              <Pill key={t} active={topic === t} onClick={() => setTopic(topic === t ? "All" : t)}>
-                {t}
+            {/* Pill row */}
+            <div className="mt-5 flex flex-wrap items-center gap-1.5">
+              <Pill active={topic === "All" && geo === "All"} onClick={() => { setTopic("All"); setGeo("All"); }}>
+                All
               </Pill>
-            ))}
-            <span className="mx-1 text-rule">·</span>
-            {GEOGRAPHIES.map((g) => (
-              <Pill key={g} active={geo === g} onClick={() => setGeo(geo === g ? "All" : g)}>
-                {g}
-              </Pill>
-            ))}
+              <span className="mx-1 text-rule">·</span>
+              {TOPICS.map((t) => (
+                <Pill key={t} active={topic === t} onClick={() => setTopic(topic === t ? "All" : t)}>
+                  {t}
+                </Pill>
+              ))}
+              <span className="mx-1 text-rule">·</span>
+              {GEOGRAPHIES.map((g) => (
+                <Pill key={g} active={geo === g} onClick={() => setGeo(geo === g ? "All" : g)}>
+                  {g}
+                </Pill>
+              ))}
+            </div>
           </div>
-        </div>
 
-        {/* Feed zone */}
-        {filtered.length === 0 ? (
-          <EmptyState onReset={() => { setTopic("All"); setGeo("All"); }} />
-        ) : (
-          <ul className="divide-y divide-rule/60">
-            {filtered.map(({ story, sig }) => (
-              <li key={story.id}>
-                <StoryItem
-                  story={story}
-                  trend={sig.trend}
-                  freshestMinutes={sig.freshestMinutes}
-                  activityScore={sig.activityScore}
-                  expanded={expandedId === story.id}
-                  onToggle={() => setExpandedId(expandedId === story.id ? null : story.id)}
-                  onOpenSource={(id) => {
-                    trackSourceOpened(story.id, id);
-                    setActiveSourceId(id);
-                  }}
-                />
-              </li>
-            ))}
-          </ul>
+          {/* Feed zone */}
+          {filtered.length === 0 ? (
+            <EmptyState onReset={() => { setTopic("All"); setGeo("All"); }} />
+          ) : (
+            <ul className="divide-y divide-rule/60">
+              {filtered.map(({ story, sig }) => (
+                <li key={story.id}>
+                  <StoryItem
+                    story={story}
+                    trend={sig.trend}
+                    freshestMinutes={sig.freshestMinutes}
+                    activityScore={sig.activityScore}
+                    expanded={expandedId === story.id}
+                    onToggle={() => setExpandedId(expandedId === story.id ? null : story.id)}
+                    onOpenSource={(id) => {
+                      trackSourceOpened(story.id, id);
+                      setActiveSourceId(id);
+                    }}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="px-6 py-8 text-center">
+            <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+              Next refresh in ~38 min
+            </p>
+          </div>
+        </section>
+
+        {/* Desktop push rail (lg+) */}
+        {railOpen && (
+          <aside className="hidden lg:block">
+            <div className="sticky top-16 h-[calc(100vh-4rem)]">
+              <SourceReader
+                source={activeSource}
+                storyTitle={activeSourceStory?.title}
+                onClose={() => setActiveSourceId(null)}
+                onBack={() => setActiveSourceId(null)}
+              />
+            </div>
+          </aside>
         )}
+      </div>
 
-        <div className="px-6 py-8 text-center">
-          <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-            Next refresh in ~38 min
-          </p>
-        </div>
-      </section>
-
-      {/* On-demand source rail */}
-      {railOpen && (
-        <aside className="hidden lg:block">
-          <div className="sticky top-16 h-[calc(100vh-4rem)]">
-            <SourceReader
-              source={activeSource}
-              storyTitle={activeSourceStory?.title}
-              onClose={() => setActiveSourceId(null)}
-              onBack={() => setActiveSourceId(null)}
-            />
-          </div>
-        </aside>
-      )}
-    </div>
+      {/* Mobile/tablet overlay (<lg) — slides in from the right */}
+      <div
+        onClick={() => setActiveSourceId(null)}
+        className={`fixed inset-0 top-16 z-40 bg-foreground/20 backdrop-blur-[1px] transition-opacity duration-300 lg:hidden ${
+          railOpen ? "opacity-100" : "pointer-events-none opacity-0"
+        }`}
+        aria-hidden={!railOpen}
+      />
+      <aside
+        className={`fixed right-0 top-16 z-50 h-[calc(100vh-4rem)] w-full max-w-[520px] transform shadow-paper transition-transform duration-300 ease-editorial lg:hidden ${
+          railOpen ? "translate-x-0" : "translate-x-full"
+        }`}
+        aria-hidden={!railOpen}
+      >
+        <SourceReader
+          source={activeSource}
+          storyTitle={activeSourceStory?.title}
+          onClose={() => setActiveSourceId(null)}
+          onBack={() => setActiveSourceId(null)}
+        />
+      </aside>
+    </>
   );
 }
 

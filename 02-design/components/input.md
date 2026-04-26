@@ -19,18 +19,18 @@ Rest, focus, filled, error, disabled
 
 ## Token usage
 
-- Surface: `color.surface.default`
-- Border: `color.border.default`; error: `color.critical.base` (border or ring, plus message — not color-only)
-- Radius: `radius.md` (default for inputs — [spacing](../foundations/spacing.md))
-- Focus ring: `color.focusRing`
-- Value text: `color.text.primary`
-- Placeholder / helper: `color.text.muted`
-- Typography: **visible label** — `font.family.heading`, `type.size.sm`. **Single-line values** (`text`, `search`) — `font.family.ui`, `type.size.sm` or `type.size.md`. **Textarea** (longer notes) — `font.family.body`, `type.size.md`
-- Padding (internals): `space.2` vertical, `space.3` horizontal unless a dense filter row uses `space.2` horizontal
-- Motion: focus ring transition `motion.duration.fast`; no layout-affecting animations on the feed row the input sits in
+- Surface: `--input` / `--card`
+- Border: `--border`; error: `--destructive` (border or ring, plus message — not color-only)
+- Radius: `rounded-md` (default for inputs — [spacing](../foundations/spacing.md))
+- Focus ring: `--ring`
+- Value text: `--foreground`
+- Placeholder / helper: `--muted-foreground`
+- Typography: **visible label** — `font-sans`, `text-sm`. **Single-line values** (`text`, `search`) — `font-sans`, `text-sm` or `text-base`. **Textarea** (longer notes) — `font-sans`, `text-base`
+- Padding (internals): `py-2 px-3` unless a dense filter row uses `px-2`
+- Motion: focus ring transition uses `--transition-base`; no layout-affecting animations on the feed row the input sits in
 
 ## Rules
 
 1. Always pair with a visible label.
-2. For errors, show `critical` semantic color plus explanatory text ([color minimums](../foundations/color.md) apply to any error stripe).
+2. For errors, show `--destructive` semantic color plus explanatory text ([color minimums](../foundations/color.md) apply to any error stripe).
 3. Keep helper text concise and action-oriented.

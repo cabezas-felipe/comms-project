@@ -36,9 +36,9 @@ const App = () => (
           <AppHeader />
           <Routes>
             <Route path="/" element={<Landing />} />
+            <Route path="/auth" element={<AuthEmail />} />
             <Route path="/auth/check-email" element={<CheckEmail />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
-            <Route path="/auth/:mode" element={<AuthEmail />} />
             <Route path="/onboarding" element={<Onboarding />} />
             <Route
               path="/dashboard"

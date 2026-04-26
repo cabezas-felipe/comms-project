@@ -15,17 +15,17 @@ Group related monitoring information into scannable units.
 
 ## Token usage
 
-- Background: `color.surface.default` (active context / selection: `color.surface.selected`)
-- Border: `color.border.default` (selection: `color.border.selected`)
-- Radius: `radius.lg` (cards / panels — [spacing](../foundations/spacing.md))
-- Padding: `space.4` or `space.5`; gap header → body `space.3` or `space.4`
-- Title: `font.family.heading`, `type.size.lg`, `font.weight.semibold`
-- Metadata (source, time, channel): `font.family.ui`, `type.size.sm`, `color.text.muted`
-- Optional excerpt or quote: `font.family.body`, `type.size.sm` or `type.size.md`, `color.text.primary`
+- Background: `--card` (active context / selection: `--secondary`)
+- Border: `--border`
+- Radius: `rounded-lg` (cards / panels — [spacing](../foundations/spacing.md))
+- Padding: `p-4` or `p-5`; gap header → body `gap-3` or `gap-4`
+- Title: `font-display`, `text-lg`, `font-semibold`
+- Metadata (source, time, channel): `font-sans`, `text-sm`, `--muted-foreground`
+- Optional excerpt or quote: `font-sans`, `text-sm` or `text-base`, `--foreground`
 
 ## Rules
 
 1. Prefer one primary message per card.
 2. Use muted metadata for source/time so headline remains dominant.
-3. For “new since last check,” add an **accent** left rail **≥ 3px** and a text label ([color](../foundations/color.md)).
-4. When a card is the active context, use selection neutrals — not a full `accent` fill ([color](../foundations/color.md)).
+3. For "new since last check," add an **ember** left rail **≥ 3px** and a text label ([color](../foundations/color.md)).
+4. When a card is the active context, use `--secondary` — not a full `--primary` or `--ember` fill ([color](../foundations/color.md)).

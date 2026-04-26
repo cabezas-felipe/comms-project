@@ -6,7 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
 import { extractOnboarding } from "./ai/onboarding-extractor.mjs";
-import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
+import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
@@ -265,6 +265,26 @@ app.get("/api/ai/metrics", (_req, res) => {
   res.json({
     metrics: getAiMetrics(),
   });
+});
+
+// ─── Post-login route decision ────────────────────────────────────────────────
+// Returns the destination the frontend should navigate to after successful auth.
+// Returning users (have existing settings) go to /dashboard; new users to /onboarding.
+
+app.get("/api/auth/post-login-route", async (req, res) => {
+  const userId = await requireAuth(req, res);
+  if (!userId) return;
+  try {
+    const returning = await hasSettings(userId);
+    const destination = returning ? "/dashboard" : "/onboarding";
+    const reason = returning ? "returning_user" : "new_user";
+    res.json({ destination, reason });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to determine post-login route.",
+      detail: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
 });
 
 // ─── Dev-only QA: mint a magic link via Supabase Admin API ───────────────────

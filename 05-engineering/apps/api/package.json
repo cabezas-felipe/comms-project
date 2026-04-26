@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.mjs",
     "start": "node src/server.mjs",
-    "test": "node --test src/ai/model-router.test.mjs src/ai/onboarding-extractor.test.mjs src/server.settings.test.mjs src/server.routes.test.mjs src/server.auth.test.mjs src/db/settings-repo.test.mjs src/ingestion/source-normalizer.test.mjs src/telemetry.test.mjs"
+    "test": "node --test src/ai/model-router.test.mjs src/ai/onboarding-extractor.test.mjs src/server.settings.test.mjs src/server.routes.test.mjs src/server.auth.test.mjs src/server.post-login-route.test.mjs src/db/settings-repo.test.mjs src/ingestion/source-normalizer.test.mjs src/telemetry.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",

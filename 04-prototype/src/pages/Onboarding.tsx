@@ -216,12 +216,12 @@ export default function Onboarding() {
 
         {/* Hero */}
         <div className="mb-10 text-center">
-          <h1 className="font-display text-[40px] font-semibold leading-[1.05] tracking-tight">
-            Stop refreshing twelve tabs to find what actually moved.
+          <h1 className="font-display text-[34px] font-semibold leading-[1.08] tracking-tight sm:text-[40px] sm:leading-[1.05]">
+            Tell us what you&apos;re watching.
           </h1>
           <p className="mx-auto mt-4 max-w-[52ch] text-[15px] leading-relaxed text-muted-foreground">
-            Tell Tempo what you watch. We cluster, dedupe, and source-check coverage so the news
-            arrives in one calm place — however fast it moves.
+            A few words is enough — topics, regions, sources you trust. You can refine anything
+            later in Settings.
           </p>
         </div>
 
@@ -247,12 +247,9 @@ export default function Onboarding() {
         <form onSubmit={handleSubmit} className="space-y-6">
           {mode === "voice" ? (
             <div className="fade-up rounded-sm border border-rule/60 bg-surface-raised p-6">
-              <div className="mb-3 flex items-center justify-between">
-                <span className="eyebrow">Example</span>
-              </div>
-              <p className="font-display text-[17px] leading-[1.6] text-foreground/85">
-                &ldquo;Track US and Colombia diplomatic stories — especially OFAC and migration.
-                Trust NYT, Reuters, El Tiempo, and Semana.&rdquo;
+              <span className="eyebrow mb-3 block">Try something like</span>
+              <p className="text-[15px] font-normal italic leading-[1.65] text-muted-foreground/70">
+                {EXAMPLE_TEXT}
               </p>
               <div className="mt-5 flex flex-col items-center gap-3">
                 <button
@@ -295,23 +292,29 @@ export default function Onboarding() {
                   Transcription added. You can keep typing if needed.
                 </p>
               )}
-              <div className="mb-3 flex items-center justify-between">
-                <span className="eyebrow">Example</span>
-              </div>
+              <span className="eyebrow mb-3 block">Try something like</span>
               <Textarea
                 value={topics}
                 onChange={(e) => setTopics(e.target.value)}
+                placeholder={EXAMPLE_TEXT}
                 rows={5}
-                className="font-display text-[17px] leading-[1.6]"
+                className="rounded-sm border-rule/60 text-[17px] font-normal leading-[1.65] not-italic placeholder:italic placeholder:text-muted-foreground/70"
               />
             </div>
           )}
 
-          {/* CTA */}
-          <div className="flex items-center justify-between pt-2">
-            <p className="font-mono text-[11px] text-muted-foreground">
-              You can edit anytime in Settings.
+          {/* Privacy */}
+          <div className="border-t border-rule/40 pt-5 text-[13px] leading-relaxed text-muted-foreground">
+            <p>
+              <span className="font-medium text-foreground">We keep:</span> your scope and source preferences.
             </p>
+            <p>
+              <span className="font-medium text-foreground">We don&apos;t keep:</span> voice recordings, draft replies, or browsing history.
+            </p>
+          </div>
+
+          {/* CTA */}
+          <div className="flex justify-end pt-2">
             <Button type="submit" size="lg" className="gap-2 rounded-sm" disabled={submitting}>
               {submitting ? "Setting tempo…" : "Set the tempo"}
               {submitting ? (
