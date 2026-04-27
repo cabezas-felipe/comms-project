@@ -30,13 +30,9 @@ export default function AppHeader() {
     return () => clearInterval(id);
   }, []);
 
-  // Hide chrome on onboarding
-  if (
-    location.pathname === "/" ||
-    location.pathname === "/onboarding" ||
-    (!isAuthenticated && !isDevPreview)
-  )
-    return null;
+  // Hide chrome on entry/onboarding screens; in prod also hide when unauthenticated
+  if (["/" , "/auth", "/onboarding"].includes(location.pathname)) return null;
+  if (!import.meta.env.DEV && !isAuthenticated) return null;
 
   return (
     <header className="sticky top-0 z-30 border-b border-rule/60 bg-background/85 backdrop-blur">

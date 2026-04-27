@@ -4,9 +4,8 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "./pages/NotFound.tsx";
-import Landing from "./pages/Landing.tsx";
-import AuthEmail from "./pages/auth/AuthEmail.tsx";
-import CheckEmail from "./pages/auth/CheckEmail.tsx";
+import EntryLandingPage from "./pages/EntryLandingPage.tsx";
+import AuthVerifyPage from "./pages/auth/AuthVerifyPage.tsx";
 import Onboarding from "./pages/Onboarding.tsx";
 import Dashboard from "./pages/Dashboard.tsx";
 import Settings from "./pages/Settings.tsx";
@@ -35,11 +34,11 @@ const App = () => (
         >
           <AppHeader />
           <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/landing" element={<Landing />} />
-            <Route path="/auth" element={<AuthEmail />} />
-            <Route path="/auth/check-email" element={<CheckEmail />} />
+            <Route path="/" element={<EntryLandingPage />} />
+            <Route path="/auth" element={<AuthVerifyPage />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/landing" element={<Navigate to="/" replace />} />
+            <Route path="/auth/check-email" element={<Navigate to="/auth" replace />} />
             <Route path="/onboarding" element={<Onboarding />} />
             <Route
               path="/dashboard"
