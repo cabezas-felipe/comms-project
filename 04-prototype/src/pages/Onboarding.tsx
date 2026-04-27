@@ -33,7 +33,7 @@ const PREFERRED_AUDIO_TYPES = [
 export default function Onboarding() {
   const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>("type");
-  const [topics, setTopics] = useState(EXAMPLE_TEXT);
+  const [topics, setTopics] = useState("");
   const [keywords, setKeywords] = useState("OFAC, sanctions, deportation routing, bilateral");
   const [geos, setGeos] = useState<string[]>(["US", "Colombia"]);
   const [sources, setSources] = useState(
