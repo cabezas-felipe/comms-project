@@ -42,6 +42,17 @@ export default function EntryLandingPage() {
       await signIn(trimmed);
       navigate(`/auth?email=${encodeURIComponent(trimmed)}`);
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (
+        import.meta.env.DEV &&
+        errMsg.includes("Supabase is not configured")
+      ) {
+        toast.info(
+          "Prototype: skipped sending email — open /auth or configure Supabase for real magic links.",
+        );
+        navigate(`/auth?email=${encodeURIComponent(trimmed)}`);
+        return;
+      }
       if (isRateLimitError(err)) {
         if (import.meta.env.DEV) {
           try {

@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { X, Plus, Save } from "lucide-react";
+import { X, Plus } from "lucide-react";
 import { toast } from "sonner";
 import {
   AlertDialog,
@@ -68,7 +68,7 @@ function ListSection({ title, description, items, onChange, placeholder }: ListS
                   </AlertDialogHeader>
                   <AlertDialogFooter>
                     <AlertDialogCancel>Keep</AlertDialogCancel>
-                    <AlertDialogAction onClick={() => { remove(item); toast.success(`Removed ${item}.`); }}>
+                    <AlertDialogAction onClick={() => remove(item)}>
                       Remove
                     </AlertDialogAction>
                   </AlertDialogFooter>
@@ -104,13 +104,14 @@ export default function Settings() {
   const [topics, setTopics] = useState(["Diplomatic relations", "Migration policy", "Security cooperation"]);
   const [keywords, setKeywords] = useState(["OFAC", "sanctions", "deportation routing", "bilateral"]);
   const [geographies, setGeographies] = useState(["US", "Colombia"]);
-  const [saved, setSaved] = useState(true);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  const [, forceTick] = useState(0);
+  const saveTimer = useRef<number | null>(null);
   const [sourceTab, setSourceTab] = useState<SourceTab>("traditional");
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
 
-  // Seed sources from story data on first render
-  const seed = (() => {
+  const seed = useMemo(() => {
     const seenT = new Set<string>();
     const seenS = new Set<string>();
     const trad: string[] = [];
@@ -128,36 +129,61 @@ export default function Settings() {
       })
     );
     return { trad, soc };
-  })();
+  }, []);
 
   const [traditional, setTraditional] = useState<string[]>(seed.trad);
   const [social, setSocial] = useState<string[]>(seed.soc);
   const [draftSource, setDraftSource] = useState("");
 
-  const markDirty = <T,>(setter: (v: T) => void) => (v: T) => {
-    setter(v);
-    setSaved(false);
+  // stateRef keeps save callback from closing over stale state values
+  const stateRef = useRef({ topics, keywords, geographies, traditional, social });
+  stateRef.current = { topics, keywords, geographies, traditional, social };
+
+  const scheduleSave = () => {
+    setSaveState("saving");
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(async () => {
+      const s = stateRef.current;
+      try {
+        await saveSettingsPayload({
+          contractVersion: CONTRACT_VERSION,
+          topics: s.topics,
+          keywords: s.keywords,
+          geographies: s.geographies,
+          traditionalSources: s.traditional,
+          socialSources: s.social,
+        });
+        setLastSavedAt(new Date());
+        setSaveState("saved");
+      } catch {
+        toast.error("Could not save settings. Please try again.");
+        setSaveState("idle");
+      }
+    }, 600);
   };
 
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await saveSettingsPayload({
-        contractVersion: CONTRACT_VERSION,
-        topics,
-        keywords,
-        geographies,
-        traditionalSources: traditional,
-        socialSources: social,
-      });
-      setSaved(true);
-      toast.success("Scope updated. Next refresh will use these settings.");
-    } catch {
-      toast.error("Could not save settings. Please try again.");
-    } finally {
-      setSaving(false);
-    }
+  const markDirty = <T,>(setter: (v: T) => void) => (v: T) => {
+    setter(v);
+    scheduleSave();
   };
+
+  // Re-render the "saved Xs ago" label every 30s
+  useEffect(() => {
+    const id = window.setInterval(() => forceTick((n) => n + 1), 30000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const savedLabel = (() => {
+    if (saveState === "saving") return "Saving…";
+    if (saveState === "idle" || !lastSavedAt) return "All changes saved";
+    const secs = Math.floor((Date.now() - lastSavedAt.getTime()) / 1000);
+    if (secs < 5) return "Saved · just now";
+    if (secs < 60) return `Saved · ${secs}s ago`;
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `Saved · ${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    return `Saved · ${hrs}h ago`;
+  })();
 
   const list = sourceTab === "traditional" ? traditional : social;
   const setList = sourceTab === "traditional" ? markDirty(setTraditional) : markDirty(setSocial);
@@ -185,18 +211,14 @@ export default function Settings() {
         setGeographies(payload.geographies);
         setTraditional(payload.traditionalSources);
         setSocial(payload.socialSources);
-        setSaved(true);
       })
       .catch(() => {
         if (canceled) return;
         toast.error("Could not load settings. Using defaults.");
       })
       .finally(() => {
-        if (!canceled) {
-          setLoading(false);
-        }
+        if (!canceled) setLoading(false);
       });
-
     return () => {
       canceled = true;
     };
@@ -215,15 +237,25 @@ export default function Settings() {
                 Refine what Tempo watches. Changes take effect at the next refresh.
               </p>
               {loading && (
-                <p className="mt-2 text-[12px] text-muted-foreground">
-                  Loading your saved scope...
+                <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+                  Loading saved scope…
                 </p>
               )}
             </div>
-            <Button onClick={handleSave} className="shrink-0 gap-2" disabled={saved || loading || saving}>
-              <Save className="h-4 w-4" />
-              {saving ? "Saving..." : saved ? "Saved" : "Save changes"}
-            </Button>
+            <div
+              aria-live="polite"
+              className="shrink-0 font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <span
+                  aria-hidden
+                  className={`inline-block h-1.5 w-1.5 rounded-full ${
+                    saveState === "saving" ? "animate-pulse bg-muted-foreground" : "bg-foreground/40"
+                  }`}
+                />
+                {savedLabel}
+              </span>
+            </div>
           </div>
 
           <div>
@@ -296,7 +328,7 @@ export default function Settings() {
                           </AlertDialogHeader>
                           <AlertDialogFooter>
                             <AlertDialogCancel>Keep</AlertDialogCancel>
-                            <AlertDialogAction onClick={() => { removeSource(s); toast.success(`Removed ${s}.`); }}>
+                            <AlertDialogAction onClick={() => removeSource(s)}>
                               Remove
                             </AlertDialogAction>
                           </AlertDialogFooter>
@@ -316,7 +348,7 @@ export default function Settings() {
                       placeholder={sourceTab === "social" ? "@handle" : "Outlet name"}
                       className="max-w-sm"
                     />
-                    <Button type="button" variant="outline" onClick={addSource} className="gap-1.5">
+                    <Button type="button" variant="outline" onClick={addSource} disabled={!draftSource.trim()} className="gap-1.5">
                       <Plus className="h-3.5 w-3.5" /> Add
                     </Button>
                   </div>
