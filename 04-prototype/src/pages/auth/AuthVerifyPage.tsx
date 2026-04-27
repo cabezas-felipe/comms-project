@@ -5,11 +5,13 @@ import { Mail, ArrowRight } from "lucide-react";
 export default function AuthVerifyPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const mode = (params.get("mode") as "signup" | "login") ?? "login";
   const email = params.get("email") ?? "";
+  const isSignup = mode === "signup";
 
-  // Prototype shortcut: simulate the magic link click → /dashboard (backend decides in real flow).
+  // Prototype shortcut: new users land in onboarding; returning users go to dashboard.
   const handleSimulateClick = () => {
-    navigate("/dashboard");
+    navigate(isSignup ? "/onboarding" : "/dashboard");
   };
 
   return (
@@ -43,7 +45,7 @@ export default function AuthVerifyPage() {
             .
           </h1>
           <p className="mx-auto mt-3 max-w-[44ch] text-[14px] leading-relaxed text-muted-foreground">
-            Open the email and tap the link to continue. The link expires in 15 minutes.
+            Open the email and tap the link to {isSignup ? "get in sync" : "stay in sync"}. The link expires in 15 minutes.
           </p>
 
           <div className="mt-7 border-t border-rule/40 pt-6">
