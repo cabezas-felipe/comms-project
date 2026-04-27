@@ -1,10 +1,8 @@
 import { Story } from "@/data/stories";
+import { trackSourceOpened } from "@/lib/analytics";
 import { GeoStrip, TopicTag } from "./Tags";
 import { timeAgo } from "@/lib/format";
-import { ArrowUpRight, ThumbsDown, ThumbsUp, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { useState } from "react";
-import { toast } from "sonner";
+import { ArrowUpRight, X } from "lucide-react";
 
 interface Props {
   story: Story;
@@ -12,15 +10,6 @@ interface Props {
 }
 
 export default function StoryDetail({ story, onClose }: Props) {
-  const [trust, setTrust] = useState<"up" | "down" | null>(null);
-
-  const handleTrust = (v: "up" | "down") => {
-    setTrust(v);
-    toast.success(
-      v === "up" ? "Marked useful — story will rank higher." : "Noted — we'll surface fewer like this."
-    );
-  };
-
   return (
     <aside className="fade-up flex h-full flex-col overflow-hidden bg-surface-raised">
       {/* header */}
@@ -70,9 +59,10 @@ export default function StoryDetail({ story, onClose }: Props) {
           </div>
           <ul className="divide-y divide-rule/50 border-y border-rule/50">
             {story.sources.map((s) => (
-              <li key={s.outlet}>
+              <li key={s.id}>
                 <a
                   href={s.url}
+                  onClick={() => trackSourceOpened(story.id, s.id)}
                   className="group flex items-center justify-between py-3 transition-colors hover:bg-background"
                 >
                   <div className="flex items-baseline gap-3">
@@ -90,29 +80,6 @@ export default function StoryDetail({ story, onClose }: Props) {
           </ul>
         </section>
 
-        <section className="border-t border-rule/60 pt-5">
-          <h3 className="eyebrow mb-3">Was this useful?</h3>
-          <div className="flex items-center gap-2">
-            <Button
-              variant={trust === "up" ? "default" : "outline"}
-              size="sm"
-              onClick={() => handleTrust("up")}
-              className="gap-2"
-            >
-              <ThumbsUp className="h-3.5 w-3.5" />
-              Useful
-            </Button>
-            <Button
-              variant={trust === "down" ? "default" : "outline"}
-              size="sm"
-              onClick={() => handleTrust("down")}
-              className="gap-2"
-            >
-              <ThumbsDown className="h-3.5 w-3.5" />
-              Not useful
-            </Button>
-          </div>
-        </section>
       </div>
     </aside>
   );

@@ -91,7 +91,7 @@ export function EmptyState({ variant, onRetry }: StateProps) {
 
 /* ---------------- Error ---------------- */
 export function ErrorState({ variant, onRetry }: StateProps) {
-  const msg = "Couldn't reach the source index.";
+  const msg = "Refresh failed — showing saved stories.";
   if (variant === "dense") {
     return (
       <div className="border-y border-destructive/30 bg-destructive/5 px-6 py-4">
