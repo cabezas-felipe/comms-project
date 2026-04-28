@@ -1,9 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   analyticsEventSchema,
-  buildAuthCtaClicked,
-  buildAuthStarted,
-  buildAuthSucceeded,
   buildDashboardViewed,
   buildLandingViewed,
   buildOnboardingCompleted,
@@ -101,92 +98,6 @@ describe("buildLandingViewed", () => {
 
   it("rejects empty route", () => {
     expect(() => buildLandingViewed({ route: "" })).toThrow();
-  });
-});
-
-describe("buildAuthCtaClicked", () => {
-  it("builds a secondary event for login ctaType", () => {
-    const e = buildAuthCtaClicked({ ctaType: "login", route: "/" });
-    expect(e.name).toBe("auth_cta_clicked");
-    expect(e.tier).toBe("secondary");
-    expect(e.payload.ctaType).toBe("login");
-  });
-
-  it("builds a secondary event for signup ctaType", () => {
-    const e = buildAuthCtaClicked({ ctaType: "signup", route: "/" });
-    expect(e.payload.ctaType).toBe("signup");
-  });
-
-  it("rejects invalid ctaType", () => {
-    expect(() =>
-      buildAuthCtaClicked({ ctaType: "unknown" as "login", route: "/" })
-    ).toThrow();
-  });
-});
-
-describe("buildAuthStarted", () => {
-  it("builds a primary event for login mode", () => {
-    const e = buildAuthStarted({ mode: "login", route: "/auth/login", authAttemptId: "att_1_abc" });
-    expect(e.name).toBe("auth_started");
-    expect(e.tier).toBe("primary");
-    expect(e.payload.mode).toBe("login");
-    expect(e.payload.authAttemptId).toBe("att_1_abc");
-  });
-
-  it("builds a primary event for signup mode", () => {
-    const e = buildAuthStarted({ mode: "signup", route: "/auth/signup", authAttemptId: "att_2_def" });
-    expect(e.payload.mode).toBe("signup");
-  });
-
-  it("rejects invalid mode", () => {
-    expect(() =>
-      buildAuthStarted({ mode: "magic" as "login", route: "/auth/login", authAttemptId: "att_x" })
-    ).toThrow();
-  });
-
-  it("rejects missing authAttemptId", () => {
-    expect(() =>
-      buildAuthStarted({ mode: "login", route: "/auth/login" } as Parameters<typeof buildAuthStarted>[0])
-    ).toThrow();
-  });
-
-  it("rejects empty authAttemptId", () => {
-    expect(() =>
-      buildAuthStarted({ mode: "login", route: "/auth/login", authAttemptId: "" })
-    ).toThrow();
-  });
-});
-
-describe("buildAuthSucceeded", () => {
-  it("builds a primary event for login mode", () => {
-    const e = buildAuthSucceeded({ mode: "login", route: "/auth/callback", authAttemptId: "att_1_abc" });
-    expect(e.name).toBe("auth_succeeded");
-    expect(e.tier).toBe("primary");
-    expect(e.payload.mode).toBe("login");
-    expect(e.payload.authAttemptId).toBe("att_1_abc");
-  });
-
-  it("builds a primary event for signup mode", () => {
-    const e = buildAuthSucceeded({ mode: "signup", route: "/auth/callback", authAttemptId: "att_2_def" });
-    expect(e.payload.mode).toBe("signup");
-  });
-
-  it("rejects invalid mode", () => {
-    expect(() =>
-      buildAuthSucceeded({ mode: "magic" as "login", route: "/auth/callback", authAttemptId: "att_x" })
-    ).toThrow();
-  });
-
-  it("rejects missing authAttemptId", () => {
-    expect(() =>
-      buildAuthSucceeded({ mode: "login", route: "/auth/callback" } as Parameters<typeof buildAuthSucceeded>[0])
-    ).toThrow();
-  });
-
-  it("rejects empty authAttemptId", () => {
-    expect(() =>
-      buildAuthSucceeded({ mode: "login", route: "/auth/callback", authAttemptId: "" })
-    ).toThrow();
   });
 });
 

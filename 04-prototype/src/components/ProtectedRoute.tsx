@@ -1,15 +1,14 @@
 import { Navigate, useLocation } from "react-router-dom";
-import { useAuth } from "@/lib/auth";
+import { getProtoSession } from "@/lib/auth";
 
 export default function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, loading } = useAuth();
   const location = useLocation();
 
+  // DEV: allow access without going through the landing flow for local iteration.
   if (import.meta.env.DEV) return <>{children}</>;
-  if (loading) return null;
 
-  if (!isAuthenticated) {
-    return <Navigate to="/auth" replace state={{ from: location.pathname }} />;
+  if (!getProtoSession()) {
+    return <Navigate to="/" replace state={{ from: location.pathname }} />;
   }
 
   return <>{children}</>;
