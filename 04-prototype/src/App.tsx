@@ -5,7 +5,6 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "./pages/NotFound.tsx";
 import EntryLandingPage from "./pages/EntryLandingPage.tsx";
-import AuthVerifyPage from "./pages/auth/AuthVerifyPage.tsx";
 import Onboarding from "./pages/Onboarding.tsx";
 import Dashboard from "./pages/Dashboard.tsx";
 import Settings from "./pages/Settings.tsx";
@@ -15,7 +14,6 @@ import EvidenceDesk from "./pages/archive/EvidenceDesk.tsx";
 import AnalystBriefing from "./pages/archive/AnalystBriefing.tsx";
 import AppHeader from "./components/AppHeader.tsx";
 import ProtectedRoute from "./components/ProtectedRoute.tsx";
-import AuthCallback from "./pages/auth/AuthCallback.tsx";
 import { AuthProvider } from "./lib/auth.tsx";
 
 const queryClient = new QueryClient();
@@ -35,10 +33,7 @@ const App = () => (
           <AppHeader />
           <Routes>
             <Route path="/" element={<EntryLandingPage />} />
-            <Route path="/auth" element={<AuthVerifyPage />} />
-            <Route path="/auth/callback" element={<AuthCallback />} />
             <Route path="/landing" element={<Navigate to="/" replace />} />
-            <Route path="/auth/check-email" element={<Navigate to="/auth" replace />} />
             <Route path="/onboarding" element={<Onboarding />} />
             <Route
               path="/dashboard"

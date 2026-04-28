@@ -28,12 +28,6 @@ export const supabase =
               },
             },
           }),
-          signInWithOtp: async () => ({
-            data: { user: null, session: null },
-            error: new Error(
-              "Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY."
-            ),
-          }),
           signOut: async () => ({ error: null }),
         },
       };

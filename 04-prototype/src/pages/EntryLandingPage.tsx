@@ -1,24 +1,16 @@
-import { useEffect, useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ArrowRight } from "lucide-react";
 import { toast } from "sonner";
-import { useAuth } from "@/lib/auth";
-import { isRateLimitError } from "@/lib/auth-errors";
-import {
-  trackLandingViewed,
-  trackAuthCtaClicked,
-  trackAuthStarted,
-  createAuthAttemptId,
-  persistAuthAttemptId,
-} from "@/lib/analytics";
+import { setProtoSession } from "@/lib/auth";
+import { trackLandingViewed } from "@/lib/analytics";
 
 export default function EntryLandingPage() {
   const navigate = useNavigate();
-  const { signIn } = useAuth();
   const [email, setEmail] = useState("");
-  const [sending, setSending] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     trackLandingViewed();
@@ -31,56 +23,28 @@ export default function EntryLandingPage() {
       toast.error("Enter a valid email to continue.");
       return;
     }
-
-    const attemptId = createAuthAttemptId();
-    persistAuthAttemptId(attemptId);
-    trackAuthCtaClicked("login");
-    trackAuthStarted("login", attemptId);
-
-    setSending(true);
+    setLoading(true);
     try {
-      await signIn(trimmed);
-      navigate(`/auth?email=${encodeURIComponent(trimmed)}`);
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (
-        import.meta.env.DEV &&
-        errMsg.includes("Supabase is not configured")
-      ) {
-        toast.info(
-          "Prototype: skipped sending email — open /auth or configure Supabase for real magic links.",
-        );
-        navigate(`/auth?email=${encodeURIComponent(trimmed)}`);
+      const res = await fetch("/api/auth/resolve-destination", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: trimmed }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { message?: string };
+        toast.error(body.message ?? "Could not continue. Please try again.");
         return;
       }
-      if (isRateLimitError(err)) {
-        if (import.meta.env.DEV) {
-          try {
-            const res = await fetch("/api/auth/dev-magic-link", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                email: trimmed,
-                type: "login",
-                redirectTo: `${window.location.origin}/auth/callback`,
-              }),
-            });
-            if (res.ok) {
-              const { url } = (await res.json()) as { url: string };
-              toast.info("Dev mode: opening magic link directly.");
-              window.location.assign(url);
-              return;
-            }
-          } catch {
-            // dev fallback failed; fall through to rate-limit message
-          }
-        }
-        toast.error("Too many requests — please wait a minute and try again.");
-      } else {
-        toast.error("Could not send the magic link. Please try again.");
-      }
+      const data = (await res.json()) as {
+        destination: string;
+        user: { id: string; email: string } | null;
+      };
+      setProtoSession({ email: trimmed, userId: data.user?.id ?? null });
+      navigate(data.destination);
+    } catch {
+      toast.error("Network error. Please try again.");
     } finally {
-      setSending(false);
+      setLoading(false);
     }
   };
 
@@ -123,16 +87,13 @@ export default function EntryLandingPage() {
             />
           </div>
 
-          <Button type="submit" size="lg" className="w-full gap-2 rounded-sm" disabled={sending}>
-            {sending ? "Sending…" : "Stay in sync"}
+          <Button type="submit" size="lg" className="w-full gap-2 rounded-sm" disabled={loading}>
+            {loading ? "Opening…" : "Stay in sync"}
             <ArrowRight className="h-4 w-4" />
           </Button>
 
           <p className="pt-1 text-center text-[13px] text-muted-foreground">
-            New here? We&apos;ll set you up. Returning? Welcome back.
-          </p>
-          <p className="pt-1 text-center font-mono text-[11px] text-muted-foreground">
-            No password. We&apos;ll send a magic link.
+            Access is currently invite-only.
           </p>
         </form>
       </div>

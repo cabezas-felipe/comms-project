@@ -6,7 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
 import { extractOnboarding } from "./ai/onboarding-extractor.mjs";
-import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
+import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
@@ -267,113 +267,74 @@ app.get("/api/ai/metrics", (_req, res) => {
   });
 });
 
-// ─── Post-login route decision ────────────────────────────────────────────────
-// Returns the destination the frontend should navigate to after successful auth.
-// Returning users (have existing settings) go to /dashboard; new users to /onboarding.
+// ─── Prototype routing: resolve destination by email ─────────────────────────
+// Checks Supabase Auth + user settings to route to /dashboard or /onboarding.
+// No session is created; this is a pre-auth identity hint for the prototype.
 
-app.get("/api/auth/post-login-route", async (req, res) => {
-  const userId = await requireAuth(req, res);
-  if (!userId) return;
-  try {
-    const returning = await hasSettings(userId);
-    const destination = returning ? "/dashboard" : "/onboarding";
-    const reason = returning ? "returning_user" : "new_user";
-    res.json({ destination, reason });
-  } catch (error) {
-    res.status(500).json({
-      message: "Failed to determine post-login route.",
-      detail: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
-});
-
-// ─── Dev-only QA: mint a magic link via Supabase Admin API ───────────────────
-// Disabled by default. Enable for local QA only: TEMPO_ENABLE_DEV_MAGIC_LINK=true
-// NEVER enable in staging or production — uses service-role credentials.
-
-// Maps the frontend auth mode to the Supabase admin.generateLink type.
-// login → magiclink  (OTP sign-in for an existing user)
-// signup → signup    (creates user if needed + signs in)
-const LINK_TYPE_MAP = Object.freeze({ login: "magiclink", signup: "signup" });
-
-// Only localhost origins are permitted as redirectTo destinations.
-const DEV_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
-
-function isAllowedRedirectOrigin(urlStr) {
-  if (!urlStr) return true; // omitted redirectTo is fine; Supabase uses its default
-  try {
-    const { protocol, hostname, port } = new URL(urlStr);
-    return DEV_ORIGIN_RE.test(`${protocol}//${hostname}${port ? `:${port}` : ""}`);
-  } catch {
-    return false;
-  }
+/** Returns true if any onboarding category has at least one entry. */
+function hasOnboardingEntries(settings) {
+  if (!settings) return false;
+  return (
+    (settings.topics?.length ?? 0) > 0 ||
+    (settings.keywords?.length ?? 0) > 0 ||
+    (settings.geographies?.length ?? 0) > 0 ||
+    (settings.socialSources?.length ?? 0) > 0 ||
+    (settings.traditionalSources?.length ?? 0) > 0
+  );
 }
 
 /**
- * Mutable hook so tests can replace generateLink without live Supabase.
- * Same pattern as _auth.resolver. Do not use in production code paths.
+ * Mutable hook. Tests replace findUserByEmail / readSettingsForUser to avoid
+ * live Supabase or filesystem calls. Do not use outside tests.
  */
-export const _devMagicLink = {
-  generateLink: async ({ email, supabaseType, redirectTo }) => {
+export const _resolveDestination = {
+  findUserByEmail: async (email) => {
     const adminClient = createClient(
       /** @type {string} */ (process.env.SUPABASE_URL),
       /** @type {string} */ (process.env.SUPABASE_SERVICE_ROLE_KEY),
       { auth: { autoRefreshToken: false, persistSession: false } }
     );
-    const opts = redirectTo ? { options: { redirectTo } } : {};
-    const { data, error } = await adminClient.auth.admin.generateLink({
-      type: supabaseType,
-      email,
-      ...opts,
-    });
-    if (error) throw error;
-    return data.properties.action_link;
+    let page = 1;
+    for (;;) {
+      const { data, error } = await adminClient.auth.admin.listUsers({ page, perPage: 1000 });
+      if (error) throw error;
+      const match = data.users.find((u) => u.email === email);
+      if (match) return { id: match.id, email: match.email };
+      if (data.users.length < 1000) return null;
+      page++;
+    }
   },
+  readSettingsForUser: readSettings,
 };
 
-app.post("/api/auth/dev-magic-link", async (req, res) => {
-  if (process.env.TEMPO_ENABLE_DEV_MAGIC_LINK !== "true") {
-    res.status(404).json({ message: "Not found." });
-    return;
-  }
-
-  const { email, type, redirectTo } = req.body ?? {};
-
+app.post("/api/auth/resolve-destination", async (req, res) => {
+  const { email } = req.body ?? {};
   if (!email || typeof email !== "string" || !email.includes("@")) {
     res.status(400).json({ message: "email is required and must contain @." });
     return;
   }
-  if (type !== "login" && type !== "signup") {
-    res.status(400).json({ message: "type must be 'login' or 'signup'." });
-    return;
-  }
-  if (redirectTo !== undefined && typeof redirectTo !== "string") {
-    res.status(400).json({ message: "redirectTo must be a string when provided." });
-    return;
-  }
-  if (!isAllowedRedirectOrigin(redirectTo)) {
-    res.status(400).json({
-      message: "redirectTo must point to a localhost origin (this endpoint is dev-only).",
-    });
-    return;
-  }
-
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     res.status(503).json({
-      message: "Magic link generation requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
+      message: "resolve-destination requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
     });
     return;
   }
-
   try {
-    const supabaseType = LINK_TYPE_MAP[type];
-    const url = await _devMagicLink.generateLink({ email, supabaseType, redirectTo });
-    res.json({ url });
+    const user = await _resolveDestination.findUserByEmail(email);
+    if (!user) {
+      return res.status(403).json({
+        allowed: false,
+        message: "This email is not enabled for the prototype yet. Contact the team to be added.",
+      });
+    }
+    const settings = await _resolveDestination.readSettingsForUser(user.id).catch(() => null);
+    const destination = hasOnboardingEntries(settings) ? "/dashboard" : "/onboarding";
+    return res.json({ destination, user: { id: user.id, email: user.email } });
   } catch (err) {
     console.error(
-      `[auth.dev-magic-link] generateLink failed: ${err instanceof Error ? err.message : String(err)}`
+      `[auth.resolve-destination] ${err instanceof Error ? err.message : String(err)}`
     );
-    res.status(502).json({ message: "Could not generate magic link." });
+    res.status(502).json({ message: "Could not resolve destination." });
   }
 });
 

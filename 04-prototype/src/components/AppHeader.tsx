@@ -2,7 +2,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { formatClock } from "@/lib/format";
 import { useEffect, useState } from "react";
 import { Settings as SettingsIcon, LogOut } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import { useAuth, getProtoSession } from "@/lib/auth";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,7 +21,7 @@ export default function AppHeader() {
   const [now, setNow] = useState(new Date());
   const location = useLocation();
   const navigate = useNavigate();
-  const { isAuthenticated, logout } = useAuth();
+  const { logout } = useAuth();
   const isDevPreview =
     import.meta.env.DEV &&
     new URLSearchParams(location.search).get("preview") === "1";
@@ -30,9 +30,9 @@ export default function AppHeader() {
     return () => clearInterval(id);
   }, []);
 
-  // Hide chrome on entry/onboarding screens; in prod also hide when unauthenticated
-  if (["/" , "/auth", "/onboarding"].includes(location.pathname)) return null;
-  if (!import.meta.env.DEV && !isAuthenticated) return null;
+  // Hide chrome on landing/onboarding; in prod also hide until proto session is set.
+  if (["/", "/onboarding"].includes(location.pathname)) return null;
+  if (!import.meta.env.DEV && !getProtoSession()) return null;
 
   return (
     <header className="sticky top-0 z-30 border-b border-rule/60 bg-background/85 backdrop-blur">
