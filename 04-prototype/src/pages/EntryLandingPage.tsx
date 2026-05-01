@@ -2,10 +2,54 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ArrowRight } from "lucide-react";
+import { AlertTriangle, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
 import { setProtoSession } from "@/lib/auth";
-import { trackLandingViewed } from "@/lib/analytics";
+import {
+  trackLandingViewed,
+  trackLandingCtaClicked,
+  trackLandingFailed,
+  trackLandingSucceeded,
+} from "@/lib/analytics";
+import {
+  isValidEmailForLanding,
+  classifyEmailValidationFailure,
+} from "@/lib/email-validation";
+
+type BackendError = {
+  toast: string;
+  analyticsKey:
+    | "not_enabled"
+    | "config_unavailable"
+    | "resolve_failed"
+    | "invalid_request"
+    | "unknown_with_message"
+    | "unknown_without_message";
+};
+
+const BACKEND_ERROR_MAP: Record<string, BackendError> = {
+  "This email is not enabled for the prototype yet. Contact the team to be added.": {
+    toast: "Use an invited email to continue.",
+    analyticsKey: "not_enabled",
+  },
+  "resolve-destination requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.": {
+    toast: "Try again in a moment.",
+    analyticsKey: "config_unavailable",
+  },
+  "Could not resolve destination.": { toast: "Try again in a moment.", analyticsKey: "resolve_failed" },
+  "email is required and must contain @.": { toast: "Enter a valid email to continue.", analyticsKey: "invalid_request" },
+};
+
+function resolveBackendError(message?: string): BackendError {
+  if (!message) return { toast: "Could not continue. Please try again.", analyticsKey: "unknown_without_message" };
+  return BACKEND_ERROR_MAP[message] ?? { toast: "Check your details and try again.", analyticsKey: "unknown_with_message" };
+}
+
+function warnToast(message: string) {
+  toast.warning(message, {
+    icon: <AlertTriangle className="h-4 w-4" style={{ color: "hsl(var(--signal-warning))" }} />,
+  });
+}
 
 export default function EntryLandingPage() {
   const navigate = useNavigate();
@@ -19,10 +63,16 @@ export default function EntryLandingPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = email.trim();
-    if (!trimmed || !trimmed.includes("@")) {
-      toast.error("Enter a valid email to continue.");
+
+    trackLandingCtaClicked();
+
+    if (!isValidEmailForLanding(trimmed)) {
+      const validationReason = classifyEmailValidationFailure(trimmed);
+      trackLandingFailed({ failureStage: "validation", validationReason });
+      warnToast("Enter a valid email to continue.");
       return;
     }
+
     setLoading(true);
     try {
       const res = await fetch("/api/auth/resolve-destination", {
@@ -31,18 +81,29 @@ export default function EntryLandingPage() {
         body: JSON.stringify({ email: trimmed }),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { message?: string };
-        toast.error(body.message ?? "Could not continue. Please try again.");
+        const statusCode = res.status;
+        const body = (await res.json().catch(() => ({}))) as { message?: string };
+        const err = resolveBackendError(body.message);
+        trackLandingFailed({ failureStage: "backend", statusCode, mappedErrorKey: err.analyticsKey });
+        warnToast(err.toast);
         return;
       }
       const data = (await res.json()) as {
         destination: string;
         user: { id: string; email: string } | null;
       };
+      if (data.destination === "/dashboard") {
+        trackLandingSucceeded("dashboard");
+      } else if (data.destination === "/onboarding") {
+        trackLandingSucceeded("onboarding");
+      } else {
+        trackLandingFailed({ failureStage: "backend", mappedErrorKey: "unknown_with_message" });
+      }
       setProtoSession({ email: trimmed, userId: data.user?.id ?? null });
       navigate(data.destination);
     } catch {
-      toast.error("Network error. Please try again.");
+      trackLandingFailed({ failureStage: "network" });
+      warnToast("Network error. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -73,7 +134,7 @@ export default function EntryLandingPage() {
         </div>
 
         {/* Single email entry */}
-        <form onSubmit={handleSubmit} className="fade-up mx-auto w-full max-w-[420px] space-y-3">
+        <form onSubmit={handleSubmit} noValidate className="fade-up mx-auto w-full max-w-[420px] space-y-3">
           <div className="rounded-sm border border-rule/60 bg-surface-raised p-5">
             <label className="eyebrow mb-2 block">Email</label>
             <Input

@@ -1,6 +1,9 @@
 import {
   buildDashboardViewed,
   buildLandingViewed,
+  buildLandingCtaClicked,
+  buildLandingSucceeded,
+  buildLandingFailed,
   buildOnboardingCompleted,
   buildOnboardingSubmitted,
   buildOnboardingViewed,
@@ -11,6 +14,7 @@ import {
   emitAnalyticsEvent,
   identifyPostHogUser,
   setAnalyticsSink,
+  type LandingFailedPayload,
 } from "@tempo/analytics";
 
 // Falls back through sessionStorage (legacy key tempo_sid) to a generated value.
@@ -100,6 +104,18 @@ export function trackSourceOpenError(payload: {
 
 export function trackLandingViewed(): void {
   emitAnalyticsEvent(buildLandingViewed({ route: "/" }));
+}
+
+export function trackLandingCtaClicked(): void {
+  emitAnalyticsEvent(buildLandingCtaClicked({ route: "/" }));
+}
+
+export function trackLandingSucceeded(destination: "dashboard" | "onboarding"): void {
+  emitAnalyticsEvent(buildLandingSucceeded({ route: "/", destination }));
+}
+
+export function trackLandingFailed(payload: Omit<LandingFailedPayload, "route">): void {
+  emitAnalyticsEvent(buildLandingFailed({ route: "/", ...payload }));
 }
 
 export function trackOnboardingViewed(): void {
