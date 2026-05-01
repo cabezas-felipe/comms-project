@@ -3,6 +3,9 @@ import {
   analyticsEventSchema,
   buildDashboardViewed,
   buildLandingViewed,
+  buildLandingCtaClicked,
+  buildLandingSucceeded,
+  buildLandingFailed,
   buildOnboardingCompleted,
   buildOnboardingSubmitted,
   buildOnboardingViewed,
@@ -89,15 +92,92 @@ describe("buildSourceOpenError", () => {
 });
 
 describe("buildLandingViewed", () => {
-  it("builds a primary event with the given route", () => {
+  it("builds a secondary event with the given route", () => {
     const e = buildLandingViewed({ route: "/" });
     expect(e.name).toBe("landing_viewed");
-    expect(e.tier).toBe("primary");
+    expect(e.tier).toBe("secondary");
     expect(e.payload.route).toBe("/");
   });
 
   it("rejects empty route", () => {
     expect(() => buildLandingViewed({ route: "" })).toThrow();
+  });
+});
+
+describe("buildLandingCtaClicked", () => {
+  it("builds a secondary event with the given route", () => {
+    const e = buildLandingCtaClicked({ route: "/" });
+    expect(e.name).toBe("landing_cta_clicked");
+    expect(e.tier).toBe("secondary");
+    expect(e.payload.route).toBe("/");
+  });
+
+  it("rejects empty route", () => {
+    expect(() => buildLandingCtaClicked({ route: "" })).toThrow();
+  });
+});
+
+describe("buildLandingSucceeded", () => {
+  it("builds a primary event for dashboard destination", () => {
+    const e = buildLandingSucceeded({ route: "/", destination: "dashboard" });
+    expect(e.name).toBe("landing_succeeded");
+    expect(e.tier).toBe("primary");
+    expect(e.payload.destination).toBe("dashboard");
+  });
+
+  it("builds a primary event for onboarding destination", () => {
+    const e = buildLandingSucceeded({ route: "/", destination: "onboarding" });
+    expect(e.payload.destination).toBe("onboarding");
+  });
+
+  it("rejects unknown destination", () => {
+    expect(() =>
+      buildLandingSucceeded({ route: "/", destination: "unknown" as "dashboard" })
+    ).toThrow();
+  });
+});
+
+describe("buildLandingFailed", () => {
+  it("builds a guardrail event for validation failure", () => {
+    const e = buildLandingFailed({
+      route: "/",
+      failureStage: "validation",
+      validationReason: "empty",
+    });
+    expect(e.name).toBe("landing_failed");
+    expect(e.tier).toBe("guardrail");
+    expect(e.payload.failureStage).toBe("validation");
+    expect(e.payload.validationReason).toBe("empty");
+  });
+
+  it("builds a guardrail event for backend failure with statusCode and key", () => {
+    const e = buildLandingFailed({
+      route: "/",
+      failureStage: "backend",
+      statusCode: 403,
+      mappedErrorKey: "not_enabled",
+    });
+    expect(e.payload.failureStage).toBe("backend");
+    expect(e.payload.statusCode).toBe(403);
+    expect(e.payload.mappedErrorKey).toBe("not_enabled");
+  });
+
+  it("builds a guardrail event for network failure with no optional fields", () => {
+    const e = buildLandingFailed({ route: "/", failureStage: "network" });
+    expect(e.payload.failureStage).toBe("network");
+    expect(e.payload.validationReason).toBeUndefined();
+    expect(e.payload.statusCode).toBeUndefined();
+    expect(e.payload.mappedErrorKey).toBeUndefined();
+  });
+
+  it("rejects unknown failureStage", () => {
+    expect(() =>
+      buildLandingFailed({ route: "/", failureStage: "bad" as "network" })
+    ).toThrow();
+  });
+
+  it("rejects empty route", () => {
+    expect(() => buildLandingFailed({ route: "", failureStage: "network" })).toThrow();
   });
 });
 

@@ -97,17 +97,64 @@ export const settingsUpdatedEventSchema = z.object({
   payload: settingsUpdatedPayloadSchema,
 });
 
-// ─── Auth funnel events ──────────────────────────────────────────────────────
+// ─── Landing funnel events ───────────────────────────────────────────────────
 
 export const landingViewedPayloadSchema = z.object({
   route: z.string().min(1),
 });
 
+export const landingCtaClickedPayloadSchema = z.object({
+  route: z.string().min(1),
+});
+
+export const landingSucceededPayloadSchema = z.object({
+  route: z.string().min(1),
+  destination: z.enum(["dashboard", "onboarding"]),
+});
+
+export const landingFailedPayloadSchema = z.object({
+  route: z.string().min(1),
+  failureStage: z.enum(["validation", "backend", "network"]),
+  validationReason: z.enum(["empty", "missing_at", "invalid_domain"]).optional(),
+  statusCode: z.number().int().optional(),
+  mappedErrorKey: z
+    .enum([
+      "not_enabled",
+      "config_unavailable",
+      "resolve_failed",
+      "invalid_request",
+      "unknown_with_message",
+      "unknown_without_message",
+    ])
+    .optional(),
+});
+
 export const landingViewedEventSchema = z.object({
   name: z.literal("landing_viewed"),
-  tier: z.literal("primary"),
+  tier: z.literal("secondary"),
   occurredAt: occurredAtSchema,
   payload: landingViewedPayloadSchema,
+});
+
+export const landingCtaClickedEventSchema = z.object({
+  name: z.literal("landing_cta_clicked"),
+  tier: z.literal("secondary"),
+  occurredAt: occurredAtSchema,
+  payload: landingCtaClickedPayloadSchema,
+});
+
+export const landingSucceededEventSchema = z.object({
+  name: z.literal("landing_succeeded"),
+  tier: z.literal("primary"),
+  occurredAt: occurredAtSchema,
+  payload: landingSucceededPayloadSchema,
+});
+
+export const landingFailedEventSchema = z.object({
+  name: z.literal("landing_failed"),
+  tier: z.literal("guardrail"),
+  occurredAt: occurredAtSchema,
+  payload: landingFailedPayloadSchema,
 });
 
 // ─── Onboarding funnel events ────────────────────────────────────────────────
@@ -154,6 +201,9 @@ export const analyticsEventSchema = z.discriminatedUnion("name", [
   apiErrorEventSchema,
   settingsUpdatedEventSchema,
   landingViewedEventSchema,
+  landingCtaClickedEventSchema,
+  landingSucceededEventSchema,
+  landingFailedEventSchema,
   onboardingViewedEventSchema,
   onboardingSubmittedEventSchema,
   onboardingCompletedEventSchema,
@@ -161,6 +211,7 @@ export const analyticsEventSchema = z.discriminatedUnion("name", [
 
 export type EventTier = z.infer<typeof eventTierSchema>;
 export type AnalyticsEvent = z.infer<typeof analyticsEventSchema>;
+export type LandingFailedPayload = z.infer<typeof landingFailedPayloadSchema>;
 
 export function buildDashboardViewed(
   payload: z.infer<typeof dashboardViewedPayloadSchema>,
@@ -252,7 +303,43 @@ export function buildLandingViewed(
 ): z.infer<typeof landingViewedEventSchema> {
   return landingViewedEventSchema.parse({
     name: "landing_viewed",
+    tier: "secondary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildLandingCtaClicked(
+  payload: z.infer<typeof landingCtaClickedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof landingCtaClickedEventSchema> {
+  return landingCtaClickedEventSchema.parse({
+    name: "landing_cta_clicked",
+    tier: "secondary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildLandingSucceeded(
+  payload: z.infer<typeof landingSucceededPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof landingSucceededEventSchema> {
+  return landingSucceededEventSchema.parse({
+    name: "landing_succeeded",
     tier: "primary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildLandingFailed(
+  payload: z.infer<typeof landingFailedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof landingFailedEventSchema> {
+  return landingFailedEventSchema.parse({
+    name: "landing_failed",
+    tier: "guardrail",
     occurredAt,
     payload,
   });
