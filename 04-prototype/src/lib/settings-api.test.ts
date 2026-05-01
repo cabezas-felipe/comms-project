@@ -123,7 +123,7 @@ describe("fetchSettingsPayload — auth-aware fallback policy", () => {
     const { supabase } = await import("@/lib/supabase");
     vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
       data: { session: { access_token: "test-token", user: { id: "test-user-id" } } },
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     await expect(fetchSettingsPayload()).rejects.toThrow(
       "Authenticated settings read failed (API unavailable)."
@@ -134,7 +134,7 @@ describe("fetchSettingsPayload — auth-aware fallback policy", () => {
     const { supabase } = await import("@/lib/supabase");
     vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
       data: { session: null },
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const payload = await fetchSettingsPayload();
     expect(payload.contractVersion).toBe(CONTRACT_VERSION);
@@ -152,7 +152,7 @@ describe("saveSettingsPayload — auth-aware fallback policy", () => {
     const { supabase } = await import("@/lib/supabase");
     vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
       data: { session: { access_token: "test-token", user: { id: "test-user-id" } } },
-    } as any);
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     await expect(
       saveSettingsPayload({

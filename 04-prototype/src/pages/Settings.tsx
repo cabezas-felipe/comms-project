@@ -24,9 +24,10 @@ interface ListSectionProps {
   items: string[];
   onChange: (items: string[]) => void;
   placeholder: string;
+  disabled?: boolean;
 }
 
-function ListSection({ title, description, items, onChange, placeholder }: ListSectionProps) {
+function ListSection({ title, description, items, onChange, placeholder, disabled }: ListSectionProps) {
   const [draft, setDraft] = useState("");
 
   const add = () => {
@@ -54,7 +55,10 @@ function ListSection({ title, description, items, onChange, placeholder }: ListS
             {items.map((item) => (
               <AlertDialog key={item}>
                 <AlertDialogTrigger asChild>
-                  <button className="group inline-flex items-center gap-1.5 rounded-sm border border-rule/60 bg-background py-1 pl-2.5 pr-1.5 text-[13px] transition-colors hover:border-ember hover:text-ember">
+                  <button
+                    disabled={disabled}
+                    className="group inline-flex items-center gap-1.5 rounded-sm border border-rule/60 bg-background py-1 pl-2.5 pr-1.5 text-[13px] transition-colors hover:border-ember hover:text-ember disabled:pointer-events-none disabled:opacity-50"
+                  >
                     {item}
                     <X className="h-3 w-3 opacity-50 transition-opacity group-hover:opacity-100" />
                   </button>
@@ -87,8 +91,9 @@ function ListSection({ title, description, items, onChange, placeholder }: ListS
               onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), add())}
               placeholder={placeholder}
               className="max-w-sm"
+              disabled={disabled}
             />
-            <Button type="button" variant="outline" onClick={add} disabled={!draft.trim()} className="gap-1.5">
+            <Button type="button" variant="outline" onClick={add} disabled={disabled || !draft.trim()} className="gap-1.5">
               <Plus className="h-3.5 w-3.5" /> Add
             </Button>
           </div>
@@ -105,8 +110,6 @@ export default function Settings() {
   const [keywords, setKeywords] = useState(["OFAC", "sanctions", "deportation routing", "bilateral"]);
   const [geographies, setGeographies] = useState(["US", "Colombia"]);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
-  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
-  const [, forceTick] = useState(0);
   const saveTimer = useRef<number | null>(null);
   const [sourceTab, setSourceTab] = useState<SourceTab>("traditional");
   const [loading, setLoading] = useState(true);
@@ -153,7 +156,6 @@ export default function Settings() {
           traditionalSources: s.traditional,
           socialSources: s.social,
         });
-        setLastSavedAt(new Date());
         setSaveState("saved");
       } catch {
         toast.error("Could not save settings. Please try again.");
@@ -167,23 +169,7 @@ export default function Settings() {
     scheduleSave();
   };
 
-  // Re-render the "saved Xs ago" label every 30s
-  useEffect(() => {
-    const id = window.setInterval(() => forceTick((n) => n + 1), 30000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  const savedLabel = (() => {
-    if (saveState === "saving") return "Saving…";
-    if (saveState === "idle" || !lastSavedAt) return "All changes saved";
-    const secs = Math.floor((Date.now() - lastSavedAt.getTime()) / 1000);
-    if (secs < 5) return "Saved · just now";
-    if (secs < 60) return `Saved · ${secs}s ago`;
-    const mins = Math.floor(secs / 60);
-    if (mins < 60) return `Saved · ${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    return `Saved · ${hrs}h ago`;
-  })();
+  const savedLabel = saveState === "saving" ? "Saving…" : "All changes saved";
 
   const list = sourceTab === "traditional" ? traditional : social;
   const setList = sourceTab === "traditional" ? markDirty(setTraditional) : markDirty(setSocial);
@@ -236,11 +222,6 @@ export default function Settings() {
               <p className="mt-1.5 max-w-[60ch] text-[13px] leading-relaxed text-muted-foreground">
                 Refine what Tempo watches. Changes take effect at the next refresh.
               </p>
-              {loading && (
-                <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-                  Loading saved scope…
-                </p>
-              )}
             </div>
             <div
               aria-live="polite"
@@ -258,13 +239,14 @@ export default function Settings() {
             </div>
           </div>
 
-          <div>
+          <div aria-busy={loading}>
             <ListSection
               title="Topics"
               description="Broad themes Tempo clusters stories around."
               items={topics}
               onChange={markDirty(setTopics)}
               placeholder="Add a topic"
+              disabled={loading}
             />
             <ListSection
               title="Keywords"
@@ -272,6 +254,7 @@ export default function Settings() {
               items={keywords}
               onChange={markDirty(setKeywords)}
               placeholder="Add a keyword"
+              disabled={loading}
             />
             <ListSection
               title="Geographies"
@@ -279,6 +262,7 @@ export default function Settings() {
               items={geographies}
               onChange={markDirty(setGeographies)}
               placeholder="Add a geography"
+              disabled={loading}
             />
 
             {/* Sources section with tabs */}
@@ -298,12 +282,14 @@ export default function Settings() {
                       onClick={() => setSourceTab("traditional")}
                       glyph="■"
                       label={`Traditional outlets · ${traditional.length}`}
+                      disabled={loading}
                     />
                     <TabButton
                       active={sourceTab === "social"}
                       onClick={() => setSourceTab("social")}
                       glyph="◯"
                       label={`Social accounts · ${social.length}`}
+                      disabled={loading}
                     />
                   </div>
 
@@ -311,7 +297,10 @@ export default function Settings() {
                     {list.map((s) => (
                       <AlertDialog key={s}>
                         <AlertDialogTrigger asChild>
-                          <button className="group inline-flex items-center gap-1.5 rounded-sm border border-rule/60 bg-background py-1 pl-2.5 pr-1.5 text-[13px] transition-colors hover:border-ember hover:text-ember">
+                          <button
+                            disabled={loading}
+                            className="group inline-flex items-center gap-1.5 rounded-sm border border-rule/60 bg-background py-1 pl-2.5 pr-1.5 text-[13px] transition-colors hover:border-ember hover:text-ember disabled:pointer-events-none disabled:opacity-50"
+                          >
                             <span aria-hidden className="font-mono text-[10px] text-muted-foreground group-hover:text-ember">
                               {sourceTab === "social" ? "◯" : "■"}
                             </span>
@@ -347,8 +336,9 @@ export default function Settings() {
                       onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addSource())}
                       placeholder={sourceTab === "social" ? "@handle" : "Outlet name"}
                       className="max-w-sm"
+                      disabled={loading}
                     />
-                    <Button type="button" variant="outline" onClick={addSource} disabled={!draftSource.trim()} className="gap-1.5">
+                    <Button type="button" variant="outline" onClick={addSource} disabled={loading || !draftSource.trim()} className="gap-1.5">
                       <Plus className="h-3.5 w-3.5" /> Add
                     </Button>
                   </div>
@@ -367,16 +357,19 @@ function TabButton({
   onClick,
   glyph,
   label,
+  disabled,
 }: {
   active: boolean;
   onClick: () => void;
   glyph: string;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
-      className={`inline-flex items-center gap-2 rounded-sm px-3 py-1.5 text-[12px] font-medium transition-colors ${
+      disabled={disabled}
+      className={`inline-flex items-center gap-2 rounded-sm px-3 py-1.5 text-[12px] font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 ${
         active ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
       }`}
     >

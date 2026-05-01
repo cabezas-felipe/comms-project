@@ -34,6 +34,8 @@ export default function AppHeader() {
   if (["/", "/onboarding"].includes(location.pathname)) return null;
   if (!import.meta.env.DEV && !getProtoSession()) return null;
 
+  const isSettings = location.pathname === "/settings";
+
   return (
     <header className="sticky top-0 z-30 border-b border-rule/60 bg-background/85 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-[1400px] items-center justify-between px-6">
@@ -49,10 +51,12 @@ export default function AppHeader() {
         </div>
 
         <div className="flex items-center gap-5">
-          <div className="hidden text-right md:block">
-            <div className="eyebrow leading-none">Last refresh</div>
-            <div className="font-mono text-xs text-foreground">{formatClock(now)}</div>
-          </div>
+          {!isSettings && (
+            <div className="hidden text-right md:block">
+              <div className="eyebrow leading-none">Last refresh</div>
+              <div className="font-mono text-xs text-foreground">{formatClock(now)}</div>
+            </div>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -64,11 +68,15 @@ export default function AppHeader() {
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-40">
-              <DropdownMenuItem onClick={() => navigate("/settings")}>
-                <SettingsIcon className="mr-2 h-4 w-4" />
-                Settings
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
+              {!isSettings && (
+                <>
+                  <DropdownMenuItem onClick={() => navigate("/settings")}>
+                    <SettingsIcon className="mr-2 h-4 w-4" />
+                    Settings
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
               <DropdownMenuItem onClick={logout}>
                 <LogOut className="mr-2 h-4 w-4" />
                 Log out
