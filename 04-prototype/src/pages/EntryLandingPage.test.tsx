@@ -49,6 +49,13 @@ describe("EntryLandingPage — analytics event emission", () => {
     vi.restoreAllMocks();
   });
 
+  it("fires trackLandingViewed on mount", async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(analytics.trackLandingViewed).toHaveBeenCalledTimes(1)
+    );
+  });
+
   it("fires trackLandingCtaClicked on every submit attempt", async () => {
     renderPage();
     clickSubmit();

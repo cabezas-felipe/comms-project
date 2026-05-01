@@ -12,7 +12,6 @@ import {
   buildStoryExpanded,
   createPostHogSink,
   emitAnalyticsEvent,
-  identifyPostHogUser,
   setAnalyticsSink,
   type LandingFailedPayload,
 } from "@tempo/analytics";
@@ -42,10 +41,9 @@ function resolveDistinctId(): string {
   return id;
 }
 
-// Stored at init time so identifyAnalyticsUser can reach the same PostHog project.
-let _phConfig: { apiKey: string; host: string; anonymousId: string } | null = null;
-// Tracks the last user ID we identified to prevent duplicate $identify calls.
-let _lastIdentifiedId: string | null = null;
+// Anon→identified user stitching is intentionally absent: the prototype uses a
+// lightweight ProtoSession marker rather than real Supabase auth, so there is no
+// stable user ID to $identify against in PostHog until full auth is wired.
 
 /**
  * Wire PostHog as the analytics sink. Call once at app startup (e.g. main.tsx).
@@ -57,28 +55,7 @@ export function initPostHog(): void {
   const apiKey = env?.VITE_POSTHOG_API_KEY;
   if (!apiKey) return;
   const host = env?.VITE_POSTHOG_HOST ?? "https://us.i.posthog.com";
-
-  const anonymousId = resolveDistinctId();
-  _phConfig = { apiKey, host, anonymousId };
-  _lastIdentifiedId = null;
-
-  setAnalyticsSink(createPostHogSink({ apiKey, host, distinctId: anonymousId }));
-}
-
-/**
- * Associate pre-login anonymous events with an authenticated user.
- * Call once after a successful auth session is established.
- * Safe to call on every auth state change — deduped by userId.
- */
-export function identifyAnalyticsUser(userId: string): void {
-  if (!_phConfig || userId === _lastIdentifiedId) return;
-  _lastIdentifiedId = userId;
-  identifyPostHogUser({
-    apiKey: _phConfig.apiKey,
-    host: _phConfig.host,
-    userId,
-    anonymousId: _phConfig.anonymousId,
-  });
+  setAnalyticsSink(createPostHogSink({ apiKey, host, distinctId: resolveDistinctId() }));
 }
 
 export function trackDashboardViewed(): void {
