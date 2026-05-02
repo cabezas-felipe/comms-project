@@ -70,7 +70,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       loading,
       logout: async () => {
         clearProtoSession();
-        await supabase.auth.signOut();
+        try {
+          await supabase.auth.signOut();
+        } catch {
+          // signOut failed (e.g. offline); local state already cleared above
+        }
       },
     }),
     [session, loading]

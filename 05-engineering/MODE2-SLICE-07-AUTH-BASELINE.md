@@ -83,3 +83,7 @@ Implement a minimal auth baseline that protects private routes while preserving 
 | `eslint` on slice files | Pass — 1 pre-existing warning (`react-refresh/only-export-components` in `auth.tsx`) |
 
 **Decision recorded:** D-024 in `05-engineering/DECISIONS.md`.
+
+## 11) Follow-up: archive removal (2026-05, branch `work/logout`)
+
+The `/archive` and `/archive/*` routes described in this slice were removed in a subsequent cleanup pass. References to archive routing above are historical — they describe what was verified at the time this slice was closed. Current protected routes are `/dashboard` and `/settings` only. See D-037 in `05-engineering/DECISIONS.md`.

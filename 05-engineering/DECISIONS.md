@@ -2,6 +2,40 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-01 - D-037 - Archive removal and logout hardening (branch `work/logout`)
+
+#### Context
+
+- Archive section (`/archive`, `/archive/signal-radar`, `/archive/evidence-desk`, `/archive/analyst-briefing`) had served as a showcase of discarded prototype directions. It was no longer useful as a live route surface and added dead weight to the app.
+- Legacy redirect routes (`/d/signal-radar`, `/d/evidence-desk`, `/d/analyst-briefing`, `/directions`) pointed only at archive pages and were no longer referenced anywhere.
+- `ProtectedRoute` had a DEV-only bypass (`if (import.meta.env.DEV) return children`) that let all routes through in development regardless of proto session state, diverging dev and prod behavior.
+- Logout did not navigate after clearing session, leaving the user on a protected page that would only redirect on the next render cycle. `supabase.auth.signOut()` was also unguarded against network errors.
+- `AppHeader` suppressed the proto-session check in DEV (`!import.meta.env.DEV && !getProtoSession()`), consistent with the old bypass but no longer correct once the bypass was removed.
+
+#### Decision
+
+- **Archive removed:** Deleted `src/pages/archive/` (5 files) and `src/components/ArchiveBanner.tsx`. Removed all archive imports, routes, and legacy redirect routes from `src/App.tsx`. Legacy URLs (`/archive`, `/archive/*`, `/d/*`, `/directions`) now fall through to `NotFound` — consistent with all other unknown paths.
+- **`AppHeader.tsx`:** Removed unused `NAV` constant (contained `/archive` entry, was not rendered). Removed dead `isDevPreview` variable. Unified proto-session guard: `if (!getProtoSession()) return null` applies in all environments.
+- **`ProtectedRoute.tsx`:** Removed the `if (import.meta.env.DEV) return <>{children}</>` bypass. Proto-session check now runs in DEV and prod identically. Without a valid session, protected routes redirect to `/` with `replace` in all environments.
+- **`auth.tsx`:** Wrapped `supabase.auth.signOut()` in try/catch. Proto session is cleared first; server-side sign-out failure (e.g. offline) does not block local logout.
+- **`AppHeader.tsx` logout:** Added `handleLogout` that calls `logout()` then `navigate("/", { replace: true })`. Replace ensures the current history entry becomes `/`, so Back from landing cannot return to a protected page (ProtectedRoute would redirect anyway since proto session is gone).
+- **Tests:** Added `src/components/ProtectedRoute.test.tsx` — 2 tests covering redirect-when-no-session and render-when-session-exists.
+
+#### Why
+
+- Removing archive eliminates dead surface area and dead redirects with no user value.
+- Unifying the DEV/prod ProtectedRoute behavior means integration tests and dev iteration reflect what production enforces.
+- Replace-style navigation after logout is the simplest reliable approach for preventing Back-button re-entry into protected pages without exotic history manipulation.
+- Tolerating a failed `signOut` (offline) while still clearing local state matches the product requirement: from the app's perspective, the user is always logged out after clicking Log out.
+
+#### Consequences
+
+- `npm test` → 95 tests, 0 failures (8 test files; 2 new ProtectedRoute tests added).
+- `npm run build` → exits 0.
+- `/archive`, `/archive/*`, `/d/*`, `/directions` now return NotFound.
+- DEV environment now requires going through the landing flow (proto session) to access protected routes.
+- Historical references to archive routes in D-011 and D-024 remain accurate as records of what was decided at those times; this entry records the subsequent removal.
+
 ### 2026-04-24 - D-036 - Slice 18 hardening: enforce 401 on protected API routes
 
 #### Context
