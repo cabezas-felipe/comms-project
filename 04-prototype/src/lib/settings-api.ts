@@ -5,6 +5,7 @@ import {
 } from "@tempo/contracts";
 import { STORIES } from "@/data/stories";
 import { supabase } from "./supabase";
+import { getProtoSession } from "./auth";
 
 const SETTINGS_STORAGE_KEY_BASE = "tempo.settings.v1";
 const SETTINGS_API_ENDPOINT = "/api/settings";
@@ -21,8 +22,11 @@ async function getStorageKey(): Promise<string> {
     const { data } = await supabase.auth.getSession();
     if (data.session?.user?.id) return `${SETTINGS_STORAGE_KEY_BASE}.${data.session.user.id}`;
   } catch {
-    // supabase not configured — use global key
+    // supabase not configured
   }
+  // Prototype recognized-identity fallback: use recognized userId for per-user isolation.
+  const proto = getProtoSession();
+  if (proto?.userId) return `${SETTINGS_STORAGE_KEY_BASE}.${proto.userId}`;
   return SETTINGS_STORAGE_KEY_BASE;
 }
 
@@ -33,7 +37,12 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
       return { Authorization: `Bearer ${data.session.access_token}` };
     }
   } catch {
-    // supabase not configured — no auth header
+    // supabase not configured
+  }
+  // Prototype recognized-identity fallback (not production auth).
+  const proto = getProtoSession();
+  if (proto) {
+    return { "x-recognized-email": proto.email };
   }
   return {};
 }
@@ -101,7 +110,9 @@ export async function extractOnboardingText(text: string): Promise<ExtractionRes
 
 export async function fetchSettingsPayload(): Promise<SettingsPayload> {
   const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
-  const authenticated = "Authorization" in authHeaders;
+  // Identity-bound: either a Supabase session (Bearer) or a prototype recognized identity.
+  // In both cases, fail loudly on API failure rather than silently diverging to local data.
+  const isIdentityBound = "Authorization" in authHeaders || "x-recognized-email" in authHeaders;
   try {
     const response = await fetch(SETTINGS_API_ENDPOINT, {
       method: "GET",
@@ -114,8 +125,8 @@ export async function fetchSettingsPayload(): Promise<SettingsPayload> {
     localStorage.setItem(storageKey, JSON.stringify(payload));
     return payload;
   } catch (err) {
-    if (authenticated) {
-      throw new Error("Authenticated settings read failed (API unavailable).");
+    if (isIdentityBound) {
+      throw new Error("Identity-bound settings read failed: API unavailable.");
     }
     await wait(MOCK_LATENCY_MS);
     const raw = localStorage.getItem(storageKey);
@@ -137,7 +148,9 @@ export async function fetchSettingsPayload(): Promise<SettingsPayload> {
 export async function saveSettingsPayload(payload: SettingsPayload): Promise<SettingsPayload> {
   const validated = settingsPayloadSchema.parse(payload);
   const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
-  const authenticated = "Authorization" in authHeaders;
+  // Identity-bound: either a Supabase session (Bearer) or a prototype recognized identity.
+  // In both cases, fail loudly on API failure rather than silently diverging to local data.
+  const isIdentityBound = "Authorization" in authHeaders || "x-recognized-email" in authHeaders;
   try {
     const response = await fetch(SETTINGS_API_ENDPOINT, {
       method: "PUT",
@@ -151,8 +164,8 @@ export async function saveSettingsPayload(payload: SettingsPayload): Promise<Set
     localStorage.setItem(storageKey, JSON.stringify(persisted));
     return persisted;
   } catch (err) {
-    if (authenticated) {
-      throw new Error("Authenticated settings write failed (API unavailable).");
+    if (isIdentityBound) {
+      throw new Error("Identity-bound settings write failed: API unavailable.");
     }
     await wait(MOCK_LATENCY_MS);
     localStorage.setItem(storageKey, JSON.stringify(validated));

@@ -2,10 +2,11 @@ import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 
-// ─── Prototype session marker ─────────────────────────────────────────────────
-// Lightweight identity hint set after /api/auth/resolve-destination resolves.
-// Not a real auth token — exists only so ProtectedRoute and AppHeader can gate
-// on "user went through the landing flow" without a Supabase session.
+// ─── Prototype recognized-identity layer ─────────────────────────────────────
+// A lightweight, non-production identity hint set when /api/auth/resolve-destination
+// confirms an email is recognized. Not a real auth token — it gates ProtectedRoute
+// and AppHeader on "user completed the landing flow" without requiring a Supabase session.
+// This is explicitly a prototype identity mechanism, not authentication.
 
 export type ProtoSession = { email: string; userId: string | null };
 
@@ -37,6 +38,9 @@ interface AuthContextValue {
   user: User | null;
   session: Session | null;
   loading: boolean;
+  // Prototype recognized identity — single source of truth across the app.
+  recognizedIdentity: ProtoSession | null;
+  setRecognizedIdentity: (s: ProtoSession) => void;
   logout: () => Promise<void>;
 }
 
@@ -45,6 +49,8 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  // Initialize synchronously from localStorage so ProtectedRoute never flashes a redirect.
+  const [protoSession, setProtoSessionState] = useState<ProtoSession | null>(() => getProtoSession());
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -64,12 +70,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<AuthContextValue>(
     () => ({
-      isAuthenticated: !!session,
+      isAuthenticated: !!session || !!protoSession,
       user: session?.user ?? null,
       session,
       loading,
+      recognizedIdentity: protoSession,
+      setRecognizedIdentity: (s: ProtoSession) => {
+        setProtoSession(s);       // persist to localStorage
+        setProtoSessionState(s);  // update React state (triggers re-render)
+      },
       logout: async () => {
         clearProtoSession();
+        setProtoSessionState(null);
         try {
           await supabase.auth.signOut();
         } catch {
@@ -77,7 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       },
     }),
-    [session, loading]
+    [session, loading, protoSession]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

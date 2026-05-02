@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AlertTriangle, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
-import { setProtoSession } from "@/lib/auth";
+import { useAuth } from "@/lib/auth";
 import {
   trackLandingViewed,
   trackLandingCtaClicked,
@@ -53,6 +53,7 @@ function warnToast(message: string) {
 
 export default function EntryLandingPage() {
   const navigate = useNavigate();
+  const { setRecognizedIdentity } = useAuth();
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -99,7 +100,8 @@ export default function EntryLandingPage() {
       } else {
         trackLandingFailed({ failureStage: "backend", mappedErrorKey: "unknown_with_message" });
       }
-      setProtoSession({ email: trimmed, userId: data.user?.id ?? null });
+      // Prefer canonical email from backend (avoids casing/alias mismatch on future requests).
+      setRecognizedIdentity({ email: data.user?.email ?? trimmed, userId: data.user?.id ?? null });
       navigate(data.destination);
     } catch {
       trackLandingFailed({ failureStage: "network" });

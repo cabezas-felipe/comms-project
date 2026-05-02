@@ -22,28 +22,123 @@ const app = express();
 app.use(express.json());
 
 /**
- * Extracts the authenticated user ID from the Bearer token in the Authorization header.
- * Returns null when no token is present, Supabase is unconfigured, or the token is invalid.
+ * Resolves an email address to a Supabase userId via admin API.
+ * Requires SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY; returns null on any failure.
+ * Not production auth — this is the prototype email-recognition lookup.
+ * Future upgrade path: replace with a proper session token exchange.
  */
-async function resolveUserId(req) {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader?.startsWith("Bearer ")) return null;
-  if (!isSupabaseEnabled()) return null;
-  const token = authHeader.slice(7);
+async function emailToUserId(email) {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) return null;
   try {
-    const { data, error } = await getSupabaseClient().auth.getUser(token);
-    if (error || !data?.user) return null;
-    return data.user.id;
+    const adminClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+    let page = 1;
+    for (;;) {
+      const { data, error } = await adminClient.auth.admin.listUsers({ page, perPage: 1000 });
+      if (error || !data) return null;
+      // Normalize both sides to handle stored-email casing differences.
+      const match = data.users.find((u) => u.email?.toLowerCase() === email);
+      if (match) return match.id;
+      if (data.users.length < 1000) return null;
+      page++;
+    }
   } catch {
     return null;
   }
 }
 
 /**
- * Mutable resolver hook. Tests override _auth.resolver to inject a deterministic user ID
- * without a live Supabase instance. Do not use in production code paths.
+ * Mutable hook for the email-to-userId lookup used in the email_recognition identity path.
+ * Tests override _emailLookup.resolve to inject a deterministic userId without live Supabase.
+ * Do not use in production code paths.
  */
-export const _auth = { resolver: resolveUserId };
+export const _emailLookup = { resolve: emailToUserId };
+
+// ─── Prototype email-recognition cache ───────────────────────────────────────
+// In-memory cache for email→userId to reduce repeated listUsers scans within a session.
+// Prototype optimization only — not a replacement for production auth/session design.
+// Future upgrade: remove when resolver is swapped to token-based identity.
+const EMAIL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const EMAIL_CACHE_MAX = 100;               // clear-all on overflow (prototype simplicity)
+
+/** @type {Map<string, { userId: string, expiresAt: number }>} */
+const _emailCache = new Map();
+
+function emailCacheGet(email) {
+  const entry = _emailCache.get(email);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) { _emailCache.delete(email); return undefined; }
+  return entry.userId;
+}
+
+function emailCacheSet(email, userId) {
+  if (_emailCache.size >= EMAIL_CACHE_MAX) _emailCache.clear();
+  _emailCache.set(email, { userId, expiresAt: Date.now() + EMAIL_CACHE_TTL_MS });
+}
+
+/** Exported for test teardown only — clears the email-recognition cache. */
+export function _clearEmailCache() {
+  _emailCache.clear();
+}
+
+/**
+ * Resolves caller identity from the request. Returns { userId, source } or null.
+ *
+ * Precedence:
+ *   1. Bearer token → Supabase JWT verification (production path; source: "bearer")
+ *   2. x-recognized-email header → server-side email lookup (prototype path; source: "email_recognition")
+ *
+ * Path 2 does NOT trust client-supplied userId — email is resolved server-side to the
+ * canonical userId. If a Bearer token is present but unresolvable, returns null without
+ * falling through to the prototype path.
+ *
+ * Prototype identity (path 2) is not production auth. Intended future upgrade: swap
+ * email_recognition for a proper short-lived token issued at landing.
+ *
+ * Exported so tests can exercise the resolver directly without HTTP overhead.
+ */
+export async function resolveIdentity(req) {
+  // 1. Bearer token — Supabase-verified identity (production path)
+  const authHeader = req.headers["authorization"];
+  if (authHeader?.startsWith("Bearer ")) {
+    if (isSupabaseEnabled()) {
+      const token = authHeader.slice(7);
+      try {
+        const { data, error } = await getSupabaseClient().auth.getUser(token);
+        if (!error && data?.user) {
+          return { userId: data.user.id, source: "bearer" };
+        }
+      } catch { /* invalid token */ }
+    }
+    // Bearer present but unresolvable: do not fall through to prototype headers.
+    return null;
+  }
+
+  // 2. Prototype recognized-identity: resolve email server-side (no client userId trust)
+  const recognizedEmail = req.headers["x-recognized-email"];
+  if (recognizedEmail && typeof recognizedEmail === "string" && recognizedEmail.trim()) {
+    const email = recognizedEmail.trim().toLowerCase();
+    const cachedId = emailCacheGet(email);
+    if (cachedId !== undefined) return { userId: cachedId, source: "email_recognition" };
+    const userId = await _emailLookup.resolve(email);
+    if (userId) {
+      emailCacheSet(email, userId);
+      return { userId, source: "email_recognition" };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Mutable resolver hook. Tests override _auth.resolver to inject a deterministic identity
+ * without a live Supabase instance. Do not use in production code paths.
+ * Resolver must return { userId: string, source: string } or null.
+ */
+export const _auth = { resolver: resolveIdentity };
 
 /**
  * Mutable extraction hook. Tests override _extraction.extract to simulate primary/fallback
@@ -52,16 +147,17 @@ export const _auth = { resolver: resolveUserId };
 export const _extraction = { extract: extractOnboarding };
 
 /**
- * Enforces authentication on a route. Sends 401 and returns null when the resolver
- * cannot identify the caller. Callers must guard: `if (!userId) return;`
+ * Enforces recognized identity on a route. Sends 401 and returns null when identity cannot be resolved.
+ * Callers must guard: `if (!identity) return;`
+ * Returns { userId, source } on success.
  */
-async function requireAuth(req, res) {
-  const userId = await _auth.resolver(req);
-  if (!userId) {
-    res.status(401).json({ message: "Authentication required. Provide a valid Bearer token." });
+async function requireIdentity(req, res) {
+  const identity = await _auth.resolver(req);
+  if (!identity) {
+    res.status(401).json({ message: "Authentication required. Provide a valid Bearer token or recognized-identity headers." });
     return null;
   }
-  return userId;
+  return identity;
 }
 
 try {
@@ -150,10 +246,10 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/api/settings", async (req, res) => {
-  const userId = await requireAuth(req, res);
-  if (!userId) return;
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
   try {
-    const payload = await readSettings(userId);
+    const payload = await readSettings(identity.userId);
     res.json(payload);
   } catch (error) {
     res.status(500).json({
@@ -164,8 +260,8 @@ app.get("/api/settings", async (req, res) => {
 });
 
 app.put("/api/settings", async (req, res) => {
-  const userId = await requireAuth(req, res);
-  if (!userId) return;
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
   const result = settingsPayloadSchema.safeParse(req.body);
   if (!result.success) {
     res.status(400).json({
@@ -175,11 +271,12 @@ app.put("/api/settings", async (req, res) => {
     return;
   }
   try {
-    await writeSettings(result.data, userId);
+    await writeSettings(result.data, identity.userId);
     trackServerEvent("settings_updated", {
       topicCount: result.data.topics?.length ?? 0,
       geoCount: result.data.geographies?.length ?? 0,
       sourceCount: (result.data.traditionalSources?.length ?? 0) + (result.data.socialSources?.length ?? 0),
+      identitySource: identity.source,
     });
     res.json(result.data);
   } catch (error) {
@@ -209,10 +306,10 @@ app.get("/api/ingestion/sources", async (_req, res) => {
 });
 
 app.get("/api/dashboard", async (req, res) => {
-  const userId = await requireAuth(req, res);
-  if (!userId) return;
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
   try {
-    const [settings, rawItems] = await Promise.all([readSettings(userId), readFeedItems(DATA_DIR)]);
+    const [settings, rawItems] = await Promise.all([readSettings(identity.userId), readFeedItems(DATA_DIR)]);
     const { items: sourceItems, errors: normErrors } = normalizeSourceItems(rawItems);
     if (normErrors.length > 0) {
       console.warn(`[ingestion.normalize] ${normErrors.length} item(s) skipped:`, normErrors);
@@ -239,6 +336,7 @@ app.get("/api/dashboard", async (req, res) => {
       fallbackCount,
       totalCostUsd: estimatedCostUsd,
       aiModel: aiConfig.summarization,
+      identitySource: identity.source,
     });
     res.json({ contractVersion: payload.contractVersion, stories: responseStories });
   } catch (error) {

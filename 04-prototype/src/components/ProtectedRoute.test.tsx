@@ -5,7 +5,7 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import * as auth from "@/lib/auth";
 
 vi.mock("@/lib/auth", () => ({
-  getProtoSession: vi.fn(),
+  useAuth: vi.fn(),
 }));
 
 function renderProtected(initialPath = "/dashboard") {
@@ -21,6 +21,14 @@ function renderProtected(initialPath = "/dashboard") {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <div>settings content</div>
+            </ProtectedRoute>
+          }
+        />
       </Routes>
     </MemoryRouter>
   );
@@ -31,15 +39,41 @@ describe("ProtectedRoute", () => {
     vi.clearAllMocks();
   });
 
-  it("renders children when proto session exists", () => {
-    vi.mocked(auth.getProtoSession).mockReturnValue({ email: "user@example.com", userId: "u1" });
+  it("renders children when recognized identity is set", () => {
+    vi.mocked(auth.useAuth).mockReturnValue({
+      recognizedIdentity: { email: "user@example.com", userId: "u1" },
+    } as ReturnType<typeof auth.useAuth>);
     renderProtected();
     expect(screen.getByText("protected content")).toBeInTheDocument();
   });
 
-  it("redirects to / and hides children when no proto session", () => {
-    vi.mocked(auth.getProtoSession).mockReturnValue(null);
+  it("redirects to / and hides children when no recognized identity", () => {
+    vi.mocked(auth.useAuth).mockReturnValue({
+      recognizedIdentity: null,
+    } as ReturnType<typeof auth.useAuth>);
     renderProtected();
+    expect(screen.queryByText("protected content")).not.toBeInTheDocument();
+    expect(screen.getByText("landing")).toBeInTheDocument();
+  });
+
+  it("identity persists across protected route navigation", () => {
+    const identity = { email: "user@example.com", userId: "u1" };
+    vi.mocked(auth.useAuth).mockReturnValue({
+      recognizedIdentity: identity,
+    } as ReturnType<typeof auth.useAuth>);
+
+    // Dashboard is protected and renders without redirecting
+    renderProtected("/dashboard");
+    expect(screen.getByText("protected content")).toBeInTheDocument();
+    expect(screen.queryByText("landing")).not.toBeInTheDocument();
+  });
+
+  it("logout clears identity and redirects to landing", () => {
+    // After logout, recognizedIdentity is null — ProtectedRoute redirects
+    vi.mocked(auth.useAuth).mockReturnValue({
+      recognizedIdentity: null,
+    } as ReturnType<typeof auth.useAuth>);
+    renderProtected("/dashboard");
     expect(screen.queryByText("protected content")).not.toBeInTheDocument();
     expect(screen.getByText("landing")).toBeInTheDocument();
   });

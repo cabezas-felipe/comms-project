@@ -2,7 +2,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { formatClock } from "@/lib/format";
 import { useEffect, useState } from "react";
 import { Settings as SettingsIcon, LogOut } from "lucide-react";
-import { useAuth, getProtoSession } from "@/lib/auth";
+import { useAuth } from "@/lib/auth";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,7 +15,7 @@ export default function AppHeader() {
   const [now, setNow] = useState(new Date());
   const location = useLocation();
   const navigate = useNavigate();
-  const { logout } = useAuth();
+  const { logout, recognizedIdentity } = useAuth();
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30_000);
@@ -23,7 +23,7 @@ export default function AppHeader() {
   }, []);
 
   if (["/", "/onboarding"].includes(location.pathname)) return null;
-  if (!getProtoSession()) return null;
+  if (!recognizedIdentity) return null;
 
   const handleLogout = async () => {
     await logout();

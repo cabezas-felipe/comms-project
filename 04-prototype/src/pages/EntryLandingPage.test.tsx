@@ -11,7 +11,9 @@ vi.mock("@/lib/analytics", () => ({
   trackLandingSucceeded: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({ setProtoSession: vi.fn() }));
+vi.mock("@/lib/auth", () => ({
+  useAuth: vi.fn(() => ({ setRecognizedIdentity: vi.fn() })),
+}));
 
 vi.mock("sonner", () => ({ toast: { warning: vi.fn() } }));
 

@@ -36,13 +36,13 @@ await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_S
 const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
 
-// Inject a deterministic test user so protected routes authenticate without a live Supabase instance.
+// Inject a deterministic test identity so protected routes authenticate without a live Supabase instance.
 const TEST_USER_ID = "test-user-id";
-_auth.resolver = async () => TEST_USER_ID;
+_auth.resolver = async () => ({ userId: TEST_USER_ID, source: "bearer" });
 
 after(async () => {
   await rm(tmpDir, { recursive: true, force: true });
@@ -286,5 +286,177 @@ test("POST /api/onboarding/extract returns 500 when both primary and fallback fa
     else delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
     if (savedFallback !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = savedFallback;
     else delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  }
+});
+
+// ─── Identity resolution — resolveIdentity unit tests ────────────────────────
+// These exercise the exported resolveIdentity function directly (no HTTP overhead).
+// In the test environment SUPABASE_URL is unset, so Bearer and email lookups both need mocking.
+// _clearEmailCache() is called around each test to prevent cache cross-contamination.
+
+test("resolveIdentity: resolves email_recognition via server-side email lookup", async () => {
+  _clearEmailCache();
+  const prevLookup = _emailLookup.resolve;
+  _emailLookup.resolve = async (email) => email === "user@example.com" ? "looked-up-user-id" : null;
+  try {
+    const mockReq = { headers: { "x-recognized-email": "user@example.com" } };
+    const identity = await resolveIdentity(mockReq);
+    assert.deepEqual(identity, { userId: "looked-up-user-id", source: "email_recognition" });
+  } finally {
+    _emailLookup.resolve = prevLookup;
+    _clearEmailCache();
+  }
+});
+
+test("resolveIdentity: lowercases email before lookup (normalization)", async () => {
+  _clearEmailCache();
+  let receivedEmail = null;
+  const prevLookup = _emailLookup.resolve;
+  _emailLookup.resolve = async (email) => { receivedEmail = email; return "u-123"; };
+  try {
+    const mockReq = { headers: { "x-recognized-email": "User@Example.COM" } };
+    await resolveIdentity(mockReq);
+    assert.equal(receivedEmail, "user@example.com");
+  } finally {
+    _emailLookup.resolve = prevLookup;
+    _clearEmailCache();
+  }
+});
+
+test("resolveIdentity: returns null when email lookup finds no matching user", async () => {
+  _clearEmailCache();
+  const prevLookup = _emailLookup.resolve;
+  _emailLookup.resolve = async () => null;
+  try {
+    const mockReq = { headers: { "x-recognized-email": "unknown@example.com" } };
+    const identity = await resolveIdentity(mockReq);
+    assert.equal(identity, null);
+  } finally {
+    _emailLookup.resolve = prevLookup;
+    _clearEmailCache();
+  }
+});
+
+test("resolveIdentity: x-recognized-user-id header alone returns null (not trusted)", async () => {
+  // Client-supplied userId is not a valid identity hint — must use x-recognized-email.
+  const mockReq = { headers: { "x-recognized-user-id": "some-client-user-id" } };
+  const identity = await resolveIdentity(mockReq);
+  assert.equal(identity, null);
+});
+
+test("resolveIdentity: returns null when no credentials present", async () => {
+  const mockReq = { headers: {} };
+  const identity = await resolveIdentity(mockReq);
+  assert.equal(identity, null);
+});
+
+test("resolveIdentity: returns null when Bearer present but Supabase disabled — does not fall through to email header", async () => {
+  // SUPABASE_URL is not set in test env, so isSupabaseEnabled() is false.
+  // A presented-but-unresolvable Bearer must NOT fall through to x-recognized-email.
+  _clearEmailCache();
+  const prevLookup = _emailLookup.resolve;
+  _emailLookup.resolve = async () => "should-not-be-called";
+  try {
+    const mockReq = {
+      headers: {
+        authorization: "Bearer some-token",
+        "x-recognized-email": "user@example.com",
+      },
+    };
+    const identity = await resolveIdentity(mockReq);
+    assert.equal(identity, null);
+  } finally {
+    _emailLookup.resolve = prevLookup;
+    _clearEmailCache();
+  }
+});
+
+test("resolveIdentity: returns null when x-recognized-email is blank", async () => {
+  const mockReq = { headers: { "x-recognized-email": "   " } };
+  const identity = await resolveIdentity(mockReq);
+  assert.equal(identity, null);
+});
+
+// ─── Email-recognition cache behavior ────────────────────────────────────────
+
+test("resolveIdentity cache: second call within TTL uses cached result without re-invoking lookup", async () => {
+  _clearEmailCache();
+  const prevLookup = _emailLookup.resolve;
+  let callCount = 0;
+  _emailLookup.resolve = async (email) => { callCount++; return email === "cached@example.com" ? "u-cached" : null; };
+  try {
+    const mockReq = { headers: { "x-recognized-email": "cached@example.com" } };
+    const id1 = await resolveIdentity(mockReq);
+    const id2 = await resolveIdentity(mockReq);
+    assert.deepEqual(id1, { userId: "u-cached", source: "email_recognition" });
+    assert.deepEqual(id2, { userId: "u-cached", source: "email_recognition" });
+    assert.equal(callCount, 1, "lookup must be called exactly once; second call served from cache");
+  } finally {
+    _emailLookup.resolve = prevLookup;
+    _clearEmailCache();
+  }
+});
+
+test("resolveIdentity cache: different emails use independent cache entries", async () => {
+  _clearEmailCache();
+  const prevLookup = _emailLookup.resolve;
+  const lookupLog = [];
+  _emailLookup.resolve = async (email) => {
+    lookupLog.push(email);
+    if (email === "a@example.com") return "user-a";
+    if (email === "b@example.com") return "user-b";
+    return null;
+  };
+  try {
+    const idA = await resolveIdentity({ headers: { "x-recognized-email": "a@example.com" } });
+    const idB = await resolveIdentity({ headers: { "x-recognized-email": "b@example.com" } });
+    const idA2 = await resolveIdentity({ headers: { "x-recognized-email": "a@example.com" } });
+    assert.equal(idA?.userId, "user-a");
+    assert.equal(idB?.userId, "user-b");
+    assert.equal(idA2?.userId, "user-a");
+    assert.equal(lookupLog.length, 2, "a and b each looked up once; second a is from cache");
+  } finally {
+    _emailLookup.resolve = prevLookup;
+    _clearEmailCache();
+  }
+});
+
+// ─── Identity resolution — HTTP integration via email_recognition ─────────────
+
+test("GET /api/settings returns 200 when resolved via x-recognized-email header", async () => {
+  _clearEmailCache();
+  const prevResolver = _auth.resolver;
+  const prevLookup = _emailLookup.resolve;
+  _auth.resolver = resolveIdentity;
+  _emailLookup.resolve = async (email) => email === "test@example.com" ? TEST_USER_ID : null;
+  try {
+    const res = await request(app)
+      .get("/api/settings")
+      .set("x-recognized-email", "test@example.com");
+    assert.equal(res.status, 200);
+  } finally {
+    _auth.resolver = prevResolver;
+    _emailLookup.resolve = prevLookup;
+    _clearEmailCache();
+  }
+});
+
+test("PUT /api/settings returns 401 when no identity headers are present", async () => {
+  _clearEmailCache();
+  const prevResolver = _auth.resolver;
+  const prevLookup = _emailLookup.resolve;
+  _auth.resolver = resolveIdentity;
+  _emailLookup.resolve = async () => null;
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send(VALID_BODY)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _auth.resolver = prevResolver;
+    _emailLookup.resolve = prevLookup;
+    _clearEmailCache();
   }
 });
