@@ -35,6 +35,8 @@ When shipping the `contract_version` column (migration 003):
    ```
 3. **Deploy API and frontend together** — once the migration is confirmed clean.
 
+Migration status (closeout): migration `003_contract_version_column` has been applied on the Tempo Supabase project, `settings.contract_version` is populated, and `settings.data` no longer contains `contractVersion` keys.
+
 ## Deployment
 
 ### Prerequisites
