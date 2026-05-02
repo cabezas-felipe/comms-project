@@ -39,11 +39,12 @@ jobs:
         run: npm ci
         working-directory: 04-prototype
 
-      # Pull Vercel project config and production env vars (VITE_* vars come from here).
+      # Vercel CLI steps run from repo root — the Vercel project already has Root Directory
+      # set to 04-prototype in project settings, so adding working-directory here would
+      # cause Vercel to resolve 04-prototype/04-prototype and fail.
       # VERCEL_ORG_ID and VERCEL_PROJECT_ID_FRONTEND must be set as GitHub Actions secrets.
       - name: Pull Vercel project config
         run: npx vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-        working-directory: 04-prototype
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_FRONTEND }}
@@ -54,7 +55,6 @@ jobs:
           URL=$(npx vercel deploy --prod --yes --token=${{ secrets.VERCEL_TOKEN }})
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Deployed: $URL"
-        working-directory: 04-prototype
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_FRONTEND }}
