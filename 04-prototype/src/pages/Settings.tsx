@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { X, Plus } from "lucide-react";
+import { X, Plus, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
+import { addCommaSeparated, addTraditional, addSocial } from "@/lib/settings-list-utils";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,27 +19,32 @@ import { STORIES } from "@/data/stories";
 import { CONTRACT_VERSION } from "@tempo/contracts";
 import { fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
 
+function warnToast(message: string) {
+  toast.warning(message, {
+    icon: <AlertTriangle className="h-4 w-4" style={{ color: "hsl(var(--signal-warning))" }} />,
+  });
+}
+
 interface ListSectionProps {
   title: string;
   description: string;
   items: string[];
   onChange: (items: string[]) => void;
   placeholder: string;
+  label: string;
   disabled?: boolean;
 }
 
-function ListSection({ title, description, items, onChange, placeholder, disabled }: ListSectionProps) {
+function ListSection({ title, description, items, onChange, placeholder, label, disabled }: ListSectionProps) {
   const [draft, setDraft] = useState("");
 
   const add = () => {
-    const v = draft.trim();
-    if (!v) return;
-    if (items.includes(v)) {
-      toast.error(`"${v}" is already in your list.`);
-      return;
+    const result = addCommaSeparated(draft, items, label);
+    if (result.warning) warnToast(result.warning);
+    if (result.nextItems) {
+      onChange(result.nextItems);
+      setDraft("");
     }
-    onChange([...items, v]);
-    setDraft("");
   };
 
   const remove = (i: string) => onChange(items.filter((x) => x !== i));
@@ -105,11 +111,19 @@ function ListSection({ title, description, items, onChange, placeholder, disable
 
 type SourceTab = "traditional" | "social";
 
+type SettingsSnapshot = {
+  topics: string[];
+  keywords: string[];
+  geographies: string[];
+  traditional: string[];
+  social: string[];
+};
+
 export default function Settings() {
   const [topics, setTopics] = useState(["Diplomatic relations", "Migration policy", "Security cooperation"]);
   const [keywords, setKeywords] = useState(["OFAC", "sanctions", "deportation routing", "bilateral"]);
   const [geographies, setGeographies] = useState(["US", "Colombia"]);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const saveTimer = useRef<number | null>(null);
   const [sourceTab, setSourceTab] = useState<SourceTab>("traditional");
   const [loading, setLoading] = useState(true);
@@ -138,14 +152,30 @@ export default function Settings() {
   const [social, setSocial] = useState<string[]>(seed.soc);
   const [draftSource, setDraftSource] = useState("");
 
+  const snapshotRef = useRef<SettingsSnapshot>({
+    topics: ["Diplomatic relations", "Migration policy", "Security cooperation"],
+    keywords: ["OFAC", "sanctions", "deportation routing", "bilateral"],
+    geographies: ["US", "Colombia"],
+    traditional: seed.trad,
+    social: seed.soc,
+  });
+
   // stateRef keeps save callback from closing over stale state values
   const stateRef = useRef({ topics, keywords, geographies, traditional, social });
   stateRef.current = { topics, keywords, geographies, traditional, social };
+
+  // Revision counter: incremented on every user mutation. A save captures the
+  // revision at launch; if the revision has advanced by the time it resolves, a
+  // newer edit is pending and the response (success or failure) is ignored. This
+  // covers both concurrent in-flight saves and the case where a new edit arrives
+  // after a save fires but before it resolves.
+  const pendingRevisionRef = useRef(0);
 
   const scheduleSave = () => {
     setSaveState("saving");
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(async () => {
+      const revisionAtStart = pendingRevisionRef.current;
       const s = stateRef.current;
       try {
         await saveSettingsPayload({
@@ -156,33 +186,47 @@ export default function Settings() {
           traditionalSources: s.traditional,
           socialSources: s.social,
         });
+        if (revisionAtStart !== pendingRevisionRef.current) return;
+        snapshotRef.current = { ...s };
         setSaveState("saved");
       } catch {
+        if (revisionAtStart !== pendingRevisionRef.current) return;
         toast.error("Could not save settings. Please try again.");
-        setSaveState("idle");
+        const snap = snapshotRef.current;
+        setTopics(snap.topics);
+        setKeywords(snap.keywords);
+        setGeographies(snap.geographies);
+        setTraditional(snap.traditional);
+        setSocial(snap.social);
+        setSaveState("failed");
       }
     }, 600);
   };
 
   const markDirty = <T,>(setter: (v: T) => void) => (v: T) => {
     setter(v);
+    pendingRevisionRef.current++;
     scheduleSave();
   };
 
-  const savedLabel = saveState === "saving" ? "Saving…" : "All changes saved";
+  const savedLabel =
+    saveState === "saving" ? "Saving…" :
+    saveState === "failed" ? "Save failed" :
+    "All changes saved";
 
   const list = sourceTab === "traditional" ? traditional : social;
   const setList = sourceTab === "traditional" ? markDirty(setTraditional) : markDirty(setSocial);
 
   const addSource = () => {
-    const v = draftSource.trim();
-    if (!v) return;
-    if (list.includes(v)) {
-      toast.error(`"${v}" is already in your sources.`);
-      return;
+    const result =
+      sourceTab === "traditional"
+        ? addTraditional(draftSource, list)
+        : addSocial(draftSource, list);
+    if (result.warning) warnToast(result.warning);
+    if (result.nextItems) {
+      setList(result.nextItems);
+      setDraftSource("");
     }
-    setList([...list, v]);
-    setDraftSource("");
   };
 
   const removeSource = (s: string) => setList(list.filter((x) => x !== s));
@@ -197,6 +241,13 @@ export default function Settings() {
         setGeographies(payload.geographies);
         setTraditional(payload.traditionalSources);
         setSocial(payload.socialSources);
+        snapshotRef.current = {
+          topics: payload.topics,
+          keywords: payload.keywords,
+          geographies: payload.geographies,
+          traditional: payload.traditionalSources,
+          social: payload.socialSources,
+        };
       })
       .catch(() => {
         if (canceled) return;
@@ -225,13 +276,19 @@ export default function Settings() {
             </div>
             <div
               aria-live="polite"
-              className="shrink-0 font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
+              className={`shrink-0 font-mono text-[11px] uppercase tracking-wider ${
+                saveState === "failed" ? "text-destructive" : "text-muted-foreground"
+              }`}
             >
               <span className="inline-flex items-center gap-1.5">
                 <span
                   aria-hidden
                   className={`inline-block h-1.5 w-1.5 rounded-full ${
-                    saveState === "saving" ? "animate-pulse bg-muted-foreground" : "bg-foreground/40"
+                    saveState === "saving"
+                      ? "animate-pulse bg-muted-foreground"
+                      : saveState === "failed"
+                      ? "bg-destructive"
+                      : "bg-foreground/40"
                   }`}
                 />
                 {savedLabel}
@@ -246,6 +303,7 @@ export default function Settings() {
               items={topics}
               onChange={markDirty(setTopics)}
               placeholder="Add a topic"
+              label="topic"
               disabled={loading}
             />
             <ListSection
@@ -254,6 +312,7 @@ export default function Settings() {
               items={keywords}
               onChange={markDirty(setKeywords)}
               placeholder="Add a keyword"
+              label="keyword"
               disabled={loading}
             />
             <ListSection
@@ -262,6 +321,7 @@ export default function Settings() {
               items={geographies}
               onChange={markDirty(setGeographies)}
               placeholder="Add a geography"
+              label="geography"
               disabled={loading}
             />
 
@@ -334,7 +394,7 @@ export default function Settings() {
                       value={draftSource}
                       onChange={(e) => setDraftSource(e.target.value)}
                       onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addSource())}
-                      placeholder={sourceTab === "social" ? "@handle" : "Outlet name"}
+                      placeholder={sourceTab === "social" ? "Add a @handle" : "Add an outlet"}
                       className="max-w-sm"
                       disabled={loading}
                     />
