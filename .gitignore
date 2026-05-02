@@ -12,3 +12,6 @@ node_modules/
 # Project-specific local env files
 05-engineering/apps/api/.env
 04-prototype/.env.local
+
+# Vercel local project metadata
+**/.vercel/
