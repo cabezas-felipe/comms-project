@@ -1,0 +1,78 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Only one production deploy runs at a time; queued runs wait rather than cancel.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-frontend:
+    name: Build & deploy frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Build shared packages first — 04-prototype depends on them via file: references.
+      - name: Install workspace deps
+        run: npm ci
+        working-directory: 05-engineering
+
+      - name: Build shared packages
+        run: npm run build:packages
+        working-directory: 05-engineering
+
+      # Install prototype deps after packages are built so file: symlinks resolve.
+      - name: Install prototype deps
+        run: npm ci
+        working-directory: 04-prototype
+
+      # Pull Vercel project config and production env vars (VITE_* vars come from here).
+      # VERCEL_ORG_ID and VERCEL_PROJECT_ID_FRONTEND must be set as GitHub Actions secrets.
+      - name: Pull Vercel project config
+        run: npx vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: 04-prototype
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_FRONTEND }}
+
+      # Build runs locally (in this runner) so file: package paths resolve correctly.
+      - name: Build via Vercel CLI
+        run: npx vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        working-directory: 04-prototype
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_FRONTEND }}
+
+      - name: Deploy prebuilt to production
+        id: deploy
+        run: |
+          URL=$(npx vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Deployed: $URL"
+        working-directory: 04-prototype
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_FRONTEND }}
+
+      # The API (tempo-gray-psi) is a separate Vercel project — not deployed here.
+      # Verify it is healthy after the frontend deploy to confirm both ends are up.
+      - name: Verify API health
+        run: |
+          echo "GET https://tempo-gray-psi.vercel.app/health"
+          curl --fail --silent --show-error \
+            --retry 3 --retry-delay 5 \
+            https://tempo-gray-psi.vercel.app/health
+          echo "API health OK"

@@ -16,7 +16,11 @@
     "test:api": "npm run test --workspace=@tempo/api",
     "test:packages": "npm run test --workspace=@tempo/contracts --workspace=@tempo/analytics",
     "test:prototype": "npm --prefix ../04-prototype test",
-    "lint:prototype:slice": "sh -c 'cd ../04-prototype && npx eslint src/pages/Dashboard.tsx src/lib/analytics.ts'"
+    "lint:prototype:slice": "sh -c 'cd ../04-prototype && npx eslint src/pages/Dashboard.tsx src/lib/analytics.ts'",
+    "deploy:frontend": "cd ../04-prototype && npx vercel",
+    "deploy:frontend:prod": "cd ../04-prototype && npx vercel --prod",
+    "verify:api:health": "curl --fail --silent --show-error https://tempo-gray-psi.vercel.app/health && echo 'API /health OK'",
+    "verify:settings:migration": "echo \"Supabase SQL (run in SQL editor): (1) SELECT key, contract_version FROM settings;  (2) SELECT COUNT(*) FROM settings WHERE data ? 'contractVersion'; -- expected: 0\""
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

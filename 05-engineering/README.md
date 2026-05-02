@@ -34,3 +34,66 @@ When shipping the `contract_version` column (migration 003):
    -- expected: 0
    ```
 3. **Deploy API and frontend together** — once the migration is confirmed clean.
+
+## Deployment
+
+### Prerequisites
+
+| Tool | Setup |
+|------|-------|
+| Vercel CLI | `npm i -g vercel` (or use `npx vercel`) |
+| Authenticated | `vercel login` |
+| Frontend linked | `cd ../04-prototype && npx vercel link` (one-time; creates `.vercel/project.json` — keep local, do not commit unless the team intentionally standardizes project linkage in-repo) |
+
+Required env vars (set in Vercel project dashboard, not locally):
+
+| Variable | Where |
+|----------|-------|
+| `VITE_SUPABASE_URL` | Vercel → Frontend project → Environment Variables |
+| `VITE_SUPABASE_ANON_KEY` | Vercel → Frontend project → Environment Variables |
+
+### Staging (preview deploy)
+
+```sh
+npm run deploy:frontend
+```
+
+Vercel prints a preview URL. Share for review before promoting to production.
+
+### Production deploy sequence
+
+If this release includes a DB migration, complete the [Supabase deploy order](#supabase-deploy-order) steps first.
+
+```sh
+npm run deploy:frontend:prod
+npm run verify:api:health
+```
+
+### Post-deploy verification
+
+**API health check** (automated by `verify:api:health`):
+
+```sh
+curl https://tempo-gray-psi.vercel.app/health
+```
+
+**Settings migration check** (manual — run in Supabase SQL editor):
+
+```sql
+-- column exists and is populated
+SELECT key, contract_version FROM settings;
+
+-- data JSON no longer contains contractVersion (expected: 0)
+SELECT COUNT(*) FROM settings WHERE data ? 'contractVersion';
+```
+
+Or run `npm run verify:settings:migration` to print the queries to your terminal.
+
+### API deployment
+
+The API (`apps/api`) is a **separate Vercel project** (`tempo-gray-psi`). It is not deployed by this workspace's scripts. Recommended options:
+
+- **Vercel dashboard GitHub integration** — connect `apps/api` as the root directory of the `tempo-gray-psi` project; Vercel deploys automatically on push to `main`.
+- **Manual deploy** — `cd apps/api && npx vercel --prod`
+
+The frontend proxies all `/api/*` requests to the API project via `04-prototype/vercel.json`; both projects must be current for the app to function correctly.
