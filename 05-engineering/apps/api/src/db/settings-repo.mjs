@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertSupabaseEnv, getSupabaseClient } from "./client.mjs";
+import { CONTRACT_VERSION } from "../contracts/settings-schema.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,24 +56,36 @@ async function writeSettingsFile(payload, userId = null) {
 
 // ─── Supabase adapter ─────────────────────────────────────────────────────────
 
+// Merges a Supabase settings row into a runtime payload object.
+// The dedicated contract_version column always wins over any stale contractVersion
+// key that may linger in legacy data JSON.
+export function mergeSettingsRow({ data: jsonData = {}, contract_version }) {
+  const safeData = jsonData && typeof jsonData === "object" ? jsonData : {};
+  const { contractVersion: _stale, ...listFields } = safeData;
+  return { ...listFields, contractVersion: contract_version };
+}
+
 async function readSettingsSupabase(userId = null) {
   const client = getSupabaseClient();
   const key = userId ? userKey(userId) : GLOBAL_KEY;
   const { data, error } = await client
     .from("settings")
-    .select("data")
+    .select("data, contract_version")
     .eq("key", key)
     .maybeSingle();
   if (error) throw new Error(`[supabase] settings read failed: ${error.message}`);
-  return data?.data ?? DEFAULT_SETTINGS;
+  if (!data) return DEFAULT_SETTINGS;
+  return mergeSettingsRow(data);
 }
 
 async function writeSettingsSupabase(payload, userId = null) {
+  const { contractVersion, ...dataFields } = payload;
   const client = getSupabaseClient();
   const key = userId ? userKey(userId) : GLOBAL_KEY;
   const { error } = await client.from("settings").upsert({
     key,
-    data: payload,
+    data: dataFields,
+    contract_version: contractVersion ?? CONTRACT_VERSION,
     updated_at: new Date().toISOString(),
   });
   if (error) throw new Error(`[supabase] settings write failed: ${error.message}`);

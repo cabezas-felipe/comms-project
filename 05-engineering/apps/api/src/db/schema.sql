@@ -11,9 +11,12 @@
 -- Migration path: add user_id column + FK when Supabase Auth is wired (future slice).
 
 CREATE TABLE IF NOT EXISTS settings (
-  key         TEXT        PRIMARY KEY,
-  data        JSONB       NOT NULL,
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  key              TEXT        PRIMARY KEY,
+  data             JSONB       NOT NULL,
+  -- data contains only: topics, keywords, geographies, traditionalSources, socialSources
+  -- contractVersion was extracted to contract_version via migration 003
+  contract_version TEXT        NOT NULL DEFAULT '2026-04-22-slice1',
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- ─── Stories (placeholder) ────────────────────────────────────────────────────

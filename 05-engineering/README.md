@@ -18,3 +18,19 @@ Run from **this directory** (`05-engineering/`):
 | `npm run test:prototype` | Prototype Vitest suite. |
 
 After changing shared packages, run `npm run build:packages` before prototype dev/build if types or `dist/` outputs change.
+
+## Supabase deploy order
+
+When shipping the `contract_version` column (migration 003):
+
+1. **Run migration first** — apply `apps/api/src/db/migrations/003_contract_version_column.sql` in the Supabase SQL editor before deploying any new API code.
+2. **Verify** — in the SQL editor:
+   ```sql
+   -- column exists and is populated
+   SELECT key, contract_version FROM settings;
+
+   -- data JSON no longer contains contractVersion
+   SELECT COUNT(*) FROM settings WHERE data ? 'contractVersion';
+   -- expected: 0
+   ```
+3. **Deploy API and frontend together** — once the migration is confirmed clean.
