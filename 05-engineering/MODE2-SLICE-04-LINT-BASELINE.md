@@ -72,3 +72,7 @@ Clear pre-existing error-level ESLint failures in the prototype so full lint can
 - `tailwind.config.ts`: ESM `import tailwindcssAnimate from "tailwindcss-animate"` — no `require()` call present.
 
 **Decision recorded:** D-021 in `DECISIONS.md`.
+
+## 11) Follow-up: archive removal (2026-05, branch `work/logout`)
+
+`src/pages/archive/EvidenceDesk.tsx` — one of the four files fixed in this slice — was subsequently deleted when the archive section was removed from the prototype. References to `src/pages/archive/` above are historical; that directory no longer exists. See D-037 in `05-engineering/DECISIONS.md`.

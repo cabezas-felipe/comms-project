@@ -11,28 +11,24 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-const NAV = [
-  { to: "/dashboard", label: "Feed" },
-  { to: "/settings", label: "Settings" },
-  { to: "/archive", label: "Archive" },
-];
-
 export default function AppHeader() {
   const [now, setNow] = useState(new Date());
   const location = useLocation();
   const navigate = useNavigate();
   const { logout } = useAuth();
-  const isDevPreview =
-    import.meta.env.DEV &&
-    new URLSearchParams(location.search).get("preview") === "1";
+
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30_000);
     return () => clearInterval(id);
   }, []);
 
-  // Hide chrome on landing/onboarding; in prod also hide until proto session is set.
   if (["/", "/onboarding"].includes(location.pathname)) return null;
-  if (!import.meta.env.DEV && !getProtoSession()) return null;
+  if (!getProtoSession()) return null;
+
+  const handleLogout = async () => {
+    await logout();
+    navigate("/", { replace: true });
+  };
 
   const isSettings = location.pathname === "/settings";
 
@@ -77,7 +73,7 @@ export default function AppHeader() {
                   <DropdownMenuSeparator />
                 </>
               )}
-              <DropdownMenuItem onClick={logout}>
+              <DropdownMenuItem onClick={handleLogout}>
                 <LogOut className="mr-2 h-4 w-4" />
                 Log out
               </DropdownMenuItem>

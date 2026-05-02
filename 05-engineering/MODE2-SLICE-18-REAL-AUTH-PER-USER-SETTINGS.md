@@ -128,3 +128,9 @@ npm run test:packages  → 18 tests, 0 failures
 npm run test:prototype →  9 tests, 0 failures
 npm run build          → exits 0
 ```
+
+---
+
+## Historical note: archive removal (2026-05, branch `work/logout`)
+
+The checklist item "No dashboard/archive behavior changes" above referred to archive routes that existed at the time this slice was closed (`/archive`, `/archive/*`). Those routes and pages were subsequently removed in a later cleanup pass. See D-037 in `05-engineering/DECISIONS.md`.

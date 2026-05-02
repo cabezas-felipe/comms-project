@@ -7,7 +7,7 @@
 - auth-specific header behavior (hide on `/`, `/auth/*`, `/onboarding`)
 
 ## Keep from current app (do not replace)
-- existing dashboard/settings/archive pages
+- existing dashboard/settings pages *(archive pages were removed in `work/logout` cleanup — see D-037)*
 - existing API integration and settings persistence
 - existing analytics hooks unless explicitly updated
 - existing app shell except route additions

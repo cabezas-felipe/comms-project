@@ -1,5 +1,7 @@
 
 
+> **Note (2026-05, branch `work/logout`):** The archive section described in Phase 1 of this plan was subsequently removed. Routes `/archive`, `/archive/*`, `/d/*`, and `/directions` no longer exist in the prototype — they return NotFound. The `AppHeader` no longer includes an Archive nav item. See D-037 in `05-engineering/DECISIONS.md` for the removal rationale.
+
 # Build plan — Tempo (converged prototype)
 
 Locking the converged design with **Tempo** as the product name. Everything from the previously approved plan stands; this document is the build spec.
