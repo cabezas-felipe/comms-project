@@ -28,7 +28,10 @@ jobs:
         working-directory: 05-engineering
 
       - name: Run daily source digest
-        run: node apps/api/src/ops/source-delta-digest.mjs
+        run: |
+          echo "[source-digest] Run started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "[source-digest] Slack webhook configured: $( [ -n "$SOURCE_DIGEST_SLACK_WEBHOOK_URL" ] && echo yes || echo no — dry-run mode )"
+          node apps/api/src/ops/source-delta-digest.mjs
         working-directory: 05-engineering
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

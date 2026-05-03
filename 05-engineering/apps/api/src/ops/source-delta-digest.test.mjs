@@ -77,3 +77,30 @@ test("formatDigest: mixed rows header includes date from asOf", () => {
   const msg = formatDigest([TRAD, SOCIAL], AS_OF);
   assert.ok(msg.includes("2026-05-02"), `Should include asOf date: ${msg}`);
 });
+
+// ─── ordering ─────────────────────────────────────────────────────────────────
+
+test("formatDigest: higher times_seen appears before lower within same kind", () => {
+  const rare = { ...TRAD, raw_string: "Rare Source", times_seen: 1, first_seen_at: "2026-05-01T06:00:00.000Z" };
+  const frequent = { ...TRAD, raw_string: "Frequent Source", times_seen: 10, first_seen_at: "2026-05-01T12:00:00.000Z" };
+  const msg = formatDigest([rare, frequent], AS_OF);
+  const rareIdx = msg.indexOf("Rare Source");
+  const frequentIdx = msg.indexOf("Frequent Source");
+  assert.ok(frequentIdx < rareIdx, `Frequent (seen 10×) should appear before Rare (seen 1×): ${msg}`);
+});
+
+test("formatDigest: ties on times_seen resolved by earliest first_seen_at", () => {
+  const later = { ...TRAD, raw_string: "Later Source", times_seen: 5, first_seen_at: "2026-05-01T18:00:00.000Z" };
+  const earlier = { ...TRAD, raw_string: "Earlier Source", times_seen: 5, first_seen_at: "2026-05-01T06:00:00.000Z" };
+  const msg = formatDigest([later, earlier], AS_OF);
+  const laterIdx = msg.indexOf("Later Source");
+  const earlierIdx = msg.indexOf("Earlier Source");
+  assert.ok(earlierIdx < laterIdx, `Earlier first_seen_at should appear first when times_seen tied: ${msg}`);
+});
+
+test("formatDigest: ordering does not mutate the input array", () => {
+  const rows = [TRAD, SOCIAL];
+  formatDigest(rows, AS_OF);
+  assert.equal(rows[0], TRAD, "Input array should not be mutated");
+  assert.equal(rows[1], SOCIAL, "Input array should not be mutated");
+});

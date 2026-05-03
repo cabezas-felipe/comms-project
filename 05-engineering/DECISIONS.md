@@ -2,6 +2,48 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-03 - D-045 - Phase 4: daily net-new source digest hardening
+
+#### Context
+
+Phase 2 (D-043) shipped the `v_source_net_new_24h` view + `source-delta-digest.mjs` + the GitHub Actions cron. Phase 3 (D-044) promoted Supabase to source of truth for the feed manifest. Phase 4 hardens the digest loop without adding new product UI or migrating the scheduler.
+
+Three gaps were identified after Phase 3:
+1. **Non-deterministic output** — `v_source_net_new_24h` has no ORDER BY (intentional at the view level), but the digest script passed rows to `formatDigest` in DB-returned order, making output non-reproducible across runs with the same data.
+2. **Thin test coverage** — tests verified section presence but not row ordering or input-mutation safety.
+3. **Operator debuggability** — GitHub Actions logs showed no metadata about whether the Slack webhook was configured before the script ran.
+
+#### Decision
+
+Hardened the digest loop in three areas:
+
+1. **Deterministic sort in `formatDigest`** ([`apps/api/src/ops/source-delta-digest.mjs`](apps/api/src/ops/source-delta-digest.mjs)) — sorts a copy of the input rows (highest `times_seen` first, then earliest `first_seen_at` as a tie-breaker) before grouping. Input array is never mutated. Sort lives in the formatter, not `run()`, so it is covered by unit tests without needing a DB connection.
+
+2. **Extended test suite** ([`apps/api/src/ops/source-delta-digest.test.mjs`](apps/api/src/ops/source-delta-digest.test.mjs)) — three new tests: ordering by `times_seen`, tie-break by `first_seen_at`, and no-mutation guard.
+
+3. **Workflow observability** ([`.github/workflows/source-digest.yml`](../.github/workflows/source-digest.yml)) — added a pre-run echo that logs UTC timestamp and whether the Slack webhook is configured (or dry-run mode active).
+
+No new migrations, no product UI, no scheduler migration.
+
+#### Why
+
+- Sort belongs in the formatter because `v_source_net_new_24h` explicitly documents "no ORDER BY at view level; consumers sort." Enforcing it in the formatter keeps the sort testable as a pure function.
+- Dry-run mode ambiguity (`SOURCE_DIGEST_SLACK_WEBHOOK_URL` not set) was invisible in logs until the script reached that branch. Echoing it upfront removes guesswork when debugging scheduled runs.
+- Input-mutation guard prevents a class of subtle bug where calling `formatDigest` twice with the same rows could produce different output if a future caller sorts in place.
+
+#### Tradeoffs
+
+- The sort is O(n log n) on the formatter input. At expected volumes (< 50 rows/day) this is negligible.
+- Adding a `ORDER BY` to the Supabase query in `run()` would also work, but then the sort guarantee would live outside the testable unit. Formatter-level sort is the more defensive choice.
+
+#### Consequences
+
+- `formatDigest` now always returns rows in deterministic order regardless of DB return order.
+- GitHub Actions run logs now include a clear "dry-run mode" or "webhook configured" line before the script output.
+- See [`SOURCE-REGISTRY-PHASE4-PLAYBOOK.md`](SOURCE-REGISTRY-PHASE4-PLAYBOOK.md) for updated operator instructions.
+
+---
+
 ### 2026-05-02 - D-044 - Phase 3 Option B: Supabase as source of truth for ingestion feed manifest
 
 #### Context

@@ -15,8 +15,10 @@ function requireEnv(name) {
 
 /**
  * Builds a Slack-friendly markdown digest from view rows.
+ * Rows are sorted deterministically: highest times_seen first, then earliest
+ * first_seen_at as a tie-breaker. Grouping: Traditional before Social.
  *
- * @param {Array<{raw_string:string, kind:string, times_seen:number, last_seen_at:string}>} rows
+ * @param {Array<{raw_string:string, kind:string, times_seen:number, first_seen_at:string, last_seen_at:string}>} rows
  * @param {Date} asOf
  * @returns {string}
  */
@@ -27,8 +29,14 @@ export function formatDigest(rows, asOf) {
     return `*Daily source digest — ${dateLabel}*\nNo unmapped sources in the last 24 hours.`;
   }
 
-  const traditional = rows.filter((r) => r.kind === "traditional");
-  const social = rows.filter((r) => r.kind === "social");
+  const sorted = [...rows].sort(
+    (a, b) =>
+      b.times_seen - a.times_seen ||
+      new Date(a.first_seen_at) - new Date(b.first_seen_at)
+  );
+
+  const traditional = sorted.filter((r) => r.kind === "traditional");
+  const social = sorted.filter((r) => r.kind === "social");
   const lines = [`*Daily source digest — ${dateLabel}* (${rows.length} unmapped)`];
 
   const formatRow = (r) => {
