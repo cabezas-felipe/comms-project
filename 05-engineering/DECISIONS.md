@@ -2,6 +2,40 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-03 - D-046 - Phase 5: read-only Markdown catalog export from Supabase
+
+#### Context
+
+PMs need to review source mappings (canonical names, statuses, feed URLs, ingestion weights) without logging into Supabase. The source registry lives in `source_feed_mapping` joined with `source_entities`. There is no existing human-readable artifact that reflects DB state without a DB connection.
+
+#### Decision
+
+Added a generator script that produces a deterministic, read-only Markdown catalog:
+
+- **Generator:** [`apps/api/src/ops/source-registry-catalog-generate.mjs`](apps/api/src/ops/source-registry-catalog-generate.mjs) — queries `source_feed_mapping` + `source_entities`, sorts and groups rows, writes `SOURCE-REGISTRY-CATALOG.generated.md`.
+- **Output:** [`SOURCE-REGISTRY-CATALOG.generated.md`](SOURCE-REGISTRY-CATALOG.generated.md) — DO NOT EDIT; Supabase remains the canonical source. No reverse sync from Markdown → DB.
+- **npm scripts:** `source-catalog:generate` on `@tempo/api`; passthrough at workspace root.
+- **Tests:** [`apps/api/src/ops/source-registry-catalog-generate.test.mjs`](apps/api/src/ops/source-registry-catalog-generate.test.mjs) covers ordering, grouping, empty-value dashes, header metadata, and no-mutation guard.
+
+#### Why
+
+- PMs can open `SOURCE-REGISTRY-CATALOG.generated.md` in Cursor and see a snapshot of all source mappings without a Supabase login.
+- Keeping the generated file in the repo makes it reviewable in PRs and diffable over time.
+- No schema changes or UI work required — pure read path on existing tables.
+
+#### Tradeoffs
+
+- The catalog is a point-in-time snapshot; it goes stale until regenerated. Acceptable for the current review cadence (regenerate before each PM review session).
+- Storing a generated file in git creates noise in diffs. Mitigated by the `DO NOT EDIT` header and clear regeneration instructions.
+
+#### Consequences
+
+- Run `cd 05-engineering && npm run source-catalog:generate` to refresh the catalog.
+- The generated file is committed as a read-only artifact; edits to it will be overwritten on the next generation run.
+- See [`SOURCE-REGISTRY-PHASE5-PLAYBOOK.md`](SOURCE-REGISTRY-PHASE5-PLAYBOOK.md) for operator instructions (if created).
+
+---
+
 ### 2026-05-03 - D-045 - Phase 4: daily net-new source digest hardening
 
 #### Context

@@ -14,6 +14,7 @@
     "dev": "npm run build:packages && concurrently \"npm run dev:api\" \"npm run dev:web\"",
     "build": "npm run build:packages && npm --prefix ../04-prototype run build",
     "test:api": "npm run test --workspace=@tempo/api",
+    "source-catalog:generate": "npm run source-catalog:generate --workspace=@tempo/api",
     "test:packages": "npm run test --workspace=@tempo/contracts --workspace=@tempo/analytics",
     "test:prototype": "npm --prefix ../04-prototype test",
     "lint:prototype:slice": "sh -c 'cd ../04-prototype && npx eslint src/pages/Dashboard.tsx src/lib/analytics.ts'",
