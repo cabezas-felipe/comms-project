@@ -36,7 +36,7 @@ await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_S
 const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
 
@@ -94,6 +94,78 @@ test("GET /api/settings returns persisted data after valid PUT", async () => {
   assert.equal(res.status, 200);
   assert.equal(res.body.contractVersion, VALID_BODY.contractVersion);
   assert.deepEqual(res.body.topics, VALID_BODY.topics);
+});
+
+// ─── Source registry sync ─────────────────────────────────────────────────────
+
+test("PUT /api/settings returns 200 and registry sync is no-op when SUPABASE_URL is absent", async () => {
+  // SUPABASE_URL is not set in the test environment; recordSourceRegistryEventsFromSettings
+  // returns early. Verify the route still completes normally.
+  const prev = _sourceRegistrySync.record;
+  let called = false;
+  _sourceRegistrySync.record = async (args) => { called = true; return prev(args); };
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send(VALID_BODY)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(called, "registry sync hook must be invoked even in no-op path");
+  } finally {
+    _sourceRegistrySync.record = prev;
+  }
+});
+
+test("PUT /api/settings passes previousPayload and nextPayload to registry sync", async () => {
+  const body = {
+    ...VALID_BODY,
+    traditionalSources: ["Reuters", "El Tiempo"],
+    socialSources: ["@latamwatcher"],
+  };
+  let captured = null;
+  const prev = _sourceRegistrySync.record;
+  _sourceRegistrySync.record = async (args) => { captured = args; };
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(captured !== null, "registry sync must have been called");
+    assert.equal(captured.userId, TEST_USER_ID);
+    assert.deepEqual(captured.nextPayload.traditionalSources, ["Reuters", "El Tiempo"]);
+    assert.deepEqual(captured.nextPayload.socialSources, ["@latamwatcher"]);
+    // previousPayload is either null (first save) or the prior settings object
+    assert.ok("previousPayload" in captured, "previousPayload key must be present");
+  } finally {
+    _sourceRegistrySync.record = prev;
+  }
+});
+
+test("PUT /api/settings sync receives updated previousPayload on second save", async () => {
+  // First save — establish baseline
+  const first = { ...VALID_BODY, traditionalSources: ["Reuters"], socialSources: [] };
+  await request(app).put("/api/settings").send(first).set("Content-Type", "application/json");
+
+  // Second save — capture what sync sees
+  const second = { ...VALID_BODY, traditionalSources: ["Reuters", "NYT"], socialSources: [] };
+  let captured = null;
+  const prev = _sourceRegistrySync.record;
+  _sourceRegistrySync.record = async (args) => { captured = args; };
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send(second)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(captured !== null, "registry sync must have been called");
+    // previousPayload reflects the first save's sources
+    assert.deepEqual(captured.previousPayload?.traditionalSources, ["Reuters"]);
+    // nextPayload is the second save
+    assert.deepEqual(captured.nextPayload.traditionalSources, ["Reuters", "NYT"]);
+  } finally {
+    _sourceRegistrySync.record = prev;
+  }
 });
 
 test("GET /api/dashboard returns schema-conformant payload with ranked stories", async () => {

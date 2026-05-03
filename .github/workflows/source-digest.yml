@@ -1,0 +1,36 @@
+name: Daily source digest
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  source-digest:
+    name: Run source delta digest
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: 05-engineering/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: 05-engineering
+
+      - name: Run daily source digest
+        run: node apps/api/src/ops/source-delta-digest.mjs
+        working-directory: 05-engineering
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SOURCE_DIGEST_SLACK_WEBHOOK_URL: ${{ secrets.SOURCE_DIGEST_SLACK_WEBHOOK_URL }}

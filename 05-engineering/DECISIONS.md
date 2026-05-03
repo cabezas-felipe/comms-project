@@ -2,6 +2,137 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-02 - D-043 - Phase 2 Option A: SQL-first daily net-new source digest
+
+#### Context
+
+Phase 1 (D-039, D-041) delivers append-only `source_registry_events` rows when a user adds a source. The operator now needs a workflow to act on this data: identify unmapped sources and add them to [`apps/api/data/source-feeds.json`](apps/api/data/source-feeds.json) (or a canonical entity + feed mapping row). Two paths were considered:
+
+- **Option A (SQL-first):** a PostgreSQL view + scheduled script send a daily Slack digest. The operator maps sources via SQL directly in the Supabase editor.
+- **Option B (Admin API):** REST endpoints + admin UI for the mapping workflow.
+
+#### Decision
+
+Chose **Option A** for Phase 2. Built:
+
+1. **Migration 006** ([`apps/api/src/db/migrations/006_source_net_new_view.sql`](apps/api/src/db/migrations/006_source_net_new_view.sql)) — `v_source_net_new_24h` view. Rolling 24-hour window of net-new, unmapped sources from `source_registry_events`. Excludes sources whose normalized form already has a `source_aliases` row linked to a `source_feed_mapping` row with `status IN ('mapped', 'verified')`. Returns `raw_string`, `kind`, `first_seen_at`, `last_seen_at`, `times_seen`, and `sample_user_ids` (bounded to 3).
+
+2. **Digest script** ([`apps/api/src/ops/source-delta-digest.mjs`](apps/api/src/ops/source-delta-digest.mjs)) — daily sender. Queries `v_source_net_new_24h` via the service role, formats a Slack-compatible text block, posts to `SOURCE_DIGEST_SLACK_WEBHOOK_URL` if set, dry-runs to stdout otherwise. Exits cleanly with a log message when there are no new sources. `formatDigest` is exported as a pure function for unit testing.
+
+3. **GitHub Actions workflow** ([`.github/workflows/source-digest.yml`](../.github/workflows/source-digest.yml)) — daily cron at 09:00 UTC with `workflow_dispatch` for manual runs. Loads `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `SOURCE_DIGEST_SLACK_WEBHOOK_URL` from repository secrets.
+
+4. **Operator playbook** ([`SOURCE-REGISTRY-PHASE2-PLAYBOOK.md`](SOURCE-REGISTRY-PHASE2-PLAYBOOK.md)) — daily loop, SQL snippets for entity/alias/feed-mapping creation, manual run instructions, and a troubleshooting checklist.
+
+#### Why Option A over Option B
+
+- Option A ships immediately: no new endpoints, no new UI surface, no additional auth logic.
+- The operator is technical and comfortable with SQL; a UI adds latency to the feedback loop without adding capability at this stage.
+- The view + script is independently schedulable, dry-runnable, and trivially auditable.
+- Source volume is expected to be low (< 50/day) while N=1 operator. SQL tooling is faster than building and validating admin CRUD.
+- Shipping Option A first gives real data on digest volume and mapping frequency before committing to the Option B investment.
+
+#### Tradeoffs
+
+- Mapping is manual SQL — slower per-source but requires zero UI investment.
+- No mapping history / audit log beyond what the DB tables already provide.
+- Exclusion relies on the alias table: an entity without a matching alias will keep appearing in the digest until the operator adds one (documented in the playbook troubleshooting section).
+
+#### Trigger for Option B migration
+
+- Daily digest consistently shows > 50 unmapped sources, **or**
+- A second non-technical operator needs to manage mappings (SQL access is a bottleneck).
+
+#### Consequences
+
+- `v_source_net_new_24h` must be applied to all environments via migration 006.
+- No application code changes — the digest runs out-of-band from the API server.
+- Three new GitHub secrets required: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SOURCE_DIGEST_SLACK_WEBHOOK_URL`.
+- Unit tests added for `formatDigest` in [`apps/api/src/ops/source-delta-digest.test.mjs`](apps/api/src/ops/source-delta-digest.test.mjs).
+
+### 2026-05-02 - D-042 - Phase 1.1 hardening: intra-payload dedupe in `computeDeltaRows`
+
+`computeDeltaRows` now builds `Set`s from `nextPayload.{traditional,social}Sources` before filtering against the previous sets. A repeated string within a single request (e.g. `["NYT","NYT"]`) now emits exactly one row rather than one per occurrence. The previous-vs-next delta semantics and exact-match behaviour are otherwise unchanged.
+
+### 2026-05-02 - D-041 - Phase 1.1: delta-only source registry events (no duplicates across saves)
+
+#### Context
+
+Phase 1 (D-039) appended one `source_registry_events` row per source string on every `PUT /api/settings` call, regardless of whether the source was already present in the user's previous settings. Repeated saves — or saves that only removed sources — produced duplicate rows and inflated daily-delta counts.
+
+#### Decision
+
+- **`computeDeltaRows({ userId, previousPayload, nextPayload })`** added to [`apps/api/src/db/source-registry-sync.mjs`](apps/api/src/db/source-registry-sync.mjs) as an exported pure function. Uses `Set`-based diffing (exact match, no normalization yet): only strings in `nextPayload.{traditional,social}Sources` that are absent from the corresponding previous set produce new rows.
+- **`recordSourceRegistryEventsFromSettings`** signature changed from `{ userId, payload }` to `{ userId, previousPayload, nextPayload }`. Delegates to `computeDeltaRows`; all other behaviour (Supabase gate, error swallowing) unchanged.
+- **`PUT /api/settings` handler** now reads previous settings for the user before calling `writeSettings`: uses `hasSettings()` (non-destructive) then `readSettings()`; both wrapped in a local try/catch so any read failure silently falls back to `previousPayload: null` (first-save semantics — log all current sources once).
+- First-save semantics: `previousPayload` null → previous sets are empty → all sources in the new payload are logged.
+
+#### Why
+
+- Duplicate events break daily-delta digest queries that count new sources introduced per day.
+- Removal-only saves (user shortens their list) should not produce any events; no source was newly requested.
+- Reading previous before writing is safe because `hasSettings` is non-destructive and the read is wrapped defensively.
+
+#### Consequences
+
+- Daily-delta queries on `source_registry_events` now reflect actual additions, not repeated saves.
+- No schema changes required.
+- `_sourceRegistrySync.record` hook call site in `server.mjs` updated; tests updated accordingly.
+
+### 2026-05-02 - D-040 - Migration 005: `service_role` DML grants on source registry tables
+
+#### Context
+
+- Phase 1 sync (`PUT /api/settings` → `source_registry_events` batch insert) failed on the live Supabase project with: `"permission denied for table source_registry_events"` — even though the server uses `SUPABASE_SERVICE_ROLE_KEY`.
+- Root cause: the Supabase `service_role` PostgreSQL role bypasses RLS row-checks but still requires explicit table-level `GRANT` on tables created after the project's initial provisioning. Phase 0 tables were created with RLS enabled and no default grants for `service_role`.
+- A manual `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE source_registry_events TO service_role` on the live DB unblocked the sync.
+
+#### Decision
+
+- Added [`apps/api/src/db/migrations/005_source_registry_service_role_grants.sql`](apps/api/src/db/migrations/005_source_registry_service_role_grants.sql).
+- Grants `SELECT, INSERT, UPDATE, DELETE` on all four Phase 0 source registry tables (`source_entities`, `source_aliases`, `source_registry_events`, `source_feed_mapping`) to `service_role`.
+- `GRANT` is additive and idempotent — re-running this migration is safe.
+
+#### Why
+
+- A manual hotfix is not reproducible: new environments (staging, fresh Supabase project) would hit the same permission error silently on first sync.
+- Codifying grants in a migration ensures they are applied in order with the rest of the schema setup.
+
+#### Consequences
+
+- Operators must apply this migration to any environment where Phase 0 tables exist (`supabase db push` or SQL editor).
+- No application code changes — this is a privilege-only fix.
+- Future source registry tables should include explicit `service_role` grants in their creation migration rather than relying on defaults.
+
+### 2026-05-02 - D-039 - Phase 1: `source_registry_events` sync on `PUT /api/settings`
+
+After a successful `writeSettings` call in `PUT /api/settings`, the server appends one row to `source_registry_events` per listed traditional or social source string, using a batch `.insert()` via the Supabase client from [`apps/api/src/db/source-registry-sync.mjs`](apps/api/src/db/source-registry-sync.mjs). The sync is gated on `isSupabaseEnabled()` (requires `SUPABASE_URL` plus a key, matching the client’s ability to insert). File-backed environments and tests without `SUPABASE_URL` no-op with no error. Failures are logged via `console.error` and never re-thrown, so a registry insert error cannot fail a settings save that already persisted. [`server.mjs`](apps/api/src/server.mjs) exports `_sourceRegistrySync` for tests to intercept `record`. `resolved_entity_id` stays null; deduplication remains a digest-time concern.
+
+### 2026-05-02 - D-038 - Source registry schema (Phase 0)
+
+#### Context
+
+- Users configure `traditionalSources` and `socialSources` in settings JSON; strings can be removed from settings, but the product direction calls for a **persistent append-only record** of what was ever requested, plus canonicalization (aliases) and operator mapping to RSS/social URLs aligned with [`apps/api/data/source-feeds.json`](apps/api/data/source-feeds.json).
+
+#### Decision
+
+- Added migration [`apps/api/src/db/migrations/004_source_registry.sql`](apps/api/src/db/migrations/004_source_registry.sql):
+  - **`source_entities`:** canonical outlet/account (`canonical_name`, `kind`, `notes`, timestamps); unique on `(kind, canonical_name)`.
+  - **`source_aliases`:** `alias_raw` + `alias_normalized` (globally unique) → `source_entity_id`.
+  - **`source_registry_events`:** append-only rows per observation (`user_id`, `raw_string`, `kind`, `seen_at`, optional `resolved_entity_id`).
+  - **`source_feed_mapping`:** one row per entity (`status` pending/mapped/verified/rejected, `rss_url`, `social_profile_url`, `manifest_feed_id`, verification fields).
+  - **`normalize_source_alias(text)`:** immutable SQL helper — trim, collapse whitespace, lowercase (used for `alias_normalized`; does not strip domain punctuation so `NYT` and `nytimes.com` stay distinct until aliased manually).
+- **RLS:** enabled on all four tables with **no** policies for `anon`/`authenticated` (same approach as [`apps/api/src/db/schema.sql`](apps/api/src/db/schema.sql)); server uses service role until client-side access is required.
+
+#### Why
+
+- Supabase remains system of truth; avoids dual-write with Markdown.
+- Events table supports daily delta and audit without mutating user settings.
+
+#### Consequences
+
+- Operators apply DDL per [`MODE2-SOURCE-REGISTRY-PHASE0.md`](MODE2-SOURCE-REGISTRY-PHASE0.md) before Phase 1 inserts succeed.
+- Phase 1 (D-039) writes to `source_registry_events`; canonical/alias/mapping rows remain manual or admin-driven until later slices.
+
 ### 2026-05-01 - D-037 - Archive removal and logout hardening (branch `work/logout`)
 
 #### Context

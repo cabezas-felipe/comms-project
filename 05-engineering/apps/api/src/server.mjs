@@ -6,11 +6,12 @@ import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
 import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
 import { extractOnboarding } from "./ai/onboarding-extractor.mjs";
-import { readSettings, writeSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
+import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
+import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -147,6 +148,12 @@ export const _auth = { resolver: resolveIdentity };
 export const _extraction = { extract: extractOnboarding };
 
 /**
+ * Mutable registry sync hook. Tests override _sourceRegistrySync.record to capture
+ * sync calls without a live Supabase instance. Do not use in production code paths.
+ */
+export const _sourceRegistrySync = { record: recordSourceRegistryEventsFromSettings };
+
+/**
  * Enforces recognized identity on a route. Sends 401 and returns null when identity cannot be resolved.
  * Callers must guard: `if (!identity) return;`
  * Returns { userId, source } on success.
@@ -271,7 +278,17 @@ app.put("/api/settings", async (req, res) => {
     return;
   }
   try {
+    // Read previous before writing so the sync can diff new vs existing sources.
+    // hasSettings avoids auto-creating a default file for first-time users.
+    // Any read failure falls back to null → first-save semantics (log all sources).
+    let previousPayload = null;
+    try {
+      if (await hasSettings(identity.userId)) {
+        previousPayload = await readSettings(identity.userId);
+      }
+    } catch { /* treat unreadable previous as first-save */ }
     await writeSettings(result.data, identity.userId);
+    await _sourceRegistrySync.record({ userId: identity.userId, previousPayload, nextPayload: result.data });
     trackServerEvent("settings_updated", {
       topicCount: result.data.topics?.length ?? 0,
       geoCount: result.data.geographies?.length ?? 0,
