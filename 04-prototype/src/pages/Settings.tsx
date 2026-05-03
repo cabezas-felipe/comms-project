@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { X, Plus, AlertTriangle } from "lucide-react";
@@ -15,9 +15,8 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { STORIES } from "@/data/stories";
 import { CONTRACT_VERSION } from "@tempo/contracts";
-import { fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
+import { defaultSettingsPayload, fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
 
 function warnToast(message: string) {
   toast.warning(message, {
@@ -120,44 +119,26 @@ type SettingsSnapshot = {
 };
 
 export default function Settings() {
-  const [topics, setTopics] = useState(["Diplomatic relations", "Migration policy", "Security cooperation"]);
-  const [keywords, setKeywords] = useState(["OFAC", "sanctions", "deportation routing", "bilateral"]);
-  const [geographies, setGeographies] = useState(["US", "Colombia"]);
+  // Computed once on mount; provides defaults for state and snapshot without duplicating values.
+  const [_defaults] = useState(defaultSettingsPayload);
+  const [topics, setTopics] = useState(_defaults.topics);
+  const [keywords, setKeywords] = useState(_defaults.keywords);
+  const [geographies, setGeographies] = useState(_defaults.geographies);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const saveTimer = useRef<number | null>(null);
   const [sourceTab, setSourceTab] = useState<SourceTab>("traditional");
   const [loading, setLoading] = useState(true);
 
-  const seed = useMemo(() => {
-    const seenT = new Set<string>();
-    const seenS = new Set<string>();
-    const trad: string[] = [];
-    const soc: string[] = [];
-    STORIES.forEach((st) =>
-      st.sources.forEach((s) => {
-        if (s.kind === "traditional" && !seenT.has(s.outlet)) {
-          seenT.add(s.outlet);
-          trad.push(s.outlet);
-        }
-        if (s.kind === "social" && !seenS.has(s.outlet)) {
-          seenS.add(s.outlet);
-          soc.push(s.outlet);
-        }
-      })
-    );
-    return { trad, soc };
-  }, []);
-
-  const [traditional, setTraditional] = useState<string[]>(seed.trad);
-  const [social, setSocial] = useState<string[]>(seed.soc);
+  const [traditional, setTraditional] = useState<string[]>(_defaults.traditionalSources);
+  const [social, setSocial] = useState<string[]>(_defaults.socialSources);
   const [draftSource, setDraftSource] = useState("");
 
   const snapshotRef = useRef<SettingsSnapshot>({
-    topics: ["Diplomatic relations", "Migration policy", "Security cooperation"],
-    keywords: ["OFAC", "sanctions", "deportation routing", "bilateral"],
-    geographies: ["US", "Colombia"],
-    traditional: seed.trad,
-    social: seed.soc,
+    topics: _defaults.topics,
+    keywords: _defaults.keywords,
+    geographies: _defaults.geographies,
+    traditional: _defaults.traditionalSources,
+    social: _defaults.socialSources,
   });
 
   // stateRef keeps save callback from closing over stale state values
@@ -230,6 +211,12 @@ export default function Settings() {
   };
 
   const removeSource = (s: string) => setList(list.filter((x) => x !== s));
+
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     let canceled = false;

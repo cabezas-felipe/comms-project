@@ -5,6 +5,10 @@
  * shaped identically to the items inside source-feeds.json's "feeds" array.
  * Used by GET /api/ingestion/sources when Supabase is enabled (Phase 3 Option B).
  *
+ * Returns ALL rows with status "mapped" or "verified" regardless of the active flag.
+ * This endpoint reflects catalog/manifest visibility — not an active-only execution list.
+ * Callers (e.g. the ingestion runner) are responsible for filtering on active if needed.
+ *
  * @param {{ supabase: import('@supabase/supabase-js').SupabaseClient }} opts
  * @returns {Promise<Array<{ id: string, name: string, kind: string, url: string, weight: number, active: boolean }>>}
  */

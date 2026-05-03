@@ -97,7 +97,7 @@ export function sortRows(rows) {
  *   updated_at: string|null,
  *   created_at: string|null,
  * }>} rows
- * @param {{ generatedAt: Date, supabaseUrl: string }} meta
+ * @param {{ generatedAt?: Date, supabaseUrl: string }} meta
  * @returns {string}
  */
 export function formatCatalogMarkdown(rows, meta) {
@@ -109,8 +109,6 @@ export function formatCatalogMarkdown(rows, meta) {
     grouped[bucket].push(row);
   }
 
-  const generatedAt = meta.generatedAt.toISOString();
-
   const lines = [
     `<!-- DO NOT EDIT — generated file. Run \`cd 05-engineering && npm run source-catalog:generate\` to regenerate. -->`,
     ``,
@@ -120,7 +118,7 @@ export function formatCatalogMarkdown(rows, meta) {
     `> Supabase is the canonical source of truth for all source mappings.`,
     `> To update a mapping, edit the record in Supabase, then regenerate this file.`,
     `>`,
-    `> **Generated:** ${generatedAt}`,
+    ...(meta.generatedAt ? [`> **Generated:** ${meta.generatedAt.toISOString()}`] : []),
     `> **Supabase project:** ${meta.supabaseUrl}`,
     `> **Regenerate:** \`cd 05-engineering && npm run source-catalog:generate\``,
     ``,
@@ -186,10 +184,7 @@ async function run() {
     created_at: row.created_at ?? null,
   }));
 
-  const markdown = formatCatalogMarkdown(rows, {
-    generatedAt: new Date(),
-    supabaseUrl,
-  });
+  const markdown = formatCatalogMarkdown(rows, { supabaseUrl });
 
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const outPath = resolve(__dirname, "../../../../SOURCE-REGISTRY-CATALOG.generated.md");

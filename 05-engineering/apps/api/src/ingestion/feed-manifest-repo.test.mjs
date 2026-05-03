@@ -146,6 +146,38 @@ test("listIngestionFeeds returns empty array when no rows", async () => {
   assert.deepEqual(feeds, []);
 });
 
+test("listIngestionFeeds includes inactive feeds — active:false rows are not filtered out", async () => {
+  // This endpoint is catalog/manifest visibility, not an active-only execution list.
+  // Inactive feeds must appear so callers can see the full registry state.
+  const rows = [
+    {
+      manifest_feed_id: "active-feed",
+      rss_url: "https://example.com/active",
+      social_profile_url: null,
+      ingestion_weight: 70,
+      active: true,
+      status: "mapped",
+      source_entities: { canonical_name: "Active Source", kind: "traditional" },
+    },
+    {
+      manifest_feed_id: "inactive-feed",
+      rss_url: "https://example.com/inactive",
+      social_profile_url: null,
+      ingestion_weight: 60,
+      active: false,
+      status: "mapped",
+      source_entities: { canonical_name: "Inactive Source", kind: "traditional" },
+    },
+  ];
+
+  const feeds = await listIngestionFeeds({ supabase: makeMockSupabase(rows) });
+
+  assert.equal(feeds.length, 2, "Both active and inactive feeds must be returned");
+  const inactive = feeds.find((f) => f.id === "inactive-feed");
+  assert.ok(inactive, "Inactive feed must be present in results");
+  assert.equal(inactive.active, false);
+});
+
 test("listIngestionFeeds maps all required output fields", async () => {
   const rows = [
     {

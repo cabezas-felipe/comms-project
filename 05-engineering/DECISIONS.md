@@ -32,7 +32,6 @@ Added a generator script that produces a deterministic, read-only Markdown catal
 
 - Run `cd 05-engineering && npm run source-catalog:generate` to refresh the catalog.
 - The generated file is committed as a read-only artifact; edits to it will be overwritten on the next generation run.
-- See [`SOURCE-REGISTRY-PHASE5-PLAYBOOK.md`](SOURCE-REGISTRY-PHASE5-PLAYBOOK.md) for operator instructions (if created).
 
 ---
 

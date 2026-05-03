@@ -69,9 +69,18 @@ test("formatCatalogMarkdown: output contains DO NOT EDIT marker", () => {
   assert.ok(md.includes("DO NOT EDIT"), `Missing DO NOT EDIT: ${md.slice(0, 200)}`);
 });
 
-test("formatCatalogMarkdown: output contains generated timestamp", () => {
+test("formatCatalogMarkdown: output contains generated timestamp when generatedAt is provided", () => {
   const md = formatCatalogMarkdown([VERIFIED], META);
   assert.ok(md.includes("2026-05-03T12:00:00.000Z"), `Missing timestamp: ${md.slice(0, 500)}`);
+});
+
+test("formatCatalogMarkdown: no timestamp line when generatedAt is omitted (diff-stable default)", () => {
+  const metaNoTimestamp = { supabaseUrl: "https://example.supabase.co" };
+  const md = formatCatalogMarkdown([VERIFIED], metaNoTimestamp);
+  assert.ok(
+    !md.includes("**Generated:**"),
+    `Timestamp line must be absent when generatedAt is not provided: ${md.slice(0, 500)}`
+  );
 });
 
 test("formatCatalogMarkdown: output contains supabaseUrl", () => {

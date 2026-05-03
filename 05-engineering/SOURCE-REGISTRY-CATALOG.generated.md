@@ -6,7 +6,6 @@
 > Supabase is the canonical source of truth for all source mappings.
 > To update a mapping, edit the record in Supabase, then regenerate this file.
 >
-> **Generated:** 2026-05-03T12:53:19.597Z
 > **Supabase project:** https://kdkzvcwlhgivvjwziqpr.supabase.co
 > **Regenerate:** `cd 05-engineering && npm run source-catalog:generate`
 
