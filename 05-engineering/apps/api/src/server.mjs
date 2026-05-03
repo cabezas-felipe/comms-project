@@ -528,7 +528,7 @@ app.post("/api/transcribe", express.raw({ type: "*/*", limit: "25mb" }), async (
     if (process.env.NODE_ENV !== "production") {
       res.json({
         transcript:
-          "Track US and Colombia diplomatic stories — especially OFAC and migration. Trust NYT, Reuters, El Tiempo, and Semana.",
+          "I lead comms for a nonprofit working on migration between the US and Colombia. I read NYT and El Tiempo, and I follow the State Department on X. Mostly I brief US boards on what's happening in Colombia.",
       });
       return;
     }

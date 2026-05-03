@@ -2,8 +2,8 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { AlertTriangle, ArrowRight } from "lucide-react";
-import { toast } from "sonner";
+import { ArrowRight } from "lucide-react";
+import { notifyWarning } from "@/lib/notify";
 import { useAuth } from "@/lib/auth";
 import {
   trackLandingViewed,
@@ -45,12 +45,6 @@ function resolveBackendError(message?: string): BackendError {
   return BACKEND_ERROR_MAP[message] ?? { toast: "Check your details and try again.", analyticsKey: "unknown_with_message" };
 }
 
-function warnToast(message: string) {
-  toast.warning(message, {
-    icon: <AlertTriangle className="h-4 w-4" style={{ color: "hsl(var(--signal-warning))" }} />,
-  });
-}
-
 export default function EntryLandingPage() {
   const navigate = useNavigate();
   const { setRecognizedIdentity } = useAuth();
@@ -70,7 +64,7 @@ export default function EntryLandingPage() {
     if (!isValidEmailForLanding(trimmed)) {
       const validationReason = classifyEmailValidationFailure(trimmed);
       trackLandingFailed({ failureStage: "validation", validationReason });
-      warnToast("Enter a valid email to continue.");
+      notifyWarning("Enter a valid email to continue.");
       return;
     }
 
@@ -86,7 +80,7 @@ export default function EntryLandingPage() {
         const body = (await res.json().catch(() => ({}))) as { message?: string };
         const err = resolveBackendError(body.message);
         trackLandingFailed({ failureStage: "backend", statusCode, mappedErrorKey: err.analyticsKey });
-        warnToast(err.toast);
+        notifyWarning(err.toast);
         return;
       }
       const data = (await res.json()) as {
@@ -105,7 +99,7 @@ export default function EntryLandingPage() {
       navigate(data.destination);
     } catch {
       trackLandingFailed({ failureStage: "network" });
-      warnToast("Network error. Please try again.");
+      notifyWarning("Network error. Please try again.");
     } finally {
       setLoading(false);
     }
