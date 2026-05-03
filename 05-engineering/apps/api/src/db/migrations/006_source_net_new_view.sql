@@ -17,7 +17,7 @@
 -- Notes
 -- -----
 -- - No ORDER BY at view level; consumers sort in their own queries.
--- - ARRAY_AGG sample_user_ids is capped to 5 elements via array slice [1:5].
+-- - ARRAY_AGG sample_user_ids is capped to 3 elements via array slice [1:3].
 -- - COUNT is cast to int for clean JSON serialisation from PostgREST.
 -- - CREATE OR REPLACE is safe to re-run (idempotent).
 
@@ -25,17 +25,17 @@ CREATE OR REPLACE VIEW v_source_net_new_24h AS
 SELECT
   e.raw_string,
   e.kind,
-  MIN(e.created_at)                         AS first_seen_at,
-  MAX(e.created_at)                         AS last_seen_at,
+  MIN(e.seen_at)                            AS first_seen_at,
+  MAX(e.seen_at)                            AS last_seen_at,
   COUNT(*)::int                             AS times_seen,
-  (ARRAY_AGG(DISTINCT e.user_id))[1:5]      AS sample_user_ids
+  (ARRAY_AGG(DISTINCT e.user_id))[1:3]      AS sample_user_ids
 FROM source_registry_events e
-WHERE e.created_at >= NOW() - INTERVAL '24 hours'
+WHERE e.seen_at >= NOW() - INTERVAL '24 hours'
   AND NOT EXISTS (
     SELECT 1
-    FROM   source_aliases    sa
-    JOIN   source_entities   se  ON se.id  = sa.entity_id
-    JOIN   source_feed_mapping sfm ON sfm.entity_id = se.id
+    FROM   source_aliases       sa
+    JOIN   source_entities      se  ON se.id  = sa.source_entity_id
+    JOIN   source_feed_mapping  sfm ON sfm.source_entity_id = se.id
     WHERE  sa.alias_normalized = normalize_source_alias(e.raw_string)
       AND  sfm.status IN ('mapped', 'verified')
   )
