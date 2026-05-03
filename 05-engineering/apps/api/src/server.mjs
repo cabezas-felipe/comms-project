@@ -10,6 +10,7 @@ import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
+import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
 
@@ -152,6 +153,12 @@ export const _extraction = { extract: extractOnboarding };
  * sync calls without a live Supabase instance. Do not use in production code paths.
  */
 export const _sourceRegistrySync = { record: recordSourceRegistryEventsFromSettings };
+
+/**
+ * Mutable feed manifest hook. Tests override _feedManifest.list to return fixture
+ * data without a live Supabase instance. Do not use in production code paths.
+ */
+export const _feedManifest = { list: listIngestionFeeds };
 
 /**
  * Enforces recognized identity on a route. Sends 401 and returns null when identity cannot be resolved.
@@ -310,6 +317,20 @@ app.put("/api/settings", async (req, res) => {
 });
 
 app.get("/api/ingestion/sources", async (_req, res) => {
+  if (isSupabaseEnabled()) {
+    try {
+      const supabase = getSupabaseClient();
+      const feeds = await _feedManifest.list({ supabase });
+      res.json({ feeds });
+    } catch (error) {
+      res.status(500).json({
+        message: "Failed to read source feeds from database.",
+        detail: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+    return;
+  }
+
   try {
     const feedsFile = path.join(DATA_DIR, "source-feeds.json");
     const content = await fs.readFile(feedsFile, "utf8");

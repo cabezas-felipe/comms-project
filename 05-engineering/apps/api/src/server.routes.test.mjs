@@ -36,7 +36,7 @@ await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_S
 const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
 
@@ -179,7 +179,8 @@ test("GET /api/dashboard returns schema-conformant payload with ranked stories",
   assert.ok(!("aiSummaryMeta" in res.body.stories[0]), "aiSummaryMeta must be stripped from response");
 });
 
-test("GET /api/ingestion/sources returns declared feed configuration", async () => {
+test("GET /api/ingestion/sources returns declared feed configuration (JSON fallback, no Supabase)", async () => {
+  // SUPABASE_URL is not set in the test env — route must fall back to source-feeds.json.
   const res = await request(app).get("/api/ingestion/sources");
   assert.equal(res.status, 200);
   assert.ok(Array.isArray(res.body.feeds), "feeds must be an array");
@@ -187,6 +188,56 @@ test("GET /api/ingestion/sources returns declared feed configuration", async () 
   assert.equal(res.body.feeds[0].id, "nyt-politics");
   assert.equal(typeof res.body.feeds[0].kind, "string");
   assert.equal(typeof res.body.feeds[0].weight, "number");
+});
+
+test("GET /api/ingestion/sources reads from DB when Supabase is enabled", async () => {
+  const savedUrl = process.env.SUPABASE_URL;
+  const savedKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_URL = "http://fake-supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "fake-service-role-key";
+  const prevList = _feedManifest.list;
+  const DB_FEEDS = [
+    { id: "db-feed-1", name: "DB Source", kind: "rss", url: "https://example.com/rss", weight: 90, active: true },
+  ];
+  _feedManifest.list = async () => DB_FEEDS;
+  try {
+    const res = await request(app).get("/api/ingestion/sources");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.body.feeds), "feeds must be an array");
+    assert.equal(res.body.feeds.length, 1);
+    assert.equal(res.body.feeds[0].id, "db-feed-1");
+    assert.equal(res.body.feeds[0].weight, 90);
+  } finally {
+    _feedManifest.list = prevList;
+    if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
+    else delete process.env.SUPABASE_URL;
+    if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
+    else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  }
+});
+
+test("GET /api/ingestion/sources returns 500 when DB read fails", async () => {
+  const savedUrl = process.env.SUPABASE_URL;
+  const savedKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_URL = "http://fake-supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "fake-service-role-key";
+  const prevList = _feedManifest.list;
+  _feedManifest.list = async () => { throw new Error("DB connection failed"); };
+  try {
+    const res = await request(app).get("/api/ingestion/sources");
+    assert.equal(res.status, 500);
+    assert.ok(typeof res.body.message === "string", "error message must be present");
+    assert.ok(
+      res.body.message.includes("database"),
+      `expected 'database' in error message, got: ${res.body.message}`
+    );
+  } finally {
+    _feedManifest.list = prevList;
+    if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
+    else delete process.env.SUPABASE_URL;
+    if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
+    else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  }
 });
 
 // ─── Auth enforcement — 401 on missing/invalid token ─────────────────────────

@@ -2,6 +2,51 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-02 - D-044 - Phase 3 Option B: Supabase as source of truth for ingestion feed manifest
+
+#### Context
+
+Phases 0–2 built out source discovery (tracking user-mentioned sources via `source_registry_events`) and the operator mapping workflow (`source_entities`, `source_feed_mapping`). The ingestion manifest — which feeds the API actually serves via `GET /api/ingestion/sources` — was still read from `apps/api/data/source-feeds.json`. This created a split: operators could map sources in Supabase but had to edit JSON and redeploy to change what gets ingested.
+
+Two paths were considered:
+
+- **Option A (JSON-first):** keep `source-feeds.json` as the source of truth; use Supabase as a secondary mirror.
+- **Option B (DB-first):** promote Supabase (`source_feed_mapping` + `source_entities`) to the source of truth; keep JSON as a seed and offline fallback.
+
+#### Decision
+
+Chose **Option B**. Built:
+
+1. **Migration 007** ([`apps/api/src/db/migrations/007_source_feed_manifest_columns.sql`](apps/api/src/db/migrations/007_source_feed_manifest_columns.sql)) — adds `ingestion_weight` (integer, 0–100, default 50) and `active` (boolean, default true) to `source_feed_mapping`. Safe to re-run.
+
+2. **DB manifest reader** ([`apps/api/src/ingestion/feed-manifest-repo.mjs`](apps/api/src/ingestion/feed-manifest-repo.mjs)) — `listIngestionFeeds({ supabase })` queries `source_feed_mapping` joined with `source_entities`, filters to `mapped`/`verified` rows with a URL, and returns items shaped identically to the existing JSON response items (`id`, `name`, `kind`, `url`, `weight`, `active`). Ordered by weight desc, name asc.
+
+3. **Route update** ([`apps/api/src/server.mjs`](apps/api/src/server.mjs)) — `GET /api/ingestion/sources` reads from DB (via `_feedManifest.list`) when Supabase is enabled; falls back to `source-feeds.json` when Supabase is not configured. DB failure returns 500 with a clear error message — no silent fallback to JSON.
+
+4. **Import script** ([`apps/api/src/db/source-feeds-import.mjs`](apps/api/src/db/source-feeds-import.mjs)) — one-time seed that reads `source-feeds.json` and upserts into `source_entities` + `source_feed_mapping`. Idempotent; preserves `status = 'verified'` on existing rows.
+
+#### Why Option B over Option A
+
+- The operator already edits `source_feed_mapping` for the daily digest workflow; merging manifest management into the same table eliminates two parallel write paths (JSON and DB).
+- DB rows can be updated live without a code deploy; JSON changes require a commit and redeploy.
+- The existing `mapped`/`verified` status gate provides natural control over which feeds are active.
+- JSON fallback is preserved for offline or test environments that do not have Supabase configured.
+
+#### Tradeoffs
+
+- Operators must apply migration 007 and run the import script before the DB path is live.
+- `listIngestionFeeds` makes a direct DB query per request (no in-process cache). Operators see changes immediately after updating a row — no restart needed.
+- DB failure is a hard 500 rather than a silent JSON fallback. Intentional: hiding a broken DB connection could mask configuration drift in production.
+
+#### Consequences
+
+- Migration 007 must be applied to all environments (Supabase SQL Editor or CLI).
+- Run `source-feeds-import.mjs` once per environment to seed the JSON entries into Supabase.
+- `_feedManifest` hook exported from `server.mjs` for test injection (same pattern as `_sourceRegistrySync`).
+- See [`SOURCE-REGISTRY-PHASE3-PLAYBOOK.md`](SOURCE-REGISTRY-PHASE3-PLAYBOOK.md) for operator instructions.
+
+---
+
 ### 2026-05-02 - D-043 - Phase 2 Option A: SQL-first daily net-new source digest
 
 #### Context
