@@ -6,12 +6,10 @@ import {
   trackOnboardingViewed,
 } from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
 import { ArrowRight, Keyboard, Loader2, Mic } from "lucide-react";
-import { toast } from "sonner";
-import { transcribeAudio, uploadVoiceNote } from "@/lib/voice-upload";
+import { notifyWarning, notifyError, notifySuccess } from "@/lib/notify";
+import { transcribeAudio } from "@/lib/voice-upload";
 import { ExtractionApiError, extractOnboardingText, saveSettingsPayload } from "@/lib/settings-api";
 import { classifySources } from "@/lib/source-classification";
 import { CONTRACT_VERSION, settingsPayloadSchema, type SettingsPayload } from "@tempo/contracts";
@@ -20,7 +18,7 @@ type Mode = "type" | "voice";
 type RecordingState = "idle" | "recording" | "processing" | "ready" | "error";
 
 const EXAMPLE_TEXT =
-  "Track US and Colombia diplomatic stories — especially OFAC and migration. Trust NYT, Reuters, El Tiempo, and Semana.";
+  "I lead comms for a nonprofit working on migration between the US and Colombia. I read NYT and El Tiempo, and I follow the State Department on X. Mostly I brief US boards on what's happening in Colombia.";
 
 const PREFERRED_AUDIO_TYPES = [
   "audio/webm;codecs=opus",
@@ -35,7 +33,7 @@ export default function Onboarding() {
   const [mode, setMode] = useState<Mode>("type");
   const [topics, setTopics] = useState("");
   const [keywords, setKeywords] = useState("OFAC, sanctions, deportation routing, bilateral");
-  const [geos, setGeos] = useState<string[]>(["US", "Colombia"]);
+  const [geos] = useState<string[]>(["US", "Colombia"]);
   const [sources, setSources] = useState(
     "NYT, Washington Post, Reuters, El Tiempo, El País, Semana"
   );
@@ -51,9 +49,6 @@ export default function Onboarding() {
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, []);
-
-  const toggleGeo = (g: string) =>
-    setGeos((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]));
 
   const stopStream = () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -100,20 +95,13 @@ export default function Onboarding() {
           type: recorder.mimeType || "audio/webm",
         });
 
-        void uploadVoiceNote(blob).then((status) => {
-          if (status === "skipped") {
-            toast.info("Not signed in — voice note was not archived.");
-          }
-        });
-
         try {
           const transcript = await transcribeAudio(blob);
           setTopics(transcript);
           setMode("type");
           setRecState("ready");
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "Transcription failed.";
-          toast.error(`Voice capture failed — ${msg} You can type instead.`);
+        } catch {
+          notifyError("Transcription failed. Please try again.");
           setRecState("error");
         }
       };
@@ -123,11 +111,7 @@ export default function Onboarding() {
       setRecState("recording");
     } catch (err) {
       stopStream();
-      const msg =
-        err instanceof Error && err.name === "NotAllowedError"
-          ? "Microphone permission denied."
-          : "Could not access microphone.";
-      toast.error(`${msg} You can type instead.`);
+      notifyError("Could not access microphone. Please try again or type instead.");
       setRecState("error");
     }
   };
@@ -135,7 +119,7 @@ export default function Onboarding() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!topics.trim() || !geos.length) {
-      toast.error("Add at least one topic and one geography to continue.");
+      notifyWarning("Add what you're watching to continue.");
       return;
     }
     setSubmitting(true);
@@ -166,7 +150,7 @@ export default function Onboarding() {
           socialSources: [],
         });
       } else {
-        toast.info("Could not extract preferences — continuing with your entered values.");
+        notifyWarning("We hit an issue on our side. You can keep going and complete what you're monitoring in Settings.");
         const splitTrim = (s: string) => s.split(/[,\n]+/).map((v) => v.trim()).filter(Boolean);
         payload = settingsPayloadSchema.parse({
           contractVersion: CONTRACT_VERSION,
@@ -182,16 +166,16 @@ export default function Onboarding() {
     try {
       await saveSettingsPayload(payload);
     } catch {
-      toast.error("Couldn't save your settings. Please try again.");
+      notifyError("We couldn't save your changes. Please try again.");
       setSubmitting(false);
       return;
     }
 
     trackOnboardingCompleted();
     if (bothFailed) {
-      toast.info("We couldn't auto-configure your watchlist yet. You can refine it in Settings.");
+      notifyWarning("We hit an issue on our side. Please complete what you're monitoring in Settings.");
     } else {
-      toast.success("Tempo set. Welcome.");
+      notifySuccess("Tempo set. Welcome.");
     }
     setSubmitting(false);
     navigate(
@@ -238,7 +222,7 @@ export default function Onboarding() {
               active={mode === "voice"}
               onClick={() => switchMode("voice")}
               icon={<Mic className="h-3.5 w-3.5" />}
-              label="Voice"
+              label="Speak"
             />
           </div>
         </div>
@@ -247,7 +231,7 @@ export default function Onboarding() {
         <form onSubmit={handleSubmit} className="space-y-6">
           {mode === "voice" ? (
             <div className="fade-up rounded-sm border border-rule/60 bg-surface-raised p-6">
-              <span className="eyebrow mb-3 block">Try something like</span>
+              <span className="eyebrow mb-3 block">For example</span>
               <p className="text-[15px] font-normal italic leading-[1.65] text-muted-foreground/70">
                 {EXAMPLE_TEXT}
               </p>
@@ -287,18 +271,13 @@ export default function Onboarding() {
             </div>
           ) : (
             <div className="fade-up rounded-sm border border-rule/60 bg-surface-raised p-6">
-              {recState === "ready" && (
-                <p className="mb-2 font-mono text-[11px] text-muted-foreground">
-                  Transcription added. You can keep typing if needed.
-                </p>
-              )}
-              <span className="eyebrow mb-3 block">Try something like</span>
+              <span className="eyebrow mb-3 block">For example</span>
               <Textarea
                 value={topics}
                 onChange={(e) => setTopics(e.target.value)}
                 placeholder={EXAMPLE_TEXT}
                 rows={5}
-                className="rounded-sm border-rule/60 text-[17px] font-normal leading-[1.65] not-italic placeholder:italic placeholder:text-muted-foreground/70"
+                className="rounded-sm border-rule/60 text-[15px] font-normal leading-[1.65] not-italic placeholder:italic placeholder:text-muted-foreground/70"
               />
             </div>
           )}
@@ -306,10 +285,10 @@ export default function Onboarding() {
           {/* Privacy */}
           <div className="border-t border-rule/40 pt-5 text-[13px] leading-relaxed text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">We keep:</span> your scope and source preferences.
+              <span className="font-medium text-foreground">We keep:</span> scope and source preferences.
             </p>
             <p>
-              <span className="font-medium text-foreground">We don&apos;t keep:</span> voice recordings, draft replies, or browsing history.
+              <span className="font-medium text-foreground">We don&apos;t keep:</span> voice recordings.
             </p>
           </div>
 
@@ -352,29 +331,5 @@ function ModeButton({
       {icon}
       {label}
     </button>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-baseline justify-between">
-        <Label className="text-[13px] font-medium text-foreground">{label}</Label>
-        {hint && (
-          <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            {hint}
-          </span>
-        )}
-      </div>
-      {children}
-    </div>
   );
 }

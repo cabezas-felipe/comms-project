@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { X, Plus, AlertTriangle } from "lucide-react";
-import { toast } from "sonner";
+import { X, Plus } from "lucide-react";
+import { notifyWarning, notifyError } from "@/lib/notify";
 import { addCommaSeparated, addTraditional, addSocial } from "@/lib/settings-list-utils";
 import {
   AlertDialog,
@@ -17,12 +17,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { CONTRACT_VERSION } from "@tempo/contracts";
 import { defaultSettingsPayload, fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
-
-function warnToast(message: string) {
-  toast.warning(message, {
-    icon: <AlertTriangle className="h-4 w-4" style={{ color: "hsl(var(--signal-warning))" }} />,
-  });
-}
 
 interface ListSectionProps {
   title: string;
@@ -39,7 +33,7 @@ function ListSection({ title, description, items, onChange, placeholder, label, 
 
   const add = () => {
     const result = addCommaSeparated(draft, items, label);
-    if (result.warning) warnToast(result.warning);
+    if (result.warning) notifyWarning(result.warning);
     if (result.nextItems) {
       onChange(result.nextItems);
       setDraft("");
@@ -172,7 +166,7 @@ export default function Settings() {
         setSaveState("saved");
       } catch {
         if (revisionAtStart !== pendingRevisionRef.current) return;
-        toast.error("Could not save settings. Please try again.");
+        notifyError("Could not save settings. Please try again.");
         const snap = snapshotRef.current;
         setTopics(snap.topics);
         setKeywords(snap.keywords);
@@ -203,7 +197,7 @@ export default function Settings() {
       sourceTab === "traditional"
         ? addTraditional(draftSource, list)
         : addSocial(draftSource, list);
-    if (result.warning) warnToast(result.warning);
+    if (result.warning) notifyWarning(result.warning);
     if (result.nextItems) {
       setList(result.nextItems);
       setDraftSource("");
@@ -238,7 +232,7 @@ export default function Settings() {
       })
       .catch(() => {
         if (canceled) return;
-        toast.error("Could not load settings. Using defaults.");
+        notifyError("Could not load settings. Using defaults.");
       })
       .finally(() => {
         if (!canceled) setLoading(false);

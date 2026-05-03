@@ -13,7 +13,7 @@ import {
 } from "@/lib/analytics";
 import { fetchDashboardPayload } from "@/lib/api";
 import { type StoryDto } from "@tempo/contracts";
-import { toast } from "sonner";
+import { notifyError } from "@/lib/notify";
 
 function dtoToStory(dto: StoryDto): Story {
   return {
@@ -108,7 +108,7 @@ export default function Dashboard() {
         const message = error instanceof Error ? error.message : "Failed to load dashboard data.";
         setLoadError(message);
         trackSourceOpenError({ message, code: "dashboard_payload_load_failed" });
-        toast.error("We couldn't refresh stories. Showing cached data.");
+        notifyError("We couldn't refresh stories. Showing cached data.");
       })
       .finally(() => {
         if (!canceled) setIsLoading(false);
