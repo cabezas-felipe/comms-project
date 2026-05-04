@@ -36,7 +36,7 @@ await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_S
 const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
 
@@ -498,6 +498,253 @@ test("resolveIdentity: returns null when x-recognized-email is blank", async () 
   const mockReq = { headers: { "x-recognized-email": "   " } };
   const identity = await resolveIdentity(mockReq);
   assert.equal(identity, null);
+});
+
+// ─── Narrative persistence (Pattern A) ───────────────────────────────────────
+
+test("PUT /api/settings with onboardingRawText calls narrative hook after successful settings write", async () => {
+  let captured = null;
+  const prev = _narrativeRepo.append;
+  _narrativeRepo.append = async (userId, rawText) => { captured = { userId, rawText }; };
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "I cover US-Colombia migration for a nonprofit." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(captured !== null, "narrative hook must be called when onboardingRawText is present");
+    assert.equal(captured.userId, TEST_USER_ID);
+    assert.equal(captured.rawText, "I cover US-Colombia migration for a nonprofit.");
+    // onboardingRawText must be stripped from the settings response
+    assert.ok(!("onboardingRawText" in res.body), "response must not include onboardingRawText");
+    // response must still conform to settingsPayloadSchema
+    const parsed = settingsPayloadSchema.safeParse(res.body);
+    assert.ok(parsed.success, "response with narrative must still conform to settingsPayloadSchema");
+  } finally {
+    _narrativeRepo.append = prev;
+  }
+});
+
+test("PUT /api/settings without onboardingRawText does not call narrative hook", async () => {
+  let called = false;
+  const prev = _narrativeRepo.append;
+  _narrativeRepo.append = async () => { called = true; };
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send(VALID_BODY)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(!called, "narrative hook must not be called when onboardingRawText is absent");
+  } finally {
+    _narrativeRepo.append = prev;
+  }
+});
+
+test("PUT /api/settings with blank onboardingRawText does not call narrative hook", async () => {
+  let called = false;
+  const prev = _narrativeRepo.append;
+  _narrativeRepo.append = async () => { called = true; };
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "   " };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(!called, "whitespace-only narrative must not trigger the hook");
+  } finally {
+    _narrativeRepo.append = prev;
+  }
+});
+
+test("PUT /api/settings returns 500 and does not call narrative hook when settings write fails (Pattern A)", async () => {
+  let narrativeCalled = false;
+  const prevNarrative = _narrativeRepo.append;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.append = async () => { narrativeCalled = true; };
+  _writeSettings.write = async () => { throw new Error("settings write failed"); };
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "Some narrative." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 500);
+    assert.ok(!narrativeCalled, "narrative hook must not be called when settings write fails");
+  } finally {
+    _narrativeRepo.append = prevNarrative;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("PUT /api/settings returns 500 when narrative hook throws and onboardingRawText is present (Pattern A strict)", async () => {
+  const prev = _narrativeRepo.append;
+  _narrativeRepo.append = async () => { throw new Error("supabase narrative write failed"); };
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "Some narrative." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 500, "request must fail when narrative write is required but fails");
+    assert.equal(typeof res.body.message, "string", "error response must include a message");
+  } finally {
+    _narrativeRepo.append = prev;
+  }
+});
+
+// ─── Atomic path (Supabase enabled + onboardingRawText) ──────────────────────
+// These tests simulate the Supabase environment by setting fake env vars so
+// isSupabaseEnabled() returns true, then override _atomicSave.execute to control
+// outcomes without a live Supabase instance.
+//
+// No-partial-write guarantee is demonstrated structurally: on the atomic path,
+// _writeSettings.write and _narrativeRepo.append are NEVER called independently —
+// all writes go through the single _atomicSave.execute hook.  When that hook
+// throws, neither write has occurred.
+
+test("atomic path: success routes through _atomicSave.execute with correct args, returns 200", async () => {
+  const savedUrl = process.env.SUPABASE_URL;
+  const savedKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_URL = "http://fake-supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "fake-service-role-key";
+
+  let capturedArgs = null;
+  let settingsWriteCalled = false;
+  let narrativeAppendCalled = false;
+  const prevExec = _atomicSave.execute;
+  const prevWrite = _writeSettings.write;
+  const prevNarrative = _narrativeRepo.append;
+  _atomicSave.execute = async (args) => { capturedArgs = args; };
+  _writeSettings.write = async () => { settingsWriteCalled = true; };
+  _narrativeRepo.append = async () => { narrativeAppendCalled = true; };
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "I cover US-Colombia migration for a nonprofit." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(capturedArgs !== null, "_atomicSave.execute must be called on Supabase path");
+    assert.equal(capturedArgs.userId, TEST_USER_ID);
+    assert.equal(capturedArgs.rawNarrative, "I cover US-Colombia migration for a nonprofit.");
+    assert.deepEqual(capturedArgs.settingsPayload.topics, VALID_BODY.topics);
+    assert.ok(!settingsWriteCalled, "_writeSettings.write must not be called independently on atomic path");
+    assert.ok(!narrativeAppendCalled, "_narrativeRepo.append must not be called independently on atomic path");
+    // onboardingRawText must be stripped from the settings response
+    assert.ok(!("onboardingRawText" in res.body), "response must not include onboardingRawText");
+  } finally {
+    _atomicSave.execute = prevExec;
+    _writeSettings.write = prevWrite;
+    _narrativeRepo.append = prevNarrative;
+    if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
+    else delete process.env.SUPABASE_URL;
+    if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
+    else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  }
+});
+
+test("atomic path: _atomicSave.execute failure → 500, neither write called independently (no partial write)", async () => {
+  const savedUrl = process.env.SUPABASE_URL;
+  const savedKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_URL = "http://fake-supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "fake-service-role-key";
+
+  let settingsWriteCalled = false;
+  let narrativeAppendCalled = false;
+  const prevExec = _atomicSave.execute;
+  const prevWrite = _writeSettings.write;
+  const prevNarrative = _narrativeRepo.append;
+  _atomicSave.execute = async () => { throw new Error("DB transaction rolled back"); };
+  _writeSettings.write = async () => { settingsWriteCalled = true; };
+  _narrativeRepo.append = async () => { narrativeAppendCalled = true; };
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "I cover US-Colombia migration." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 500);
+    assert.equal(typeof res.body.message, "string");
+    // Structural proof of no partial write: individual write hooks were never invoked.
+    // The only write path was _atomicSave.execute, which threw before committing anything.
+    assert.ok(!settingsWriteCalled, "_writeSettings.write must not be called on atomic path");
+    assert.ok(!narrativeAppendCalled, "_narrativeRepo.append must not be called on atomic path");
+  } finally {
+    _atomicSave.execute = prevExec;
+    _writeSettings.write = prevWrite;
+    _narrativeRepo.append = prevNarrative;
+    if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
+    else delete process.env.SUPABASE_URL;
+    if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
+    else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  }
+});
+
+test("atomic path: 500 response includes detail field propagated from RPC error", async () => {
+  const savedUrl = process.env.SUPABASE_URL;
+  const savedKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_URL = "http://fake-supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "fake-service-role-key";
+
+  const prevExec = _atomicSave.execute;
+  _atomicSave.execute = async () => { throw new Error("[atomic-save] RPC not found — run migration 009: Could not find the function"); };
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "I cover migration policy." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 500);
+    assert.equal(typeof res.body.message, "string");
+    assert.equal(typeof res.body.detail, "string", "detail field must be present to aid debugging");
+    assert.ok(
+      res.body.detail.includes("atomic-save"),
+      `expected detail to include '[atomic-save]', got: ${res.body.detail}`
+    );
+  } finally {
+    _atomicSave.execute = prevExec;
+    if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
+    else delete process.env.SUPABASE_URL;
+    if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
+    else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  }
+});
+
+test("atomic path not taken when onboardingRawText is absent (Supabase enabled) — uses _writeSettings.write", async () => {
+  const savedUrl = process.env.SUPABASE_URL;
+  const savedKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_URL = "http://fake-supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "fake-service-role-key";
+
+  let atomicCalled = false;
+  let settingsWriteCalled = false;
+  const prevExec = _atomicSave.execute;
+  const prevWrite = _writeSettings.write;
+  _atomicSave.execute = async () => { atomicCalled = true; };
+  _writeSettings.write = async () => { settingsWriteCalled = true; };
+
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send(VALID_BODY)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(!atomicCalled, "_atomicSave.execute must not be called when onboardingRawText is absent");
+    assert.ok(settingsWriteCalled, "_writeSettings.write must be called on non-atomic path");
+  } finally {
+    _atomicSave.execute = prevExec;
+    _writeSettings.write = prevWrite;
+    if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
+    else delete process.env.SUPABASE_URL;
+    if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
+    else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  }
 });
 
 // ─── Email-recognition cache behavior ────────────────────────────────────────

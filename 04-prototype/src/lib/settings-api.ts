@@ -145,17 +145,24 @@ export async function fetchSettingsPayload(): Promise<SettingsPayload> {
   }
 }
 
-export async function saveSettingsPayload(payload: SettingsPayload): Promise<SettingsPayload> {
+export async function saveSettingsPayload(
+  payload: SettingsPayload,
+  options?: { onboardingRawText?: string }
+): Promise<SettingsPayload> {
   const validated = settingsPayloadSchema.parse(payload);
   const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
   // Identity-bound: either a Supabase session (Bearer) or a prototype recognized identity.
   // In both cases, fail loudly on API failure rather than silently diverging to local data.
   const isIdentityBound = "Authorization" in authHeaders || "x-recognized-email" in authHeaders;
+  const requestBody: Record<string, unknown> = { ...validated };
+  if (options?.onboardingRawText) {
+    requestBody.onboardingRawText = options.onboardingRawText;
+  }
   try {
     const response = await fetch(SETTINGS_API_ENDPOINT, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...authHeaders },
-      body: JSON.stringify(validated),
+      body: JSON.stringify(requestBody),
     });
     if (!response.ok) {
       throw new Error(`Settings API returned HTTP ${response.status}`);
