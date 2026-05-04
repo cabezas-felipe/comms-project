@@ -13,6 +13,8 @@ import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
+import { appendOnboardingNarrative } from "./db/narrative-repo.mjs";
+import { atomicSaveSettingsAndNarrative } from "./db/atomic-settings-save.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -155,6 +157,26 @@ export const _extraction = { extract: extractOnboarding };
 export const _sourceRegistrySync = { record: recordSourceRegistryEventsFromSettings };
 
 /**
+ * Mutable narrative hook. Tests override _narrativeRepo.append to capture or
+ * skip Supabase writes without a live instance. Do not use in production code paths.
+ */
+export const _narrativeRepo = { append: appendOnboardingNarrative };
+
+/**
+ * Mutable atomic-save hook. Tests override _atomicSave.execute to simulate the RPC
+ * path (success or failure) without a live Supabase instance. The real implementation
+ * calls save_settings_with_narrative via supabase.rpc().
+ * Do not use in production code paths.
+ */
+export const _atomicSave = { execute: atomicSaveSettingsAndNarrative };
+
+/**
+ * Mutable settings-write hook. Tests override _writeSettings.write to inject
+ * failures without touching the filesystem or Supabase. Do not use in production code paths.
+ */
+export const _writeSettings = { write: writeSettings };
+
+/**
  * Mutable feed manifest hook. Tests override _feedManifest.list to return fixture
  * data without a live Supabase instance. Do not use in production code paths.
  */
@@ -276,7 +298,11 @@ app.get("/api/settings", async (req, res) => {
 app.put("/api/settings", async (req, res) => {
   const identity = await requireIdentity(req, res);
   if (!identity) return;
-  const result = settingsPayloadSchema.safeParse(req.body);
+  // Strip onboardingRawText before schema validation — settings schema stays clean.
+  const { onboardingRawText: rawNarrative, ...settingsBody } = req.body ?? {};
+  const onboardingRawText =
+    typeof rawNarrative === "string" && rawNarrative.trim() ? rawNarrative.trim() : null;
+  const result = settingsPayloadSchema.safeParse(settingsBody);
   if (!result.success) {
     res.status(400).json({
       message: "Invalid settings payload.",
@@ -294,7 +320,25 @@ app.put("/api/settings", async (req, res) => {
         previousPayload = await readSettings(identity.userId);
       }
     } catch { /* treat unreadable previous as first-save */ }
-    await writeSettings(result.data, identity.userId);
+
+    if (onboardingRawText && isSupabaseEnabled()) {
+      // Atomic path (Supabase): settings upsert + narrative append run inside one
+      // Postgres transaction via the save_settings_with_narrative RPC.  A failure
+      // in either step rolls back both — no partial state is committed.
+      await _atomicSave.execute({ userId: identity.userId, settingsPayload: result.data, rawNarrative: onboardingRawText });
+    } else {
+      // Sequential path: no narrative to persist, or file adapter (dev/test only).
+      // File adapter has no transaction support; partial writes on error are acceptable
+      // in dev since the adapter is never used in production.
+      await _writeSettings.write(result.data, identity.userId);
+      if (onboardingRawText) {
+        // Reached only on file adapter — Supabase path takes the atomic branch above.
+        await _narrativeRepo.append(identity.userId, onboardingRawText);
+      }
+    }
+
+    // Registry sync always runs after the write(s) — append-only observation log.
+    // Errors are swallowed internally; failures here never affect the response.
     await _sourceRegistrySync.record({ userId: identity.userId, previousPayload, nextPayload: result.data });
     trackServerEvent("settings_updated", {
       topicCount: result.data.topics?.length ?? 0,

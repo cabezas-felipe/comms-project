@@ -10,9 +10,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { ArrowRight, Keyboard, Loader2, Mic } from "lucide-react";
 import { notifyWarning, notifyError, notifySuccess } from "@/lib/notify";
 import { transcribeAudio } from "@/lib/voice-upload";
-import { ExtractionApiError, extractOnboardingText, saveSettingsPayload } from "@/lib/settings-api";
+import { extractOnboardingText, saveSettingsPayload } from "@/lib/settings-api";
 import { classifySources } from "@/lib/source-classification";
-import { CONTRACT_VERSION, settingsPayloadSchema, type SettingsPayload } from "@tempo/contracts";
+import { CONTRACT_VERSION, settingsPayloadSchema } from "@tempo/contracts";
 
 type Mode = "type" | "voice";
 type RecordingState = "idle" | "recording" | "processing" | "ready" | "error";
@@ -118,71 +118,59 @@ export default function Onboarding() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!topics.trim() || !geos.length) {
+    if (!topics.trim()) {
       notifyWarning("Add what you're watching to continue.");
       return;
     }
     setSubmitting(true);
     trackOnboardingSubmitted();
 
-    let payload: SettingsPayload;
-    let bothFailed = false;
-    try {
-      const extracted = await extractOnboardingText(topics.trim());
-      const { traditionalSources, socialSources } = classifySources(extracted.sources);
-      payload = settingsPayloadSchema.parse({
-        contractVersion: CONTRACT_VERSION,
-        topics: extracted.topics,
-        keywords: extracted.keywords,
-        geographies: extracted.geographies.length ? extracted.geographies : geos,
-        traditionalSources,
-        socialSources,
-      });
-    } catch (err) {
-      bothFailed = err instanceof ExtractionApiError && err.status === 500;
-      if (bothFailed) {
-        payload = settingsPayloadSchema.parse({
-          contractVersion: CONTRACT_VERSION,
-          topics: [],
-          keywords: [],
-          geographies: [],
-          traditionalSources: [],
-          socialSources: [],
-        });
-      } else {
-        notifyWarning("We hit an issue on our side. You can keep going and complete what you're monitoring in Settings.");
-        const splitTrim = (s: string) => s.split(/[,\n]+/).map((v) => v.trim()).filter(Boolean);
-        payload = settingsPayloadSchema.parse({
-          contractVersion: CONTRACT_VERSION,
-          topics: splitTrim(topics),
-          keywords: splitTrim(keywords),
-          geographies: geos,
-          traditionalSources: splitTrim(sources),
-          socialSources: [],
-        });
-      }
-    }
+    const splitTrim = (s: string) => s.split(/[,\n]+/).map((v) => v.trim()).filter(Boolean);
 
+    // Step 1: Build minimal safe payload from entered values — no AI, no blocking calls.
+    const minimalPayload = settingsPayloadSchema.parse({
+      contractVersion: CONTRACT_VERSION,
+      topics: splitTrim(topics),
+      keywords: splitTrim(keywords),
+      geographies: geos,
+      traditionalSources: splitTrim(sources),
+      socialSources: [],
+    });
+
+    // Step 2: Persist raw text + baseline settings. Failure blocks navigation.
     try {
-      await saveSettingsPayload(payload);
+      await saveSettingsPayload(minimalPayload, { onboardingRawText: topics.trim() });
     } catch {
       notifyError("We couldn't save your changes. Please try again.");
       setSubmitting(false);
       return;
     }
 
+    // Step 3: User is unblocked — navigate immediately.
     trackOnboardingCompleted();
-    if (bothFailed) {
-      notifyWarning("We hit an issue on our side. Please complete what you're monitoring in Settings.");
-    } else {
-      notifySuccess("Tempo set. Welcome.");
-    }
+    notifySuccess("Tempo set. Welcome.");
     setSubmitting(false);
-    navigate(
-      bothFailed
-        ? import.meta.env.DEV ? "/dashboard?preview=1&empty=1" : "/dashboard?empty=1"
-        : import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard"
-    );
+    navigate(import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard");
+
+    // Step 4: Best-effort extraction — runs after navigation, never blocks the user.
+    const rawText = topics.trim();
+    void (async () => {
+      try {
+        const extracted = await extractOnboardingText(rawText);
+        const { traditionalSources, socialSources } = classifySources(extracted.sources);
+        const derivedPayload = settingsPayloadSchema.parse({
+          contractVersion: CONTRACT_VERSION,
+          topics: extracted.topics.length ? extracted.topics : minimalPayload.topics,
+          keywords: extracted.keywords.length ? extracted.keywords : minimalPayload.keywords,
+          geographies: extracted.geographies.length ? extracted.geographies : minimalPayload.geographies,
+          traditionalSources: traditionalSources.length ? traditionalSources : minimalPayload.traditionalSources,
+          socialSources,
+        });
+        await saveSettingsPayload(derivedPayload);
+      } catch {
+        notifyWarning("We hit an issue on our side. You can keep going and complete what you're monitoring in Settings.");
+      }
+    })();
   };
 
   return (
@@ -285,10 +273,10 @@ export default function Onboarding() {
           {/* Privacy */}
           <div className="border-t border-rule/40 pt-5 text-[13px] leading-relaxed text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">We keep:</span> scope and source preferences.
+              <span className="font-medium text-foreground">We keep:</span> your text.
             </p>
             <p>
-              <span className="font-medium text-foreground">We don&apos;t keep:</span> voice recordings.
+              <span className="font-medium text-foreground">We don&apos;t keep:</span> your voice recording.
             </p>
           </div>
 
