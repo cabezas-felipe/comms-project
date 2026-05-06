@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTRACT_VERSION } from "@tempo/contracts";
-import { fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
+import { fetchSettingsPayload, saveSettingsPayload, SaveSettingsError } from "@/lib/settings-api";
 
 vi.mock("@/lib/supabase", () => ({
   supabase: {
@@ -167,7 +167,7 @@ describe("saveSettingsPayload — identity-bound fallback policy", () => {
     vi.restoreAllMocks();
   });
 
-  it("throws when API fails and user has a Supabase session (bearer path)", async () => {
+  it("throws SaveSettingsError when API fails and user has a Supabase session (bearer path)", async () => {
     const { supabase } = await import("@/lib/supabase");
     vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
       data: { session: { access_token: "test-token", user: { id: "test-user-id" } } },
@@ -182,10 +182,10 @@ describe("saveSettingsPayload — identity-bound fallback policy", () => {
         traditionalSources: ["Reuters"],
         socialSources: [],
       })
-    ).rejects.toThrow("Identity-bound settings write failed: API unavailable.");
+    ).rejects.toBeInstanceOf(SaveSettingsError);
   });
 
-  it("throws when API fails and proto session is active (email_recognition path)", async () => {
+  it("throws SaveSettingsError when API fails and proto session is active (email_recognition path)", async () => {
     const { supabase } = await import("@/lib/supabase");
     const { getProtoSession } = await import("@/lib/auth");
     vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
@@ -202,7 +202,7 @@ describe("saveSettingsPayload — identity-bound fallback policy", () => {
         traditionalSources: [],
         socialSources: [],
       })
-    ).rejects.toThrow("Identity-bound settings write failed: API unavailable.");
+    ).rejects.toBeInstanceOf(SaveSettingsError);
   });
 });
 
@@ -300,6 +300,58 @@ describe("settings-api — MVP recognized-identity fallback", () => {
 
     // User B must not see User A's scoped data
     expect(payloadB.topics).not.toContain("User A's Topic");
+  });
+});
+
+describe("saveSettingsPayload — failure classification", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("throws SaveSettingsError with stage=backend for non-ok HTTP response", async () => {
+    const { supabase } = await import("@/lib/supabase");
+    vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
+      data: { session: { access_token: "test-token", user: { id: "test-user-id" } } },
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+    } as Response);
+
+    const err = await saveSettingsPayload({
+      contractVersion: CONTRACT_VERSION,
+      topics: ["T"],
+      keywords: [],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(SaveSettingsError);
+    expect(err.stage).toBe("backend");
+    expect(err.statusCode).toBe(503);
+  });
+
+  it("throws SaveSettingsError with stage=network when fetch throws", async () => {
+    const { supabase } = await import("@/lib/supabase");
+    vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
+      data: { session: { access_token: "test-token", user: { id: "test-user-id" } } },
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Failed to fetch"));
+
+    const err = await saveSettingsPayload({
+      contractVersion: CONTRACT_VERSION,
+      topics: ["T"],
+      keywords: [],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(SaveSettingsError);
+    expect(err.stage).toBe("network");
+    expect(err.statusCode).toBeUndefined();
   });
 });
 

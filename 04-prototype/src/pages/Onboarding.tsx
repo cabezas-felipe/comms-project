@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  trackOnboardingCompleted,
-  trackOnboardingSubmitted,
   trackOnboardingViewed,
+  trackOnboardingCtaClicked,
+  trackOnboardingSucceeded,
+  trackOnboardingFailed,
 } from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ArrowRight, Keyboard, Loader2, Mic } from "lucide-react";
 import { notifyWarning, notifyError, notifySuccess } from "@/lib/notify";
 import { transcribeAudio } from "@/lib/voice-upload";
-import { saveSettingsPayload } from "@/lib/settings-api";
+import { saveSettingsPayload, SaveSettingsError } from "@/lib/settings-api";
 import { CONTRACT_VERSION, settingsPayloadSchema } from "@tempo/contracts";
 
 type Mode = "type" | "voice";
@@ -117,12 +118,14 @@ export default function Onboarding() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    trackOnboardingCtaClicked();
+
     if (!topics.trim()) {
+      trackOnboardingFailed({ failureStage: "validation", validationReason: "empty" });
       notifyWarning("Add what you're watching to continue.");
       return;
     }
     setSubmitting(true);
-    trackOnboardingSubmitted();
 
     const splitTrim = (s: string) => s.split(/[,\n]+/).map((v) => v.trim()).filter(Boolean);
 
@@ -140,14 +143,20 @@ export default function Onboarding() {
     let saveResult: Awaited<ReturnType<typeof saveSettingsPayload>>;
     try {
       saveResult = await saveSettingsPayload(minimalPayload, { onboardingRawText: topics.trim() });
-    } catch {
+    } catch (err) {
+      const stage = err instanceof SaveSettingsError ? err.stage : "backend";
+      const statusCode = err instanceof SaveSettingsError ? err.statusCode : undefined;
+      trackOnboardingFailed({
+        failureStage: stage,
+        ...(statusCode !== undefined ? { statusCode } : {}),
+      });
       notifyError("We couldn't save your changes. Please try again.");
       setSubmitting(false);
       return;
     }
 
     // Step 3: User is unblocked — navigate immediately.
-    trackOnboardingCompleted();
+    trackOnboardingSucceeded();
     notifySuccess("Tempo set. Welcome.");
     setSubmitting(false);
     navigate(import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard");

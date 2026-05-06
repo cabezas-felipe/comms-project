@@ -12,8 +12,9 @@ export {
   landingSucceededPayloadSchema,
   landingFailedPayloadSchema,
   onboardingViewedPayloadSchema,
-  onboardingSubmittedPayloadSchema,
-  onboardingCompletedPayloadSchema,
+  onboardingCtaClickedPayloadSchema,
+  onboardingSucceededPayloadSchema,
+  onboardingFailedPayloadSchema,
   dashboardViewedEventSchema,
   storyExpandedEventSchema,
   sourceOpenedEventSchema,
@@ -26,8 +27,9 @@ export {
   landingSucceededEventSchema,
   landingFailedEventSchema,
   onboardingViewedEventSchema,
-  onboardingSubmittedEventSchema,
-  onboardingCompletedEventSchema,
+  onboardingCtaClickedEventSchema,
+  onboardingSucceededEventSchema,
+  onboardingFailedEventSchema,
   analyticsEventSchema,
   buildDashboardViewed,
   buildStoryExpanded,
@@ -41,10 +43,11 @@ export {
   buildLandingSucceeded,
   buildLandingFailed,
   buildOnboardingViewed,
-  buildOnboardingSubmitted,
-  buildOnboardingCompleted,
+  buildOnboardingCtaClicked,
+  buildOnboardingSucceeded,
+  buildOnboardingFailed,
 } from "./events.js";
-export type { EventTier, AnalyticsEvent, LandingFailedPayload } from "./events.js";
+export type { EventTier, AnalyticsEvent, LandingFailedPayload, OnboardingFailedPayload } from "./events.js";
 export { setAnalyticsSink, emitAnalyticsEvent } from "./sink.js";
 export type { AnalyticsSink } from "./sink.js";
 export { createPostHogSink, identifyPostHogUser } from "./posthog-sink.js";
