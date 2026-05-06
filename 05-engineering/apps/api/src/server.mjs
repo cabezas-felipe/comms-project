@@ -13,8 +13,9 @@ import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
-import { appendOnboardingNarrative } from "./db/narrative-repo.mjs";
+import { appendOnboardingNarrative, readCurrentOnboardingNarrative } from "./db/narrative-repo.mjs";
 import { atomicSaveSettingsAndNarrative } from "./db/atomic-settings-save.mjs";
+import { normalizeTopicLabel, normalizeKeywordLabel, normalizeSourceName } from "@tempo/contracts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -160,7 +161,7 @@ export const _sourceRegistrySync = { record: recordSourceRegistryEventsFromSetti
  * Mutable narrative hook. Tests override _narrativeRepo.append to capture or
  * skip Supabase writes without a live instance. Do not use in production code paths.
  */
-export const _narrativeRepo = { append: appendOnboardingNarrative };
+export const _narrativeRepo = { append: appendOnboardingNarrative, read: readCurrentOnboardingNarrative };
 
 /**
  * Mutable atomic-save hook. Tests override _atomicSave.execute to simulate the RPC
@@ -175,6 +176,13 @@ export const _atomicSave = { execute: atomicSaveSettingsAndNarrative };
  * failures without touching the filesystem or Supabase. Do not use in production code paths.
  */
 export const _writeSettings = { write: writeSettings };
+
+/**
+ * Mutable settings-read hook. Tests override _readSettings.has / _readSettings.read to avoid
+ * live Supabase or filesystem calls when reading previous settings before a write.
+ * Do not use in production code paths.
+ */
+export const _readSettings = { has: hasSettings, read: readSettings };
 
 /**
  * Mutable feed manifest hook. Tests override _feedManifest.list to return fixture
@@ -202,6 +210,20 @@ try {
   const message = err instanceof Error ? err.message : String(err);
   console.warn(`[ai.config] Misconfiguration detected: ${message}`);
 }
+// Trim, filter empties, and deduplicate (case-insensitive, first-occurrence wins).
+// Applied to model-returned string arrays before persistence.
+function normalizeStringArray(arr) {
+  const seen = new Set();
+  const result = [];
+  for (const raw of arr) {
+    const s = typeof raw === "string" ? raw.trim() : "";
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (!seen.has(key)) { seen.add(key); result.push(s); }
+  }
+  return result;
+}
+
 function rankStories(stories) {
   return [...stories].sort((a, b) => {
     const scoreA = a.sources.reduce((sum, s) => sum + s.weight, 0) - Math.min(...a.sources.map((s) => s.minutesAgo));
@@ -211,12 +233,14 @@ function rankStories(stories) {
 }
 
 async function buildDashboardPayload(items, settings, limit = 10) {
-  const allowedTopics = new Set(settings.topics ?? []);
+  // Normalize topic labels on both sides so legacy item labels (e.g. "Security cooperation")
+  // match saved settings that were normalized at write-back time (e.g. "Security policy").
+  const allowedTopics = new Set((settings.topics ?? []).map(normalizeTopicLabel));
   const allowedGeos = new Set(settings.geographies ?? []);
   const allowedSources = new Set([...(settings.traditionalSources ?? []), ...(settings.socialSources ?? [])]);
 
   const filtered = items.filter((item) => {
-    const topicAllowed = allowedTopics.size === 0 || allowedTopics.has(item.topic);
+    const topicAllowed = allowedTopics.size === 0 || allowedTopics.has(normalizeTopicLabel(item.topic));
     const geoAllowed = allowedGeos.size === 0 || item.geographies.some((g) => allowedGeos.has(g));
     const sourceAllowed = allowedSources.size === 0 || allowedSources.has(item.outlet);
     return topicAllowed && geoAllowed && sourceAllowed;
@@ -316,8 +340,8 @@ app.put("/api/settings", async (req, res) => {
     // Any read failure falls back to null → first-save semantics (log all sources).
     let previousPayload = null;
     try {
-      if (await hasSettings(identity.userId)) {
-        previousPayload = await readSettings(identity.userId);
+      if (await _readSettings.has(identity.userId)) {
+        previousPayload = await _readSettings.read(identity.userId);
       }
     } catch { /* treat unreadable previous as first-save */ }
 
@@ -337,16 +361,82 @@ app.put("/api/settings", async (req, res) => {
       }
     }
 
+    // Post-save extraction — only when onboardingRawText was provided.
+    // Non-fatal: settings + narrative already committed before this block.
+    let settingsToReturn = result.data;
+    let extractionStatus = "not_attempted"; // "succeeded" | "failed"
+    if (onboardingRawText) {
+      try {
+        // Prefer the stored narrative (Supabase accumulation); fall back to the
+        // raw text supplied in this request so extraction works on the file adapter
+        // (where appendOnboardingNarrative is a no-op) without a false skipped status.
+        const storedNarrative = await _narrativeRepo.read(identity.userId);
+        const narrative = storedNarrative ?? onboardingRawText;
+        // narrative is always non-empty here: onboardingRawText is non-null at this point.
+        if (process.env.TEMPO_AI_MOCK_ONLY === "true" && process.env.NODE_ENV !== "test") {
+          console.warn("[onboarding.extract] mock-only mode enabled; skipping extraction in non-test runtime");
+          extractionStatus = "failed";
+        } else {
+          // Strict two-model chain: Opus primary, Sonnet fallback.
+          // No mock/default fallback — if both fail, extraction is skipped non-fatally.
+          let extracted = null;
+          try {
+            extracted = await _extraction.extract(narrative, "anthropic:claude-opus-4-7");
+          } catch (primaryErr) {
+            console.warn(
+              `[onboarding.extract] primary (anthropic:claude-opus-4-7) failed: ${primaryErr instanceof Error ? primaryErr.message : primaryErr}`
+            );
+            try {
+              extracted = await _extraction.extract(narrative, "anthropic:claude-sonnet-4-6");
+            } catch (fallbackErr) {
+              console.warn(
+                `[onboarding.extract] fallback (anthropic:claude-sonnet-4-6) failed: ${fallbackErr instanceof Error ? fallbackErr.message : fallbackErr}`
+              );
+            }
+          }
+          if (extracted) {
+            const extractedTopics = normalizeStringArray((extracted.topics ?? []).map(normalizeTopicLabel));
+            const extractedKeywords = normalizeStringArray((extracted.keywords ?? []).map(normalizeKeywordLabel));
+            const extractedGeographies = normalizeStringArray(extracted.geographies ?? []);
+            const extractedTraditional = normalizeStringArray((extracted.traditionalSources ?? []).map(normalizeSourceName));
+            const extractedSocial = normalizeStringArray(extracted.socialSources ?? []);
+            const merged = {
+              ...result.data,
+              ...(extractedTopics.length > 0 && { topics: extractedTopics }),
+              ...(extractedKeywords.length > 0 && { keywords: extractedKeywords }),
+              ...(extractedGeographies.length > 0 && { geographies: extractedGeographies }),
+              ...(extractedTraditional.length > 0 && { traditionalSources: extractedTraditional }),
+              ...(extractedSocial.length > 0 && { socialSources: extractedSocial }),
+            };
+            const fieldsChanged = ["topics", "keywords", "geographies", "traditionalSources", "socialSources"]
+              .some(f => JSON.stringify(merged[f]) !== JSON.stringify(result.data[f]));
+            if (fieldsChanged) {
+              await _writeSettings.write(merged, identity.userId);
+            }
+            settingsToReturn = merged;
+            extractionStatus = "succeeded";
+          } else {
+            extractionStatus = "failed";
+          }
+        }
+      } catch (extractErr) {
+        console.error(
+          `[onboarding.extract] post-save extraction failed for user ${identity.userId}: ${extractErr instanceof Error ? extractErr.message : extractErr}`
+        );
+        extractionStatus = "failed";
+      }
+    }
+
     // Registry sync always runs after the write(s) — append-only observation log.
     // Errors are swallowed internally; failures here never affect the response.
-    await _sourceRegistrySync.record({ userId: identity.userId, previousPayload, nextPayload: result.data });
+    await _sourceRegistrySync.record({ userId: identity.userId, previousPayload, nextPayload: settingsToReturn });
     trackServerEvent("settings_updated", {
-      topicCount: result.data.topics?.length ?? 0,
-      geoCount: result.data.geographies?.length ?? 0,
-      sourceCount: (result.data.traditionalSources?.length ?? 0) + (result.data.socialSources?.length ?? 0),
+      topicCount: settingsToReturn.topics?.length ?? 0,
+      geoCount: settingsToReturn.geographies?.length ?? 0,
+      sourceCount: (settingsToReturn.traditionalSources?.length ?? 0) + (settingsToReturn.socialSources?.length ?? 0),
       identitySource: identity.source,
     });
-    res.json(result.data);
+    res.json({ ...settingsToReturn, _meta: { extractionStatus } });
   } catch (error) {
     trackServerEvent("api_error", {
       route: "/api/settings",
@@ -516,44 +606,6 @@ app.post("/api/auth/resolve-destination", async (req, res) => {
     );
     res.status(502).json({ message: "Could not resolve destination." });
   }
-});
-
-// ─── Onboarding text extraction ──────────────────────────────────────────────
-// Tries primary model first; if it fails and a different fallback is configured,
-// retries with the fallback. Returns 500 only when both are unavailable.
-app.post("/api/onboarding/extract", async (req, res) => {
-  const { text } = req.body ?? {};
-  if (!text || typeof text !== "string" || !text.trim()) {
-    res.status(400).json({ message: "text is required." });
-    return;
-  }
-
-  const primary = process.env.TEMPO_AI_CLASSIFIER_MODEL || "mock-anthropic-haiku";
-  const fallback = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
-
-  try {
-    const result = await _extraction.extract(text, primary);
-    return res.json(result);
-  } catch (primaryErr) {
-    console.warn(
-      `[onboarding.extract] primary (${primary}) failed: ${primaryErr instanceof Error ? primaryErr.message : primaryErr}`
-    );
-  }
-
-  if (fallback && fallback !== primary) {
-    console.log(`[onboarding.extract] attempting fallback: ${fallback}`);
-    try {
-      const result = await _extraction.extract(text, fallback);
-      console.log(`[onboarding.extract] fallback (${fallback}) succeeded`);
-      return res.json(result);
-    } catch (fallbackErr) {
-      console.warn(
-        `[onboarding.extract] fallback (${fallback}) failed: ${fallbackErr instanceof Error ? fallbackErr.message : fallbackErr}`
-      );
-    }
-  }
-
-  res.status(500).json({ message: "Extraction failed: all configured models unavailable." });
 });
 
 // ─── Voice transcription ──────────────────────────────────────────────────────

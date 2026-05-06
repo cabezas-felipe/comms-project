@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifySources } from "@/lib/source-classification";
+import { classifySources } from "./source-classification.js";
 
 describe("classifySources", () => {
   // ── empty input ─────────────────────────────────────────────────────────────

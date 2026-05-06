@@ -3,13 +3,14 @@ import Anthropic from "@anthropic-ai/sdk";
 import { providerFor } from "./model-router.mjs";
 import { withTimeout } from "./guardrails.mjs";
 
-export const EXTRACT_PROMPT_VERSION = "extract-v1";
+export const EXTRACT_PROMPT_VERSION = "extract-v3";
 
 export const extractionOutputSchema = z.object({
   topics: z.array(z.string().min(1)),
   keywords: z.array(z.string().min(1)),
   geographies: z.array(z.string().min(1)),
-  sources: z.array(z.string().min(1)),
+  traditionalSources: z.array(z.string().min(1)),
+  socialSources: z.array(z.string().min(1)),
 });
 
 // System prompt kept here so prompt version can be bumped in one place.
@@ -18,13 +19,22 @@ const SYSTEM_PROMPT = [
   "Return ONLY valid JSON — no markdown fences, no prose, no explanation.",
   "",
   "Required JSON structure:",
-  '{ "topics": string[], "keywords": string[], "geographies": string[], "sources": string[] }',
+  '{ "topics": string[], "keywords": string[], "geographies": string[], "traditionalSources": string[], "socialSources": string[] }',
   "",
   "Field definitions:",
-  '  topics      — broad subject areas (e.g. "Diplomatic relations", "Migration policy")',
-  '  keywords    — specific terms, acronyms, or proper names (e.g. "OFAC", "sanctions")',
-  '  geographies — country or region names mentioned (e.g. "US", "Colombia")',
-  '  sources     — news outlet names mentioned (e.g. "Reuters", "NYT")',
+  '  topics             — broad subject areas; use short canonical labels of 1–4 words (e.g. "Diplomatic relations", "Migration policy", "Security policy", "Humanitarian aid").',
+  '                       Do NOT use full sentences or verbose fragments.',
+  '  keywords           — specific terms, acronyms, or proper names (e.g. "OFAC", "sanctions", "deportation").',
+  '                       Keep each entry short (1–3 words).',
+  '  geographies        — country or region names mentioned (e.g. "US", "Colombia").',
+  '  traditionalSources — full outlet names without "The" prefix (e.g. "Reuters", "New York Times", "Wall Street Journal", "Associated Press", "BBC", "El Tiempo").',
+  '                       Do NOT abbreviate: write "New York Times" not "NYT", "Associated Press" not "AP", "Wall Street Journal" not "WSJ".',
+  '  socialSources      — social media accounts or platform-based sources (e.g. "@stateDept", "@latamwatcher").',
+  "",
+  "Source classification rules:",
+  "  - Handles starting with \"@\" → socialSources",
+  "  - Named news outlets, newspapers, wire services, or publications → traditionalSources",
+  "  - When uncertain, prefer traditionalSources.",
   "",
   "Extract only what is explicitly stated. Return empty arrays for fields with no relevant content.",
 ].join("\n");
@@ -63,12 +73,19 @@ function mockExtract(text) {
   }
   if (lower.includes("colombia")) geographies.push("Colombia");
 
-  const sources = [];
+  const traditionalSources = [];
   for (const src of ["Reuters", "NYT", "Washington Post", "El Tiempo", "El País", "Semana"]) {
-    if (text.includes(src)) sources.push(src);
+    if (text.includes(src)) traditionalSources.push(src);
   }
 
-  return { topics, keywords, geographies, sources };
+  const seenSocial = new Set();
+  const socialSources = [];
+  for (const handle of (text.match(/@\w+/g) ?? [])) {
+    const key = handle.toLowerCase();
+    if (!seenSocial.has(key)) { seenSocial.add(key); socialSources.push(handle); }
+  }
+
+  return { topics, keywords, geographies, traditionalSources, socialSources };
 }
 
 async function extractWithAnthropic({ apiKey, model, text, timeoutMs }) {
@@ -76,7 +93,6 @@ async function extractWithAnthropic({ apiKey, model, text, timeoutMs }) {
   const message = await client.messages.create({
     model,
     max_tokens: 512,
-    temperature: 0,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: buildExtractionPrompt(text) }],
   });

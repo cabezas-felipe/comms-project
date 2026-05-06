@@ -26,7 +26,8 @@ test("extractionOutputSchema accepts fully populated output", () => {
     topics: ["Diplomatic relations"],
     keywords: ["OFAC", "sanctions"],
     geographies: ["US", "Colombia"],
-    sources: ["Reuters"],
+    traditionalSources: ["Reuters"],
+    socialSources: ["@latamwatcher"],
   });
   assert.ok(result.success, JSON.stringify(result.error?.errors));
 });
@@ -36,7 +37,8 @@ test("extractionOutputSchema accepts all-empty arrays", () => {
     topics: [],
     keywords: [],
     geographies: [],
-    sources: [],
+    traditionalSources: [],
+    socialSources: [],
   });
   assert.ok(result.success);
 });
@@ -51,7 +53,8 @@ test("extractionOutputSchema rejects non-string array items", () => {
     topics: [42],
     keywords: [],
     geographies: [],
-    sources: [],
+    traditionalSources: [],
+    socialSources: [],
   });
   assert.ok(!result.success);
 });
@@ -61,14 +64,26 @@ test("extractionOutputSchema rejects empty-string array items", () => {
     topics: [""],
     keywords: [],
     geographies: [],
-    sources: [],
+    traditionalSources: [],
+    socialSources: [],
+  });
+  assert.ok(!result.success);
+});
+
+test("extractionOutputSchema rejects empty-string items in traditionalSources", () => {
+  const result = extractionOutputSchema.safeParse({
+    topics: [],
+    keywords: [],
+    geographies: [],
+    traditionalSources: [""],
+    socialSources: [],
   });
   assert.ok(!result.success);
 });
 
 // ── extractOnboarding — mock providers ───────────────────────────────────────
 
-test("extractOnboarding returns all four arrays with mock-anthropic-haiku", async () => {
+test("extractOnboarding returns all five fields with mock-anthropic-haiku", async () => {
   const result = await extractOnboarding(
     "Track OFAC sanctions and Colombia-US diplomatic stories. Trust Reuters.",
     "mock-anthropic-haiku"
@@ -76,7 +91,8 @@ test("extractOnboarding returns all four arrays with mock-anthropic-haiku", asyn
   assert.ok(Array.isArray(result.topics));
   assert.ok(Array.isArray(result.keywords));
   assert.ok(Array.isArray(result.geographies));
-  assert.ok(Array.isArray(result.sources));
+  assert.ok(Array.isArray(result.traditionalSources));
+  assert.ok(Array.isArray(result.socialSources));
 });
 
 test("extractOnboarding mock detects Diplomatic relations topic", async () => {
@@ -94,15 +110,21 @@ test("extractOnboarding mock detects Colombia geography", async () => {
   assert.ok(result.geographies.includes("Colombia"));
 });
 
-test("extractOnboarding mock detects Reuters source", async () => {
+test("extractOnboarding mock detects Reuters as traditionalSource", async () => {
   const result = await extractOnboarding("Trust Reuters for coverage.", "mock-openai-mini");
-  assert.ok(result.sources.includes("Reuters"));
+  assert.ok(result.traditionalSources.includes("Reuters"));
 });
 
-test("extractOnboarding mock detects NYT source", async () => {
+test("extractOnboarding mock detects NYT and El Tiempo as traditionalSources", async () => {
   const result = await extractOnboarding("Read NYT and El Tiempo.", "mock-openai-mini");
-  assert.ok(result.sources.includes("NYT"));
-  assert.ok(result.sources.includes("El Tiempo"));
+  assert.ok(result.traditionalSources.includes("NYT"));
+  assert.ok(result.traditionalSources.includes("El Tiempo"));
+});
+
+test("extractOnboarding mock detects @-handle as socialSource", async () => {
+  const result = await extractOnboarding("Follow @latamwatcher for updates.", "mock-anthropic-haiku");
+  assert.ok(result.socialSources.includes("@latamwatcher"));
+  assert.ok(!result.traditionalSources.includes("@latamwatcher"));
 });
 
 test("extractOnboarding mock detects OFAC keyword", async () => {
@@ -115,7 +137,8 @@ test("extractOnboarding mock returns empty arrays for unrelated text", async () 
   assert.deepEqual(result.topics, []);
   assert.deepEqual(result.keywords, []);
   assert.deepEqual(result.geographies, []);
-  assert.deepEqual(result.sources, []);
+  assert.deepEqual(result.traditionalSources, []);
+  assert.deepEqual(result.socialSources, []);
 });
 
 test("extractOnboarding works with mock-openai-mini provider", async () => {
@@ -159,8 +182,8 @@ test("extractOnboarding throws when openai: model has no API key", async () => {
 });
 
 test("extractOnboarding falls through to mock-openai for unknown model prefix (default routing)", async () => {
-  // providerFor() defaults unknown prefixes to "mock-openai" — not an error.
   const result = await extractOnboarding("Colombia diplomacy.", "unknown-provider:model");
   assert.ok(Array.isArray(result.topics));
-  assert.ok(Array.isArray(result.sources));
+  assert.ok(Array.isArray(result.traditionalSources));
+  assert.ok(Array.isArray(result.socialSources));
 });

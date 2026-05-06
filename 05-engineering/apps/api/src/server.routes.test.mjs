@@ -36,7 +36,7 @@ await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_S
 const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
 
@@ -177,6 +177,49 @@ test("GET /api/dashboard returns schema-conformant payload with ranked stories",
   const parsed = dashboardPayloadSchema.safeParse(res.body);
   assert.ok(parsed.success, `response must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
   assert.ok(!("aiSummaryMeta" in res.body.stories[0]), "aiSummaryMeta must be stripped from response");
+});
+
+// ─── Topic taxonomy backward compatibility ─────────────────────────────────────
+// These tests verify that normalizeTopicLabel is applied on both sides of the
+// dashboard filter so legacy item labels ("Security cooperation") match settings
+// that were written back in normalized form ("Security policy"), and vice-versa.
+
+test("dashboard filter: normalized settings topic matches item with legacy topic label", async () => {
+  // Items carry the old-form label that pre-dates normalization.
+  const oldLabelItems = [{ ...FIXTURE_SOURCE_ITEMS[0], topic: "Security cooperation", clusterId: "test-old-label" }];
+  await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(oldLabelItems), "utf8");
+
+  // Settings hold the post-normalization form (what extraction write-back produces).
+  await request(app).put("/api/settings")
+    .send({ ...VALID_BODY, topics: ["Security policy"] })
+    .set("Content-Type", "application/json");
+
+  const res = await request(app).get("/api/dashboard");
+  assert.equal(res.status, 200);
+  assert.ok(res.body.stories.length > 0,
+    "item labeled 'Security cooperation' must match normalized setting 'Security policy'");
+
+  // Restore fixture and settings for subsequent tests.
+  await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
+  await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
+});
+
+test("dashboard filter: old settings topic still matches item with the same old label (backward compat)", async () => {
+  // Neither side was ever normalized — both use the old form.
+  const oldLabelItems = [{ ...FIXTURE_SOURCE_ITEMS[0], topic: "Security cooperation", clusterId: "test-old-both" }];
+  await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(oldLabelItems), "utf8");
+
+  await request(app).put("/api/settings")
+    .send({ ...VALID_BODY, topics: ["Security cooperation"] })
+    .set("Content-Type", "application/json");
+
+  const res = await request(app).get("/api/dashboard");
+  assert.equal(res.status, 200);
+  assert.ok(res.body.stories.length > 0,
+    "old-form setting 'Security cooperation' must still match item with same old label");
+
+  await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
+  await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
 });
 
 test("GET /api/ingestion/sources returns declared feed configuration (JSON fallback, no Supabase)", async () => {
@@ -341,76 +384,7 @@ test("POST /api/transcribe returns 503 in production when API key is absent", as
   }
 });
 
-// ─── Onboarding extraction — fallback logic ───────────────────────────────────
-
-const MOCK_EXTRACTION = { topics: ["test-topic"], keywords: [], geographies: ["US"], sources: [] };
-
-test("POST /api/onboarding/extract returns 200 when primary succeeds", async () => {
-  const saved = _extraction.extract;
-  _extraction.extract = async () => MOCK_EXTRACTION;
-  try {
-    const res = await request(app)
-      .post("/api/onboarding/extract")
-      .send({ text: "some onboarding text" })
-      .set("Content-Type", "application/json");
-    assert.equal(res.status, 200);
-    assert.deepEqual(res.body.topics, MOCK_EXTRACTION.topics);
-  } finally {
-    _extraction.extract = saved;
-  }
-});
-
-test("POST /api/onboarding/extract returns 200 when primary fails but fallback succeeds", async () => {
-  const savedExtract = _extraction.extract;
-  const savedPrimary = process.env.TEMPO_AI_CLASSIFIER_MODEL;
-  const savedFallback = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
-  process.env.TEMPO_AI_CLASSIFIER_MODEL = "mock-anthropic-haiku";
-  process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = "mock-openai-mini";
-  let callCount = 0;
-  _extraction.extract = async (_text, model) => {
-    callCount++;
-    if (model === "mock-anthropic-haiku") throw new Error("primary unavailable");
-    return MOCK_EXTRACTION;
-  };
-  try {
-    const res = await request(app)
-      .post("/api/onboarding/extract")
-      .send({ text: "some onboarding text" })
-      .set("Content-Type", "application/json");
-    assert.equal(res.status, 200);
-    assert.deepEqual(res.body.topics, MOCK_EXTRACTION.topics);
-    assert.equal(callCount, 2, "should have called extract twice (primary + fallback)");
-  } finally {
-    _extraction.extract = savedExtract;
-    if (savedPrimary !== undefined) process.env.TEMPO_AI_CLASSIFIER_MODEL = savedPrimary;
-    else delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
-    if (savedFallback !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = savedFallback;
-    else delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
-  }
-});
-
-test("POST /api/onboarding/extract returns 500 when both primary and fallback fail", async () => {
-  const savedExtract = _extraction.extract;
-  const savedPrimary = process.env.TEMPO_AI_CLASSIFIER_MODEL;
-  const savedFallback = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
-  process.env.TEMPO_AI_CLASSIFIER_MODEL = "mock-anthropic-haiku";
-  process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = "mock-openai-mini";
-  _extraction.extract = async () => { throw new Error("all models down"); };
-  try {
-    const res = await request(app)
-      .post("/api/onboarding/extract")
-      .send({ text: "some onboarding text" })
-      .set("Content-Type", "application/json");
-    assert.equal(res.status, 500);
-    assert.ok(typeof res.body.message === "string");
-  } finally {
-    _extraction.extract = savedExtract;
-    if (savedPrimary !== undefined) process.env.TEMPO_AI_CLASSIFIER_MODEL = savedPrimary;
-    else delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
-    if (savedFallback !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = savedFallback;
-    else delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
-  }
-});
+const MOCK_EXTRACTION = { topics: ["test-topic"], keywords: [], geographies: ["US"], traditionalSources: [], socialSources: [] };
 
 // ─── Identity resolution — resolveIdentity unit tests ────────────────────────
 // These exercise the exported resolveIdentity function directly (no HTTP overhead).
@@ -617,9 +591,15 @@ test("atomic path: success routes through _atomicSave.execute with correct args,
   const prevExec = _atomicSave.execute;
   const prevWrite = _writeSettings.write;
   const prevNarrative = _narrativeRepo.append;
+  const prevNarrativeRead = _narrativeRepo.read;
+  const prevReadHas = _readSettings.has;
   _atomicSave.execute = async (args) => { capturedArgs = args; };
   _writeSettings.write = async () => { settingsWriteCalled = true; };
   _narrativeRepo.append = async () => { narrativeAppendCalled = true; };
+  // Prevent post-save extraction from hitting the fake Supabase URL.
+  _narrativeRepo.read = async () => null;
+  // Prevent the previous-settings read from hitting the fake Supabase URL.
+  _readSettings.has = async () => false;
 
   try {
     const body = { ...VALID_BODY, onboardingRawText: "I cover US-Colombia migration for a nonprofit." };
@@ -640,6 +620,8 @@ test("atomic path: success routes through _atomicSave.execute with correct args,
     _atomicSave.execute = prevExec;
     _writeSettings.write = prevWrite;
     _narrativeRepo.append = prevNarrative;
+    _narrativeRepo.read = prevNarrativeRead;
+    _readSettings.has = prevReadHas;
     if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
     else delete process.env.SUPABASE_URL;
     if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
@@ -658,9 +640,11 @@ test("atomic path: _atomicSave.execute failure → 500, neither write called ind
   const prevExec = _atomicSave.execute;
   const prevWrite = _writeSettings.write;
   const prevNarrative = _narrativeRepo.append;
+  const prevReadHas = _readSettings.has;
   _atomicSave.execute = async () => { throw new Error("DB transaction rolled back"); };
   _writeSettings.write = async () => { settingsWriteCalled = true; };
   _narrativeRepo.append = async () => { narrativeAppendCalled = true; };
+  _readSettings.has = async () => false;
 
   try {
     const body = { ...VALID_BODY, onboardingRawText: "I cover US-Colombia migration." };
@@ -678,6 +662,7 @@ test("atomic path: _atomicSave.execute failure → 500, neither write called ind
     _atomicSave.execute = prevExec;
     _writeSettings.write = prevWrite;
     _narrativeRepo.append = prevNarrative;
+    _readSettings.has = prevReadHas;
     if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
     else delete process.env.SUPABASE_URL;
     if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
@@ -692,7 +677,9 @@ test("atomic path: 500 response includes detail field propagated from RPC error"
   process.env.SUPABASE_SERVICE_ROLE_KEY = "fake-service-role-key";
 
   const prevExec = _atomicSave.execute;
+  const prevReadHas = _readSettings.has;
   _atomicSave.execute = async () => { throw new Error("[atomic-save] RPC not found — run migration 009: Could not find the function"); };
+  _readSettings.has = async () => false;
 
   try {
     const body = { ...VALID_BODY, onboardingRawText: "I cover migration policy." };
@@ -709,6 +696,7 @@ test("atomic path: 500 response includes detail field propagated from RPC error"
     );
   } finally {
     _atomicSave.execute = prevExec;
+    _readSettings.has = prevReadHas;
     if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
     else delete process.env.SUPABASE_URL;
     if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
@@ -726,8 +714,10 @@ test("atomic path not taken when onboardingRawText is absent (Supabase enabled) 
   let settingsWriteCalled = false;
   const prevExec = _atomicSave.execute;
   const prevWrite = _writeSettings.write;
+  const prevReadHas = _readSettings.has;
   _atomicSave.execute = async () => { atomicCalled = true; };
   _writeSettings.write = async () => { settingsWriteCalled = true; };
+  _readSettings.has = async () => false;
 
   try {
     const res = await request(app)
@@ -740,6 +730,7 @@ test("atomic path not taken when onboardingRawText is absent (Supabase enabled) 
   } finally {
     _atomicSave.execute = prevExec;
     _writeSettings.write = prevWrite;
+    _readSettings.has = prevReadHas;
     if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
     else delete process.env.SUPABASE_URL;
     if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;
@@ -808,6 +799,349 @@ test("GET /api/settings returns 200 when resolved via x-recognized-email header"
     _auth.resolver = prevResolver;
     _emailLookup.resolve = prevLookup;
     _clearEmailCache();
+  }
+});
+
+// ─── Post-save extraction trigger (Section 4) ─────────────────────────────────
+// These tests verify that after a successful onboarding save, the server reads
+// the persisted narrative, runs extraction, and writes the extracted fields back
+// to settings.  The _narrativeRepo.read and _extraction.extract hooks are used to
+// control outcomes without a live AI provider or Supabase instance.
+
+test("extraction trigger: writes back extracted topics/keywords/geographies after onboarding save", async () => {
+  const NARRATIVE = "I lead comms for a nonprofit covering US-Colombia migration.";
+  const EXTRACTED = {
+    topics: ["Migration policy"],
+    keywords: ["bilateral"],
+    geographies: ["US", "Colombia"],
+    traditionalSources: [],
+    socialSources: [],
+  };
+  const writeCalls = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => NARRATIVE;
+  _extraction.extract = async () => EXTRACTED;
+  _writeSettings.write = async (payload, userId) => { writeCalls.push({ payload, userId }); };
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: NARRATIVE };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    // write called twice: initial settings save + extraction write-back
+    assert.equal(writeCalls.length, 2, "settings must be written twice: initial save + extraction write-back");
+    const writeBack = writeCalls[1].payload;
+    assert.deepEqual(writeBack.topics, EXTRACTED.topics, "extracted topics must be persisted");
+    assert.deepEqual(writeBack.keywords, EXTRACTED.keywords, "extracted keywords must be persisted");
+    assert.deepEqual(writeBack.geographies, EXTRACTED.geographies, "extracted geographies must be persisted");
+    // non-extracted fields must be preserved from original settings
+    assert.deepEqual(writeBack.traditionalSources, VALID_BODY.traditionalSources, "traditionalSources must be unchanged");
+    assert.deepEqual(writeBack.socialSources, VALID_BODY.socialSources, "socialSources must be unchanged");
+    // response reflects extracted fields
+    assert.deepEqual(res.body.topics, EXTRACTED.topics);
+    assert.deepEqual(res.body.geographies, EXTRACTED.geographies);
+    assert.equal(res.body._meta?.extractionStatus, "succeeded");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction trigger: empty extracted arrays do not overwrite existing settings values", async () => {
+  const EXTRACTED_EMPTY = { topics: [], keywords: [], geographies: [], traditionalSources: [], socialSources: [] };
+  const writeCalls = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => "Some narrative.";
+  _extraction.extract = async () => EXTRACTED_EMPTY;
+  _writeSettings.write = async (payload, userId) => { writeCalls.push({ payload, userId }); };
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "Some narrative." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    // All extracted arrays are empty → no fields changed → write-back is skipped (only initial write)
+    assert.equal(writeCalls.length, 1, "write-back must be skipped when no fields change");
+    // Response retains original values (via settingsToReturn = merged, which equals result.data)
+    assert.deepEqual(res.body.topics, VALID_BODY.topics);
+    assert.deepEqual(res.body.keywords, VALID_BODY.keywords);
+    assert.deepEqual(res.body.geographies, VALID_BODY.geographies);
+    assert.equal(res.body._meta?.extractionStatus, "succeeded");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction trigger: model-provided traditionalSources and socialSources are written back", async () => {
+  const EXTRACTED_WITH_SOURCES = {
+    topics: ["Migration policy"],
+    keywords: ["bilateral"],
+    geographies: ["Colombia"],
+    traditionalSources: ["Reuters", "El Tiempo"],
+    socialSources: ["@latamwatcher"],
+  };
+  const writeCalls = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => "Some narrative with sources.";
+  _extraction.extract = async () => EXTRACTED_WITH_SOURCES;
+  _writeSettings.write = async (payload, userId) => { writeCalls.push({ payload, userId }); };
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "Some narrative with sources." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.equal(writeCalls.length, 2, "write-back must run after extraction");
+    const writeBack = writeCalls[1].payload;
+    assert.deepEqual(writeBack.traditionalSources, ["Reuters", "El Tiempo"], "model-provided traditional outlets must be written back");
+    assert.deepEqual(writeBack.socialSources, ["@latamwatcher"], "model-provided social handles must be written back");
+    assert.deepEqual(res.body.traditionalSources, ["Reuters", "El Tiempo"]);
+    assert.deepEqual(res.body.socialSources, ["@latamwatcher"]);
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction trigger: empty extracted sources do not overwrite existing source settings", async () => {
+  const EXTRACTED_NO_SOURCES = { topics: [], keywords: [], geographies: [], traditionalSources: [], socialSources: [] };
+  const writeCalls = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => "Some narrative.";
+  _extraction.extract = async () => EXTRACTED_NO_SOURCES;
+  _writeSettings.write = async (payload, userId) => { writeCalls.push({ payload, userId }); };
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "Some narrative." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    // No fields changed — write-back skipped; response still carries original source lists
+    assert.equal(writeCalls.length, 1, "write-back must be skipped when no fields change");
+    assert.deepEqual(res.body.traditionalSources, VALID_BODY.traditionalSources, "traditionalSources must not be erased when extraction finds none");
+    assert.deepEqual(res.body.socialSources, VALID_BODY.socialSources, "socialSources must not be erased when extraction finds none");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction trigger: extraction failure does not fail request — returns 200 with original settings", async () => {
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  const writeCalls = [];
+  _narrativeRepo.read = async () => "Some narrative.";
+  _extraction.extract = async () => { throw new Error("model unavailable"); };
+  _writeSettings.write = async (payload, userId) => { writeCalls.push({ payload, userId }); };
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "Some narrative." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200, "extraction failure must not fail the onboarding save");
+    // only the initial settings write — no extraction write-back
+    assert.equal(writeCalls.length, 1, "write-back must not be called when extraction fails");
+    // response is original validated settings, no extracted overlay
+    assert.deepEqual(res.body.topics, VALID_BODY.topics);
+    assert.equal(res.body._meta?.extractionStatus, "failed");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction trigger: narrative read returns null — falls back to onboardingRawText and extraction runs", async () => {
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  let extractCalled = false;
+  _narrativeRepo.read = async () => null;
+  _extraction.extract = async () => { extractCalled = true; return MOCK_EXTRACTION; };
+  _writeSettings.write = async () => {};
+
+  try {
+    const body = { ...VALID_BODY, onboardingRawText: "Some narrative." };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(body)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(extractCalled, "extraction must run using onboardingRawText when narrative read returns null");
+    assert.equal(res.body._meta?.extractionStatus, "succeeded");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction trigger: not attempted when onboardingRawText is absent", async () => {
+  const prevRead = _narrativeRepo.read;
+  let readCalled = false;
+  _narrativeRepo.read = async () => { readCalled = true; return null; };
+
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send(VALID_BODY)
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.ok(!readCalled, "narrative read must not be called when no onboardingRawText is provided");
+    assert.equal(res.body._meta?.extractionStatus, "not_attempted");
+  } finally {
+    _narrativeRepo.read = prevRead;
+  }
+});
+
+// ─── Two-model extraction chain (Section 7) ──────────────────────────────────
+
+test("extraction chain: primary (Opus) succeeds — single attempt, status succeeded", async () => {
+  const attempts = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => "Colombia diplomacy.";
+  _extraction.extract = async (_text, model) => { attempts.push(model); return MOCK_EXTRACTION; };
+  _writeSettings.write = async () => {};
+
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send({ ...VALID_BODY, onboardingRawText: "Colombia diplomacy." })
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.equal(attempts.length, 1, "only primary should be attempted when primary succeeds");
+    assert.equal(attempts[0], "anthropic:claude-opus-4-7", "primary must be Opus");
+    assert.equal(res.body._meta?.extractionStatus, "succeeded");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction chain: primary fails, fallback (Sonnet) succeeds — two attempts, status succeeded", async () => {
+  const attempts = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => "Colombia diplomacy.";
+  _extraction.extract = async (_text, model) => {
+    attempts.push(model);
+    if (model === "anthropic:claude-opus-4-7") throw new Error("primary unavailable");
+    return MOCK_EXTRACTION;
+  };
+  _writeSettings.write = async () => {};
+
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send({ ...VALID_BODY, onboardingRawText: "Colombia diplomacy." })
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.equal(attempts.length, 2, "both models must be attempted");
+    assert.equal(attempts[0], "anthropic:claude-opus-4-7", "primary must be Opus");
+    assert.equal(attempts[1], "anthropic:claude-sonnet-4-6", "fallback must be Sonnet");
+    assert.equal(res.body._meta?.extractionStatus, "succeeded");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction chain: both primary and fallback fail — no write-back, status failed, original settings returned", async () => {
+  const attempts = [];
+  const writeCalls = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => "Colombia diplomacy.";
+  _extraction.extract = async (_text, model) => {
+    attempts.push(model);
+    throw new Error(`${model} unavailable`);
+  };
+  _writeSettings.write = async (payload, userId) => { writeCalls.push({ payload, userId }); };
+
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send({ ...VALID_BODY, onboardingRawText: "Colombia diplomacy." })
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200, "both-model failure must not fail the onboarding save");
+    assert.equal(attempts.length, 2, "both models must be attempted before giving up");
+    assert.equal(attempts[0], "anthropic:claude-opus-4-7");
+    assert.equal(attempts[1], "anthropic:claude-sonnet-4-6");
+    // Only the initial settings write — no extraction write-back
+    assert.equal(writeCalls.length, 1, "no synthetic write-back when both models fail");
+    assert.equal(res.body._meta?.extractionStatus, "failed");
+    // Response must be original settings, not mock/synthetic extracted data
+    assert.deepEqual(res.body.topics, VALID_BODY.topics);
+    assert.deepEqual(res.body.geographies, VALID_BODY.geographies);
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction chain: TEMPO_AI_MOCK_ONLY=true in non-test runtime skips extraction — status failed, no write-back", async () => {
+  const writeCalls = [];
+  let extractCalled = false;
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  const prevMockOnly = process.env.TEMPO_AI_MOCK_ONLY;
+  const prevNodeEnv = process.env.NODE_ENV;
+  _narrativeRepo.read = async () => "Colombia diplomacy.";
+  _extraction.extract = async () => { extractCalled = true; return MOCK_EXTRACTION; };
+  _writeSettings.write = async (payload, userId) => { writeCalls.push({ payload, userId }); };
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  process.env.NODE_ENV = "production";
+
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send({ ...VALID_BODY, onboardingRawText: "Colombia diplomacy." })
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200, "mock-only guard must not fail the request");
+    assert.ok(!extractCalled, "extraction must not be called when mock-only mode is active outside test");
+    assert.equal(writeCalls.length, 1, "only the initial settings write — no extraction write-back");
+    assert.equal(res.body._meta?.extractionStatus, "failed");
+    assert.deepEqual(res.body.topics, VALID_BODY.topics, "original settings must be returned");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+    if (prevMockOnly !== undefined) process.env.TEMPO_AI_MOCK_ONLY = prevMockOnly;
+    else delete process.env.TEMPO_AI_MOCK_ONLY;
+    if (prevNodeEnv !== undefined) process.env.NODE_ENV = prevNodeEnv;
+    else delete process.env.NODE_ENV;
   }
 });
 
