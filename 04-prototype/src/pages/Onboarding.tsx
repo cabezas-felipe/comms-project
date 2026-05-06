@@ -10,8 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ArrowRight, Keyboard, Loader2, Mic } from "lucide-react";
 import { notifyWarning, notifyError, notifySuccess } from "@/lib/notify";
 import { transcribeAudio } from "@/lib/voice-upload";
-import { extractOnboardingText, saveSettingsPayload } from "@/lib/settings-api";
-import { classifySources } from "@/lib/source-classification";
+import { saveSettingsPayload } from "@/lib/settings-api";
 import { CONTRACT_VERSION, settingsPayloadSchema } from "@tempo/contracts";
 
 type Mode = "type" | "voice";
@@ -138,8 +137,9 @@ export default function Onboarding() {
     });
 
     // Step 2: Persist raw text + baseline settings. Failure blocks navigation.
+    let saveResult: Awaited<ReturnType<typeof saveSettingsPayload>>;
     try {
-      await saveSettingsPayload(minimalPayload, { onboardingRawText: topics.trim() });
+      saveResult = await saveSettingsPayload(minimalPayload, { onboardingRawText: topics.trim() });
     } catch {
       notifyError("We couldn't save your changes. Please try again.");
       setSubmitting(false);
@@ -152,25 +152,12 @@ export default function Onboarding() {
     setSubmitting(false);
     navigate(import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard");
 
-    // Step 4: Best-effort extraction — runs after navigation, never blocks the user.
-    const rawText = topics.trim();
-    void (async () => {
-      try {
-        const extracted = await extractOnboardingText(rawText);
-        const { traditionalSources, socialSources } = classifySources(extracted.sources);
-        const derivedPayload = settingsPayloadSchema.parse({
-          contractVersion: CONTRACT_VERSION,
-          topics: extracted.topics.length ? extracted.topics : minimalPayload.topics,
-          keywords: extracted.keywords.length ? extracted.keywords : minimalPayload.keywords,
-          geographies: extracted.geographies.length ? extracted.geographies : minimalPayload.geographies,
-          traditionalSources: traditionalSources.length ? traditionalSources : minimalPayload.traditionalSources,
-          socialSources,
-        });
-        await saveSettingsPayload(derivedPayload);
-      } catch {
-        notifyWarning("We hit an issue on our side. You can keep going and complete what you're monitoring in Settings.");
-      }
-    })();
+    // Surface backend extraction failure — save already committed, user can fix in Settings.
+    const extractionStatus = saveResult._meta?.extractionStatus;
+    if (extractionStatus === "failed") {
+      notifyWarning("We hit an issue on our side. You can keep going and complete what you're monitoring in Settings.");
+    }
+
   };
 
   return (

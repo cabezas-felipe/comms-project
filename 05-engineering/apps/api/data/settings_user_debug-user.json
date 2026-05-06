@@ -1,0 +1,28 @@
+{
+  "contractVersion": "2026-04-22-slice1",
+  "topics": [
+    "trade policy"
+  ],
+  "keywords": [
+    "trade",
+    "deportations"
+  ],
+  "geographies": [
+    "US",
+    "Colombia"
+  ],
+  "traditionalSources": [
+    "New York Times",
+    "Washington Post",
+    "Politico",
+    "El Tiempo",
+    "El Espectador",
+    "La Silla Vacia"
+  ],
+  "socialSources": [
+    "@petrogustavo",
+    "@WhiteHouse",
+    "@realDonaldTrump",
+    "@marcorubio"
+  ]
+}

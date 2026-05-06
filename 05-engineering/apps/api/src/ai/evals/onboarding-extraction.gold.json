@@ -1,0 +1,242 @@
+[
+  {
+    "id": "ex-01",
+    "bucket": "clean_explicit",
+    "inputText": "I lead comms for a nonprofit focused on migration between the US and Colombia. I read The New York Times, Reuters, and El Tiempo every morning. I also follow @StateDept on X for official updates.",
+    "expected": {
+      "topics": ["Migration policy"],
+      "keywords": ["migration"],
+      "geographies": ["Colombia", "US"],
+      "traditionalSources": ["El Tiempo", "Reuters", "New York Times"],
+      "socialSources": ["@StateDept"]
+    }
+  },
+  {
+    "id": "ex-02",
+    "bucket": "clean_explicit",
+    "inputText": "I handle communications for an energy association tracking sanctions in Venezuela and Colombia. I monitor Reuters, Bloomberg, and Financial Times, and I follow @USTreasury and @CancilleriaCol on X.",
+    "expected": {
+      "topics": ["Energy policy"],
+      "keywords": ["energy", "sanctions"],
+      "geographies": ["Colombia", "Venezuela"],
+      "traditionalSources": ["Bloomberg", "Financial Times", "Reuters"],
+      "socialSources": ["@CancilleriaCol", "@USTreasury"]
+    }
+  },
+  {
+    "id": "ex-03",
+    "bucket": "clean_explicit",
+    "inputText": "I brief executives on security cooperation in Mexico and the US. My core sources are Washington Post, Wall Street Journal, and AP News. On social, I track @DHSgov and @CBP.",
+    "expected": {
+      "topics": ["Border policy", "Security policy"],
+      "keywords": ["border", "DHS", "security"],
+      "geographies": ["Mexico", "US"],
+      "traditionalSources": ["Associated Press", "Wall Street Journal", "Washington Post"],
+      "socialSources": ["@CBP", "@DHSgov"]
+    }
+  },
+  {
+    "id": "ex-04",
+    "bucket": "clean_explicit",
+    "inputText": "I run public affairs for a health NGO working in Brazil and Colombia. I read Folha de S.Paulo, El País, and BBC News. I also follow @WHO and @MinSaludCol on social.",
+    "expected": {
+      "topics": ["Health policy", "Public health"],
+      "keywords": ["health", "WHO"],
+      "geographies": ["Brazil", "Colombia"],
+      "traditionalSources": ["BBC", "El País", "Folha de S.Paulo"],
+      "socialSources": ["@MinSaludCol", "@WHO"]
+    }
+  },
+  {
+    "id": "ex-05",
+    "bucket": "clean_explicit",
+    "inputText": "I support a trade group focused on customs policy across Peru, Chile, and Colombia. I rely on Reuters, Diario Financiero, and Portafolio. I follow @SUNATOficial and @DIANColombia for updates.",
+    "expected": {
+      "topics": ["Customs policy", "International trade", "Trade policy"],
+      "keywords": ["customs", "DIAN", "trade"],
+      "geographies": ["Chile", "Colombia", "Peru"],
+      "traditionalSources": ["Diario Financiero", "Portafolio", "Reuters"],
+      "socialSources": ["@DIANColombia", "@SUNATOficial"]
+    }
+  },
+  {
+    "id": "ex-06",
+    "bucket": "implicit_ambiguous",
+    "inputText": "I cover migration headlines tied to deportation flights and asylum court changes. I usually read Reuters and Semana, and I keep an eye on @ICEgov.",
+    "expected": {
+      "topics": ["Border policy", "Deportation policy", "Migration policy"],
+      "keywords": ["asylum", "deportation", "ICE"],
+      "geographies": [],
+      "traditionalSources": ["Reuters", "Semana"],
+      "socialSources": ["@ICEgov"]
+    }
+  },
+  {
+    "id": "ex-07",
+    "bucket": "implicit_ambiguous",
+    "inputText": "My updates focus on sanctions and compliance risk for clients in the region. I start with Financial Times and Bloomberg, then check @USTreasury for official notices.",
+    "expected": {
+      "topics": ["Sanctions enforcement"],
+      "keywords": ["sanctions"],
+      "geographies": [],
+      "traditionalSources": ["Bloomberg", "Financial Times"],
+      "socialSources": ["@USTreasury"]
+    }
+  },
+  {
+    "id": "ex-08",
+    "bucket": "implicit_ambiguous",
+    "inputText": "I follow bilateral storylines and diplomatic tone shifts between capitals. My baseline is El País and AP, plus @StateDept and @CancilleriaCol.",
+    "expected": {
+      "topics": [],
+      "keywords": ["diplomacy"],
+      "geographies": [],
+      "traditionalSources": ["Associated Press", "El País"],
+      "socialSources": ["@CancilleriaCol", "@StateDept"]
+    }
+  },
+  {
+    "id": "ex-09",
+    "bucket": "implicit_ambiguous",
+    "inputText": "I monitor security incidents near border corridors and official reactions. I use Washington Post, Reuters, and @CBP.",
+    "expected": {
+      "topics": ["Border policy", "Security policy"],
+      "keywords": ["border", "security"],
+      "geographies": [],
+      "traditionalSources": ["Reuters", "Washington Post"],
+      "socialSources": ["@CBP"]
+    }
+  },
+  {
+    "id": "ex-10",
+    "bucket": "implicit_ambiguous",
+    "inputText": "I track public health messaging during outbreaks and vaccine updates. I read WHO bulletins, BBC, and follow @WHO.",
+    "expected": {
+      "topics": ["International health", "Public health"],
+      "keywords": ["health", "outbreak", "vaccine", "WHO"],
+      "geographies": [],
+      "traditionalSources": ["BBC"],
+      "socialSources": ["@WHO"]
+    }
+  },
+  {
+    "id": "ex-11",
+    "bucket": "noisy_long",
+    "inputText": "I run comms for a manufacturing coalition and I'm juggling way too many threads right now: labor disputes, customs delays, and political noise around new tariffs. Most of my briefs are about Colombia, Mexico, and the US. I read Reuters, WSJ, and Portafolio; when things move fast I also check @USTRadeRep and @DIANColombia.",
+    "expected": {
+      "topics": ["Customs policy", "Trade policy"],
+      "keywords": ["customs", "labor", "manufacturing", "tariffs"],
+      "geographies": ["Colombia", "Mexico", "US"],
+      "traditionalSources": ["Portafolio", "Reuters", "Wall Street Journal"],
+      "socialSources": ["@DIANColombia", "@USTRadeRep"]
+    }
+  },
+  {
+    "id": "ex-12",
+    "bucket": "noisy_long",
+    "inputText": "For context: I advise an NGO board on migration and humanitarian operations. The same week I'm tracking shelter capacity, deportation notices, and visa announcements touching Colombia, Panama, and Ecuador. I read El Tiempo, AP, and BBC; for social feeds I mainly watch @UNHCR and @MigracionCol.",
+    "expected": {
+      "topics": ["Humanitarian aid", "Migration policy"],
+      "keywords": ["deportation", "migration", "visa", "United Nations"],
+      "geographies": ["Colombia", "Ecuador", "Panama"],
+      "traditionalSources": ["Associated Press", "BBC", "El Tiempo"],
+      "socialSources": ["@MigracionCol", "@UNHCR"]
+    }
+  },
+  {
+    "id": "ex-13",
+    "bucket": "noisy_long",
+    "inputText": "I handle strategic comms in energy. My team keeps mixing up what matters, so I track sanctions, compliance, and shipping risk tied to Venezuela and Colombia. Daily reads: Bloomberg, Financial Times, Reuters. Social accounts: @USTreasury, @PDVSA, and @MinEnergiaCo.",
+    "expected": {
+      "topics": ["Energy policy"],
+      "keywords": ["energy", "sanctions"],
+      "geographies": ["Colombia", "Venezuela"],
+      "traditionalSources": ["Bloomberg", "Financial Times", "Reuters"],
+      "socialSources": ["@MinEnergiaCo", "@PDVSA", "@USTreasury"]
+    }
+  },
+  {
+    "id": "ex-14",
+    "bucket": "noisy_long",
+    "inputText": "I'm less interested in broad headlines and more in narrative drift on security cooperation. For this quarter I'm focused on US-Colombia-Mexico coordination, especially around border pressure and organized crime framing. My sources are Washington Post, El País, and Reuters; on X I monitor @DHSgov and @PoliciaColombia.",
+    "expected": {
+      "topics": ["Border policy", "Security policy"],
+      "keywords": ["border", "organized crime", "security"],
+      "geographies": ["Colombia", "Mexico", "US"],
+      "traditionalSources": ["El País", "Reuters", "Washington Post"],
+      "socialSources": ["@DHSgov", "@PoliciaColombia"]
+    }
+  },
+  {
+    "id": "ex-15",
+    "bucket": "noisy_long",
+    "inputText": "My workflow is messy: morning clips, noon stakeholder calls, late-night edits. But what I really monitor is public health policy and vaccine messaging in Brazil, Colombia, and Peru. I rely on Folha de S.Paulo, Semana, and BBC; plus @WHO and @MinSaludCol when decisions break.",
+    "expected": {
+      "topics": ["International health", "Public health policy"],
+      "keywords": ["health", "public health", "vaccine"],
+      "geographies": ["Brazil", "Colombia", "Peru"],
+      "traditionalSources": ["BBC", "Folha de S.Paulo", "Semana"],
+      "socialSources": ["@MinSaludCol", "@WHO"]
+    }
+  },
+  {
+    "id": "ex-16",
+    "bucket": "edge_negative",
+    "inputText": "I need broad awareness and usually just skim headlines when I can.",
+    "expected": {
+      "topics": [],
+      "keywords": [],
+      "geographies": [],
+      "traditionalSources": [],
+      "socialSources": []
+    }
+  },
+  {
+    "id": "ex-17",
+    "bucket": "edge_negative",
+    "inputText": "I follow the White House on X and read Reuters.",
+    "expected": {
+      "topics": [],
+      "keywords": [],
+      "geographies": [],
+      "traditionalSources": ["Reuters"],
+      "socialSources": ["@WhiteHouse"]
+    }
+  },
+  {
+    "id": "ex-18",
+    "bucket": "edge_negative",
+    "inputText": "Mostly tracking sanctions and migration in US and Colombia. Sources: NYT, New York Times, Reuters, @StateDept, @statedept.",
+    "expected": {
+      "topics": ["Migration policy"],
+      "keywords": ["migration", "sanctions"],
+      "geographies": ["Colombia", "US"],
+      "traditionalSources": ["New York Times", "Reuters"],
+      "socialSources": ["@StateDept"]
+    }
+  },
+  {
+    "id": "ex-19",
+    "bucket": "edge_negative",
+    "inputText": "I monitor 'El Tiempo' and @ELTIEMPO for updates on Colombia and Peru elections.",
+    "expected": {
+      "topics": [],
+      "keywords": ["elections"],
+      "geographies": ["Colombia", "Peru"],
+      "traditionalSources": ["El Tiempo"],
+      "socialSources": ["@ELTIEMPO"]
+    }
+  },
+  {
+    "id": "ex-20",
+    "bucket": "edge_negative",
+    "inputText": "Reading AP + Associated Press + AP News, and checking @WHO + @who. Focus: vaccine rollout in Brazil.",
+    "expected": {
+      "topics": ["International health", "Public health policy"],
+      "keywords": ["vaccine"],
+      "geographies": ["Brazil"],
+      "traditionalSources": ["Associated Press"],
+      "socialSources": ["@WHO"]
+    }
+  }
+]

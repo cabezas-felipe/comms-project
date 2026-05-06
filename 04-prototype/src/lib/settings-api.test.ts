@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTRACT_VERSION } from "@tempo/contracts";
-import { ExtractionApiError, extractOnboardingText, fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
+import { fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
 
 vi.mock("@/lib/supabase", () => ({
   supabase: {
@@ -303,40 +303,76 @@ describe("settings-api — MVP recognized-identity fallback", () => {
   });
 });
 
-describe("extractOnboardingText", () => {
+describe("saveSettingsPayload — _meta pass-through", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("throws ExtractionApiError with status 500 when API returns 500", async () => {
+  it("returns _meta.extractionStatus from API response when present", async () => {
+    const apiResponse = {
+      contractVersion: CONTRACT_VERSION,
+      topics: ["Diplomatic relations"],
+      keywords: [],
+      geographies: ["US"],
+      traditionalSources: [],
+      socialSources: [],
+      _meta: { extractionStatus: "succeeded" },
+    };
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      json: async () => ({ message: "Extraction failed: all configured models unavailable." }),
+      ok: true,
+      status: 200,
+      json: async () => apiResponse,
     } as Response);
-    await expect(extractOnboardingText("some text")).rejects.toMatchObject({
-      name: "ExtractionApiError",
-      status: 500,
-    });
+
+    const result = await saveSettingsPayload(
+      { contractVersion: CONTRACT_VERSION, topics: ["Diplomatic relations"], keywords: [], geographies: ["US"], traditionalSources: [], socialSources: [] },
+      { onboardingRawText: "Colombia diplomacy." }
+    );
+    expect(result._meta?.extractionStatus).toBe("succeeded");
   });
 
-  it("ExtractionApiError is also an instance of Error", async () => {
-    const err = new ExtractionApiError(500);
-    expect(err).toBeInstanceOf(Error);
-    expect(err).toBeInstanceOf(ExtractionApiError);
-    expect(err.status).toBe(500);
-    expect(err.message).toMatch(/500/);
+  it("returns _meta.extractionStatus === 'failed' when API signals failure", async () => {
+    const apiResponse = {
+      contractVersion: CONTRACT_VERSION,
+      topics: [],
+      keywords: [],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+      _meta: { extractionStatus: "failed" },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => apiResponse,
+    } as Response);
+
+    const result = await saveSettingsPayload(
+      { contractVersion: CONTRACT_VERSION, topics: [], keywords: [], geographies: [], traditionalSources: [], socialSources: [] },
+      { onboardingRawText: "some text" }
+    );
+    expect(result._meta?.extractionStatus).toBe("failed");
   });
 
-  it("throws ExtractionApiError with correct status for non-500 failures", async () => {
+  it("returns no _meta when API response omits it", async () => {
+    const apiResponse = {
+      contractVersion: CONTRACT_VERSION,
+      topics: [],
+      keywords: [],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+    };
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      json: async () => ({}),
+      ok: true,
+      status: 200,
+      json: async () => apiResponse,
     } as Response);
-    await expect(extractOnboardingText("some text")).rejects.toMatchObject({
-      name: "ExtractionApiError",
-      status: 404,
-    });
+
+    const result = await saveSettingsPayload(
+      { contractVersion: CONTRACT_VERSION, topics: [], keywords: [], geographies: [], traditionalSources: [], socialSources: [] }
+    );
+    expect(result._meta).toBeUndefined();
   });
 });
+

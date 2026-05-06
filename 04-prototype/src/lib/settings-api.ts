@@ -81,32 +81,11 @@ export function defaultSettingsPayload(): SettingsPayload {
   });
 }
 
-export type ExtractionResult = {
-  topics: string[];
-  keywords: string[];
-  geographies: string[];
-  sources: string[];
+export type SaveSettingsResult = SettingsPayload & {
+  _meta?: {
+    extractionStatus?: "not_attempted" | "succeeded" | "failed";
+  };
 };
-
-export class ExtractionApiError extends Error {
-  constructor(public readonly status: number) {
-    super(`Extraction API returned HTTP ${status}`);
-    this.name = "ExtractionApiError";
-  }
-}
-
-export async function extractOnboardingText(text: string): Promise<ExtractionResult> {
-  const authHeaders = await getAuthHeaders();
-  const response = await fetch("/api/onboarding/extract", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders },
-    body: JSON.stringify({ text }),
-  });
-  if (!response.ok) {
-    throw new ExtractionApiError(response.status);
-  }
-  return response.json() as Promise<ExtractionResult>;
-}
 
 export async function fetchSettingsPayload(): Promise<SettingsPayload> {
   const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
@@ -124,7 +103,7 @@ export async function fetchSettingsPayload(): Promise<SettingsPayload> {
     const payload = settingsPayloadSchema.parse(await response.json());
     localStorage.setItem(storageKey, JSON.stringify(payload));
     return payload;
-  } catch (err) {
+  } catch {
     if (isIdentityBound) {
       throw new Error("Identity-bound settings read failed: API unavailable.");
     }
@@ -148,11 +127,9 @@ export async function fetchSettingsPayload(): Promise<SettingsPayload> {
 export async function saveSettingsPayload(
   payload: SettingsPayload,
   options?: { onboardingRawText?: string }
-): Promise<SettingsPayload> {
+): Promise<SaveSettingsResult> {
   const validated = settingsPayloadSchema.parse(payload);
   const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
-  // Identity-bound: either a Supabase session (Bearer) or a prototype recognized identity.
-  // In both cases, fail loudly on API failure rather than silently diverging to local data.
   const isIdentityBound = "Authorization" in authHeaders || "x-recognized-email" in authHeaders;
   const requestBody: Record<string, unknown> = { ...validated };
   if (options?.onboardingRawText) {
@@ -167,10 +144,11 @@ export async function saveSettingsPayload(
     if (!response.ok) {
       throw new Error(`Settings API returned HTTP ${response.status}`);
     }
-    const persisted = settingsPayloadSchema.parse(await response.json());
+    const raw = (await response.json()) as SaveSettingsResult;
+    const persisted = settingsPayloadSchema.parse(raw);
     localStorage.setItem(storageKey, JSON.stringify(persisted));
-    return persisted;
-  } catch (err) {
+    return raw._meta ? { ...persisted, _meta: raw._meta } : persisted;
+  } catch {
     if (isIdentityBound) {
       throw new Error("Identity-bound settings write failed: API unavailable.");
     }
