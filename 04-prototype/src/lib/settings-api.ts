@@ -87,6 +87,24 @@ export type SaveSettingsResult = SettingsPayload & {
   };
 };
 
+export class SaveSettingsError extends Error {
+  readonly stage: "backend" | "network";
+  readonly statusCode?: number;
+
+  constructor(stage: "backend" | "network", statusCode?: number) {
+    const detail =
+      stage === "backend"
+        ? statusCode !== undefined
+          ? `backend: HTTP ${statusCode}`
+          : "backend"
+        : "network";
+    super(`Identity-bound settings write failed (${detail}).`);
+    this.name = "SaveSettingsError";
+    this.stage = stage;
+    this.statusCode = statusCode;
+  }
+}
+
 export async function fetchSettingsPayload(): Promise<SettingsPayload> {
   const [storageKey, authHeaders] = await Promise.all([getStorageKey(), getAuthHeaders()]);
   // Identity-bound: either a Supabase session (Bearer) or a prototype recognized identity.
@@ -135,25 +153,31 @@ export async function saveSettingsPayload(
   if (options?.onboardingRawText) {
     requestBody.onboardingRawText = options.onboardingRawText;
   }
+  let response: Response;
   try {
-    const response = await fetch(SETTINGS_API_ENDPOINT, {
+    response = await fetch(SETTINGS_API_ENDPOINT, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...authHeaders },
       body: JSON.stringify(requestBody),
     });
-    if (!response.ok) {
-      throw new Error(`Settings API returned HTTP ${response.status}`);
-    }
-    const raw = (await response.json()) as SaveSettingsResult;
-    const persisted = settingsPayloadSchema.parse(raw);
-    localStorage.setItem(storageKey, JSON.stringify(persisted));
-    return raw._meta ? { ...persisted, _meta: raw._meta } : persisted;
   } catch {
-    if (isIdentityBound) {
-      throw new Error("Identity-bound settings write failed: API unavailable.");
-    }
+    // Transport-level failure — no HTTP response received.
+    if (isIdentityBound) throw new SaveSettingsError("network");
     await wait(MOCK_LATENCY_MS);
     localStorage.setItem(storageKey, JSON.stringify(validated));
+    return validated;
   }
-  return validated;
+
+  if (!response.ok) {
+    // Server responded but with a non-2xx status.
+    if (isIdentityBound) throw new SaveSettingsError("backend", response.status);
+    await wait(MOCK_LATENCY_MS);
+    localStorage.setItem(storageKey, JSON.stringify(validated));
+    return validated;
+  }
+
+  const raw = (await response.json()) as SaveSettingsResult;
+  const persisted = settingsPayloadSchema.parse(raw);
+  localStorage.setItem(storageKey, JSON.stringify(persisted));
+  return raw._meta ? { ...persisted, _meta: raw._meta } : persisted;
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeForEval, normalizeForEvalField, setMetrics, EVAL_FIELDS } from "./eval-utils.mjs";
+import { normalizeForEval, normalizeForEvalField, setMetrics, EVAL_FIELDS, buildExtractionScoredPayload } from "./eval-utils.mjs";
 
 // ── EVAL_FIELDS ───────────────────────────────────────────────────────────────
 
@@ -238,5 +238,102 @@ test("normalizeForEvalField: traditionalSources — maps 'WSJ' to 'Wall Street J
   assert.deepEqual(
     normalizeForEvalField("traditionalSources", ["WSJ"]),
     ["Wall Street Journal"]
+  );
+});
+
+// ── buildExtractionScoredPayload ──────────────────────────────────────────────
+
+const VALID_PAYLOAD = {
+  f1: 0.82,
+  precision: 0.88,
+  recall: 0.77,
+  modelVersion: "anthropic:claude-opus-4-7",
+  datasetVersion: "gold-abc12345",
+  sampleSize: 20,
+  runType: "manual",
+};
+
+test("buildExtractionScoredPayload: returns correct shape for valid input", () => {
+  const payload = buildExtractionScoredPayload(VALID_PAYLOAD);
+  assert.equal(payload.f1, 0.82);
+  assert.equal(payload.precision, 0.88);
+  assert.equal(payload.recall, 0.77);
+  assert.equal(payload.modelVersion, "anthropic:claude-opus-4-7");
+  assert.equal(payload.datasetVersion, "gold-abc12345");
+  assert.equal(payload.sampleSize, 20);
+  assert.equal(payload.runType, "manual");
+});
+
+test("buildExtractionScoredPayload: accepts boundary values 0 and 1 for metrics", () => {
+  assert.doesNotThrow(() =>
+    buildExtractionScoredPayload({ ...VALID_PAYLOAD, f1: 0, precision: 1, recall: 0 })
+  );
+});
+
+test("buildExtractionScoredPayload: accepts runType 'ci'", () => {
+  const p = buildExtractionScoredPayload({ ...VALID_PAYLOAD, runType: "ci" });
+  assert.equal(p.runType, "ci");
+});
+
+test("buildExtractionScoredPayload: throws RangeError when f1 > 1", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, f1: 1.01 }),
+    RangeError
+  );
+});
+
+test("buildExtractionScoredPayload: throws RangeError when f1 < 0", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, f1: -0.01 }),
+    RangeError
+  );
+});
+
+test("buildExtractionScoredPayload: throws RangeError when precision out of range", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, precision: 1.5 }),
+    RangeError
+  );
+});
+
+test("buildExtractionScoredPayload: throws RangeError when recall out of range", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, recall: -0.1 }),
+    RangeError
+  );
+});
+
+test("buildExtractionScoredPayload: throws TypeError when modelVersion is empty string", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, modelVersion: "" }),
+    TypeError
+  );
+});
+
+test("buildExtractionScoredPayload: throws TypeError when datasetVersion is empty string", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, datasetVersion: "" }),
+    TypeError
+  );
+});
+
+test("buildExtractionScoredPayload: throws RangeError when sampleSize is 0", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, sampleSize: 0 }),
+    RangeError
+  );
+});
+
+test("buildExtractionScoredPayload: throws RangeError when sampleSize is non-integer", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, sampleSize: 20.5 }),
+    RangeError
+  );
+});
+
+test("buildExtractionScoredPayload: throws TypeError when runType is empty string", () => {
+  assert.throws(
+    () => buildExtractionScoredPayload({ ...VALID_PAYLOAD, runType: "" }),
+    TypeError
   );
 });

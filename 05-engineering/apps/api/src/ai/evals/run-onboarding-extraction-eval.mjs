@@ -10,11 +10,13 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import dotenv from "dotenv";
 import { extractOnboarding } from "../onboarding-extractor.mjs";
-import { normalizeForEval, normalizeForEvalField, setMetrics, EVAL_FIELDS } from "./eval-utils.mjs";
+import { normalizeForEval, normalizeForEvalField, setMetrics, EVAL_FIELDS, buildExtractionScoredPayload } from "./eval-utils.mjs";
+import { trackServerEvent } from "../../telemetry.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,7 +60,8 @@ async function main() {
   }
 
   const goldPath = path.join(__dirname, "onboarding-extraction.gold.json");
-  const examples = JSON.parse(await readFile(goldPath, "utf8"));
+  const goldContent = await readFile(goldPath, "utf8");
+  const examples = JSON.parse(goldContent);
 
   console.log(
     `\n[eval] Running ${examples.length} examples — ${PRIMARY_MODEL} → ${FALLBACK_MODEL}`
@@ -141,6 +144,27 @@ async function main() {
       f1: sumF1 / total,
     };
   }
+
+  // ── Telemetry ──────────────────────────────────────────────────────────────
+
+  const macroF1 = EVAL_FIELDS.reduce((s, f) => s + fieldAgg[f].f1, 0) / EVAL_FIELDS.length;
+  const macroPrecision = EVAL_FIELDS.reduce((s, f) => s + fieldAgg[f].precision, 0) / EVAL_FIELDS.length;
+  const macroRecall = EVAL_FIELDS.reduce((s, f) => s + fieldAgg[f].recall, 0) / EVAL_FIELDS.length;
+  const datasetVersion = `gold-${createHash("sha256").update(goldContent).digest("hex").slice(0, 8)}`;
+  const runType = process.env.EVAL_RUN_TYPE ?? "manual";
+
+  trackServerEvent(
+    "onboarding_extraction_scored",
+    buildExtractionScoredPayload({
+      f1: macroF1,
+      precision: macroPrecision,
+      recall: macroRecall,
+      modelVersion: PRIMARY_MODEL,
+      datasetVersion,
+      sampleSize: total,
+      runType,
+    })
+  );
 
   // Bucket-level exact match
   const bucketCounts = {};

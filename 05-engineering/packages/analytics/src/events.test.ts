@@ -6,9 +6,10 @@ import {
   buildLandingCtaClicked,
   buildLandingSucceeded,
   buildLandingFailed,
-  buildOnboardingCompleted,
-  buildOnboardingSubmitted,
   buildOnboardingViewed,
+  buildOnboardingCtaClicked,
+  buildOnboardingSucceeded,
+  buildOnboardingFailed,
   buildSourceOpenError,
   buildSourceOpened,
   buildStoryExpanded,
@@ -194,29 +195,85 @@ describe("buildOnboardingViewed", () => {
   });
 });
 
-describe("buildOnboardingSubmitted", () => {
+describe("buildOnboardingCtaClicked", () => {
   it("builds a secondary event with the given route", () => {
-    const e = buildOnboardingSubmitted({ route: "/onboarding" });
-    expect(e.name).toBe("onboarding_submitted");
+    const e = buildOnboardingCtaClicked({ route: "/onboarding" });
+    expect(e.name).toBe("onboarding_cta_clicked");
     expect(e.tier).toBe("secondary");
     expect(e.payload.route).toBe("/onboarding");
   });
 
   it("rejects empty route", () => {
-    expect(() => buildOnboardingSubmitted({ route: "" })).toThrow();
+    expect(() => buildOnboardingCtaClicked({ route: "" })).toThrow();
   });
 });
 
-describe("buildOnboardingCompleted", () => {
+describe("buildOnboardingSucceeded", () => {
   it("builds a primary event with the given route", () => {
-    const e = buildOnboardingCompleted({ route: "/onboarding" });
-    expect(e.name).toBe("onboarding_completed");
+    const e = buildOnboardingSucceeded({ route: "/onboarding" });
+    expect(e.name).toBe("onboarding_succeeded");
     expect(e.tier).toBe("primary");
     expect(e.payload.route).toBe("/onboarding");
   });
 
   it("rejects empty route", () => {
-    expect(() => buildOnboardingCompleted({ route: "" })).toThrow();
+    expect(() => buildOnboardingSucceeded({ route: "" })).toThrow();
+  });
+});
+
+describe("buildOnboardingFailed", () => {
+  it("builds a guardrail event for validation failure", () => {
+    const e = buildOnboardingFailed({
+      route: "/onboarding",
+      failureStage: "validation",
+      validationReason: "empty",
+    });
+    expect(e.name).toBe("onboarding_failed");
+    expect(e.tier).toBe("guardrail");
+    expect(e.payload.failureStage).toBe("validation");
+    expect(e.payload.validationReason).toBe("empty");
+  });
+
+  it("builds a guardrail event for backend failure with statusCode and key", () => {
+    const e = buildOnboardingFailed({
+      route: "/onboarding",
+      failureStage: "backend",
+      statusCode: 500,
+      mappedErrorKey: "config_unavailable",
+    });
+    expect(e.payload.failureStage).toBe("backend");
+    expect(e.payload.statusCode).toBe(500);
+    expect(e.payload.mappedErrorKey).toBe("config_unavailable");
+  });
+
+  it("builds a guardrail event for network failure with no optional fields", () => {
+    const e = buildOnboardingFailed({ route: "/onboarding", failureStage: "network" });
+    expect(e.payload.failureStage).toBe("network");
+    expect(e.payload.validationReason).toBeUndefined();
+    expect(e.payload.statusCode).toBeUndefined();
+    expect(e.payload.mappedErrorKey).toBeUndefined();
+  });
+
+  it("rejects unknown failureStage", () => {
+    expect(() =>
+      buildOnboardingFailed({ route: "/onboarding", failureStage: "bad" as "network" })
+    ).toThrow();
+  });
+
+  it("rejects invalid onboarding validationReason (landing-specific values not accepted)", () => {
+    expect(() =>
+      buildOnboardingFailed({
+        route: "/onboarding",
+        failureStage: "validation",
+        validationReason: "missing_at" as "empty",
+      })
+    ).toThrow();
+  });
+
+  it("rejects empty route", () => {
+    expect(() =>
+      buildOnboardingFailed({ route: "", failureStage: "network" })
+    ).toThrow();
   });
 });
 

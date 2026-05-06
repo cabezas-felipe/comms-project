@@ -1,5 +1,35 @@
 import { normalizeTopicLabel, normalizeKeywordLabel, normalizeSourceName } from "@tempo/contracts";
 
+/**
+ * Build and validate the telemetry payload for onboarding_extraction_scored.
+ * Numeric metrics must be in [0, 1]; string fields must be non-empty.
+ */
+export function buildExtractionScoredPayload({
+  f1,
+  precision,
+  recall,
+  modelVersion,
+  datasetVersion,
+  sampleSize,
+  runType,
+}) {
+  if (typeof f1 !== "number" || f1 < 0 || f1 > 1)
+    throw new RangeError("f1 must be a number in [0, 1]");
+  if (typeof precision !== "number" || precision < 0 || precision > 1)
+    throw new RangeError("precision must be a number in [0, 1]");
+  if (typeof recall !== "number" || recall < 0 || recall > 1)
+    throw new RangeError("recall must be a number in [0, 1]");
+  if (!modelVersion || typeof modelVersion !== "string")
+    throw new TypeError("modelVersion must be a non-empty string");
+  if (!datasetVersion || typeof datasetVersion !== "string")
+    throw new TypeError("datasetVersion must be a non-empty string");
+  if (!Number.isInteger(sampleSize) || sampleSize < 1)
+    throw new RangeError("sampleSize must be a positive integer");
+  if (!runType || typeof runType !== "string")
+    throw new TypeError("runType must be a non-empty string");
+  return { f1, precision, recall, modelVersion, datasetVersion, sampleSize, runType };
+}
+
 export const EVAL_FIELDS = [
   "topics",
   "keywords",

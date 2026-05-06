@@ -163,12 +163,29 @@ export const onboardingViewedPayloadSchema = z.object({
   route: z.string().min(1),
 });
 
-export const onboardingSubmittedPayloadSchema = z.object({
+export const onboardingCtaClickedPayloadSchema = z.object({
   route: z.string().min(1),
 });
 
-export const onboardingCompletedPayloadSchema = z.object({
+export const onboardingSucceededPayloadSchema = z.object({
   route: z.string().min(1),
+});
+
+export const onboardingFailedPayloadSchema = z.object({
+  route: z.string().min(1),
+  failureStage: z.enum(["validation", "backend", "network"]),
+  validationReason: z.enum(["empty"]).optional(),
+  statusCode: z.number().int().optional(),
+  mappedErrorKey: z
+    .enum([
+      "not_enabled",
+      "config_unavailable",
+      "resolve_failed",
+      "invalid_request",
+      "unknown_with_message",
+      "unknown_without_message",
+    ])
+    .optional(),
 });
 
 export const onboardingViewedEventSchema = z.object({
@@ -178,18 +195,25 @@ export const onboardingViewedEventSchema = z.object({
   payload: onboardingViewedPayloadSchema,
 });
 
-export const onboardingSubmittedEventSchema = z.object({
-  name: z.literal("onboarding_submitted"),
+export const onboardingCtaClickedEventSchema = z.object({
+  name: z.literal("onboarding_cta_clicked"),
   tier: z.literal("secondary"),
   occurredAt: occurredAtSchema,
-  payload: onboardingSubmittedPayloadSchema,
+  payload: onboardingCtaClickedPayloadSchema,
 });
 
-export const onboardingCompletedEventSchema = z.object({
-  name: z.literal("onboarding_completed"),
+export const onboardingSucceededEventSchema = z.object({
+  name: z.literal("onboarding_succeeded"),
   tier: z.literal("primary"),
   occurredAt: occurredAtSchema,
-  payload: onboardingCompletedPayloadSchema,
+  payload: onboardingSucceededPayloadSchema,
+});
+
+export const onboardingFailedEventSchema = z.object({
+  name: z.literal("onboarding_failed"),
+  tier: z.literal("guardrail"),
+  occurredAt: occurredAtSchema,
+  payload: onboardingFailedPayloadSchema,
 });
 
 export const analyticsEventSchema = z.discriminatedUnion("name", [
@@ -205,13 +229,15 @@ export const analyticsEventSchema = z.discriminatedUnion("name", [
   landingSucceededEventSchema,
   landingFailedEventSchema,
   onboardingViewedEventSchema,
-  onboardingSubmittedEventSchema,
-  onboardingCompletedEventSchema,
+  onboardingCtaClickedEventSchema,
+  onboardingSucceededEventSchema,
+  onboardingFailedEventSchema,
 ]);
 
 export type EventTier = z.infer<typeof eventTierSchema>;
 export type AnalyticsEvent = z.infer<typeof analyticsEventSchema>;
 export type LandingFailedPayload = z.infer<typeof landingFailedPayloadSchema>;
+export type OnboardingFailedPayload = z.infer<typeof onboardingFailedPayloadSchema>;
 
 export function buildDashboardViewed(
   payload: z.infer<typeof dashboardViewedPayloadSchema>,
@@ -357,25 +383,37 @@ export function buildOnboardingViewed(
   });
 }
 
-export function buildOnboardingSubmitted(
-  payload: z.infer<typeof onboardingSubmittedPayloadSchema>,
+export function buildOnboardingCtaClicked(
+  payload: z.infer<typeof onboardingCtaClickedPayloadSchema>,
   occurredAt = new Date().toISOString()
-): z.infer<typeof onboardingSubmittedEventSchema> {
-  return onboardingSubmittedEventSchema.parse({
-    name: "onboarding_submitted",
+): z.infer<typeof onboardingCtaClickedEventSchema> {
+  return onboardingCtaClickedEventSchema.parse({
+    name: "onboarding_cta_clicked",
     tier: "secondary",
     occurredAt,
     payload,
   });
 }
 
-export function buildOnboardingCompleted(
-  payload: z.infer<typeof onboardingCompletedPayloadSchema>,
+export function buildOnboardingSucceeded(
+  payload: z.infer<typeof onboardingSucceededPayloadSchema>,
   occurredAt = new Date().toISOString()
-): z.infer<typeof onboardingCompletedEventSchema> {
-  return onboardingCompletedEventSchema.parse({
-    name: "onboarding_completed",
+): z.infer<typeof onboardingSucceededEventSchema> {
+  return onboardingSucceededEventSchema.parse({
+    name: "onboarding_succeeded",
     tier: "primary",
+    occurredAt,
+    payload,
+  });
+}
+
+export function buildOnboardingFailed(
+  payload: z.infer<typeof onboardingFailedPayloadSchema>,
+  occurredAt = new Date().toISOString()
+): z.infer<typeof onboardingFailedEventSchema> {
+  return onboardingFailedEventSchema.parse({
+    name: "onboarding_failed",
+    tier: "guardrail",
     occurredAt,
     payload,
   });
