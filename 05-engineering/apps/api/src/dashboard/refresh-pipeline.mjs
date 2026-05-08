@@ -8,6 +8,12 @@ import {
 } from "../ai/cluster-engine.mjs";
 import { applyGeoFilter, mockAssessGeoConfidence } from "./geo-filter.mjs";
 import { normalizeTopicLabel } from "@tempo/contracts";
+import {
+  resolveSelectedSources,
+  buildMatchedOutletSet,
+  filterItemsToMatchedFeeds,
+  SELECTION_MODE,
+} from "../ingestion/source-matcher.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -148,22 +154,47 @@ export function applyRelevanceFilter(items, settings) {
   });
 }
 
+// Regex-escape characters that have special meaning inside a RegExp pattern.
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Build a single case-insensitive whole-word regex that matches any of the
+ * given keywords as a token (\b word boundaries).  Returns null when there are
+ * no usable keywords.  Multi-word keywords like "border policy" are matched as
+ * a contiguous phrase.  Empty/whitespace-only keywords are dropped.
+ */
+function buildKeywordTokenRegex(keywords) {
+  const cleaned = (keywords ?? [])
+    .map((k) => (typeof k === "string" ? k.trim() : ""))
+    .filter(Boolean);
+  if (cleaned.length === 0) return null;
+  const alternation = cleaned.map((k) => escapeRegex(k)).join("|");
+  return new RegExp(`\\b(?:${alternation})\\b`, "i");
+}
+
 /**
  * Filters items by topic and keyword match only (no geography check).
  * Used after applyGeoFilter so geo is handled separately.
- * If both topics and keywords are empty, all items pass.
+ *
+ *   - Topic uses canonical normalization (`normalizeTopicLabel`).
+ *   - Keyword uses whole-word/token matching (case-insensitive); substrings
+ *     inside larger words (e.g. "ofac" inside "ofacility") do NOT match.
+ *   - Topic OR keyword (logical OR) decides relevance.
+ *   - If both topics and keywords are empty, all items pass through.
  */
 export function applyTopicKeywordFilter(items, settings) {
   const topics = new Set((settings.topics ?? []).map((t) => normalizeTopicLabel(t)));
-  const keywords = (settings.keywords ?? []).map((k) => k.toLowerCase());
+  const keywordRegex = buildKeywordTokenRegex(settings.keywords);
 
-  if (topics.size === 0 && keywords.length === 0) return items;
+  if (topics.size === 0 && !keywordRegex) return items;
 
   return items.filter((item) => {
     if (topics.size > 0 && topics.has(normalizeTopicLabel(item.topic))) return true;
-    if (keywords.length > 0) {
-      const text = (item.headline + " " + item.body.join(" ")).toLowerCase();
-      if (keywords.some((k) => text.includes(k))) return true;
+    if (keywordRegex) {
+      const text = (item.headline ?? "") + " " + (Array.isArray(item.body) ? item.body.join(" ") : (item.body ?? ""));
+      if (keywordRegex.test(text)) return true;
     }
     return false;
   });
@@ -229,14 +260,18 @@ function buildStory(metaStory, sourceItems) {
  * @param {Function} opts.clusterFn  — injectable cluster function (for tests)
  * @param {string} opts.clusterModel — model string for clustering
  * @param {string} opts.contractVersion — version to embed in payload
- * @param {Function} [opts.geoAssessFn]  — injectable geo-confidence assessor (for tests)
- * @param {Function} [opts.readHeldFn]  — injectable hold bucket reader; returns previously held items
- * @param {Function} [opts.writeHeldFn] — injectable hold bucket writer (for tests)
+ * @param {Function} [opts.geoAssessFn]      — injectable geo-confidence assessor (for tests)
+ * @param {Function} [opts.readHeldFn]       — injectable hold bucket reader; returns previously held items
+ * @param {Function} [opts.writeHeldFn]      — injectable hold bucket writer (for tests)
  * @param {Function} [opts.readPriorSnapshotFn] — injectable prior snapshot reader (for ID lineage continuity)
+ * @param {Array}    [opts.manifestFeeds]    — manifest feed list for source matching (Phase 2)
+ * @param {object}   [opts.aliasMap]         — merged alias map (Supabase ∪ repo fallback)
+ * @param {string[]} [opts.fallbackFeedIds]  — env-configured fallback baseline feed IDs
+ * @param {boolean}  [opts.fallbackEnabled]
  *
  * @returns {{ payload: object, log: object }}
  *   payload — ready-to-persist dashboard payload
- *   log     — observability metadata
+ *   log     — observability metadata (includes selection meta in `log.selection`)
  */
 export async function runRefreshPipeline({
   settings,
@@ -248,6 +283,10 @@ export async function runRefreshPipeline({
   readHeldFn = null,
   writeHeldFn = null,
   readPriorSnapshotFn = null,
+  manifestFeeds = null,
+  aliasMap = undefined,
+  fallbackFeedIds = [],
+  fallbackEnabled = true,
 }) {
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
@@ -255,11 +294,65 @@ export async function runRefreshPipeline({
     console.warn(`[pipeline] ${normErrors.length} item(s) skipped during normalization:`, normErrors);
   }
 
-  // 2. Source pool selection (by outlet matching configured sources)
-  const poolItems = selectSourcePool(normalizedItems, settings);
+  // 2. Time window FIRST (per Phase 2 product decision: pre-source-selection,
+  //    pre-relevance).  Items older than 24h are dropped before any selection
+  //    or relevance work so downstream stages don't burn on stale items.
+  const recentNormalizedItems = apply24hFilter(normalizedItems);
 
-  // 3. 24h filter
-  const recentItems = apply24hFilter(poolItems);
+  // 3. Source selection (Phase 2): resolve user-selected sources against the
+  //    manifest with alias map + connector availability.  When manifestFeeds
+  //    is provided (production path), use the matcher.  When absent (legacy
+  //    tests), fall back to the simple outlet-set selectSourcePool below.
+  let selectionMeta;
+  let selectedItems;
+  if (manifestFeeds) {
+    const selectedNames = [
+      ...(settings.traditionalSources ?? []),
+      ...(settings.socialSources ?? []),
+    ];
+    const selection = resolveSelectedSources({
+      selectedSources: selectedNames,
+      manifestFeeds,
+      aliasMap,
+      fallbackFeedIds,
+      fallbackEnabled,
+    });
+    const matchedOutlets = buildMatchedOutletSet(selection.matchedFeeds);
+    selectedItems = filterItemsToMatchedFeeds(recentNormalizedItems, matchedOutlets);
+    selectionMeta = {
+      sourceSelectionMode: selection.mode,
+      sourceFallbackUsed: selection.fallbackUsed,
+      sourceFallbackReason: selection.fallbackReason,
+      matchedSourceCount: selection.matchedSourceCount,
+      selectedSourceCount: selection.selectedSourceCount,
+      unmatchedSelectedSources: selection.unmatchedSelectedSources,
+      unavailableConnectorCount: selection.unavailableConnectorCount,
+      unavailableConnectorSources: selection.unavailableConnectorSources,
+      matchedFeedIds: selection.matchedFeeds.map((f) => f.id),
+    };
+    console.log(
+      `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${selection.matchedSourceCount}/${selection.selectedSourceCount} unmatched=${selection.unmatchedSelectedSources.length} unavailable=${selection.unavailableConnectorCount}`
+    );
+  } else {
+    selectedItems = selectSourcePool(recentNormalizedItems, settings);
+    selectionMeta = {
+      sourceSelectionMode: SELECTION_MODE.STRICT,
+      sourceFallbackUsed: false,
+      sourceFallbackReason: null,
+      matchedSourceCount: 0,
+      selectedSourceCount: ((settings.traditionalSources ?? []).length + (settings.socialSources ?? []).length),
+      unmatchedSelectedSources: [],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: [],
+    };
+  }
+
+  // Variable name kept (`recentItems`) for backward compat with subsequent
+  // pipeline steps.  Semantics unchanged: items that have passed time window
+  // AND source selection.
+  const recentItems = selectedItems;
+  const poolItems = recentItems; // kept for log compatibility
 
   // 4a. Merge with previous hold bucket — re-evaluate held items this refresh
   let previouslyHeld = [];
@@ -387,10 +480,12 @@ export async function runRefreshPipeline({
     recentCount: recentItems.length,
     geoHeldCount: geoHeldItems.length,
     relevantCount: relevantItems.length,
+    relevantItemCount: relevantItems.length, // alias surfaced in `_meta.selection`
     metaStoryCount: stories.length,
     usedFallbackClustering,
     groundingFailures,
     normErrors: normErrors.length,
+    selection: { ...selectionMeta, relevantItemCount: relevantItems.length },
   };
 
   return { payload, log };

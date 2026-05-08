@@ -829,3 +829,168 @@ test("runRefreshPipeline: dedup prevents duplicate processing of current-pool + 
     "shared sourceId must appear exactly once in cluster input (dedup prevented duplicate from hold bucket)"
   );
 });
+
+// ─── Phase 2: keyword whole-word matching ────────────────────────────────────
+
+test("applyTopicKeywordFilter: keyword matches as whole word, not substring", () => {
+  const items = [
+    makeItem({ sourceId: "kw-hit", topic: "Other", headline: "Treasury weighs OFAC expansion" }),
+    makeItem({ sourceId: "kw-substr", topic: "Other", headline: "ofacility opens new wing" }), // contains 'ofac' substring only
+  ];
+  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: [], keywords: ["OFAC"] });
+  assert.deepEqual(result.map((i) => i.sourceId), ["kw-hit"]);
+});
+
+test("applyTopicKeywordFilter: keyword matching is case-insensitive", () => {
+  const items = [
+    makeItem({ sourceId: "lower", topic: "Other", headline: "ofac update today" }),
+    makeItem({ sourceId: "upper", topic: "Other", headline: "OFAC UPDATE" }),
+    makeItem({ sourceId: "mixed", topic: "Other", headline: "Ofac Update" }),
+  ];
+  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: [], keywords: ["OFAC"] });
+  assert.equal(result.length, 3);
+});
+
+test("applyTopicKeywordFilter: multi-word keyword matches as a contiguous phrase token", () => {
+  const items = [
+    makeItem({ sourceId: "phrase-hit", topic: "Other", headline: "Border policy debate intensifies" }),
+    makeItem({ sourceId: "phrase-miss", topic: "Other", headline: "Border tightening; new policy unveiled" }),
+  ];
+  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: [], keywords: ["border policy"] });
+  assert.deepEqual(result.map((i) => i.sourceId), ["phrase-hit"]);
+});
+
+test("applyTopicKeywordFilter: topic OR keyword (item passes either)", () => {
+  const items = [
+    makeItem({ sourceId: "topic-only", topic: "Diplomatic relations", headline: "no keywords" }),
+    makeItem({ sourceId: "kw-only", topic: "Other", headline: "OFAC ruling" }),
+    makeItem({ sourceId: "neither", topic: "Other", headline: "unrelated" }),
+  ];
+  const result = applyTopicKeywordFilter(items, {
+    ...BASE_SETTINGS,
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+  });
+  assert.deepEqual(result.map((i) => i.sourceId).sort(), ["kw-only", "topic-only"]);
+});
+
+test("applyTopicKeywordFilter: zero matches returns strict empty (no relevance fallback)", () => {
+  const items = [makeItem({ sourceId: "x", topic: "Other", headline: "totally unrelated" })];
+  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: ["Diplomatic relations"], keywords: ["OFAC"] });
+  assert.deepEqual(result, []);
+});
+
+// ─── Phase 2: time window runs FIRST (before source selection) ───────────────
+
+test("runRefreshPipeline: time window runs before source selection (24h drops stale items pre-matcher)", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [
+    makeItem({ sourceId: "fresh", outlet: "Reuters", minutesAgo: 30 }),
+    makeItem({ sourceId: "stale", outlet: "Reuters", minutesAgo: 2000 }), // > 24h
+  ];
+  const seenIds = [];
+  await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.ok(seenIds.includes("fresh"));
+  assert.ok(!seenIds.includes("stale"), "items older than 24h must be filtered before source matching");
+});
+
+// ─── Phase 2: source selection metadata in pipeline log ──────────────────────
+
+test("runRefreshPipeline: strict mode populates selection metadata when manifestFeeds provided", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(log.selection.sourceSelectionMode, "strict");
+  assert.equal(log.selection.sourceFallbackUsed, false);
+  assert.equal(log.selection.sourceFallbackReason, null);
+  assert.equal(log.selection.matchedSourceCount, 1);
+  assert.equal(log.selection.selectedSourceCount, 1);
+  assert.deepEqual(log.selection.unmatchedSelectedSources, []);
+  assert.equal(log.selection.unavailableConnectorCount, 0);
+});
+
+test("runRefreshPipeline: fallback mode kicks in when all selected sources unmatched, returns metadata", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["Made-Up Outlet"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    fallbackFeedIds: ["reuters-world"],
+    fallbackEnabled: true,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(log.selection.sourceSelectionMode, "fallback");
+  assert.equal(log.selection.sourceFallbackUsed, true);
+  assert.equal(log.selection.sourceFallbackReason, "all_unmatched");
+  assert.deepEqual(log.selection.unmatchedSelectedSources, ["Made-Up Outlet"]);
+});
+
+test("runRefreshPipeline: empty matched feeds + fallback disabled → strict empty (no items reach cluster)", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let clusterCalled = false;
+  const { payload, log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["No-Such-Outlet"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    fallbackEnabled: false,
+    clusterFn: async () => { clusterCalled = true; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 0);
+  assert.equal(clusterCalled, false);
+  assert.equal(log.selection.sourceFallbackUsed, false);
+  assert.equal(log.selection.sourceFallbackReason, "fallback_disabled");
+});
+
+test("runRefreshPipeline: relevantItemCount surfaced in selection metadata (zero relevant → strict empty)", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [
+    // Item is in pool (Reuters), passes 24h, but topic+keyword don't match.
+    makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30, topic: "Other", headline: "unrelated" }),
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: {
+      ...BASE_SETTINGS,
+      traditionalSources: ["Reuters"],
+      socialSources: [],
+      topics: ["Migration policy"],
+      keywords: ["sanctions"],
+    },
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(log.selection.relevantItemCount, 0);
+  assert.equal(payload.stories.length, 0);
+});

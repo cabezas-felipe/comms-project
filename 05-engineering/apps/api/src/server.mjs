@@ -15,6 +15,7 @@ import { readSnapshot, writeSnapshot, getLockedTitles, insertTitleLocks, readHol
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
 import { mockAssessGeoConfidence } from "./dashboard/geo-filter.mjs";
+import { parseFallbackFeedIdsEnv, parseFallbackEnabledEnv } from "./ingestion/source-matcher.mjs";
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
 import { appendOnboardingNarrative, readCurrentOnboardingNarrative } from "./db/narrative-repo.mjs";
 import { atomicSaveSettingsAndNarrative } from "./db/atomic-settings-save.mjs";
@@ -255,6 +256,30 @@ try {
   const message = err instanceof Error ? err.message : String(err);
   console.warn(`[ai.config] Misconfiguration detected: ${message}`);
 }
+
+/**
+ * Load the ingestion manifest for source-selection (Phase 2).  Mirrors the
+ * source-of-truth used by GET /api/ingestion/sources: Supabase via
+ * listIngestionFeeds when enabled, else the file at data/source-feeds.json.
+ * Failures are non-fatal — pipeline falls back to legacy outlet matching when
+ * manifestFeeds is null.
+ */
+async function loadManifestForSelection() {
+  try {
+    if (isSupabaseEnabled()) {
+      return await _feedManifest.list({ supabase: getSupabaseClient() });
+    }
+    const file = path.join(DATA_DIR, "source-feeds.json");
+    const content = await fs.readFile(file, "utf8");
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed?.feeds) ? parsed.feeds : [];
+  } catch (err) {
+    console.warn(
+      `[dashboard.refresh] manifest load failed (selection will fall back): ${err instanceof Error ? err.message : err}`
+    );
+    return null;
+  }
+}
 // Trim, filter empties, and deduplicate (case-insensitive, first-occurrence wins).
 // Applied to model-returned string arrays before persistence.
 function normalizeStringArray(arr) {
@@ -463,7 +488,10 @@ app.get("/api/dashboard", async (req, res) => {
         _meta: { hasSnapshot: false },
       });
     }
-    const { _meta, ...snapshotBody } = snapshot;
+    // Strip non-payload fields before schema validation. `_selectionMeta` is
+    // persisted alongside the contract payload (Phase 2) and surfaced through
+    // `_meta.selection` on the way out — it is NOT part of dashboardPayloadSchema.
+    const { _meta, _selectionMeta, ...snapshotBody } = snapshot;
     const validation = dashboardPayloadSchema.safeParse(snapshotBody);
     if (!validation.success) {
       console.warn(
@@ -487,7 +515,10 @@ app.get("/api/dashboard", async (req, res) => {
       storyCount: snapshot.stories?.length ?? 0,
       identitySource: identity.source,
     });
-    res.json(snapshot);
+    // Re-attach selection metadata to `_meta` for the frontend.
+    const responseMeta = { ..._meta };
+    if (_selectionMeta) responseMeta.selection = _selectionMeta;
+    res.json({ ...snapshotBody, _meta: responseMeta });
   } catch (error) {
     trackServerEvent("api_error", {
       route: "/api/dashboard",
@@ -506,9 +537,10 @@ app.post("/api/dashboard/refresh", async (req, res) => {
   if (!identity) return;
   const startedAt = Date.now();
   try {
-    const [settings, rawItems] = await Promise.all([
+    const [settings, rawItems, manifestFeeds] = await Promise.all([
       readSettings(identity.userId),
       readFeedItems(DATA_DIR),
+      loadManifestForSelection(),
     ]);
 
     const clusterModel = getAiCapabilityMap().clustering;
@@ -518,6 +550,9 @@ app.post("/api/dashboard/refresh", async (req, res) => {
       rawItems,
       clusterModel,
       contractVersion: DEFAULT_SETTINGS.contractVersion,
+      manifestFeeds,
+      fallbackFeedIds: parseFallbackFeedIdsEnv(process.env.TEMPO_FALLBACK_SOURCE_IDS),
+      fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
     });
 
     // Apply title/subtitle locks: look up existing locks, apply them, insert new ones
@@ -539,11 +574,17 @@ app.post("/api/dashboard/refresh", async (req, res) => {
 
     const finalPayload = { ...payload, stories: lockedStories };
 
+    // Persist selection metadata alongside the payload so GET /api/dashboard
+    // can surface the same status cues without re-running the pipeline.  The
+    // payload itself stays clean (validated against dashboardPayloadSchema).
+    finalPayload._selectionMeta = log.selection;
+
     await _snapshotRepo.write(identity.userId, finalPayload);
 
     const elapsedMs = Date.now() - startedAt;
+    const sel = log.selection ?? {};
     console.log(
-      `[dashboard.refresh] user=${identity.userId} stories=${finalPayload.stories.length} pool=${log.poolCount} relevant=${log.relevantCount} elapsed=${elapsedMs}ms fallback=${log.usedFallbackClustering} groundingFail=${log.groundingFailures}`
+      `[dashboard.refresh] user=${identity.userId} stories=${finalPayload.stories.length} pool=${log.poolCount} relevant=${log.relevantCount} elapsed=${elapsedMs}ms fallback=${log.usedFallbackClustering} groundingFail=${log.groundingFailures} selectionMode=${sel.sourceSelectionMode} sourceFallback=${sel.sourceFallbackUsed}`
     );
 
     trackServerEvent("dashboard_refreshed", {
@@ -555,9 +596,28 @@ app.post("/api/dashboard/refresh", async (req, res) => {
       elapsedMs,
       clusterModel,
       identitySource: identity.source,
+      // Phase 2 selection telemetry
+      sourceSelectionMode: sel.sourceSelectionMode,
+      sourceFallbackUsed: sel.sourceFallbackUsed,
+      sourceFallbackReason: sel.sourceFallbackReason,
+      matchedSourceCount: sel.matchedSourceCount,
+      selectedSourceCount: sel.selectedSourceCount,
+      unmatchedSelectedSourceCount: (sel.unmatchedSelectedSources ?? []).length,
+      unavailableConnectorCount: sel.unavailableConnectorCount,
+      relevantItemCount: sel.relevantItemCount,
     });
 
-    res.json({ ...finalPayload, _meta: { refreshedAt: new Date().toISOString(), hasSnapshot: true } });
+    // Strip the persisted-only `_selectionMeta` field before responding —
+    // it's an internal storage shape; clients consume `_meta.selection`.
+    const { _selectionMeta: _persistedSelection, ...responsePayload } = finalPayload;
+    res.json({
+      ...responsePayload,
+      _meta: {
+        refreshedAt: new Date().toISOString(),
+        hasSnapshot: true,
+        selection: log.selection,
+      },
+    });
   } catch (error) {
     const elapsedMs = Date.now() - startedAt;
     const message = error instanceof Error ? error.message : "Unknown error";
