@@ -4,18 +4,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
-import { getAiCapabilityMap, getAiMetrics, summarizeCluster, assertAiConfig } from "./ai/model-router.mjs";
+import { getAiCapabilityMap, getAiMetrics, assertAiConfig } from "./ai/model-router.mjs";
 import { extractOnboarding } from "./ai/onboarding-extractor.mjs";
 import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
-import { normalizeSourceItems } from "./ingestion/source-normalizer.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
+import { readSnapshot, writeSnapshot, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket } from "./db/dashboard-snapshot-repo.mjs";
+import { clusterItems } from "./ai/cluster-engine.mjs";
+import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
+import { mockAssessGeoConfidence } from "./dashboard/geo-filter.mjs";
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
 import { appendOnboardingNarrative, readCurrentOnboardingNarrative } from "./db/narrative-repo.mjs";
 import { atomicSaveSettingsAndNarrative } from "./db/atomic-settings-save.mjs";
-import { normalizeTopicLabel, normalizeKeywordLabel, normalizeSourceName } from "@tempo/contracts";
+import { normalizeTopicLabel, normalizeKeywordLabel, normalizeSourceName, dashboardPayloadSchema } from "@tempo/contracts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -191,6 +194,48 @@ export const _readSettings = { has: hasSettings, read: readSettings };
 export const _feedManifest = { list: listIngestionFeeds };
 
 /**
+ * Mutable snapshot repo hook. Tests override individual functions to control
+ * snapshot reads/writes without filesystem or Supabase calls.
+ */
+export const _snapshotRepo = {
+  read: readSnapshot,
+  write: writeSnapshot,
+  getLocks: getLockedTitles,
+  insertLocks: insertTitleLocks,
+  readHeld: readHoldBucket,
+  writeHeld: writeHoldBucket,
+};
+
+/**
+ * Mutable cluster engine hook. Tests override cluster to inject deterministic
+ * results without AI provider calls.
+ */
+export const _clusterEngine = { cluster: clusterItems };
+
+/**
+ * Mutable refresh pipeline hook. Tests override run to simulate pipeline
+ * outcomes (success, fallback, grounding failures) without running the full
+ * pipeline.
+ */
+export const _refreshPipeline = {
+  run: (opts) =>
+    runRefreshPipeline({
+      ...opts,
+      clusterFn: _clusterEngine.cluster,
+      geoAssessFn: _geoFilter.assess,
+      readHeldFn: opts.userId ? () => _snapshotRepo.readHeld(opts.userId) : null,
+      writeHeldFn: opts.userId ? (items) => _snapshotRepo.writeHeld(opts.userId, items) : null,
+      readPriorSnapshotFn: opts.userId ? () => _snapshotRepo.read(opts.userId) : null,
+    }),
+};
+
+/**
+ * Mutable geo-confidence assessor hook. Tests override assess to inject
+ * deterministic confidence scores without AI provider calls.
+ */
+export const _geoFilter = { assess: mockAssessGeoConfidence };
+
+/**
  * Enforces recognized identity on a route. Sends 401 and returns null when identity cannot be resolved.
  * Callers must guard: `if (!identity) return;`
  * Returns { userId, source } on success.
@@ -224,82 +269,6 @@ function normalizeStringArray(arr) {
   return result;
 }
 
-function rankStories(stories) {
-  return [...stories].sort((a, b) => {
-    const scoreA = a.sources.reduce((sum, s) => sum + s.weight, 0) - Math.min(...a.sources.map((s) => s.minutesAgo));
-    const scoreB = b.sources.reduce((sum, s) => sum + s.weight, 0) - Math.min(...b.sources.map((s) => s.minutesAgo));
-    return scoreB - scoreA;
-  });
-}
-
-async function buildDashboardPayload(items, settings, limit = 10) {
-  // Normalize topic labels on both sides so legacy item labels (e.g. "Security cooperation")
-  // match saved settings that were normalized at write-back time (e.g. "Security policy").
-  const allowedTopics = new Set((settings.topics ?? []).map(normalizeTopicLabel));
-  const allowedGeos = new Set(settings.geographies ?? []);
-  const allowedSources = new Set([...(settings.traditionalSources ?? []), ...(settings.socialSources ?? [])]);
-
-  const filtered = items.filter((item) => {
-    const topicAllowed = allowedTopics.size === 0 || allowedTopics.has(normalizeTopicLabel(item.topic));
-    const geoAllowed = allowedGeos.size === 0 || item.geographies.some((g) => allowedGeos.has(g));
-    const sourceAllowed = allowedSources.size === 0 || allowedSources.has(item.outlet);
-    return topicAllowed && geoAllowed && sourceAllowed;
-  });
-
-  const byCluster = new Map();
-  for (const item of filtered) {
-    const existing = byCluster.get(item.clusterId);
-    if (!existing) {
-      byCluster.set(item.clusterId, {
-        id: item.clusterId,
-        title: item.title,
-        geographies: item.geographies,
-        topic: item.topic,
-        takeaway: item.takeaway,
-        summary: item.summary,
-        whyItMatters: item.whyItMatters,
-        whatChanged: item.whatChanged,
-        priority: item.priority,
-        outletCount: 0,
-        sources: [],
-      });
-    }
-    const cluster = byCluster.get(item.clusterId);
-    cluster.sources.push({
-      id: item.sourceId,
-      outlet: item.outlet,
-      byline: item.byline,
-      kind: item.kind,
-      weight: item.weight,
-      url: item.url,
-      minutesAgo: item.minutesAgo,
-      headline: item.headline,
-      body: item.body,
-    });
-  }
-
-  const stories = Array.from(byCluster.values()).map((story) => ({
-    ...story,
-    outletCount: story.sources.length,
-  }));
-
-  const ranked = rankStories(stories).slice(0, limit);
-  const enriched = await Promise.all(
-    ranked.map(async (story) => {
-      const ai = await summarizeCluster(story);
-      return {
-        ...story,
-        summary: ai.summary,
-        aiSummaryMeta: ai.meta,
-      };
-    })
-  );
-
-  return {
-    contractVersion: DEFAULT_SETTINGS.contractVersion,
-    stories: enriched,
-  };
-}
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "@tempo/api" });
@@ -481,36 +450,44 @@ app.get("/api/dashboard", async (req, res) => {
   const identity = await requireIdentity(req, res);
   if (!identity) return;
   try {
-    const [settings, rawItems] = await Promise.all([readSettings(identity.userId), readFeedItems(DATA_DIR)]);
-    const { items: sourceItems, errors: normErrors } = normalizeSourceItems(rawItems);
-    if (normErrors.length > 0) {
-      console.warn(`[ingestion.normalize] ${normErrors.length} item(s) skipped:`, normErrors);
+    const snapshot = await _snapshotRepo.read(identity.userId);
+    if (!snapshot) {
+      trackServerEvent("api_dashboard_requested", {
+        hasSnapshot: false,
+        storyCount: 0,
+        identitySource: identity.source,
+      });
+      return res.json({
+        contractVersion: DEFAULT_SETTINGS.contractVersion,
+        stories: [],
+        _meta: { hasSnapshot: false },
+      });
     }
-    const rawLimit = Number(req.query.limit ?? 10);
-    const resolvedLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.trunc(rawLimit) : 10;
-    const payload = await buildDashboardPayload(sourceItems, settings, resolvedLimit);
-    const aiConfig = getAiCapabilityMap();
-    const estimatedCostUsd = payload.stories.reduce(
-      (sum, story) => sum + (story.aiSummaryMeta?.costUsd ?? 0),
-      0
-    );
-    const fallbackCount = payload.stories.filter((story) => story.aiSummaryMeta?.fallbackUsed).length;
-    if (estimatedCostUsd > 0) {
-      console.log(
-        `[ai.cost] capability=summarization model=${aiConfig.summarization} stories=${payload.stories.length} cost_usd=${estimatedCostUsd.toFixed(6)} fallback=${fallbackCount}`
+    const { _meta, ...snapshotBody } = snapshot;
+    const validation = dashboardPayloadSchema.safeParse(snapshotBody);
+    if (!validation.success) {
+      console.warn(
+        `[dashboard.get] snapshot for user=${identity.userId} failed schema validation; returning empty`,
+        validation.error.errors
       );
+      trackServerEvent("api_dashboard_requested", {
+        hasSnapshot: false,
+        storyCount: 0,
+        identitySource: identity.source,
+        validationFailed: true,
+      });
+      return res.json({
+        contractVersion: DEFAULT_SETTINGS.contractVersion,
+        stories: [],
+        _meta: { hasSnapshot: false },
+      });
     }
-    const responseStories = payload.stories.map(({ aiSummaryMeta: _meta, ...story }) => story);
     trackServerEvent("api_dashboard_requested", {
-      storyCount: responseStories.length,
-      normErrorCount: normErrors.length,
-      limitApplied: resolvedLimit,
-      fallbackCount,
-      totalCostUsd: estimatedCostUsd,
-      aiModel: aiConfig.summarization,
+      hasSnapshot: true,
+      storyCount: snapshot.stories?.length ?? 0,
       identitySource: identity.source,
     });
-    res.json({ contractVersion: payload.contractVersion, stories: responseStories });
+    res.json(snapshot);
   } catch (error) {
     trackServerEvent("api_error", {
       route: "/api/dashboard",
@@ -518,8 +495,92 @@ app.get("/api/dashboard", async (req, res) => {
       message: error instanceof Error ? error.message : "Unknown error",
     });
     res.status(500).json({
-      message: "Failed to build dashboard payload.",
+      message: "Failed to read dashboard snapshot.",
       detail: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+app.post("/api/dashboard/refresh", async (req, res) => {
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  const startedAt = Date.now();
+  try {
+    const [settings, rawItems] = await Promise.all([
+      readSettings(identity.userId),
+      readFeedItems(DATA_DIR),
+    ]);
+
+    const clusterModel = getAiCapabilityMap().clustering;
+    const { payload, log } = await _refreshPipeline.run({
+      userId: identity.userId,
+      settings,
+      rawItems,
+      clusterModel,
+      contractVersion: DEFAULT_SETTINGS.contractVersion,
+    });
+
+    // Apply title/subtitle locks: look up existing locks, apply them, insert new ones
+    const metaStoryIds = payload.stories.map((s) => s.metaStoryId).filter(Boolean);
+    const lockedTitles = await _snapshotRepo.getLocks(identity.userId, metaStoryIds);
+
+    const lockedStories = payload.stories.map((story) => {
+      const lock = story.metaStoryId ? lockedTitles.get(story.metaStoryId) : undefined;
+      if (lock) {
+        return { ...story, title: lock.title, subtitle: lock.subtitle };
+      }
+      return story;
+    });
+
+    const newLocks = lockedStories
+      .filter((s) => s.metaStoryId && !lockedTitles.has(s.metaStoryId))
+      .map((s) => ({ metaStoryId: s.metaStoryId, title: s.title, subtitle: s.subtitle }));
+    await _snapshotRepo.insertLocks(identity.userId, newLocks);
+
+    const finalPayload = { ...payload, stories: lockedStories };
+
+    await _snapshotRepo.write(identity.userId, finalPayload);
+
+    const elapsedMs = Date.now() - startedAt;
+    console.log(
+      `[dashboard.refresh] user=${identity.userId} stories=${finalPayload.stories.length} pool=${log.poolCount} relevant=${log.relevantCount} elapsed=${elapsedMs}ms fallback=${log.usedFallbackClustering} groundingFail=${log.groundingFailures}`
+    );
+
+    trackServerEvent("dashboard_refreshed", {
+      storyCount: finalPayload.stories.length,
+      poolCount: log.poolCount,
+      relevantCount: log.relevantCount,
+      usedFallbackClustering: log.usedFallbackClustering,
+      groundingFailures: log.groundingFailures,
+      elapsedMs,
+      clusterModel,
+      identitySource: identity.source,
+    });
+
+    res.json({ ...finalPayload, _meta: { refreshedAt: new Date().toISOString(), hasSnapshot: true } });
+  } catch (error) {
+    const elapsedMs = Date.now() - startedAt;
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error(`[dashboard.refresh] FAILED user=${identity.userId} elapsed=${elapsedMs}ms: ${message}`);
+
+    trackServerEvent("api_error", {
+      route: "/api/dashboard/refresh",
+      statusCode: 500,
+      message,
+      elapsedMs,
+    });
+
+    // Serve last good snapshot on failure
+    try {
+      const lastSnapshot = await _snapshotRepo.read(identity.userId);
+      if (lastSnapshot) {
+        return res.json({ ...lastSnapshot, _meta: { ...(lastSnapshot._meta ?? {}), fallback: true } });
+      }
+    } catch { /* ignore */ }
+
+    res.status(500).json({
+      message: "Dashboard refresh failed.",
+      detail: message,
     });
   }
 });

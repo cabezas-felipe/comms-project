@@ -25,10 +25,18 @@ export const sourceSchema = z.object({
   body: z.array(z.string()).min(1),
 });
 
+export const storyTagsSchema = z.object({
+  topics: z.array(z.string()),
+  keywords: z.array(z.string()),
+  geographies: z.array(z.string()),
+});
+
 export const storySchema = z.object({
   id: z.string().min(1),
+  metaStoryId: z.string().optional(),
   title: z.string().min(1),
-  geographies: z.array(geographySchema).min(1),
+  subtitle: z.string().optional(),
+  geographies: z.array(geographySchema),
   topic: topicSchema,
   takeaway: z.string().min(1),
   summary: z.string().min(1),
@@ -36,6 +44,7 @@ export const storySchema = z.object({
   whatChanged: z.string().min(1),
   priority: storyPrioritySchema,
   outletCount: z.number().int().nonnegative(),
+  tags: storyTagsSchema.optional(),
   sources: z.array(sourceSchema).min(1),
 });
 
@@ -59,6 +68,7 @@ export type SourceKindDto = z.infer<typeof sourceKindSchema>;
 export type StoryPriorityDto = z.infer<typeof storyPrioritySchema>;
 export type TrendDto = z.infer<typeof trendSchema>;
 export type SourceDto = z.infer<typeof sourceSchema>;
+export type StoryTagsDto = z.infer<typeof storyTagsSchema>;
 export type StoryDto = z.infer<typeof storySchema>;
 export type DashboardPayload = z.infer<typeof dashboardPayloadSchema>;
 export type SettingsPayload = z.infer<typeof settingsPayloadSchema>;

@@ -15,3 +15,6 @@ node_modules/
 
 # Vercel local project metadata
 **/.vercel/
+
+# Local Claude / Cursor agent project memory (machine-specific paths)
+.claude/

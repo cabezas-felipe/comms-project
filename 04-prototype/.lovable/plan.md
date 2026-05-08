@@ -1,5 +1,3 @@
-
-
 > **Note (2026-05, branch `work/logout`):** The archive section described in Phase 1 of this plan was subsequently removed. Routes `/archive`, `/archive/*`, `/d/*`, and `/directions` no longer exist in the prototype — they return NotFound. The `AppHeader` no longer includes an Archive nav item. See D-037 in `05-engineering/DECISIONS.md` for the removal rationale.
 
 # Build plan — Tempo (converged prototype)
@@ -24,6 +22,7 @@ Locking the converged design with **Tempo** as the product name. Everything from
 Two-phase build, single PR's worth of work:
 
 ### Phase 1 — Brand + structure
+
 1. Rename masthead to `Tempo` with persistent mono-muted tagline.
 2. Rebuild header nav to **Feed · Settings · Archive**, plus a cog icon redundant with Settings.
 3. Move existing `SignalRadar`, `EvidenceDesk`, `AnalystBriefing`, `Directions` pages under `src/pages/archive/`. Add `ArchiveIndex.tsx`. Redirect `/d/*` and `/directions` to their `/archive/*` equivalents.
@@ -31,6 +30,7 @@ Two-phase build, single PR's worth of work:
 5. Thin top banner on every archive page: *"Earlier exploration — not the converged design. Back to Feed →"*
 
 ### Phase 2 — Converged surfaces
+
 6. **Onboarding** — single centered column. Eyebrow `For communications professionals`. Hero *"Stop refreshing twelve tabs to find what actually moved."* Type/Voice toggle (Type selected by default). Both modes show *example* answers, not instructions. Plain two-line "We keep / We don't keep" privacy note (no shield icons). CTA `Set the tempo →`.
 7. **Dashboard** — three zones (header / feed / on-demand source rail). Headline reflects actual state with no quotas: e.g. `2 narratives rising · 2 steady · 1 falling`, `All steady`, `1 narrative rising`. Pill row for topics + geos. Cards show status row (`↑ Rising · Diplomatic relations · updated 14m ago`), title, takeaway, activity bar with **only `updated Xm ago`** to its right. Click expands inline (Summary · Why this matters · What changed · Key Sources max 5 · Was this useful?). Trend coloring: rising=ember, steady=ink, falling=muted with `↓` glyph.
 8. **Source Reader** — right rail (~480px) that mounts only when a source is clicked. Renders the **full article in-app** (outlet glyph, byline, timestamp, serif body at ~62ch, close button, "Back to story" footer). Feed spans full width when rail is closed; CSS grid transition, no jump.
@@ -42,10 +42,12 @@ Two-phase build, single PR's worth of work:
 ## Technical changes
 
 ### Files to create
+
 - `src/components/SourceReader.tsx` — right-rail full-article reader, controlled by `activeSourceId` state lifted into Dashboard and Settings.
 - `src/pages/archive/ArchiveIndex.tsx` — index of the three earlier prototypes with original thesis text.
 
 ### Files to edit
+
 - `src/components/AppHeader.tsx` — rename masthead, add tagline line, swap nav to `Feed · Settings · Archive`, add cog.
 - `src/pages/Onboarding.tsx` — new copy, type/voice example content, plain privacy note, new CTA.
 - `src/pages/Dashboard.tsx` — new headline logic (no quotas), pill row, expandable cards, activity bar with only `updated Xm ago`, integration with `SourceReader`.
@@ -55,6 +57,7 @@ Two-phase build, single PR's worth of work:
 - `src/App.tsx` — new routes, redirects from old `/d/*` and `/directions`, root → `/onboarding`.
 
 ### Files to move
+
 - `src/pages/SignalRadar.tsx` → `src/pages/archive/SignalRadar.tsx`
 - `src/pages/EvidenceDesk.tsx` → `src/pages/archive/EvidenceDesk.tsx`
 - `src/pages/AnalystBriefing.tsx` → `src/pages/archive/AnalystBriefing.tsx`
@@ -62,19 +65,22 @@ Two-phase build, single PR's worth of work:
 - Each gets a thin "Earlier exploration" banner at the top.
 
 ### Files untouched
+
 - `index.html` `<title>` updates to `Tempo · the news, in tempo for comms`. Meta description updates to match. Everything else in `src/components/ui/*`, `tailwind.config.ts`, `index.css` design tokens stay as-is — Tempo inherits the existing ember/ink palette and Fraunces/Inter pairing.
 
 ---
 
 ## Two-click guarantee verification
 
-| From | To | Clicks |
-|---|---|---|
-| Onboarding | Feed | 1 (CTA) |
-| Feed | Settings | 1 (cog or text) |
-| Settings | Feed | 1 (header) |
-| Anywhere | Full source article | 2 (open story → click source) |
-| Anywhere | Archive prototype | 2 (Archive → prototype) |
+
+| From       | To                  | Clicks                        |
+| ---------- | ------------------- | ----------------------------- |
+| Onboarding | Feed                | 1 (CTA)                       |
+| Feed       | Settings            | 1 (cog or text)               |
+| Settings   | Feed                | 1 (header)                    |
+| Anywhere   | Full source article | 2 (open story → click source) |
+| Anywhere   | Archive prototype   | 2 (Archive → prototype)       |
+
 
 ---
 
@@ -83,4 +89,3 @@ Two-phase build, single PR's worth of work:
 - No backend, no auth, no persistence (scope state lives in component state for the prototype).
 - No fast-mode toggle yet — Tempo's name accommodates it for the next iteration, but cadence stays hourly in v0 copy and behavior.
 - No new ui/* primitives — everything composes from existing shadcn pieces.
-
