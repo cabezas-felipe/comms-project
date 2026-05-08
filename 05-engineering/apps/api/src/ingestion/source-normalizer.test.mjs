@@ -56,9 +56,16 @@ test("normalizeSourceItem defaults optional fields when absent", () => {
   assert.equal(item.byline, undefined);
 });
 
-test("normalizeSourceItem throws on missing clusterId", () => {
+test("normalizeSourceItem defaults clusterId to provisional:${sourceId} when omitted", () => {
   const { clusterId: _omit, ...rest } = MINIMAL_VALID;
-  assert.throws(() => normalizeSourceItem(rest), /Missing required field: clusterId/);
+  const item = normalizeSourceItem(rest);
+  assert.equal(item.clusterId, "provisional:test-src-1");
+  assert.equal(item.title, "provisional:test-src-1", "title falls back to defaulted clusterId");
+});
+
+test("normalizeSourceItem still throws on missing sourceId", () => {
+  const { sourceId: _omit, ...rest } = MINIMAL_VALID;
+  assert.throws(() => normalizeSourceItem(rest), /Missing required field: sourceId/);
 });
 
 test("normalizeSourceItem throws on missing body", () => {
