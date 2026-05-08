@@ -1,53 +1,45 @@
 {
-  "_note": "Declared feed sources. URLs are not fetched in this slice — source-items.json provides fixture content. Replace readFeedItems() in feed-reader.mjs to activate live ingestion.",
+  "_note": "Declared feed sources for ingestion. This list is intentionally Washington Post-only for the current source-by-source rollout. Live fetching is gated by env TEMPO_RSS_INGESTION (values: 'live' | 'fixture'; defaults to 'live' when NODE_ENV=production, else 'fixture'). When set to 'live', feed-reader.mjs fetches every eligible row (kind=rss, active=true, valid http(s) url) and applies caps via TEMPO_RSS_MAX_ITEMS_PER_FEED (default 30) and TEMPO_RSS_MAX_ITEMS_TOTAL (default 200). Optional publisher filter via TEMPO_RSS_PUBLISHER (case-insensitive substring match on feed name). Operators may add/replace rows here for local dev; production reads from the Supabase manifest when isSupabaseEnabled().",
   "feeds": [
     {
-      "id": "nyt-politics",
-      "name": "The New York Times — Politics",
+      "id": "wapo-politics",
+      "name": "The Washington Post — Politics",
       "kind": "rss",
-      "url": "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
+      "url": "https://feeds.washingtonpost.com/rss/politics",
       "weight": 95,
       "active": true
     },
     {
-      "id": "reuters-world",
-      "name": "Reuters — World News",
+      "id": "wapo-world",
+      "name": "The Washington Post — World",
       "kind": "rss",
-      "url": "https://feeds.reuters.com/reuters/worldNews",
+      "url": "https://feeds.washingtonpost.com/rss/world",
+      "weight": 92,
+      "active": true
+    },
+    {
+      "id": "wapo-national",
+      "name": "The Washington Post — National",
+      "kind": "rss",
+      "url": "https://feeds.washingtonpost.com/rss/national",
+      "weight": 90,
+      "active": true
+    },
+    {
+      "id": "wapo-business",
+      "name": "The Washington Post — Business",
+      "kind": "rss",
+      "url": "https://feeds.washingtonpost.com/rss/business",
       "weight": 88,
       "active": true
     },
     {
-      "id": "el-tiempo-politics",
-      "name": "El Tiempo — Política",
+      "id": "wapo-technology",
+      "name": "The Washington Post — Technology",
       "kind": "rss",
-      "url": "https://www.eltiempo.com/rss/politica.xml",
-      "weight": 82,
+      "url": "https://feeds.washingtonpost.com/rss/business/technology",
+      "weight": 86,
       "active": true
-    },
-    {
-      "id": "politico-congress",
-      "name": "Politico — Congress",
-      "kind": "rss",
-      "url": "https://www.politico.com/rss/politicopicks.xml",
-      "weight": 80,
-      "active": true
-    },
-    {
-      "id": "latamwatcher",
-      "name": "@latamwatcher",
-      "kind": "social",
-      "url": "https://twitter.com/latamwatcher",
-      "weight": 65,
-      "active": true
-    },
-    {
-      "id": "migrationdesk",
-      "name": "@migrationdesk",
-      "kind": "social",
-      "url": "https://twitter.com/migrationdesk",
-      "weight": 50,
-      "active": false
     }
   ]
 }

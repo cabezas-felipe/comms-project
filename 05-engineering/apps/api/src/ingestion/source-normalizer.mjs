@@ -1,8 +1,11 @@
 // Normalize raw feed items → canonical sourceItem shape.
-// Required fields: clusterId, sourceId, outlet, kind, weight, url, minutesAgo, headline, body.
+// Required fields: sourceId, outlet, kind, weight, url, minutesAgo, headline, body.
+// `clusterId` is OPTIONAL on raw input — when omitted (e.g. live RSS items that
+// haven't been clustered yet), it defaults to `provisional:${sourceId}`.  Real
+// clusterIds get assigned downstream by the clustering engine.
 // Optional fields receive defaults when absent so downstream pipeline always sees a consistent shape.
 
-const REQUIRED_FIELDS = ["clusterId", "sourceId", "outlet", "kind", "weight", "url", "minutesAgo", "headline", "body"];
+const REQUIRED_FIELDS = ["sourceId", "outlet", "kind", "weight", "url", "minutesAgo", "headline", "body"];
 
 export function normalizeSourceItem(raw) {
   if (raw == null || typeof raw !== "object") {
@@ -13,9 +16,13 @@ export function normalizeSourceItem(raw) {
       throw new Error(`Missing required field: ${field}`);
     }
   }
+  const clusterId =
+    raw.clusterId !== undefined && raw.clusterId !== null
+      ? String(raw.clusterId)
+      : `provisional:${String(raw.sourceId)}`;
   return {
-    clusterId: String(raw.clusterId),
-    title: String(raw.title ?? raw.clusterId),
+    clusterId,
+    title: String(raw.title ?? clusterId),
     topic: String(raw.topic ?? ""),
     geographies: Array.isArray(raw.geographies) ? raw.geographies.map(String) : [],
     priority: raw.priority ?? "standard",
