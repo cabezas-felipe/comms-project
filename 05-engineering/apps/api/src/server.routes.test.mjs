@@ -36,7 +36,7 @@ await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_S
 const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
 
@@ -168,44 +168,98 @@ test("PUT /api/settings sync receives updated previousPayload on second save", a
   }
 });
 
-test("GET /api/dashboard returns schema-conformant payload with ranked stories", async () => {
-  const res = await request(app).get("/api/dashboard");
-  assert.equal(res.status, 200);
-  assert.equal(res.body.contractVersion, "2026-04-22-slice1");
-  assert.ok(Array.isArray(res.body.stories), "stories must be an array");
-  assert.equal(res.body.stories.length, 1);
-  const parsed = dashboardPayloadSchema.safeParse(res.body);
-  assert.ok(parsed.success, `response must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
-  assert.ok(!("aiSummaryMeta" in res.body.stories[0]), "aiSummaryMeta must be stripped from response");
+test("GET /api/dashboard returns empty stories with hasSnapshot=false when no snapshot exists", async () => {
+  // Override snapshot repo to simulate no snapshot on record.
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => null;
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.contractVersion, "2026-04-22-slice1");
+    assert.ok(Array.isArray(res.body.stories));
+    assert.equal(res.body.stories.length, 0);
+    assert.equal(res.body._meta?.hasSnapshot, false);
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
+test("GET /api/dashboard returns persisted snapshot when one exists", async () => {
+  const SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [
+      {
+        id: "snap-story-1",
+        metaStoryId: "snap-story-1",
+        title: "Snapshot Story",
+        subtitle: "A subtitle.",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        takeaway: "Takeaway",
+        summary: "Summary.",
+        whyItMatters: "Why.",
+        whatChanged: "Latest update 30 min ago.",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        sources: [{ id: "src-1", outlet: "Reuters", kind: "traditional", weight: 75, url: "#", minutesAgo: 30, headline: "Headline", body: ["Body."] }],
+      },
+    ],
+    _meta: { hasSnapshot: true, refreshedAt: new Date().toISOString() },
+  };
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => SNAPSHOT;
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.contractVersion, "2026-04-22-slice1");
+    assert.equal(res.body.stories.length, 1);
+    assert.equal(res.body.stories[0].id, "snap-story-1");
+    const parsed = dashboardPayloadSchema.safeParse(res.body);
+    assert.ok(parsed.success, `response must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
+  } finally {
+    _snapshotRepo.read = prev;
+  }
 });
 
 // ─── Topic taxonomy backward compatibility ─────────────────────────────────────
-// These tests verify that normalizeTopicLabel is applied on both sides of the
-// dashboard filter so legacy item labels ("Security cooperation") match settings
-// that were written back in normalized form ("Security policy"), and vice-versa.
+// These tests verify that normalizeTopicLabel is applied during relevance filtering
+// so legacy item labels ("Security cooperation") match settings written in normalized
+// form ("Security policy"), and vice-versa.  These now exercise POST /api/dashboard/refresh
+// since that is where filtering runs.
 
-test("dashboard filter: normalized settings topic matches item with legacy topic label", async () => {
-  // Items carry the old-form label that pre-dates normalization.
+test("refresh pipeline: normalized settings topic matches item with legacy topic label", async () => {
   const oldLabelItems = [{ ...FIXTURE_SOURCE_ITEMS[0], topic: "Security cooperation", clusterId: "test-old-label" }];
   await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(oldLabelItems), "utf8");
 
-  // Settings hold the post-normalization form (what extraction write-back produces).
   await request(app).put("/api/settings")
     .send({ ...VALID_BODY, topics: ["Security policy"] })
     .set("Content-Type", "application/json");
 
-  const res = await request(app).get("/api/dashboard");
-  assert.equal(res.status, 200);
-  assert.ok(res.body.stories.length > 0,
-    "item labeled 'Security cooperation' must match normalized setting 'Security policy'");
-
-  // Restore fixture and settings for subsequent tests.
-  await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
-  await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
+  // Inject snapshot write capture to verify stories were produced.
+  let capturedPayload = null;
+  const prevWrite = _snapshotRepo.write;
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  const prevGetLocks = _snapshotRepo.getLocks;
+  _snapshotRepo.getLocks = async () => new Map();
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(capturedPayload !== null);
+    assert.ok(capturedPayload.stories.length > 0,
+      "item labeled 'Security cooperation' must match normalized setting 'Security policy'");
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
+    await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
+  }
 });
 
-test("dashboard filter: old settings topic still matches item with the same old label (backward compat)", async () => {
-  // Neither side was ever normalized — both use the old form.
+test("refresh pipeline: old settings topic still matches item with the same old label (backward compat)", async () => {
   const oldLabelItems = [{ ...FIXTURE_SOURCE_ITEMS[0], topic: "Security cooperation", clusterId: "test-old-both" }];
   await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(oldLabelItems), "utf8");
 
@@ -213,13 +267,26 @@ test("dashboard filter: old settings topic still matches item with the same old 
     .send({ ...VALID_BODY, topics: ["Security cooperation"] })
     .set("Content-Type", "application/json");
 
-  const res = await request(app).get("/api/dashboard");
-  assert.equal(res.status, 200);
-  assert.ok(res.body.stories.length > 0,
-    "old-form setting 'Security cooperation' must still match item with same old label");
-
-  await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
-  await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
+  let capturedPayload = null;
+  const prevWrite = _snapshotRepo.write;
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  const prevGetLocks = _snapshotRepo.getLocks;
+  _snapshotRepo.getLocks = async () => new Map();
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(capturedPayload !== null);
+    assert.ok(capturedPayload.stories.length > 0,
+      "old-form setting 'Security cooperation' must still match item with same old label");
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
+    await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
+  }
 });
 
 test("GET /api/ingestion/sources returns declared feed configuration (JSON fallback, no Supabase)", async () => {
@@ -385,6 +452,123 @@ test("POST /api/transcribe returns 503 in production when API key is absent", as
 });
 
 const MOCK_EXTRACTION = { topics: ["test-topic"], keywords: [], geographies: ["US"], traditionalSources: [], socialSources: [] };
+
+// ─── POST /api/dashboard/refresh ─────────────────────────────────────────────
+
+test("POST /api/dashboard/refresh returns 401 without valid token", async () => {
+  const prev = _auth.resolver;
+  _auth.resolver = async () => null;
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _auth.resolver = prev;
+  }
+});
+
+test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns stories", async () => {
+  let writtenPayload = null;
+  let insertedLocks = null;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async (_uid, locks) => { insertedLocks = locks; };
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(writtenPayload !== null, "snapshot must be persisted on success");
+    assert.ok(Array.isArray(res.body.stories), "response must include stories array");
+    assert.ok(res.body._meta?.hasSnapshot === true, "response must include _meta.hasSnapshot=true");
+    assert.ok(typeof res.body._meta?.refreshedAt === "string", "response must include _meta.refreshedAt");
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: applies title lock — second refresh preserves first title", async () => {
+  const firstTitle = "First Run Title";
+  const secondTitle = "Different Second Title";
+  const MS_ID = "locked-meta-story";
+  const makeStory = (title) => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [{
+      id: MS_ID, metaStoryId: MS_ID, title, subtitle: "Sub.",
+      geographies: ["US"], topic: "Diplomatic relations",
+      takeaway: "T", summary: "S", whyItMatters: "W", whatChanged: "C",
+      priority: "standard", outletCount: 1,
+      tags: { topics: [], keywords: [], geographies: [] },
+      sources: [],
+    }],
+  });
+
+  const locks = new Map();
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map(locks);
+  _snapshotRepo.insertLocks = async (_uid, newLocks) => {
+    for (const l of newLocks) locks.set(l.metaStoryId, { title: l.title, subtitle: l.subtitle });
+  };
+  _refreshPipeline.run = async () => ({ payload: makeStory(firstTitle), log: { poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0 } });
+  const res1 = await request(app).post("/api/dashboard/refresh");
+  assert.equal(res1.body.stories[0].title, firstTitle, "first refresh must use LLM title");
+
+  _refreshPipeline.run = async () => ({ payload: makeStory(secondTitle), log: { poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0 } });
+  const res2 = await request(app).post("/api/dashboard/refresh");
+  try {
+    assert.equal(res2.body.stories[0].title, firstTitle, "second refresh must use locked title, not new LLM title");
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/refresh: on failure, returns last good snapshot with fallback=true", async () => {
+  const LAST_SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: new Date().toISOString() },
+  };
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  _refreshPipeline.run = async () => { throw new Error("pipeline exploded"); };
+  _snapshotRepo.read = async () => LAST_SNAPSHOT;
+  _snapshotRepo.getLocks = async () => new Map();
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200, "must not 500 when last snapshot is available");
+    assert.equal(res.body._meta?.fallback, true, "must signal fallback=true");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.getLocks = prevGetLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: returns 500 when pipeline fails and no prior snapshot", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  _refreshPipeline.run = async () => { throw new Error("pipeline exploded"); };
+  _snapshotRepo.read = async () => null;
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 500);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+  }
+});
 
 // ─── Identity resolution — resolveIdentity unit tests ────────────────────────
 // These exercise the exported resolveIdentity function directly (no HTTP overhead).

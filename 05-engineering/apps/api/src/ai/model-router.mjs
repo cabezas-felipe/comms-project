@@ -11,6 +11,7 @@ function getCapabilityDefaults() {
     summarization: process.env.TEMPO_AI_SUMMARY_MODEL || "mock-openai-mini",
     classification: process.env.TEMPO_AI_CLASSIFIER_MODEL || "mock-anthropic-haiku",
     safety: process.env.TEMPO_AI_SAFETY_MODEL || "mock-openai-mini",
+    clustering: process.env.TEMPO_AI_CLUSTER_MODEL || "mock-anthropic-haiku",
   };
 }
 
