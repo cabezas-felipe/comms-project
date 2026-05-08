@@ -300,7 +300,7 @@ test("runRefreshPipeline: rejects meta-story with fully hallucinated source IDs 
   assert.equal(log.groundingFailures, 1);
 });
 
-test("runRefreshPipeline: applies extractive fallback when some IDs are hallucinated (partial_source_ids)", async () => {
+test("runRefreshPipeline: Phase 3 strict drop — partial_source_ids stories are dropped (no extractive fallback)", async () => {
   const rawItems = [makeItem({ sourceId: "real-id", outlet: "Reuters", minutesAgo: 30, headline: "Real headline" })];
   const partialStory = {
     meta_story_id: "partial",
@@ -317,12 +317,10 @@ test("runRefreshPipeline: applies extractive fallback when some IDs are hallucin
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-04-22-slice1",
   });
-  assert.equal(payload.stories.length, 1, "story with partial valid IDs must be kept with extractive fallback");
+  assert.equal(payload.stories.length, 0, "partial_source_ids must be dropped under strict grounding");
   assert.equal(log.groundingFailures, 1);
-  assert.ok(
-    payload.stories[0].summary.includes("Real headline"),
-    "extractive fallback must use real headline"
-  );
+  assert.equal(log.droppedUngroundedStoryCount, 1);
+  assert.equal(log.groundingDropReasons.partial_source_ids, 1);
 });
 
 // ─── Snapshot continuity ──────────────────────────────────────────────────────
@@ -769,13 +767,14 @@ test("runRefreshPipeline: reused metaStoryId from prior snapshot enables title-l
   assert.equal(payload.stories[0].metaStoryId, "stable-lineage");
 });
 
-// ─── Finding 2: subtitle grounding for partial_source_ids fallback ───────────
+// ─── Finding 2 (re-asserted under Phase 3 strict grounding) ──────────────────
+// Under Phase 3, partial_source_ids stories are dropped entirely — there is no
+// publish path that could leak ungrounded subtitle/summary text.
 
-test("runRefreshPipeline: partial_source_ids fallback overwrites subtitle with grounded extractive text", async () => {
+test("runRefreshPipeline: poison subtitle on partial_source_ids cannot reach output (strict drop)", async () => {
   const rawItems = [
     makeItem({ sourceId: "real-id", outlet: "Reuters", minutesAgo: 30, headline: "Real grounded headline" }),
   ];
-  // Cluster output: poison subtitle + one valid source + one hallucinated source
   const partialStory = {
     title: "Partial Story",
     subtitle: "POISON: ungrounded assertion that the model invented out of thin air.",
@@ -792,16 +791,13 @@ test("runRefreshPipeline: partial_source_ids fallback overwrites subtitle with g
     contractVersion: "2026-04-22-slice1",
   });
 
-  assert.equal(payload.stories.length, 1);
+  assert.equal(payload.stories.length, 0, "strict grounding drops the story entirely");
   assert.equal(log.groundingFailures, 1);
-  assert.ok(
-    !payload.stories[0].subtitle.includes("POISON"),
-    "model-supplied subtitle must not pass through partial_source_ids path"
-  );
+  assert.equal(log.droppedUngroundedStoryCount, 1);
   assert.equal(
-    payload.stories[0].subtitle,
-    "Real grounded headline",
-    "subtitle must be replaced with deterministic extractive text from surviving sources"
+    log.groundingDropReasons.partial_source_ids,
+    1,
+    "poison subtitle path must be dropped — never reaches publish"
   );
 });
 
@@ -993,4 +989,191 @@ test("runRefreshPipeline: relevantItemCount surfaced in selection metadata (zero
   });
   assert.equal(log.selection.relevantItemCount, 0);
   assert.equal(payload.stories.length, 0);
+});
+
+// ─── Phase 3: strict grounding drop + rejection persistence + telemetry ──────
+
+test("runRefreshPipeline: ungrounded_claims drops the story (strict trust posture)", async () => {
+  const rawItems = [makeItem({ sourceId: "real-id", outlet: "Reuters", minutesAgo: 30, headline: "Real headline" })];
+  // Source IDs all valid, but a factual claim points only at hallucinated evidence.
+  const story = {
+    meta_story_id: "x",
+    title: "Has Real Sources But Bad Claim Evidence",
+    subtitle: "Sub.",
+    source_item_ids: ["real-id"],
+    summary: "Summary.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    factual_claims: ["This claim cites no real source."],
+    claim_evidence_map: { "0": ["fake-id-only"] },
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [story],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 0, "ungrounded_claims must drop story under strict policy");
+  assert.equal(log.droppedUngroundedStoryCount, 1);
+  assert.equal(log.groundingDropReasons.ungrounded_claims, 1);
+});
+
+test("runRefreshPipeline: mixed batch — valid stories survive, failed stories are dropped", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "good-1", outlet: "Reuters", minutesAgo: 30 }),
+    makeItem({ sourceId: "good-2", outlet: "Reuters", minutesAgo: 30 }),
+  ];
+  const stories = [
+    {
+      meta_story_id: "valid",
+      title: "Valid Story",
+      subtitle: "Sub.",
+      source_item_ids: ["good-1"],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      factual_claims: ["Real claim."],
+      claim_evidence_map: { "0": ["good-1"] },
+    },
+    {
+      meta_story_id: "halluc",
+      title: "Fully Hallucinated",
+      subtitle: "Sub.",
+      source_item_ids: ["fake-only"],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    },
+    {
+      meta_story_id: "partial",
+      title: "Partial Hallucination",
+      subtitle: "Sub.",
+      source_item_ids: ["good-2", "fake-side"],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    },
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => stories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 1, "only the valid story survives");
+  assert.equal(payload.stories[0].metaStoryId, "valid");
+  assert.equal(log.droppedUngroundedStoryCount, 2);
+  assert.equal(log.groundingDropReasons.no_valid_source_ids, 1);
+  assert.equal(log.groundingDropReasons.partial_source_ids, 1);
+});
+
+test("runRefreshPipeline: dropped stories are written to rejection log via writeRejectionsFn", async () => {
+  const rawItems = [makeItem({ sourceId: "real-id", outlet: "Reuters", minutesAgo: 30 })];
+  const stories = [
+    {
+      meta_story_id: "halluc",
+      title: "Fully Hallucinated",
+      subtitle: "Sub.",
+      source_item_ids: ["fake-only"],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    },
+    {
+      meta_story_id: "partial",
+      title: "Partial",
+      subtitle: "Sub.",
+      source_item_ids: ["real-id", "fake-side"],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    },
+  ];
+  let captured = null;
+  await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => stories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    writeRejectionsFn: async (recs) => { captured = recs; },
+  });
+  assert.ok(Array.isArray(captured), "writeRejectionsFn must be called with rejection records");
+  assert.equal(captured.length, 2);
+  const reasons = captured.map((r) => r.reason_code).sort();
+  assert.deepEqual(reasons, ["no_valid_source_ids", "partial_source_ids"]);
+  // Each record carries reason + meta_story_id + source_item_ids + debug payload + timestamp
+  for (const r of captured) {
+    assert.ok(typeof r.reason_code === "string");
+    assert.ok(Array.isArray(r.source_item_ids));
+    assert.ok(typeof r.created_at === "string");
+    assert.ok(r.debug_payload && typeof r.debug_payload === "object");
+  }
+});
+
+test("runRefreshPipeline: writeRejectionsFn not invoked when there are zero failures", async () => {
+  const rawItems = [makeItem({ sourceId: "good", outlet: "Reuters", minutesAgo: 30 })];
+  const story = {
+    meta_story_id: "ok",
+    title: "Valid",
+    subtitle: "Sub.",
+    source_item_ids: ["good"],
+    summary: "Summary.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+  };
+  let calls = 0;
+  await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [story],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    writeRejectionsFn: async () => { calls += 1; },
+  });
+  assert.equal(calls, 0);
+});
+
+test("runRefreshPipeline: writeRejectionsFn errors are non-fatal (refresh still succeeds)", async () => {
+  const rawItems = [makeItem({ sourceId: "real", outlet: "Reuters", minutesAgo: 30 })];
+  const story = {
+    meta_story_id: "halluc",
+    title: "All hallucinated",
+    subtitle: "Sub.",
+    source_item_ids: ["fake-only"],
+    summary: "Summary.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [story],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    writeRejectionsFn: async () => { throw new Error("DB down"); },
+  });
+  assert.equal(payload.stories.length, 0);
+  assert.equal(log.droppedUngroundedStoryCount, 1, "drop count still tracked even when log write fails");
+});
+
+test("runRefreshPipeline: rejection records never appear in payload.stories (no contract leak)", async () => {
+  const rawItems = [makeItem({ sourceId: "real", outlet: "Reuters", minutesAgo: 30 })];
+  const stories = [
+    {
+      meta_story_id: "halluc",
+      title: "All hallucinated",
+      subtitle: "Sub.",
+      source_item_ids: ["fake-only"],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    },
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => stories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.deepEqual(payload.stories, [], "no rejected story may leak into stories array");
+  assert.ok(Array.isArray(log.rejectionRecords));
+  assert.equal(log.rejectionRecords.length, 1);
+  // rejection record carries the meta_story_id + reason but is NOT a published story shape
+  assert.equal(log.rejectionRecords[0].reason_code, "no_valid_source_ids");
+  assert.equal(log.rejectionRecords[0].meta_story_id, "halluc");
 });
