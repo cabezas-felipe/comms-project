@@ -9,6 +9,7 @@ export {
   storyTagsSchema,
   storySchema,
   dashboardPayloadSchema,
+  dashboardSelectionMetaSchema,
   settingsPayloadSchema,
 } from "./schemas.js";
 export type {
@@ -21,6 +22,7 @@ export type {
   StoryTagsDto,
   StoryDto,
   DashboardPayload,
+  DashboardSelectionMeta,
   SettingsPayload,
 } from "./schemas.js";
 export { classifySources } from "./source-classification.js";

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTRACT_VERSION } from "@tempo/contracts";
-import { fetchDashboardPayload } from "@/lib/api";
+import { fetchDashboardPayload, fetchDashboardWithMeta } from "@/lib/api";
 import { STORIES } from "@/data/stories";
 
 vi.mock("@/lib/supabase", () => ({
@@ -79,6 +79,61 @@ describe("fetchDashboardPayload", () => {
     const payload = await fetchDashboardPayload({ fetcher, retries: 1, sleep });
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(payload.contractVersion).toBe(CONTRACT_VERSION);
+  });
+
+  it("Phase 2: fetchDashboardWithMeta surfaces _meta.selection from API response", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: {
+          refreshedAt: "2026-05-08T00:00:00Z",
+          hasSnapshot: true,
+          selection: {
+            sourceSelectionMode: "fallback",
+            sourceFallbackUsed: true,
+            sourceFallbackReason: "no_selected_sources",
+            matchedSourceCount: 0,
+            selectedSourceCount: 0,
+            unmatchedSelectedSources: [],
+            unavailableConnectorCount: 0,
+            relevantItemCount: 0,
+          },
+        },
+      }),
+    });
+    const { payload, selection } = await fetchDashboardWithMeta({ fetcher });
+    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
+    expect(selection).not.toBeNull();
+    expect(selection?.sourceSelectionMode).toBe("fallback");
+    expect(selection?.sourceFallbackUsed).toBe(true);
+    expect(selection?.sourceFallbackReason).toBe("no_selected_sources");
+  });
+
+  it("Phase 2: fetchDashboardWithMeta returns selection=null when API omits _meta.selection", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: CONTRACT_VERSION, stories: STORIES }),
+    });
+    const { selection } = await fetchDashboardWithMeta({ fetcher });
+    expect(selection).toBeNull();
+  });
+
+  it("Phase 2: fetchDashboardWithMeta tolerates malformed _meta.selection (returns null without throwing)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { selection: { sourceSelectionMode: "not-a-valid-mode" } },
+      }),
+    });
+    const { selection } = await fetchDashboardWithMeta({ fetcher });
+    expect(selection).toBeNull();
   });
 
   it("rethrows AbortError immediately without retrying or sleeping", async () => {

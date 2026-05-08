@@ -53,6 +53,25 @@ export const dashboardPayloadSchema = z.object({
   stories: z.array(storySchema),
 });
 
+/**
+ * Selection metadata surfaced through `_meta.selection` on dashboard responses
+ * (Phase 2).  Reports source-resolution outcome so the frontend can show small
+ * status cues (fallback used / unmatched names / strict-empty).  All fields
+ * are optional for forward compatibility — older snapshots won't carry them.
+ */
+export const dashboardSelectionMetaSchema = z.object({
+  sourceSelectionMode: z.enum(["strict", "fallback"]).optional(),
+  sourceFallbackUsed: z.boolean().optional(),
+  sourceFallbackReason: z.string().nullable().optional(),
+  matchedSourceCount: z.number().int().nonnegative().optional(),
+  selectedSourceCount: z.number().int().nonnegative().optional(),
+  unmatchedSelectedSources: z.array(z.string()).optional(),
+  unavailableConnectorCount: z.number().int().nonnegative().optional(),
+  unavailableConnectorSources: z.array(z.string()).optional(),
+  matchedFeedIds: z.array(z.string()).optional(),
+  relevantItemCount: z.number().int().nonnegative().optional(),
+});
+
 export const settingsPayloadSchema = z.object({
   contractVersion: z.literal(CONTRACT_VERSION),
   topics: z.array(z.string().min(1)),
@@ -71,4 +90,5 @@ export type SourceDto = z.infer<typeof sourceSchema>;
 export type StoryTagsDto = z.infer<typeof storyTagsSchema>;
 export type StoryDto = z.infer<typeof storySchema>;
 export type DashboardPayload = z.infer<typeof dashboardPayloadSchema>;
+export type DashboardSelectionMeta = z.infer<typeof dashboardSelectionMetaSchema>;
 export type SettingsPayload = z.infer<typeof settingsPayloadSchema>;

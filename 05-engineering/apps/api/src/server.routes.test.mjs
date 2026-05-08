@@ -32,8 +32,18 @@ const tmpDir = await mkdtemp(path.join(tmpdir(), "tempo-api-test-"));
 process.env.TEMPO_DATA_DIR = tmpDir;
 // Seed source-items fixture before server import so GET /api/dashboard can read it.
 await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
-// Seed source-feeds fixture for GET /api/ingestion/sources.
-const FIXTURE_SOURCE_FEEDS = { feeds: [{ id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true }] };
+// Seed source-feeds fixture for GET /api/ingestion/sources AND POST /api/dashboard/refresh
+// (Phase 2 source-matcher loads this manifest to resolve user-selected sources).  Includes
+// rows whose names match the traditional/social sources used in VALID_BODY so source selection
+// resolves rather than falling through to the empty-fallback path.
+const FIXTURE_SOURCE_FEEDS = {
+  feeds: [
+    { id: "nyt-politics", name: "The New York Times", kind: "rss", url: "https://example.com/rss", weight: 95, active: true },
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://example.com/reuters", weight: 88, active: true },
+    // social row — matches by name but no implemented connector → unavailable
+    { id: "latamwatcher", name: "@latamwatcher", kind: "social", url: "https://twitter.com/latamwatcher", weight: 60, active: true },
+  ],
+};
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
 const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline } = await import("./server.mjs");
@@ -294,8 +304,9 @@ test("GET /api/ingestion/sources returns declared feed configuration (JSON fallb
   const res = await request(app).get("/api/ingestion/sources");
   assert.equal(res.status, 200);
   assert.ok(Array.isArray(res.body.feeds), "feeds must be an array");
-  assert.equal(res.body.feeds.length, 1);
-  assert.equal(res.body.feeds[0].id, "nyt-politics");
+  assert.equal(res.body.feeds.length, FIXTURE_SOURCE_FEEDS.feeds.length);
+  const ids = res.body.feeds.map((f) => f.id).sort();
+  assert.ok(ids.includes("nyt-politics"));
   assert.equal(typeof res.body.feeds[0].kind, "string");
   assert.equal(typeof res.body.feeds[0].weight, "number");
 });
@@ -483,10 +494,85 @@ test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns 
     assert.ok(Array.isArray(res.body.stories), "response must include stories array");
     assert.ok(res.body._meta?.hasSnapshot === true, "response must include _meta.hasSnapshot=true");
     assert.ok(typeof res.body._meta?.refreshedAt === "string", "response must include _meta.refreshedAt");
+    // Phase 2: selection metadata surfaced on POST /api/dashboard/refresh
+    const sel = res.body._meta?.selection;
+    assert.ok(sel, "response must include _meta.selection");
+    assert.ok(["strict", "fallback"].includes(sel.sourceSelectionMode));
+    assert.equal(typeof sel.sourceFallbackUsed, "boolean");
+    assert.equal(typeof sel.matchedSourceCount, "number");
+    assert.equal(typeof sel.selectedSourceCount, "number");
+    assert.ok(Array.isArray(sel.unmatchedSelectedSources));
+    assert.equal(typeof sel.unavailableConnectorCount, "number");
+    assert.equal(typeof sel.relevantItemCount, "number");
+    // Internal storage field must NOT leak to clients — they read _meta.selection.
+    assert.equal(res.body._selectionMeta, undefined, "_selectionMeta must not leak at top level");
+    assert.ok(!Object.prototype.hasOwnProperty.call(res.body, "_selectionMeta"), "_selectionMeta key must be absent");
   } finally {
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: selection metadata reports unmatched sources when settings names not in manifest", async () => {
+  // VALID_BODY (used in setup) sets traditionalSources=["Reuters"], socialSources=["@latamwatcher"].
+  // Reuters resolves; @latamwatcher matches social row but social has no implemented connector.
+  let writtenPayload = null;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    const sel = res.body._meta?.selection;
+    assert.ok(sel);
+    // Reuters matches the manifest row, so strict mode is preserved.
+    assert.equal(sel.sourceSelectionMode, "strict");
+    // @latamwatcher matched social row only — counted as unavailable connector.
+    assert.equal(sel.unavailableConnectorCount, 1);
+    assert.equal(sel.matchedSourceCount, 1);
+    assert.equal(sel.selectedSourceCount, 2);
+    // Persisted snapshot carries the selection meta so GET can surface it too.
+    assert.ok(writtenPayload?._selectionMeta, "selection meta must be persisted with snapshot");
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("GET /api/dashboard surfaces persisted _selectionMeta as _meta.selection", async () => {
+  const SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: new Date().toISOString() },
+    _selectionMeta: {
+      sourceSelectionMode: "fallback",
+      sourceFallbackUsed: true,
+      sourceFallbackReason: "all_unmatched",
+      matchedSourceCount: 0,
+      selectedSourceCount: 1,
+      unmatchedSelectedSources: ["Made-Up Outlet"],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: ["reuters-world"],
+      relevantItemCount: 0,
+    },
+  };
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => SNAPSHOT;
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.ok(res.body._meta?.selection, "GET must surface selection meta from persisted snapshot");
+    assert.equal(res.body._meta.selection.sourceSelectionMode, "fallback");
+    assert.equal(res.body._meta.selection.sourceFallbackReason, "all_unmatched");
+    assert.deepEqual(res.body._meta.selection.unmatchedSelectedSources, ["Made-Up Outlet"]);
+  } finally {
+    _snapshotRepo.read = prev;
   }
 });
 

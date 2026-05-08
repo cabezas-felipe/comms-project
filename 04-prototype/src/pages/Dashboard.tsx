@@ -11,9 +11,62 @@ import {
   trackSourceOpened,
   trackStoryExpanded,
 } from "@/lib/analytics";
-import { fetchDashboardPayload } from "@/lib/api";
-import { type StoryDto } from "@tempo/contracts";
+import { fetchDashboardWithMeta } from "@/lib/api";
+import { type DashboardSelectionMeta, type StoryDto } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
+
+// Phase 2: minimal status badge surfacing source-selection metadata from the
+// API.  Renders nothing when there's nothing meaningful to say (strict mode +
+// no unmatched + non-empty stories).  Visual treatment intentionally compact —
+// the dashboard's information architecture is unchanged.
+function SelectionStatusCue({
+  meta,
+  hasStories,
+}: {
+  meta: DashboardSelectionMeta | null;
+  hasStories: boolean;
+}) {
+  if (!meta) return null;
+
+  const messages: string[] = [];
+  if (meta.sourceFallbackUsed) {
+    const reason = meta.sourceFallbackReason ?? "no match";
+    messages.push(
+      reason === "no_selected_sources"
+        ? "Showing fallback sources — pick sources in Settings to personalize."
+        : reason === "all_unavailable_connectors"
+          ? "Selected sources have no connector yet — showing fallback baseline."
+          : "No selected sources matched the manifest — showing fallback baseline."
+    );
+  }
+  const unmatched = meta.unmatchedSelectedSources ?? [];
+  if (unmatched.length > 0 && !meta.sourceFallbackUsed) {
+    messages.push(`${unmatched.length} selected source${unmatched.length === 1 ? "" : "s"} unavailable: ${unmatched.join(", ")}`);
+  }
+  if (
+    !meta.sourceFallbackUsed &&
+    !hasStories &&
+    typeof meta.relevantItemCount === "number" &&
+    meta.relevantItemCount === 0 &&
+    (meta.matchedSourceCount ?? 0) > 0
+  ) {
+    messages.push("No stories match your topics or keywords in the last 24 hours.");
+  }
+
+  if (messages.length === 0) return null;
+  return (
+    <div className="px-6 py-2 border-b border-rule/60">
+      {messages.map((m, i) => (
+        <p
+          key={i}
+          className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
+        >
+          {m}
+        </p>
+      ))}
+    </div>
+  );
+}
 
 function dtoToStory(dto: StoryDto): Story {
   return {
@@ -55,6 +108,7 @@ export default function Dashboard() {
   const [stories, setStories] = useState<Story[]>(emptyMode ? [] : STORIES);
   const [isLoading, setIsLoading] = useState(!emptyMode);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [selectionMeta, setSelectionMeta] = useState<DashboardSelectionMeta | null>(null);
 
   const filtered = useMemo(
     () =>
@@ -97,10 +151,11 @@ export default function Dashboard() {
     if (emptyMode) return;
     let canceled = false;
     setIsLoading(true);
-    fetchDashboardPayload()
-      .then((payload) => {
+    fetchDashboardWithMeta()
+      .then(({ payload, selection }) => {
         if (canceled) return;
         setStories(payload.stories.map(dtoToStory));
+        setSelectionMeta(selection);
         setLoadError(null);
       })
       .catch((error: unknown) => {
@@ -167,6 +222,9 @@ export default function Dashboard() {
               ))}
             </div>
           </div>
+
+          {/* Selection status — Phase 2: small cues for fallback / unmatched / strict-empty */}
+          <SelectionStatusCue meta={selectionMeta} hasStories={filtered.length > 0} />
 
           {/* Error banner — non-blocking, stories still show below */}
           {loadError && (
