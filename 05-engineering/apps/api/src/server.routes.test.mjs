@@ -656,6 +656,224 @@ test("POST /api/dashboard/refresh: returns 500 when pipeline fails and no prior 
   }
 });
 
+// ─── Phase 4: watermark short-circuit ────────────────────────────────────────
+
+test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior snapshot, no clusterFn, _meta.unchanged=true", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  const PRIOR_SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _watermark: "wm-stable-123",
+    _selectionMeta: {
+      sourceSelectionMode: "strict",
+      sourceFallbackUsed: false,
+      sourceFallbackReason: null,
+      matchedSourceCount: 1,
+      selectedSourceCount: 1,
+      unmatchedSelectedSources: [],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: ["nyt-politics"],
+      relevantItemCount: 0,
+    },
+  };
+
+  let writeCalls = 0;
+  let lockCalls = 0;
+  _snapshotRepo.read = async () => PRIOR_SNAPSHOT;
+  _snapshotRepo.write = async () => { writeCalls++; };
+  _snapshotRepo.getLocks = async () => { lockCalls++; return new Map(); };
+  _snapshotRepo.insertLocks = async () => { lockCalls++; };
+
+  _refreshPipeline.run = async (opts) => {
+    // Verify the route forwarded priorWatermark from the persisted snapshot.
+    assert.equal(opts.priorWatermark, "wm-stable-123");
+    return {
+      payload: null,
+      log: {
+        unchanged: true,
+        refreshSkippedReason: "unchanged_watermark",
+        watermark: "wm-stable-123",
+        candidateCount: 5,
+        selectedFeedCount: 1,
+        selection: PRIOR_SNAPSHOT._selectionMeta,
+      },
+    };
+  };
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.unchanged, true);
+    assert.equal(res.body._meta.refreshSkippedReason, "unchanged_watermark");
+    assert.equal(res.body._meta.watermark, "wm-stable-123");
+    assert.equal(res.body._meta.candidateCount, 5);
+    assert.equal(res.body._meta.selectedFeedCount, 1);
+    // Idempotency: NO snapshot writes, NO lock churn under short-circuit.
+    assert.equal(writeCalls, 0, "no snapshot write under short-circuit");
+    assert.equal(lockCalls, 0, "no lock churn under short-circuit");
+    // Internal storage fields must NOT leak.
+    assert.equal(res.body._watermark, undefined);
+    assert.equal(res.body._selectionMeta, undefined);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: watermark changed → full run executes, response carries new watermark", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  let priorWatermarkSeen = "not-passed";
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _watermark: "old-wm",
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async (opts) => {
+    priorWatermarkSeen = opts.priorWatermark;
+    return {
+      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      log: {
+        poolCount: 1,
+        relevantCount: 1,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "new-wm",
+        candidateCount: 1,
+        selectedFeedCount: 1,
+        unchanged: false,
+        refreshSkippedReason: null,
+        selection: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 1, selectedSourceCount: 1, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 1 },
+      },
+    };
+  };
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(priorWatermarkSeen, "old-wm", "route must forward priorWatermark to pipeline");
+    assert.equal(res.body._meta.watermark, "new-wm");
+    assert.equal(res.body._meta.unchanged, false);
+    assert.equal(res.body._meta.refreshSkippedReason, undefined);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── Phase 4: in-flight guard ────────────────────────────────────────────────
+
+test("POST /api/dashboard/refresh: concurrent refresh for same user is skipped with refreshSkippedReason=in_flight", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  // Make the pipeline hold for ~50ms so a second request can land while it's running.
+  let pipelineCalls = 0;
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => {
+    pipelineCalls++;
+    await new Promise((r) => setTimeout(r, 60));
+    return {
+      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      log: {
+        poolCount: 0, relevantCount: 0, usedFallbackClustering: false, groundingFailures: 0,
+        droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+        watermark: "wm-conc", candidateCount: 0, selectedFeedCount: 0,
+        unchanged: false, refreshSkippedReason: null,
+        selection: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 0, selectedSourceCount: 0, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 0 },
+      },
+    };
+  };
+
+  try {
+    const [first, second] = await Promise.all([
+      request(app).post("/api/dashboard/refresh"),
+      // Second request fires while first is still in pipeline.run.
+      new Promise((resolve) => setTimeout(() => resolve(request(app).post("/api/dashboard/refresh")), 5)),
+    ]);
+    // One of them must be the in-flight skip; the other is the full run.
+    const responses = [first, second];
+    const skipped = responses.find((r) => r.body?._meta?.refreshSkippedReason === "in_flight");
+    const ran = responses.find((r) => !r.body?._meta?.refreshSkippedReason);
+    assert.ok(skipped, "one response must report refreshSkippedReason=in_flight");
+    assert.ok(ran, "the other must complete normally");
+    assert.equal(pipelineCalls, 1, "pipeline must execute exactly once when guarded");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: in-flight slot is released after pipeline completion (next call runs)", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRead = _snapshotRepo.read;
+
+  let count = 0;
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => {
+    count++;
+    return {
+      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      log: {
+        poolCount: 0, relevantCount: 0, usedFallbackClustering: false, groundingFailures: 0,
+        droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+        watermark: `wm-${count}`, candidateCount: 0, selectedFeedCount: 0,
+        unchanged: false, refreshSkippedReason: null,
+        selection: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 0, selectedSourceCount: 0, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 0 },
+      },
+    };
+  };
+
+  try {
+    const r1 = await request(app).post("/api/dashboard/refresh");
+    const r2 = await request(app).post("/api/dashboard/refresh");
+    assert.equal(r1.body._meta.refreshSkippedReason, undefined);
+    assert.equal(r2.body._meta.refreshSkippedReason, undefined, "after release, next sequential call must run");
+    assert.equal(count, 2, "pipeline ran twice");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _snapshotRepo.read = prevRead;
+  }
+});
+
 // ─── Identity resolution — resolveIdentity unit tests ────────────────────────
 // These exercise the exported resolveIdentity function directly (no HTTP overhead).
 // In the test environment SUPABASE_URL is unset, so Bearer and email lookups both need mocking.

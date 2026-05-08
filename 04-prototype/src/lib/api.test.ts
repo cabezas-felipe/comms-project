@@ -122,6 +122,48 @@ describe("fetchDashboardPayload", () => {
     expect(selection).toBeNull();
   });
 
+  it("Phase 4: fetchDashboardWithMeta tolerates new optional _meta fields (unchanged/watermark/refreshSkippedReason)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: {
+          refreshedAt: "2026-05-08T00:00:00Z",
+          hasSnapshot: true,
+          unchanged: true,
+          refreshSkippedReason: "unchanged_watermark",
+          watermark: "wm-abc",
+          candidateCount: 5,
+          selectedFeedCount: 2,
+        },
+      }),
+    });
+    const { payload, selection } = await fetchDashboardWithMeta({ fetcher });
+    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
+    // No selection field provided here — parser must not throw and just returns null
+    expect(selection).toBeNull();
+  });
+
+  it("Phase 4: fetchDashboardWithMeta tolerates refreshSkippedReason=in_flight without selection meta", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: {
+          hasSnapshot: true,
+          refreshSkippedReason: "in_flight",
+          unchanged: false,
+        },
+      }),
+    });
+    const { payload } = await fetchDashboardWithMeta({ fetcher });
+    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
+  });
+
   it("Phase 2: fetchDashboardWithMeta tolerates malformed _meta.selection (returns null without throwing)", async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: true,

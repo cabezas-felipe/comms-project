@@ -12,6 +12,7 @@ import {
   filterItemsToMatchedFeeds,
   SELECTION_MODE,
 } from "../ingestion/source-matcher.mjs";
+import { computeWatermark, watermarksMatch } from "./refresh-watermark.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -267,6 +268,9 @@ function buildStory(metaStory, sourceItems) {
  * @param {string[]} [opts.fallbackFeedIds]  — env-configured fallback baseline feed IDs
  * @param {boolean}  [opts.fallbackEnabled]
  * @param {Function} [opts.writeRejectionsFn] — injectable rejection-log writer (Phase 3)
+ * @param {string}   [opts.priorWatermark]    — last persisted watermark (Phase 4); when matching the
+ *                                              candidate watermark, the pipeline short-circuits and
+ *                                              skips clustering/grounding/lock/rejection writes.
  *
  * @returns {{ payload: object, log: object }}
  *   payload — ready-to-persist dashboard payload
@@ -288,6 +292,7 @@ export async function runRefreshPipeline({
   fallbackFeedIds = [],
   fallbackEnabled = true,
   writeRejectionsFn = null,
+  priorWatermark = null,
 }) {
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
@@ -399,6 +404,43 @@ export async function runRefreshPipeline({
   // 5. Topic + keyword filter (geo handled in step 4)
   const relevantItems = applyTopicKeywordFilter(geoPassedItems, settings);
 
+  // 5b. Phase 4: watermark over the actual clustering candidate set.  This is
+  //     the "would clustering see the same input as last time?" check — if so
+  //     we skip clustering, grounding, lock writes, and rejection writes.
+  const watermarkInfo = computeWatermark({
+    candidateItems: relevantItems,
+    selectedFeedIds: selectionMeta?.matchedFeedIds ?? [],
+  });
+  if (watermarksMatch(priorWatermark, watermarkInfo.watermark)) {
+    console.log(
+      `[pipeline.watermark] unchanged (${watermarkInfo.watermark}) — skipping clustering, grounding, locks, rejections`
+    );
+    return {
+      payload: null, // signals caller to re-serve prior snapshot
+      log: {
+        unchanged: true,
+        refreshSkippedReason: "unchanged_watermark",
+        watermark: watermarkInfo.watermark,
+        candidateCount: watermarkInfo.candidateCount,
+        selectedFeedCount: watermarkInfo.selectedFeedCount,
+        totalItems: normalizedItems.length,
+        poolCount: poolItems.length,
+        recentCount: recentItems.length,
+        geoHeldCount: geoHeldItems.length,
+        relevantCount: relevantItems.length,
+        relevantItemCount: relevantItems.length,
+        metaStoryCount: 0,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        rejectionRecords: [],
+        normErrors: normErrors.length,
+        selection: { ...selectionMeta, relevantItemCount: relevantItems.length },
+      },
+    };
+  }
+
   // 6. LLM clustering
   let rawMetaStories;
   let usedFallbackClustering = false;
@@ -462,6 +504,7 @@ export async function runRefreshPipeline({
         factual_claims_count: Array.isArray(ms.factual_claims) ? ms.factual_claims.length : 0,
         tags: ms.tags ?? null,
       },
+      watermark: watermarkInfo.watermark, // Phase 4: stamps for dedup key
       created_at: rejectedAt,
     });
   }
@@ -514,6 +557,14 @@ export async function runRefreshPipeline({
     rejectionRecords, // exposed in log for testability; route persists via writeRejectionsFn
     normErrors: normErrors.length,
     selection: { ...selectionMeta, relevantItemCount: relevantItems.length },
+    // Phase 4 hardening: watermark + skip metadata.  `unchanged` is false here
+    // because we executed the full pipeline; the short-circuit branch above
+    // returns early with `unchanged: true` and `payload: null`.
+    unchanged: false,
+    refreshSkippedReason: null,
+    watermark: watermarkInfo.watermark,
+    candidateCount: watermarkInfo.candidateCount,
+    selectedFeedCount: watermarkInfo.selectedFeedCount,
   };
 
   return { payload, log };

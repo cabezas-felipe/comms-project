@@ -1177,3 +1177,151 @@ test("runRefreshPipeline: rejection records never appear in payload.stories (no 
   assert.equal(log.rejectionRecords[0].reason_code, "no_valid_source_ids");
   assert.equal(log.rejectionRecords[0].meta_story_id, "halluc");
 });
+
+// ─── Phase 4: watermark + short-circuit + dedup-stamping ─────────────────────
+
+test("runRefreshPipeline: full run emits a watermark in log + candidateCount + selectedFeedCount", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(log.unchanged, false);
+  assert.equal(log.refreshSkippedReason, null);
+  assert.ok(/^[0-9a-f]{16}$/.test(log.watermark), `expected 16-hex watermark, got ${log.watermark}`);
+  assert.equal(log.candidateCount, 1);
+  assert.equal(log.selectedFeedCount, 1);
+});
+
+test("runRefreshPipeline: priorWatermark match → short-circuit, payload null, no clusterFn invocation", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+
+  // First run computes the watermark.
+  let clusterCalls = 0;
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] };
+  const first = await runRefreshPipeline({
+    settings,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const wm = first.log.watermark;
+  assert.equal(clusterCalls, 1);
+
+  // Second run with the SAME inputs + priorWatermark === watermark → short-circuit.
+  const second = await runRefreshPipeline({
+    settings,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    priorWatermark: wm,
+  });
+  assert.equal(second.payload, null, "short-circuit returns payload=null");
+  assert.equal(second.log.unchanged, true);
+  assert.equal(second.log.refreshSkippedReason, "unchanged_watermark");
+  assert.equal(second.log.watermark, wm);
+  assert.equal(clusterCalls, 1, "clusterFn must NOT be invoked under short-circuit");
+});
+
+test("runRefreshPipeline: priorWatermark mismatch → full run executes (cluster invoked)", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => { calls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    priorWatermark: "stale-watermark-from-yesterday",
+  });
+  assert.notEqual(payload, null);
+  assert.equal(log.unchanged, false);
+  assert.equal(calls, 1);
+});
+
+test("runRefreshPipeline: priorWatermark match + writeRejectionsFn → no rejection writes (idempotency)", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+
+  // First run: no failures, just to capture the watermark.
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] };
+  const first = await runRefreshPipeline({
+    settings,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const wm = first.log.watermark;
+
+  // Second run under unchanged watermark.  A clusterFn that would have failed
+  // grounding is provided — but it must NOT be invoked because we short-circuit
+  // before clustering, so writeRejectionsFn must NOT be called either.
+  let rejectionWrites = 0;
+  await runRefreshPipeline({
+    settings,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => [{
+      meta_story_id: "halluc",
+      title: "Bad",
+      subtitle: "Sub.",
+      source_item_ids: ["fake-only"],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    priorWatermark: wm,
+    writeRejectionsFn: async () => { rejectionWrites++; },
+  });
+  assert.equal(rejectionWrites, 0, "rejection writes must not occur when watermark short-circuits");
+});
+
+test("runRefreshPipeline: rejection records carry watermark stamp for dedup", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "real-src", outlet: "Reuters", minutesAgo: 30 })];
+  const story = {
+    meta_story_id: "halluc",
+    title: "Hallucinated",
+    subtitle: "Sub.",
+    source_item_ids: ["fake-only"],
+    summary: "Summary.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+  };
+  let captured = null;
+  await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => [story],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    writeRejectionsFn: async (recs) => { captured = recs; },
+  });
+  assert.ok(Array.isArray(captured) && captured.length === 1);
+  assert.ok(/^[0-9a-f]{16}$/.test(captured[0].watermark), "rejection record must carry watermark stamp");
+});
