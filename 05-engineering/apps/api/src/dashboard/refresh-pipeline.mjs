@@ -2,8 +2,6 @@ import { normalizeSourceItems } from "../ingestion/source-normalizer.mjs";
 import {
   verifyGrounding,
   gracefulFallbackClustering,
-  extractiveSummary,
-  extractiveSubtitle,
   generateMetaStoryId,
 } from "../ai/cluster-engine.mjs";
 import { applyGeoFilter, mockAssessGeoConfidence } from "./geo-filter.mjs";
@@ -268,10 +266,12 @@ function buildStory(metaStory, sourceItems) {
  * @param {object}   [opts.aliasMap]         — merged alias map (Supabase ∪ repo fallback)
  * @param {string[]} [opts.fallbackFeedIds]  — env-configured fallback baseline feed IDs
  * @param {boolean}  [opts.fallbackEnabled]
+ * @param {Function} [opts.writeRejectionsFn] — injectable rejection-log writer (Phase 3)
  *
  * @returns {{ payload: object, log: object }}
  *   payload — ready-to-persist dashboard payload
- *   log     — observability metadata (includes selection meta in `log.selection`)
+ *   log     — observability metadata (includes selection meta in `log.selection`
+ *             and Phase 3 strict-grounding metrics)
  */
 export async function runRefreshPipeline({
   settings,
@@ -287,6 +287,7 @@ export async function runRefreshPipeline({
   aliasMap = undefined,
   fallbackFeedIds = [],
   fallbackEnabled = true,
+  writeRejectionsFn = null,
 }) {
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
@@ -441,28 +442,51 @@ export async function runRefreshPipeline({
   );
 
   const groundingFailures = failedGrounding.length;
-  if (groundingFailures > 0) {
-    console.warn(`[pipeline] ${groundingFailures} meta-story grounding failure(s); applying extractive fallback`);
+
+  // Phase 3 (strict trust posture): ANY grounding failure drops the story
+  // from the published dashboard.  No extractive fallback for partial_source_ids,
+  // no soft-publish for ungrounded_claims.  Dropped stories are persisted
+  // separately (rejection log) for offline analysis — never returned to clients.
+  const groundingDropReasons = {};
+  const rejectionRecords = [];
+  const rejectedAt = new Date().toISOString();
+  for (const ms of failedGrounding) {
+    const reason = ms.groundingFailure ?? "unknown";
+    groundingDropReasons[reason] = (groundingDropReasons[reason] ?? 0) + 1;
+    rejectionRecords.push({
+      meta_story_id: ms.meta_story_id ?? null,
+      reason_code: reason,
+      source_item_ids: Array.isArray(ms.source_item_ids) ? ms.source_item_ids : [],
+      debug_payload: {
+        title: ms.title ?? null,
+        factual_claims_count: Array.isArray(ms.factual_claims) ? ms.factual_claims.length : 0,
+        tags: ms.tags ?? null,
+      },
+      created_at: rejectedAt,
+    });
+  }
+  const droppedUngroundedStoryCount = rejectionRecords.length;
+  if (droppedUngroundedStoryCount > 0) {
+    const breakdown = Object.entries(groundingDropReasons)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(",");
+    console.warn(
+      `[pipeline.grounding] strict drop — ${droppedUngroundedStoryCount} story(ies) excluded (${breakdown})`
+    );
+    if (writeRejectionsFn) {
+      try {
+        await writeRejectionsFn(rejectionRecords);
+      } catch (err) {
+        console.warn(
+          `[pipeline.grounding] rejection-log write failed: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
   }
 
-  // Apply extractive fallback only for partial_source_ids (some valid IDs remain).
-  // Overwrite both summary AND subtitle from surviving sources — model-supplied
-  // subtitle text can carry ungrounded claims and must not leak through this path.
-  const fallbackStories = failedGrounding
-    .filter((ms) => ms.groundingFailure === "partial_source_ids")
-    .map((ms) => {
-      const sourceItems = ms.source_item_ids.map((id) => sourceItemsById.get(id)).filter(Boolean);
-      return {
-        ...ms,
-        summary: extractiveSummary(ms.title, sourceItems),
-        subtitle: extractiveSubtitle(sourceItems),
-      };
-    });
-
-  const allMetaStories = [...groundedStories, ...fallbackStories];
-
-  // 10. Build response stories (resolve source items, shape to schema)
-  const stories = allMetaStories.map((ms) => {
+  // 10. Build response stories (resolve source items, shape to schema).
+  //     Only `groundedStories` (passed all grounding gates) reach this step.
+  const stories = groundedStories.map((ms) => {
     const sourceItems = ms.source_item_ids
       .map((id) => sourceItemsById.get(id))
       .filter(Boolean);
@@ -484,6 +508,10 @@ export async function runRefreshPipeline({
     metaStoryCount: stories.length,
     usedFallbackClustering,
     groundingFailures,
+    // Phase 3 strict-grounding metrics
+    droppedUngroundedStoryCount,
+    groundingDropReasons,
+    rejectionRecords, // exposed in log for testability; route persists via writeRejectionsFn
     normErrors: normErrors.length,
     selection: { ...selectionMeta, relevantItemCount: relevantItems.length },
   };

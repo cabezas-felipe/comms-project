@@ -12,6 +12,7 @@ import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
 import { readSnapshot, writeSnapshot, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket } from "./db/dashboard-snapshot-repo.mjs";
+import { appendRejections as appendStoryRejections } from "./db/story-rejection-log-repo.mjs";
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
 import { mockAssessGeoConfidence } from "./dashboard/geo-filter.mjs";
@@ -227,8 +228,16 @@ export const _refreshPipeline = {
       readHeldFn: opts.userId ? () => _snapshotRepo.readHeld(opts.userId) : null,
       writeHeldFn: opts.userId ? (items) => _snapshotRepo.writeHeld(opts.userId, items) : null,
       readPriorSnapshotFn: opts.userId ? () => _snapshotRepo.read(opts.userId) : null,
+      writeRejectionsFn: opts.userId ? (recs) => _rejectionLog.write(opts.userId, recs) : null,
     }),
 };
+
+/**
+ * Mutable rejection-log hook (Phase 3 strict grounding). Tests override
+ * `_rejectionLog.write` to capture dropped-story records without persisting.
+ * Internal only — never surfaced via dashboard routes.
+ */
+export const _rejectionLog = { write: appendStoryRejections };
 
 /**
  * Mutable geo-confidence assessor hook. Tests override assess to inject
@@ -584,7 +593,7 @@ app.post("/api/dashboard/refresh", async (req, res) => {
     const elapsedMs = Date.now() - startedAt;
     const sel = log.selection ?? {};
     console.log(
-      `[dashboard.refresh] user=${identity.userId} stories=${finalPayload.stories.length} pool=${log.poolCount} relevant=${log.relevantCount} elapsed=${elapsedMs}ms fallback=${log.usedFallbackClustering} groundingFail=${log.groundingFailures} selectionMode=${sel.sourceSelectionMode} sourceFallback=${sel.sourceFallbackUsed}`
+      `[dashboard.refresh] user=${identity.userId} stories=${finalPayload.stories.length} pool=${log.poolCount} relevant=${log.relevantCount} elapsed=${elapsedMs}ms fallback=${log.usedFallbackClustering} groundingFail=${log.groundingFailures} dropped=${log.droppedUngroundedStoryCount ?? 0} selectionMode=${sel.sourceSelectionMode} sourceFallback=${sel.sourceFallbackUsed}`
     );
 
     trackServerEvent("dashboard_refreshed", {
@@ -605,6 +614,9 @@ app.post("/api/dashboard/refresh", async (req, res) => {
       unmatchedSelectedSourceCount: (sel.unmatchedSelectedSources ?? []).length,
       unavailableConnectorCount: sel.unavailableConnectorCount,
       relevantItemCount: sel.relevantItemCount,
+      // Phase 3 strict-grounding telemetry
+      droppedUngroundedStoryCount: log.droppedUngroundedStoryCount ?? 0,
+      groundingDropReasons: log.groundingDropReasons ?? {},
     });
 
     // Strip the persisted-only `_selectionMeta` field before responding —
