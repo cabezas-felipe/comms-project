@@ -488,6 +488,33 @@ app.get("/api/ingestion/sources", async (_req, res) => {
   }
 });
 
+// ─── Dashboard response helpers ──────────────────────────────────────────────
+// The `_selectionMeta` (Phase 2) and `_watermark` (Phase 4) fields are
+// persisted alongside the contract payload but must NOT leak into the response
+// body — they're surfaced under `_meta.selection` / `_meta.watermark` instead.
+// Both dashboard routes (GET, POST refresh, POST bootstrap) repeat the same
+// strip+reattach dance, so it lives here in one place.
+
+function stripPersistedFields(snapshot) {
+  const { _meta = {}, _selectionMeta, _watermark, ...body } = snapshot ?? {};
+  return { body, baseMeta: _meta, selectionMeta: _selectionMeta, watermark: _watermark };
+}
+
+function attachInternalsToMeta(meta, { selectionMeta, watermark } = {}) {
+  const out = { ...(meta ?? {}) };
+  if (selectionMeta) out.selection = selectionMeta;
+  if (watermark) out.watermark = watermark;
+  return out;
+}
+
+function emptyDashboardResponse(metaExtra = {}) {
+  return {
+    contractVersion: DEFAULT_SETTINGS.contractVersion,
+    stories: [],
+    _meta: { hasSnapshot: false, ...metaExtra },
+  };
+}
+
 app.get("/api/dashboard", async (req, res) => {
   const identity = await requireIdentity(req, res);
   if (!identity) return;
@@ -499,18 +526,10 @@ app.get("/api/dashboard", async (req, res) => {
         storyCount: 0,
         identitySource: identity.source,
       });
-      return res.json({
-        contractVersion: DEFAULT_SETTINGS.contractVersion,
-        stories: [],
-        _meta: { hasSnapshot: false },
-      });
+      return res.json(emptyDashboardResponse());
     }
-    // Strip non-payload fields before schema validation. `_selectionMeta`
-    // (Phase 2) and `_watermark` (Phase 4) are persisted alongside the
-    // contract payload and surfaced through `_meta.*` on the way out — they
-    // are NOT part of dashboardPayloadSchema.
-    const { _meta, _selectionMeta, _watermark, ...snapshotBody } = snapshot;
-    const validation = dashboardPayloadSchema.safeParse(snapshotBody);
+    const { body, baseMeta, selectionMeta, watermark } = stripPersistedFields(snapshot);
+    const validation = dashboardPayloadSchema.safeParse(body);
     if (!validation.success) {
       console.warn(
         `[dashboard.get] snapshot for user=${identity.userId} failed schema validation; returning empty`,
@@ -522,22 +541,14 @@ app.get("/api/dashboard", async (req, res) => {
         identitySource: identity.source,
         validationFailed: true,
       });
-      return res.json({
-        contractVersion: DEFAULT_SETTINGS.contractVersion,
-        stories: [],
-        _meta: { hasSnapshot: false },
-      });
+      return res.json(emptyDashboardResponse());
     }
     trackServerEvent("api_dashboard_requested", {
       hasSnapshot: true,
       storyCount: snapshot.stories?.length ?? 0,
       identitySource: identity.source,
     });
-    // Re-attach selection metadata + watermark to `_meta` for the frontend.
-    const responseMeta = { ..._meta };
-    if (_selectionMeta) responseMeta.selection = _selectionMeta;
-    if (_watermark) responseMeta.watermark = _watermark;
-    res.json({ ...snapshotBody, _meta: responseMeta });
+    res.json({ ...body, _meta: attachInternalsToMeta(baseMeta, { selectionMeta, watermark }) });
   } catch (error) {
     trackServerEvent("api_error", {
       route: "/api/dashboard",
@@ -585,29 +596,23 @@ async function executeRefreshFlow(identity) {
     });
     const inflightSnapshot = await _snapshotRepo.read(identity.userId).catch(() => null);
     if (inflightSnapshot) {
-      const { _meta: _m, _selectionMeta, _watermark: _wm, ...body } = inflightSnapshot;
+      const { body, baseMeta, selectionMeta } = stripPersistedFields(inflightSnapshot);
       return {
         kind: "in_flight",
         httpStatus: 200,
         body: {
           ...body,
-          _meta: {
-            ...(_m ?? {}),
-            refreshSkippedReason: "in_flight",
-            unchanged: false,
-            ...(_selectionMeta ? { selection: _selectionMeta } : {}),
-          },
+          _meta: attachInternalsToMeta(
+            { ...baseMeta, refreshSkippedReason: "in_flight", unchanged: false },
+            { selectionMeta }
+          ),
         },
       };
     }
     return {
       kind: "in_flight",
       httpStatus: 200,
-      body: {
-        contractVersion: DEFAULT_SETTINGS.contractVersion,
-        stories: [],
-        _meta: { hasSnapshot: false, refreshSkippedReason: "in_flight", unchanged: false },
-      },
+      body: emptyDashboardResponse({ refreshSkippedReason: "in_flight", unchanged: false }),
     };
   }
 
@@ -648,40 +653,31 @@ async function executeRefreshFlow(identity) {
         elapsedMs,
         identitySource: identity.source,
       });
+      const skipMeta = {
+        unchanged: true,
+        refreshSkippedReason: "unchanged_watermark",
+        watermark: log.watermark,
+        candidateCount: log.candidateCount,
+        selectedFeedCount: log.selectedFeedCount,
+      };
       if (priorSnapshot) {
-        const { _meta: _pm, _selectionMeta: _psm, _watermark: _pwm, ...body } = priorSnapshot;
+        const { body, baseMeta, selectionMeta } = stripPersistedFields(priorSnapshot);
         return {
           kind: "unchanged",
           httpStatus: 200,
           body: {
             ...body,
-            _meta: {
-              ...(_pm ?? {}),
-              unchanged: true,
-              refreshSkippedReason: "unchanged_watermark",
-              watermark: log.watermark,
-              candidateCount: log.candidateCount,
-              selectedFeedCount: log.selectedFeedCount,
-              ...(_psm ? { selection: _psm } : { selection: log.selection }),
-            },
+            _meta: attachInternalsToMeta(
+              { ...baseMeta, ...skipMeta },
+              { selectionMeta: selectionMeta ?? log.selection }
+            ),
           },
         };
       }
       return {
         kind: "unchanged",
         httpStatus: 200,
-        body: {
-          contractVersion: DEFAULT_SETTINGS.contractVersion,
-          stories: [],
-          _meta: {
-            hasSnapshot: false,
-            unchanged: true,
-            refreshSkippedReason: "unchanged_watermark",
-            watermark: log.watermark,
-            candidateCount: log.candidateCount,
-            selectedFeedCount: log.selectedFeedCount,
-          },
-        },
+        body: emptyDashboardResponse(skipMeta),
       };
     }
 
@@ -739,7 +735,7 @@ async function executeRefreshFlow(identity) {
       unchanged: false,
     });
 
-    const { _selectionMeta: _ps, _watermark: _pw, ...responsePayload } = finalPayload;
+    const { body: responsePayload } = stripPersistedFields(finalPayload);
     return {
       kind: "ran",
       httpStatus: 200,
@@ -771,11 +767,11 @@ async function executeRefreshFlow(identity) {
     try {
       const lastSnapshot = await _snapshotRepo.read(identity.userId);
       if (lastSnapshot) {
-        const { _meta: _lm, _selectionMeta: _lsm, _watermark: _lwm, ...lastBody } = lastSnapshot;
+        const { body: lastBody, baseMeta } = stripPersistedFields(lastSnapshot);
         return {
           kind: "error_fallback",
           httpStatus: 200,
-          body: { ...lastBody, _meta: { ...(_lm ?? {}), fallback: true } },
+          body: { ...lastBody, _meta: { ...baseMeta, fallback: true } },
         };
       }
     } catch { /* ignore */ }
@@ -835,7 +831,7 @@ app.post("/api/dashboard/bootstrap", async (req, res) => {
   const snapshot = await _snapshotRepo.read(identity.userId).catch(() => null);
   const ageMs = snapshotAgeMs(snapshot);
   if (snapshot && ageMs <= BOOTSTRAP_FRESHNESS_THRESHOLD_MS) {
-    const { _meta, _selectionMeta, _watermark, ...body } = snapshot;
+    const { body, baseMeta, selectionMeta, watermark } = stripPersistedFields(snapshot);
     // Mirror GET /api/dashboard's contract validation: a malformed persisted
     // snapshot must NOT leak through.  On validation failure we fall back to
     // the same empty-payload shape GET uses, but tag the bootstrap decision as
@@ -852,15 +848,9 @@ app.post("/api/dashboard/bootstrap", async (req, res) => {
         identitySource: identity.source,
         validationFailed: true,
       });
-      return res.json({
-        contractVersion: DEFAULT_SETTINGS.contractVersion,
-        stories: [],
-        _meta: { hasSnapshot: false, bootstrapDecision: "no_snapshot" },
-      });
+      return res.json(emptyDashboardResponse({ bootstrapDecision: "no_snapshot" }));
     }
-    const responseMeta = { ...(_meta ?? {}) };
-    if (_selectionMeta) responseMeta.selection = _selectionMeta;
-    if (_watermark) responseMeta.watermark = _watermark;
+    const responseMeta = attachInternalsToMeta(baseMeta, { selectionMeta, watermark });
     responseMeta.bootstrapDecision = "served_fresh_snapshot";
     console.log(
       `[dashboard.bootstrap] user=${identity.userId} decision=served_fresh_snapshot ageMs=${ageMs}`
