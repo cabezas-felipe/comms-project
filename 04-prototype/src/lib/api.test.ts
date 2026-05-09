@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTRACT_VERSION } from "@tempo/contracts";
-import { fetchDashboardPayload, fetchDashboardWithMeta } from "@/lib/api";
+import { bootstrapDashboard, fetchDashboardPayload, fetchDashboardWithMeta } from "@/lib/api";
 import { STORIES } from "@/data/stories";
 
 vi.mock("@/lib/supabase", () => ({
@@ -253,5 +253,99 @@ describe("fetchDashboardPayload — identity header propagation", () => {
 
     expect(capturedHeaders["Authorization"]).toBeUndefined();
     expect(capturedHeaders["x-recognized-email"]).toBeUndefined();
+  });
+});
+
+describe("Phase 5: bootstrapDashboard", () => {
+  it("POSTs to /api/dashboard/bootstrap and surfaces decision=served_fresh_snapshot", async () => {
+    let capturedUrl = "";
+    let capturedMethod = "";
+    const fetcher = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      capturedUrl = url;
+      capturedMethod = init.method ?? "";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          contractVersion: CONTRACT_VERSION,
+          stories: STORIES,
+          _meta: {
+            hasSnapshot: true,
+            refreshedAt: "2026-05-08T00:00:00Z",
+            bootstrapDecision: "served_fresh_snapshot",
+          },
+        }),
+      };
+    });
+    const { payload, decision } = await bootstrapDashboard({ fetcher, retries: 0 });
+    expect(capturedUrl).toBe("/api/dashboard/bootstrap");
+    expect(capturedMethod).toBe("POST");
+    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
+    expect(decision).toBe("served_fresh_snapshot");
+  });
+
+  it("parses decision=ran_refresh", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { hasSnapshot: true, bootstrapDecision: "ran_refresh" },
+      }),
+    });
+    const { decision } = await bootstrapDashboard({ fetcher, retries: 0 });
+    expect(decision).toBe("ran_refresh");
+  });
+
+  it("parses decision=no_snapshot", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { hasSnapshot: false, bootstrapDecision: "no_snapshot" },
+      }),
+    });
+    const { decision } = await bootstrapDashboard({ fetcher, retries: 0 });
+    expect(decision).toBe("no_snapshot");
+  });
+
+  it("returns decision=null when API omits the field (forward compat)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: CONTRACT_VERSION, stories: STORIES }),
+    });
+    const { decision } = await bootstrapDashboard({ fetcher, retries: 0 });
+    expect(decision).toBeNull();
+  });
+
+  it("returns decision=null when API supplies an unknown enum value (defensive)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { bootstrapDecision: "rebooted_the_universe" },
+      }),
+    });
+    const { decision } = await bootstrapDashboard({ fetcher, retries: 0 });
+    expect(decision).toBeNull();
+  });
+
+  it("retries on non-2xx then falls back to local payload + decision=null", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const { payload, decision } = await bootstrapDashboard({ fetcher, retries: 1, sleep });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
+    expect(decision).toBeNull();
   });
 });

@@ -551,19 +551,29 @@ app.get("/api/dashboard", async (req, res) => {
   }
 });
 
-app.post("/api/dashboard/refresh", async (req, res) => {
-  const identity = await requireIdentity(req, res);
-  if (!identity) return;
+/**
+ * Phase 5: shared refresh executor used by both POST /api/dashboard/refresh
+ * and the bootstrap route's "stale or missing snapshot → run refresh" path.
+ *
+ * Returns `{ kind, httpStatus, body }` where `kind` describes the terminal
+ * branch the refresh took.  Bootstrap uses `kind` to derive its
+ * `bootstrapDecision` enum without re-implementing pipeline orchestration.
+ *
+ *   kind ∈
+ *     "in_flight"      — concurrent refresh in progress; this caller did not run anything
+ *     "unchanged"      — pipeline watermark short-circuited; no new work performed
+ *     "ran"            — full pipeline ran, snapshot persisted
+ *     "error_fallback" — pipeline threw; served prior snapshot as soft fallback
+ *     "error_500"      — pipeline threw and no prior snapshot to fall back on
+ *
+ * Telemetry inside this helper only emits the existing refresh-flow events
+ * (`dashboard_refreshed`, `dashboard_refresh_skipped`, `api_error`).  Bootstrap
+ * adds its own `dashboard_bootstrap` event on top.
+ */
+async function executeRefreshFlow(identity) {
   const startedAt = Date.now();
 
-  // Phase 4: per-user in-flight guard.  Concurrent refresh attempts return the
-  // existing snapshot with `refreshSkippedReason: "in_flight"` instead of
-  // launching a duplicate pipeline run.
-  //
-  // NOTE: guard is process-local (see refresh-guard.mjs).  In multi-instance
-  // deployments two replicas can each start a refresh; watermark short-circuit
-  // and rejection-log dedup absorb correctness, but the second clustering call
-  // may still incur cost.  `refreshGuardScope` in telemetry lets us spot this.
+  // Phase 4: per-user in-flight guard.  See refresh-guard.mjs for scope notes.
   if (!tryAcquireRefresh(identity.userId)) {
     console.log(
       `[dashboard.refresh] user=${identity.userId} skipped: in_flight (scope=${REFRESH_GUARD_SCOPE})`
@@ -576,21 +586,29 @@ app.post("/api/dashboard/refresh", async (req, res) => {
     const inflightSnapshot = await _snapshotRepo.read(identity.userId).catch(() => null);
     if (inflightSnapshot) {
       const { _meta: _m, _selectionMeta, _watermark: _wm, ...body } = inflightSnapshot;
-      return res.json({
-        ...body,
-        _meta: {
-          ...(_m ?? {}),
-          refreshSkippedReason: "in_flight",
-          unchanged: false,
-          ...(_selectionMeta ? { selection: _selectionMeta } : {}),
+      return {
+        kind: "in_flight",
+        httpStatus: 200,
+        body: {
+          ...body,
+          _meta: {
+            ...(_m ?? {}),
+            refreshSkippedReason: "in_flight",
+            unchanged: false,
+            ...(_selectionMeta ? { selection: _selectionMeta } : {}),
+          },
         },
-      });
+      };
     }
-    return res.json({
-      contractVersion: DEFAULT_SETTINGS.contractVersion,
-      stories: [],
-      _meta: { hasSnapshot: false, refreshSkippedReason: "in_flight", unchanged: false },
-    });
+    return {
+      kind: "in_flight",
+      httpStatus: 200,
+      body: {
+        contractVersion: DEFAULT_SETTINGS.contractVersion,
+        stories: [],
+        _meta: { hasSnapshot: false, refreshSkippedReason: "in_flight", unchanged: false },
+      },
+    };
   }
 
   try {
@@ -617,10 +635,6 @@ app.post("/api/dashboard/refresh", async (req, res) => {
     });
 
     // ─── Phase 4 short-circuit: watermark unchanged ─────────────────────────
-    // Pipeline returned `payload: null` to signal nothing changed since last
-    // refresh.  Re-serve the prior snapshot, advertise `_meta.unchanged: true`
-    // and `refreshSkippedReason: "unchanged_watermark"`, and DO NOT touch
-    // locks, rejection log, or snapshot writes (idempotency).
     if (log?.unchanged === true && payload === null) {
       const elapsedMs = Date.now() - startedAt;
       console.log(
@@ -636,35 +650,42 @@ app.post("/api/dashboard/refresh", async (req, res) => {
       });
       if (priorSnapshot) {
         const { _meta: _pm, _selectionMeta: _psm, _watermark: _pwm, ...body } = priorSnapshot;
-        return res.json({
-          ...body,
+        return {
+          kind: "unchanged",
+          httpStatus: 200,
+          body: {
+            ...body,
+            _meta: {
+              ...(_pm ?? {}),
+              unchanged: true,
+              refreshSkippedReason: "unchanged_watermark",
+              watermark: log.watermark,
+              candidateCount: log.candidateCount,
+              selectedFeedCount: log.selectedFeedCount,
+              ...(_psm ? { selection: _psm } : { selection: log.selection }),
+            },
+          },
+        };
+      }
+      return {
+        kind: "unchanged",
+        httpStatus: 200,
+        body: {
+          contractVersion: DEFAULT_SETTINGS.contractVersion,
+          stories: [],
           _meta: {
-            ...(_pm ?? {}),
+            hasSnapshot: false,
             unchanged: true,
             refreshSkippedReason: "unchanged_watermark",
             watermark: log.watermark,
             candidateCount: log.candidateCount,
             selectedFeedCount: log.selectedFeedCount,
-            ...(_psm ? { selection: _psm } : { selection: log.selection }),
           },
-        });
-      }
-      // No prior snapshot but watermark matched — degenerate case (both null).
-      return res.json({
-        contractVersion: DEFAULT_SETTINGS.contractVersion,
-        stories: [],
-        _meta: {
-          hasSnapshot: false,
-          unchanged: true,
-          refreshSkippedReason: "unchanged_watermark",
-          watermark: log.watermark,
-          candidateCount: log.candidateCount,
-          selectedFeedCount: log.selectedFeedCount,
         },
-      });
+      };
     }
 
-    // Apply title/subtitle locks: look up existing locks, apply them, insert new ones
+    // Apply title/subtitle locks
     const metaStoryIds = payload.stories.map((s) => s.metaStoryId).filter(Boolean);
     const lockedTitles = await _snapshotRepo.getLocks(identity.userId, metaStoryIds);
 
@@ -682,10 +703,6 @@ app.post("/api/dashboard/refresh", async (req, res) => {
     await _snapshotRepo.insertLocks(identity.userId, newLocks);
 
     const finalPayload = { ...payload, stories: lockedStories };
-
-    // Persist selection metadata + watermark alongside the payload.  Both are
-    // internal storage fields (prefixed with `_`); GET /api/dashboard strips
-    // them before contract validation and surfaces the watermark via _meta.
     finalPayload._selectionMeta = log.selection;
     finalPayload._watermark = log.watermark;
 
@@ -706,7 +723,6 @@ app.post("/api/dashboard/refresh", async (req, res) => {
       elapsedMs,
       clusterModel,
       identitySource: identity.source,
-      // Phase 2 selection telemetry
       sourceSelectionMode: sel.sourceSelectionMode,
       sourceFallbackUsed: sel.sourceFallbackUsed,
       sourceFallbackReason: sel.sourceFallbackReason,
@@ -715,31 +731,31 @@ app.post("/api/dashboard/refresh", async (req, res) => {
       unmatchedSelectedSourceCount: (sel.unmatchedSelectedSources ?? []).length,
       unavailableConnectorCount: sel.unavailableConnectorCount,
       relevantItemCount: sel.relevantItemCount,
-      // Phase 3 strict-grounding telemetry
       droppedUngroundedStoryCount: log.droppedUngroundedStoryCount ?? 0,
       groundingDropReasons: log.groundingDropReasons ?? {},
-      // Phase 4 watermark + idempotency telemetry
       watermark: log.watermark,
       candidateCount: log.candidateCount,
       selectedFeedCount: log.selectedFeedCount,
       unchanged: false,
     });
 
-    // Strip persisted-only fields before responding — clients consume
-    // `_meta.selection` and `_meta.watermark` instead.
     const { _selectionMeta: _ps, _watermark: _pw, ...responsePayload } = finalPayload;
-    res.json({
-      ...responsePayload,
-      _meta: {
-        refreshedAt: new Date().toISOString(),
-        hasSnapshot: true,
-        selection: log.selection,
-        unchanged: false,
-        watermark: log.watermark,
-        candidateCount: log.candidateCount,
-        selectedFeedCount: log.selectedFeedCount,
+    return {
+      kind: "ran",
+      httpStatus: 200,
+      body: {
+        ...responsePayload,
+        _meta: {
+          refreshedAt: new Date().toISOString(),
+          hasSnapshot: true,
+          selection: log.selection,
+          unchanged: false,
+          watermark: log.watermark,
+          candidateCount: log.candidateCount,
+          selectedFeedCount: log.selectedFeedCount,
+        },
       },
-    });
+    };
   } catch (error) {
     const elapsedMs = Date.now() - startedAt;
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -752,22 +768,166 @@ app.post("/api/dashboard/refresh", async (req, res) => {
       elapsedMs,
     });
 
-    // Serve last good snapshot on failure
     try {
       const lastSnapshot = await _snapshotRepo.read(identity.userId);
       if (lastSnapshot) {
         const { _meta: _lm, _selectionMeta: _lsm, _watermark: _lwm, ...lastBody } = lastSnapshot;
-        return res.json({ ...lastBody, _meta: { ...(_lm ?? {}), fallback: true } });
+        return {
+          kind: "error_fallback",
+          httpStatus: 200,
+          body: { ...lastBody, _meta: { ...(_lm ?? {}), fallback: true } },
+        };
       }
     } catch { /* ignore */ }
 
-    res.status(500).json({
-      message: "Dashboard refresh failed.",
-      detail: message,
-    });
+    return {
+      kind: "error_500",
+      httpStatus: 500,
+      body: { message: "Dashboard refresh failed.", detail: message },
+    };
   } finally {
     releaseRefresh(identity.userId);
   }
+}
+
+/**
+ * Mutable execution hook for the shared refresh flow.  Both
+ * `POST /api/dashboard/refresh` and the bootstrap route's "stale or missing
+ * snapshot" path go through this hook so tests can stub flow outcomes
+ * (in_flight, ran, unchanged, error_*) deterministically without timing/
+ * concurrency races.  Production code reads `_refreshExecutor.execute` —
+ * tests replace it inside a `try/finally` and restore the prior reference.
+ */
+export const _refreshExecutor = { execute: executeRefreshFlow };
+
+app.post("/api/dashboard/refresh", async (req, res) => {
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  const { httpStatus, body } = await _refreshExecutor.execute(identity);
+  res.status(httpStatus).json(body);
+});
+
+// ─── Phase 5: bootstrap route ────────────────────────────────────────────────
+//
+// Backend-owned freshness policy: dashboard's first paint after Landing or
+// post-Onboarding entry calls this endpoint instead of GET /api/dashboard.
+// Behavior:
+//   - snapshot exists AND age <= 60 min  →  served_fresh_snapshot (no refresh)
+//   - snapshot missing OR age > 60 min   →  ran_refresh (delegate to refresh flow)
+//   - refresh attempt produced no snapshot at all → no_snapshot
+//
+// The `bootstrapDecision` field is exclusive to this route — GET /api/dashboard
+// and POST /api/dashboard/refresh do not surface it.
+const BOOTSTRAP_FRESHNESS_THRESHOLD_MS = 60 * 60 * 1000;
+
+function snapshotAgeMs(snapshot) {
+  const ts = snapshot?._meta?.refreshedAt;
+  if (!ts) return Infinity;
+  const parsed = Date.parse(ts);
+  return Number.isFinite(parsed) ? Date.now() - parsed : Infinity;
+}
+
+app.post("/api/dashboard/bootstrap", async (req, res) => {
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+
+  // 1. Try to serve fresh snapshot without running anything expensive.
+  const snapshot = await _snapshotRepo.read(identity.userId).catch(() => null);
+  const ageMs = snapshotAgeMs(snapshot);
+  if (snapshot && ageMs <= BOOTSTRAP_FRESHNESS_THRESHOLD_MS) {
+    const { _meta, _selectionMeta, _watermark, ...body } = snapshot;
+    // Mirror GET /api/dashboard's contract validation: a malformed persisted
+    // snapshot must NOT leak through.  On validation failure we fall back to
+    // the same empty-payload shape GET uses, but tag the bootstrap decision as
+    // `no_snapshot` since the persisted blob was unusable.
+    const validation = dashboardPayloadSchema.safeParse(body);
+    if (!validation.success) {
+      console.warn(
+        `[dashboard.bootstrap] user=${identity.userId} snapshot failed schema validation; serving empty`,
+        validation.error.errors
+      );
+      trackServerEvent("dashboard_bootstrap", {
+        decision: "no_snapshot",
+        snapshotAgeMs: ageMs,
+        identitySource: identity.source,
+        validationFailed: true,
+      });
+      return res.json({
+        contractVersion: DEFAULT_SETTINGS.contractVersion,
+        stories: [],
+        _meta: { hasSnapshot: false, bootstrapDecision: "no_snapshot" },
+      });
+    }
+    const responseMeta = { ...(_meta ?? {}) };
+    if (_selectionMeta) responseMeta.selection = _selectionMeta;
+    if (_watermark) responseMeta.watermark = _watermark;
+    responseMeta.bootstrapDecision = "served_fresh_snapshot";
+    console.log(
+      `[dashboard.bootstrap] user=${identity.userId} decision=served_fresh_snapshot ageMs=${ageMs}`
+    );
+    trackServerEvent("dashboard_bootstrap", {
+      decision: "served_fresh_snapshot",
+      snapshotAgeMs: ageMs,
+      identitySource: identity.source,
+    });
+    return res.json({ ...body, _meta: responseMeta });
+  }
+
+  // 2. Stale or missing — run the refresh flow.  This delegates to the same
+  //    in-flight guard, watermark short-circuit, lock writes, and snapshot
+  //    persistence used by POST /api/dashboard/refresh.
+  const { kind, httpStatus, body } = await _refreshExecutor.execute(identity);
+
+  // Map refresh kind → bootstrap decision.
+  //   "ran"             — fresh pipeline run produced a new snapshot
+  //   "unchanged"       — watermark short-circuit; we attempted refresh but
+  //                       served the prior snapshot — still semantically a
+  //                       refresh attempt, classify as ran_refresh
+  //   "in_flight"       — another refresh is currently running.  Decision is
+  //                       driven by the RETURNED body's `_meta.hasSnapshot`,
+  //                       not the bootstrap-route's earlier snapshot read.
+  //                       The earlier read can be null while executeRefreshFlow
+  //                       (which performs its own re-read) successfully pulls
+  //                       a snapshot — in that case we should still report
+  //                       ran_refresh since data is being served.
+  //   "error_fallback"  — pipeline threw but a prior snapshot was served;
+  //                       still classify as ran_refresh from the user's POV
+  //   "error_500"       — pipeline threw with no fallback snapshot available
+  const hasSnapshotFlag = body?._meta?.hasSnapshot === true;
+  let decision;
+  if (kind === "error_500") {
+    decision = "no_snapshot";
+  } else if (kind === "in_flight") {
+    decision = hasSnapshotFlag ? "ran_refresh" : "no_snapshot";
+  } else {
+    decision = "ran_refresh";
+  }
+
+  // Edge case: ran/unchanged/error_fallback paths can land here without a
+  // snapshot (e.g. first-time pipeline produced empty payload AND no prior
+  // snapshot).  Demote to no_snapshot so clients aren't told a refresh
+  // happened when there's nothing to show.
+  if (!snapshot && !hasSnapshotFlag && decision === "ran_refresh") {
+    decision = "no_snapshot";
+  }
+
+  console.log(
+    `[dashboard.bootstrap] user=${identity.userId} decision=${decision} kind=${kind} hadPriorSnapshot=${!!snapshot}`
+  );
+  trackServerEvent("dashboard_bootstrap", {
+    decision,
+    refreshKind: kind,
+    hadPriorSnapshot: !!snapshot,
+    snapshotAgeMs: ageMs,
+    identitySource: identity.source,
+  });
+
+  if (httpStatus !== 200) {
+    return res.status(httpStatus).json(body);
+  }
+
+  const responseMeta = { ...(body._meta ?? {}), bootstrapDecision: decision };
+  res.json({ ...body, _meta: responseMeta });
 });
 
 app.get("/api/ai/models", (_req, res) => {

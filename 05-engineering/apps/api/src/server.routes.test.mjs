@@ -46,7 +46,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
 
@@ -871,6 +871,342 @@ test("POST /api/dashboard/refresh: in-flight slot is released after pipeline com
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
     _snapshotRepo.read = prevRead;
+  }
+});
+
+// ─── Phase 5: bootstrap route ────────────────────────────────────────────────
+
+test("POST /api/dashboard/bootstrap: 401 without identity", async () => {
+  const prev = _auth.resolver;
+  _auth.resolver = async () => null;
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.status, 401);
+  } finally {
+    _auth.resolver = prev;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: fresh snapshot (<= 60 min) → served_fresh_snapshot, no pipeline run", async () => {
+  const prev = _snapshotRepo.read;
+  const prevRun = _refreshPipeline.run;
+  let pipelineCalls = 0;
+  const FRESH_SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 5 * 60_000).toISOString() }, // 5 min ago
+    _selectionMeta: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 1, selectedSourceCount: 1, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 1 },
+    _watermark: "wm-fresh",
+  };
+  _snapshotRepo.read = async () => FRESH_SNAPSHOT;
+  _refreshPipeline.run = async () => { pipelineCalls++; return { payload: null, log: { unchanged: true } }; };
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.bootstrapDecision, "served_fresh_snapshot");
+    assert.equal(pipelineCalls, 0, "pipeline must NOT run when snapshot is fresh");
+    assert.equal(res.body._meta.watermark, "wm-fresh", "watermark surfaced from snapshot");
+    assert.ok(res.body._meta.selection, "selection meta surfaced");
+    // Internal storage fields must not leak
+    assert.equal(res.body._selectionMeta, undefined);
+    assert.equal(res.body._watermark, undefined);
+  } finally {
+    _snapshotRepo.read = prev;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: stale snapshot (> 60 min) → ran_refresh, pipeline runs", async () => {
+  const prevRead = _snapshotRepo.read;
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  const STALE_SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 90 * 60_000).toISOString() }, // 90 min ago
+    _watermark: "wm-stale",
+  };
+  let pipelineCalls = 0;
+  _snapshotRepo.read = async () => STALE_SNAPSHOT;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async (opts) => {
+    pipelineCalls++;
+    assert.equal(opts.priorWatermark, "wm-stale", "stale snapshot's watermark forwarded");
+    return {
+      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      log: {
+        poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0,
+        droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+        watermark: "wm-new", candidateCount: 1, selectedFeedCount: 1,
+        unchanged: false, refreshSkippedReason: null,
+        selection: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 1, selectedSourceCount: 1, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 1 },
+      },
+    };
+  };
+
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.bootstrapDecision, "ran_refresh");
+    assert.equal(pipelineCalls, 1, "pipeline must run when snapshot is stale");
+    assert.equal(res.body._meta.watermark, "wm-new", "response carries new watermark");
+  } finally {
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: no prior snapshot + refresh produces snapshot → ran_refresh", async () => {
+  const prevRead = _snapshotRepo.read;
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+    log: {
+      poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0,
+      droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+      watermark: "wm-first", candidateCount: 1, selectedFeedCount: 1,
+      unchanged: false, refreshSkippedReason: null,
+      selection: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 1, selectedSourceCount: 1, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 1 },
+    },
+  });
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.bootstrapDecision, "ran_refresh");
+    assert.equal(res.body._meta.hasSnapshot, true);
+  } finally {
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: no prior snapshot + refresh fails → no_snapshot (status 500)", async () => {
+  const prevRead = _snapshotRepo.read;
+  const prevRun = _refreshPipeline.run;
+  _snapshotRepo.read = async () => null;
+  _refreshPipeline.run = async () => { throw new Error("pipeline exploded"); };
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    // Pipeline failed and no fallback snapshot exists → underlying refresh
+    // helper returns 500.  Bootstrap surfaces this as the request status; we
+    // do NOT silently rewrite to 200 because clients should know the call failed.
+    assert.equal(res.status, 500);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _snapshotRepo.read = prevRead;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: snapshot at exactly 60 min boundary is treated as fresh", async () => {
+  const prev = _snapshotRepo.read;
+  const prevRun = _refreshPipeline.run;
+  let pipelineCalls = 0;
+  // 60 min - 1s — comfortably within the 60 min threshold (<= cutoff is fresh)
+  const SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - (60 * 60_000 - 1000)).toISOString() },
+  };
+  _snapshotRepo.read = async () => SNAPSHOT;
+  _refreshPipeline.run = async () => { pipelineCalls++; return { payload: null, log: { unchanged: true } }; };
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.body._meta.bootstrapDecision, "served_fresh_snapshot");
+    assert.equal(pipelineCalls, 0);
+  } finally {
+    _snapshotRepo.read = prev;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: snapshot just over 60 min triggers refresh", async () => {
+  const prevRead = _snapshotRepo.read;
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  // 61 minutes ago — past the cutoff
+  const SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 61 * 60_000).toISOString() },
+  };
+  let pipelineCalls = 0;
+  _snapshotRepo.read = async () => SNAPSHOT;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => {
+    pipelineCalls++;
+    return {
+      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      log: {
+        poolCount: 0, relevantCount: 0, usedFallbackClustering: false, groundingFailures: 0,
+        droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+        watermark: "wm-newer", candidateCount: 0, selectedFeedCount: 0,
+        unchanged: false, refreshSkippedReason: null,
+        selection: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 0, selectedSourceCount: 0, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 0 },
+      },
+    };
+  };
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.body._meta.bootstrapDecision, "ran_refresh");
+    assert.equal(pipelineCalls, 1);
+  } finally {
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: malformed FRESH snapshot fails validation → empty payload + bootstrapDecision=no_snapshot", async () => {
+  // Phase 5 fix: fresh-snapshot branch must run dashboardPayloadSchema.safeParse
+  // exactly like GET /api/dashboard.  A persisted snapshot whose stories array
+  // contains schema-invalid records must NOT pass through to the client.
+  const prev = _snapshotRepo.read;
+  const prevRun = _refreshPipeline.run;
+  let pipelineCalls = 0;
+  const MALFORMED_FRESH = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [
+      {
+        // Missing required `id`, `topic`, `summary`, etc. — schema must reject
+        outletCount: "not-a-number",
+        sources: [],
+      },
+    ],
+    _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 5 * 60_000).toISOString() },
+  };
+  _snapshotRepo.read = async () => MALFORMED_FRESH;
+  _refreshPipeline.run = async () => { pipelineCalls++; return { payload: null, log: { unchanged: true } }; };
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.bootstrapDecision, "no_snapshot", "malformed fresh snapshot must demote to no_snapshot");
+    assert.equal(res.body._meta.hasSnapshot, false);
+    assert.deepEqual(res.body.stories, []);
+    assert.equal(pipelineCalls, 0, "fresh-branch validation failure must NOT trigger refresh");
+  } finally {
+    _snapshotRepo.read = prev;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: in_flight body with hasSnapshot=true → ran_refresh (deterministic, executor stubbed)", async () => {
+  // Replaces the prior concurrency-race test.  We stub `_refreshExecutor.execute`
+  // directly to return a synthetic in_flight result, eliminating timing/Promise
+  // ordering as a source of flakiness.  This is the exact scenario Phase 5 fix
+  // #2 cares about: bootstrap's initial snapshot read may be null, but the
+  // refresh executor's body can still carry hasSnapshot=true (e.g. a concurrent
+  // worker just wrote a snapshot the helper's internal re-read picked up).
+  const prevRead = _snapshotRepo.read;
+  const prevExec = _refreshExecutor.execute;
+  let execCalls = 0;
+  _snapshotRepo.read = async () => null; // bootstrap entry: no snapshot known here
+  _refreshExecutor.execute = async () => {
+    execCalls++;
+    return {
+      kind: "in_flight",
+      httpStatus: 200,
+      body: {
+        contractVersion: "2026-04-22-slice1",
+        stories: [],
+        _meta: { hasSnapshot: true, refreshSkippedReason: "in_flight", unchanged: false },
+      },
+    };
+  };
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.status, 200);
+    assert.equal(
+      res.body._meta.bootstrapDecision,
+      "ran_refresh",
+      "in_flight body with hasSnapshot=true must yield ran_refresh regardless of initial-read state"
+    );
+    assert.equal(res.body._meta.refreshSkippedReason, "in_flight");
+    assert.equal(execCalls, 1);
+  } finally {
+    _snapshotRepo.read = prevRead;
+    _refreshExecutor.execute = prevExec;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: in_flight body with hasSnapshot=false → no_snapshot (deterministic, executor stubbed)", async () => {
+  // Replaces the prior concurrency-race test.  Same approach — stub the executor.
+  // Inverse scenario: initial snapshot read DOES return data, but the executor's
+  // in_flight body has hasSnapshot=false (e.g. its internal re-read returned
+  // null).  Decision must be derived from body, not the initial read.
+  const prevRead = _snapshotRepo.read;
+  const prevExec = _refreshExecutor.execute;
+  _snapshotRepo.read = async () => ({
+    // Stale (90 min) — bypasses the fresh-snapshot branch so we proceed to the
+    // executor.  But this stale snapshot exists, so naive "snapshot ? ran : no"
+    // logic would WRONGLY return ran_refresh.  The fix routes through body.
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 90 * 60_000).toISOString() },
+  });
+  _refreshExecutor.execute = async () => ({
+    kind: "in_flight",
+    httpStatus: 200,
+    body: {
+      contractVersion: "2026-04-22-slice1",
+      stories: [],
+      _meta: { hasSnapshot: false, refreshSkippedReason: "in_flight", unchanged: false },
+    },
+  });
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.status, 200);
+    assert.equal(
+      res.body._meta.bootstrapDecision,
+      "no_snapshot",
+      "in_flight body without snapshot must yield no_snapshot regardless of initial-read state"
+    );
+    assert.equal(res.body._meta.hasSnapshot, false);
+  } finally {
+    _snapshotRepo.read = prevRead;
+    _refreshExecutor.execute = prevExec;
+  }
+});
+
+test("GET /api/dashboard does NOT include bootstrapDecision (Phase 5: bootstrap-only field)", async () => {
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: new Date().toISOString() },
+  });
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.bootstrapDecision, undefined, "GET must not surface bootstrapDecision");
+  } finally {
+    _snapshotRepo.read = prev;
   }
 });
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { GEOGRAPHIES, Geography, STORIES, Source, Story, TOPICS, Topic } from "@/data/stories";
+import { useLocation, useSearchParams } from "react-router-dom";
+import { STORIES, Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
 import StoryCard from "@/components/StoryCard";
 import SourceReader from "@/components/SourceReader";
@@ -11,7 +11,14 @@ import {
   trackSourceOpened,
   trackStoryExpanded,
 } from "@/lib/analytics";
-import { fetchDashboardWithMeta } from "@/lib/api";
+import { bootstrapDashboard, fetchDashboardWithMeta } from "@/lib/api";
+import {
+  aggregateTagSections,
+  isEmptySelection,
+  storyMatchesSelection,
+  toggleInSet,
+  type TagSelection,
+} from "@/lib/dashboard-filters";
 import { type DashboardSelectionMeta, type StoryDto } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
 
@@ -91,18 +98,33 @@ function dtoToStory(dto: StoryDto): Story {
       headline: s.headline,
       body: s.body,
     })),
+    tags: dto.tags
+      ? {
+          topics: [...dto.tags.topics],
+          keywords: [...dto.tags.keywords],
+          geographies: [...dto.tags.geographies],
+        }
+      : undefined,
   };
 }
 
-type TopicFilter = Topic | "All";
-type GeoFilter = Geography | "All";
-
 export default function Dashboard() {
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const emptyMode = searchParams.get("empty") === "1";
 
-  const [topic, setTopic] = useState<TopicFilter>("All");
-  const [geo, setGeo] = useState<GeoFilter>("All");
+  // Phase 5: bootstrap is reserved for two entry surfaces only — Landing →
+  // Dashboard for recognized users, and Onboarding → Dashboard post-submit.
+  // Both navigate with `state: { bootstrap: true }`.  Settings, in-app links,
+  // browser back/forward, and direct URL loads do NOT carry this flag and use
+  // the cheaper GET path.
+  const useBootstrap = (location.state as { bootstrap?: boolean } | null)?.bootstrap === true;
+
+  // Phase 6: dynamic, multi-select header pill state (one Set per section).
+  // Empty sets across all three sections = "All" (no filters applied).
+  const [selectedTopics, setSelectedTopics] = useState<ReadonlySet<string>>(() => new Set());
+  const [selectedKeywords, setSelectedKeywords] = useState<ReadonlySet<string>>(() => new Set());
+  const [selectedGeographies, setSelectedGeographies] = useState<ReadonlySet<string>>(() => new Set());
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   const [stories, setStories] = useState<Story[]>(emptyMode ? [] : STORIES);
@@ -110,16 +132,19 @@ export default function Dashboard() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectionMeta, setSelectionMeta] = useState<DashboardSelectionMeta | null>(null);
 
+  const tagSections = useMemo(() => aggregateTagSections(stories), [stories]);
+  const tagSelection = useMemo<TagSelection>(
+    () => ({ topics: selectedTopics, keywords: selectedKeywords, geographies: selectedGeographies }),
+    [selectedTopics, selectedKeywords, selectedGeographies]
+  );
+  const allActive = isEmptySelection(tagSelection);
+
   const filtered = useMemo(
     () =>
       stories
-        .filter(
-          (s) =>
-            (topic === "All" || s.topic === topic) &&
-            (geo === "All" || s.geographies.includes(geo))
-        )
+        .filter((s) => storyMatchesSelection(s, tagSelection))
         .map((s) => ({ story: s, sig: deriveSignals(s) })),
-    [stories, topic, geo]
+    [stories, tagSelection]
   );
 
   const counts = useMemo(() => {
@@ -151,7 +176,15 @@ export default function Dashboard() {
     if (emptyMode) return;
     let canceled = false;
     setIsLoading(true);
-    fetchDashboardWithMeta()
+
+    // Phase 5: bootstrap path runs the (potentially expensive) refresh check
+    // server-side and falls back to a fresh snapshot when ≤ 60 min old.  GET
+    // path stays cheap and is used for every other dashboard load.
+    const loader = useBootstrap
+      ? bootstrapDashboard().then(({ payload, selection }) => ({ payload, selection }))
+      : fetchDashboardWithMeta();
+
+    loader
       .then(({ payload, selection }) => {
         if (canceled) return;
         setStories(payload.stories.map(dtoToStory));
@@ -171,12 +204,17 @@ export default function Dashboard() {
     return () => {
       canceled = true;
     };
-  }, [emptyMode]);
+  }, [emptyMode, useBootstrap]);
 
   const handleReset = () => {
-    setTopic("All");
-    setGeo("All");
+    setSelectedTopics(new Set());
+    setSelectedKeywords(new Set());
+    setSelectedGeographies(new Set());
   };
+
+  const toggleTopic = (t: string) => setSelectedTopics((prev) => toggleInSet(prev, t));
+  const toggleKeyword = (k: string) => setSelectedKeywords((prev) => toggleInSet(prev, k));
+  const toggleGeography = (g: string) => setSelectedGeographies((prev) => toggleInSet(prev, g));
 
   const handleOpenSource = (storyId: string, sourceId: string) => {
     trackSourceOpened(storyId, sourceId);
@@ -203,23 +241,62 @@ export default function Dashboard() {
               </p>
             )}
 
-            {/* Pill row */}
-            <div className="mt-5 flex flex-wrap items-center gap-1.5">
-              <Pill active={topic === "All" && geo === "All"} onClick={handleReset}>
+            {/* Pill row — Phase 6: dynamic sections derived from current
+                payload's stories.  Order: All → Topics → Keywords → Geographies.
+                Sections with zero tags are hidden entirely; separators only
+                appear between non-empty sections. */}
+            <div
+              className="mt-5 flex flex-wrap items-center gap-1.5"
+              data-testid="header-pill-row"
+            >
+              <Pill active={allActive} onClick={handleReset} testId="pill-all">
                 All
               </Pill>
-              <span className="mx-1 text-rule">·</span>
-              {TOPICS.map((t) => (
-                <Pill key={t} active={topic === t} onClick={() => setTopic(topic === t ? "All" : t)}>
-                  {t}
-                </Pill>
-              ))}
-              <span className="mx-1 text-rule">·</span>
-              {GEOGRAPHIES.map((g) => (
-                <Pill key={g} active={geo === g} onClick={() => setGeo(geo === g ? "All" : g)}>
-                  {g}
-                </Pill>
-              ))}
+              {tagSections.topics.length > 0 && (
+                <>
+                  <span className="mx-1 text-rule" aria-hidden="true">·</span>
+                  {tagSections.topics.map((t) => (
+                    <Pill
+                      key={`topic-${t}`}
+                      active={selectedTopics.has(t)}
+                      onClick={() => toggleTopic(t)}
+                      testId={`pill-topic-${t}`}
+                    >
+                      {t}
+                    </Pill>
+                  ))}
+                </>
+              )}
+              {tagSections.keywords.length > 0 && (
+                <>
+                  <span className="mx-1 text-rule" aria-hidden="true">·</span>
+                  {tagSections.keywords.map((k) => (
+                    <Pill
+                      key={`keyword-${k}`}
+                      active={selectedKeywords.has(k)}
+                      onClick={() => toggleKeyword(k)}
+                      testId={`pill-keyword-${k}`}
+                    >
+                      {k}
+                    </Pill>
+                  ))}
+                </>
+              )}
+              {tagSections.geographies.length > 0 && (
+                <>
+                  <span className="mx-1 text-rule" aria-hidden="true">·</span>
+                  {tagSections.geographies.map((g) => (
+                    <Pill
+                      key={`geo-${g}`}
+                      active={selectedGeographies.has(g)}
+                      onClick={() => toggleGeography(g)}
+                      testId={`pill-geo-${g}`}
+                    >
+                      {g}
+                    </Pill>
+                  ))}
+                </>
+              )}
             </div>
           </div>
 
@@ -324,14 +401,18 @@ function Pill({
   active,
   onClick,
   children,
+  testId,
 }: {
   active: boolean;
   onClick: () => void;
   children: React.ReactNode;
+  testId?: string;
 }) {
   return (
     <button
       onClick={onClick}
+      data-testid={testId}
+      aria-pressed={active}
       className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
         active
           ? "bg-foreground text-background"
