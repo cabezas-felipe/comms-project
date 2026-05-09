@@ -30,6 +30,19 @@ export interface Story {
   priority: "top" | "standard";
   outletCount: number;
   sources: Source[];
+  /**
+   * Phase 6: optional tag arrays surfaced by clustering.  When present, drive
+   * the dashboard's dynamic header pills (topics / keywords / geographies).
+   * When absent (e.g. local fixture, legacy snapshots), the dashboard falls
+   * back to the canonical `topic` / `geographies` fields.  Keyword pills only
+   * render when this object provides them — keywords are NEVER inferred from
+   * free text.
+   */
+  tags?: {
+    topics: string[];
+    keywords: string[];
+    geographies: string[];
+  };
 }
 
 export const STORIES: Story[] = [

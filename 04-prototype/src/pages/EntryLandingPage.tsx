@@ -96,7 +96,11 @@ export default function EntryLandingPage() {
       }
       // Prefer canonical email from backend (avoids casing/alias mismatch on future requests).
       setRecognizedIdentity({ email: data.user?.email ?? trimmed, userId: data.user?.id ?? null });
-      navigate(data.destination);
+      // Phase 5: Landing → Dashboard for a recognized returning user is one of
+      // the two surfaces that should trigger backend-owned bootstrap freshness.
+      // Onboarding → Dashboard is the other.  Other navigations omit this state.
+      const navState = data.destination === "/dashboard" ? { bootstrap: true } : undefined;
+      navigate(data.destination, navState ? { state: navState } : undefined);
     } catch {
       trackLandingFailed({ failureStage: "network" });
       notifyWarning("Network error. Please try again.");

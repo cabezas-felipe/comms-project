@@ -159,7 +159,12 @@ export default function Onboarding() {
     trackOnboardingSucceeded();
     notifySuccess("Tempo set. Welcome.");
     setSubmitting(false);
-    navigate(import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard");
+    // Phase 5: Onboarding → Dashboard post-submit is the second of the two
+    // surfaces that should trigger backend-owned bootstrap freshness.
+    navigate(
+      import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard",
+      { state: { bootstrap: true } }
+    );
 
     // Surface backend extraction failure — save already committed, user can fix in Settings.
     const extractionStatus = saveResult._meta?.extractionStatus;
