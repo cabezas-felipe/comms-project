@@ -23,6 +23,37 @@ const DEFAULT_FETCH_TIMEOUT_MS = 12_000;
 const DEFAULT_FETCH_CONCURRENCY = 6;
 const DEFAULT_MAX_PER_FEED = 30;
 const DEFAULT_MAX_TOTAL = 200;
+// Default cap for blocked-feed log lines.  Keeps the operator log readable
+// when an allowlist filters out the whole manifest minus a small tail; full
+// visibility is still available behind `TEMPO_RSS_ALLOWLIST_VERBOSE=true`.
+const BLOCKED_LOG_DEFAULT_CAP = 5;
+
+// Hardcoded restricted default allowlist used when no operator config is
+// present.  This pins the "WaPo-focused source-by-source rollout" posture
+// described in `data/source-feeds.json` so that future manifest expansion
+// cannot silently widen ingestion just because a new feed row landed in
+// the manifest.  Operators who want broader access set an env var or pass
+// `opts.allowlist` (array to override, `null` to disable).
+//
+// Why a hardcoded value rather than reading the manifest:  the manifest
+// can change from any direction (Supabase write, repo PR, ad-hoc patch);
+// the allowlist guard is meant to be a separate, deliberate kill switch.
+// Pinning the default here means widening the source pool always requires
+// an explicit operator action — exactly the property Codex flagged as
+// missing in the original Phase 3 patch.
+const DEFAULT_ALLOWLIST = Object.freeze(["washington post"]);
+
+// Env var aliases.  The Phase 3 work introduced `TEMPO_RSS_*` names
+// alongside an older `TEMPO_INGESTION_*` convention used elsewhere in
+// the deploy.  Both are honored — newer wins when set, legacy is the
+// fallback — so existing ops configs keep working while new deploys can
+// adopt the rss-scoped names.  Documented in the resolver functions
+// below; tests pin the precedence so no future refactor can drop
+// support for the legacy names without flagging.
+const ENV_ALLOWLIST_NEWER = "TEMPO_RSS_ALLOWLIST";
+const ENV_ALLOWLIST_LEGACY = "TEMPO_INGESTION_ALLOWLIST";
+const ENV_VERBOSE_NEWER = "TEMPO_RSS_ALLOWLIST_VERBOSE";
+const ENV_VERBOSE_LEGACY = "TEMPO_INGESTION_GUARD_VERBOSE";
 
 function resolveMode() {
   const explicit = process.env.TEMPO_RSS_INGESTION;
@@ -40,6 +71,202 @@ function maxItemsTotal() {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : DEFAULT_MAX_TOTAL;
 }
 
+// ─── Allowlist guard ──────────────────────────────────────────────────────────
+//
+// A second-stage guard layered on top of `filterFeeds`.  Where `filterFeeds`
+// rejects rows that are structurally ineligible (non-RSS, inactive, invalid
+// URL), the allowlist rejects rows whose name does not appear in an
+// operator-controlled allowlist.  Useful for incident response (kill a
+// feed without a manifest edit), staging environments, and chaos drills.
+//
+// Inputs:
+//   - `opts.allowlist`            — caller-supplied (tests + service code).
+//   - `process.env.TEMPO_RSS_ALLOWLIST` — env-supplied default.
+// Precedence (must be explicit; ambiguous types fall through to env):
+//   - `null`                      → guard disabled (no filtering).
+//   - `Array.isArray(...)`        → use this list verbatim (after normalize).
+//   - `undefined` / absent        → fall back to env resolution.
+//
+// Normalization parity: opts entries and env entries are normalized through
+// the same pipeline (trim, lowercase, collapse internal whitespace, drop
+// empties) so `["  Reuters  "]` and `"reuters"` produce the same matcher.
+
+/**
+ * Normalize a single allowlist entry: trim, lowercase, collapse runs of
+ * whitespace.  Returns null for non-strings and for entries that are empty
+ * after trimming so the caller can `.filter(Boolean)` them out.
+ */
+function normalizeAllowlistEntry(raw) {
+  if (typeof raw !== "string") return null;
+  const cleaned = raw.trim().toLowerCase().replace(/\s+/g, " ");
+  return cleaned.length === 0 ? null : cleaned;
+}
+
+/** Apply normalization + drop-empty in one pass.  Exported for parity tests. */
+export function normalizeAllowlist(entries) {
+  if (!Array.isArray(entries)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const raw of entries) {
+    const norm = normalizeAllowlistEntry(raw);
+    if (norm == null) continue;
+    if (seen.has(norm)) continue; // dedupe so blocked-list logs stay clean
+    seen.add(norm);
+    out.push(norm);
+  }
+  return out;
+}
+
+/**
+ * Parse `TEMPO_RSS_ALLOWLIST` (comma-separated names) into a normalized
+ * allowlist.  Empty / unset env yields `[]`.  Each entry runs through the
+ * same normalization the opts path uses, so behavior is identical.
+ */
+export function parseAllowlistEnv(raw) {
+  if (raw == null) return [];
+  return normalizeAllowlist(String(raw).split(","));
+}
+
+/**
+ * Read the env snapshot used by `resolveAllowlist` / `isAllowlistVerboseEnv`.
+ * Centralizing this here keeps the resolver decoupled from `process.env`
+ * (tests can pass an explicit snapshot) and documents the supported names
+ * in one place.  Both newer and legacy names are read on every call — the
+ * resolver decides which one wins.
+ */
+function readAllowlistEnv() {
+  return {
+    newer: process.env[ENV_ALLOWLIST_NEWER],
+    legacy: process.env[ENV_ALLOWLIST_LEGACY],
+  };
+}
+
+/**
+ * Resolve the effective allowlist from caller opts + env.  Returns:
+ *   - `null`     — guard disabled (caller passed `opts.allowlist === null`).
+ *   - `string[]` — normalized allowlist.  An empty list is permissive at the
+ *                  filter step (every feed passes); only reachable via an
+ *                  explicit empty array from the caller.  When opts is
+ *                  absent and env yields nothing, the resolver falls back
+ *                  to `DEFAULT_ALLOWLIST` so manifest expansion cannot
+ *                  silently widen ingestion (Phase 3 fix patch).
+ *
+ * The asymmetry between `null` (disabled) and `[]` (permissive) is
+ * deliberate: a caller who genuinely wants to bypass the env/default
+ * allowlist must do so explicitly (`opts.allowlist = null`) so they cannot
+ * accidentally lose the guard by passing `undefined`.
+ *
+ * Env precedence (when opts is absent):
+ *   1. `TEMPO_RSS_ALLOWLIST` (newer, scoped to RSS) — wins when normalized
+ *      to a non-empty list.
+ *   2. `TEMPO_INGESTION_ALLOWLIST` (legacy alias) — fallback.
+ *   3. `DEFAULT_ALLOWLIST` (hardcoded `["washington post"]`).
+ *
+ * "Wins when non-empty" means an env value that normalizes to nothing
+ * (empty string, only commas/whitespace) does NOT silently flip the
+ * guard to permissive — it falls through to the next source.  The only
+ * way to get an empty allowlist is an explicit empty array from opts.
+ *
+ * The second arg accepts either a `{ newer, legacy }` snapshot (preferred,
+ * used by tests that mock the env without touching `process.env`) or a
+ * plain string treated as the newer var (back-compat with the original
+ * Phase 3 signature).  Default is read from `process.env` lazily so the
+ * function stays test-friendly.
+ */
+export function resolveAllowlist(optsAllowlist, env = readAllowlistEnv()) {
+  if (optsAllowlist === null) return null;
+  if (Array.isArray(optsAllowlist)) return normalizeAllowlist(optsAllowlist);
+  // Any other opts shape (undefined, string, object) → fall through to env.
+  // We do NOT silently disable the guard for unexpected types — that would
+  // let a typo in caller code bypass the operator-configured allowlist.
+  const snap = typeof env === "object" && env !== null
+    ? env
+    : { newer: env, legacy: undefined };
+  const fromNewer = parseAllowlistEnv(snap.newer);
+  if (fromNewer.length > 0) return fromNewer;
+  const fromLegacy = parseAllowlistEnv(snap.legacy);
+  if (fromLegacy.length > 0) return fromLegacy;
+  return normalizeAllowlist(DEFAULT_ALLOWLIST);
+}
+
+/**
+ * Apply the allowlist guard to a list of feeds.  Returns `{ allowed,
+ * blocked }`.
+ *
+ *   - `allowlist === null`        → guard disabled, every feed allowed.
+ *   - `allowlist.length === 0`    → no filter configured, every feed allowed.
+ *   - non-empty allowlist         → feed name (normalized) must contain at
+ *                                   least one allowlist entry as a substring.
+ *
+ * Substring match (rather than exact) keeps publisher-level allowlist entries
+ * working against section-level feed names — e.g. `"reuters"` matches
+ * `"Reuters — World News"`.
+ */
+export function applyAllowlistGuard(feeds, allowlist) {
+  if (allowlist === null || allowlist.length === 0) {
+    return { allowed: [...(feeds ?? [])], blocked: [] };
+  }
+  const allowed = [];
+  const blocked = [];
+  for (const feed of feeds ?? []) {
+    const norm = String(feed?.name ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+    if (norm && allowlist.some((entry) => norm.includes(entry))) {
+      allowed.push(feed);
+    } else {
+      blocked.push(feed);
+    }
+  }
+  return { allowed, blocked };
+}
+
+/**
+ * Format a blocked-list log fragment.  Default mode caps the rendered list
+ * to keep operator logs readable; verbose mode (TEMPO_RSS_ALLOWLIST_VERBOSE)
+ * dumps the full list.  Either way the count is always present so log
+ * readers can spot a sudden uptick in blocked feeds without scrolling.
+ *
+ * Returns the rendered fragment or `null` when nothing is blocked, so the
+ * caller can skip emitting a log line entirely (no "blocked=0" noise).
+ */
+export function formatBlockedList(blocked, { verbose, cap = BLOCKED_LOG_DEFAULT_CAP } = {}) {
+  if (!Array.isArray(blocked) || blocked.length === 0) return null;
+  const ids = blocked.map((f) => String(f?.id ?? f?.name ?? "?"));
+  const total = ids.length;
+  if (verbose) {
+    return `blocked=${total} [${ids.join(", ")}]`;
+  }
+  if (total <= cap) {
+    return `blocked=${total} [${ids.join(", ")}]`;
+  }
+  const head = ids.slice(0, cap).join(", ");
+  const remainder = total - cap;
+  return `blocked=${total} [${head}, ...and ${remainder} more]`;
+}
+
+/**
+ * Resolve the verbose flag with the same newer-wins precedence the
+ * allowlist uses.  Either `TEMPO_RSS_ALLOWLIST_VERBOSE` or the legacy
+ * `TEMPO_INGESTION_GUARD_VERBOSE` may set it; only the literal string
+ * `"true"` (case-insensitive) enables verbose output.
+ *
+ * "Newer wins when set" follows the same rule as the allowlist: a
+ * non-empty value for the newer var takes precedence regardless of
+ * whether it evaluates to true or false — operator's most recent
+ * intent stands.  Legacy is consulted only when the newer var is unset
+ * or empty.
+ */
+export function isAllowlistVerboseEnv(env = process.env) {
+  const newer = env[ENV_VERBOSE_NEWER];
+  if (typeof newer === "string" && newer.length > 0) {
+    return newer.trim().toLowerCase() === "true";
+  }
+  const legacy = env[ENV_VERBOSE_LEGACY];
+  if (typeof legacy === "string" && legacy.length > 0) {
+    return legacy.trim().toLowerCase() === "true";
+  }
+  return false;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -55,6 +282,9 @@ function maxItemsTotal() {
  * @param {number}   [opts.timeoutMs]
  * @param {number}   [opts.maxPerFeed]
  * @param {number}   [opts.maxTotal]
+ * @param {string[]|null} [opts.allowlist]    — feed-name allowlist guard:
+ *   `null` disables the guard, `string[]` overrides env, `undefined` falls
+ *   back to TEMPO_RSS_ALLOWLIST.  See `resolveAllowlist` for precedence.
  * @returns {Promise<Array>} raw items
  */
 export async function readFeedItems(dataDir, opts = {}) {
@@ -86,14 +316,32 @@ async function readLiveItems(dataDir, opts) {
   }
 
   const allFeeds = await loadManifest(dataDir, opts.manifestLoader);
-  const { eligible, skipped } = filterFeeds(allFeeds, process.env.TEMPO_RSS_PUBLISHER);
+  const { eligible: structurallyEligible, skipped } = filterFeeds(allFeeds, process.env.TEMPO_RSS_PUBLISHER);
 
   if (skipped.length > 0) {
     console.log(`[feed-reader.live] skipped ${skipped.length} manifest row(s): ${skipped.map((s) => `${s.id}:${s.reason}`).join(", ")}`);
   }
 
+  // Layered guard: filterFeeds rejects rows by structural eligibility
+  // (kind/active/url); the allowlist rejects by operator policy.  We resolve
+  // and apply it AFTER filterFeeds so the blocked log only mentions rows
+  // that would otherwise have been fetched — keeping the operator's mental
+  // model simple ("blocked = real feeds the allowlist held back").
+  // Pass `undefined` as the second arg so resolveAllowlist reads its env
+  // snapshot from process.env directly — picks up both the newer and legacy
+  // var names with the documented precedence.  Tests that mock the env
+  // without touching process.env can pass a snapshot via opts.allowlist or
+  // by mutating process.env before the call.
+  const allowlist = resolveAllowlist(opts.allowlist);
+  const { allowed: eligible, blocked } = applyAllowlistGuard(structurallyEligible, allowlist);
+  const blockedFragment = formatBlockedList(blocked, { verbose: isAllowlistVerboseEnv() });
+  if (blockedFragment) {
+    // One log line, optional cap, never "blocked=0" — see formatBlockedList.
+    console.log(`[feed-reader.live] allowlist ${blockedFragment}`);
+  }
+
   if (eligible.length === 0) {
-    console.log(`[feed-reader.live] no eligible RSS feeds after filtering (publisher="${process.env.TEMPO_RSS_PUBLISHER ?? ""}")`);
+    console.log(`[feed-reader.live] no eligible RSS feeds after filtering (publisher="${process.env.TEMPO_RSS_PUBLISHER ?? ""}", allowlistActive=${allowlist === null ? "false" : String(allowlist.length > 0)})`);
     return [];
   }
 

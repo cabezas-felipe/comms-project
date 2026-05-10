@@ -215,6 +215,80 @@ test("filterItemsToMatchedFeeds: empty set returns empty (strict empty when sele
   assert.deepEqual(filterItemsToMatchedFeeds([{ outlet: "x" }], new Set()), []);
 });
 
+// ─── Inactive-row gating ─────────────────────────────────────────────────────
+
+test("resolveSelectedSources: feeds with active=false are excluded from matchedFeeds", () => {
+  // Operator kill switch: a manifest row whose `active` flag is explicitly
+  // false must not surface as a selectable match even when the user's
+  // selection name resolves to it via alias + substring.  This is the
+  // ingestion-side mirror of the feed-reader's `filterFeeds` skip path.
+  const manifest = [
+    { id: "wapo-pol", name: "The Washington Post — Politics", kind: "rss", url: "https://wapo/pol", weight: 95, active: true },
+    { id: "wapo-world-off", name: "The Washington Post — World", kind: "rss", url: "https://wapo/world", weight: 92, active: false },
+    { id: "wapo-biz", name: "The Washington Post — Business", kind: "rss", url: "https://wapo/biz", weight: 90, active: true },
+  ];
+  const result = resolveSelectedSources({
+    selectedSources: ["Washington Post"],
+    manifestFeeds: manifest,
+  });
+  assert.equal(result.mode, SELECTION_MODE.STRICT);
+  const ids = result.matchedFeeds.map((f) => f.id).sort();
+  assert.deepEqual(ids, ["wapo-biz", "wapo-pol"], "inactive WaPo World row must be filtered out");
+});
+
+test("resolveSelectedSources: feeds with active omitted (undefined) remain eligible", () => {
+  // Backward-compat: legacy fixtures and pre-active-flag rows have no
+  // `active` field at all.  `undefined !== false`, so they pass the gate
+  // unchanged — pinning this prevents a future refactor from accidentally
+  // requiring `active === true` and breaking every legacy manifest.
+  const manifest = [
+    { id: "no-flag", name: "The Washington Post — Politics", kind: "rss", url: "https://wapo/pol", weight: 95 /* active omitted */ },
+    { id: "explicit-true", name: "The Washington Post — World", kind: "rss", url: "https://wapo/world", weight: 92, active: true },
+  ];
+  const result = resolveSelectedSources({
+    selectedSources: ["Washington Post"],
+    manifestFeeds: manifest,
+  });
+  const ids = result.matchedFeeds.map((f) => f.id).sort();
+  assert.deepEqual(ids, ["explicit-true", "no-flag"]);
+});
+
+test("resolveSelectedSources: only-inactive matches → unavailable bucket (not silent drop)", () => {
+  // When the only matching feed is inactive, the user-facing surface treats
+  // it the same as "no implemented connector" — the source name lands in
+  // `unavailableConnectorSources` so the operator can still reason about
+  // why their selection produced nothing.  Avoids a silent drop where the
+  // selection would otherwise look "valid but empty".
+  const manifest = [
+    { id: "only-row", name: "El Tiempo", kind: "rss", url: "https://eltiempo", weight: 80, active: false },
+  ];
+  const result = resolveSelectedSources({
+    selectedSources: ["El Tiempo"],
+    manifestFeeds: manifest,
+  });
+  assert.equal(result.mode, SELECTION_MODE.FALLBACK);
+  assert.equal(result.fallbackReason, FALLBACK_REASON.ALL_UNAVAILABLE_CONNECTORS);
+  assert.deepEqual(result.unavailableConnectorSources, ["El Tiempo"]);
+  assert.equal(result.matchedFeeds.length, 0);
+});
+
+test("resolveSelectedSources: fallback baseline excludes inactive feed IDs", () => {
+  // The kill switch must hold across the fallback path too — otherwise an
+  // operator who flipped a feed off via `active=false` would still see it
+  // surface when fallback engages, defeating the kill switch.
+  const manifest = [
+    { id: "fallback-on", name: "The Washington Post — Politics", kind: "rss", url: "https://wapo/pol", weight: 95, active: true },
+    { id: "fallback-off", name: "The Washington Post — Sports", kind: "rss", url: "https://wapo/sports", weight: 80, active: false },
+  ];
+  const result = resolveSelectedSources({
+    selectedSources: [], // forces fallback
+    manifestFeeds: manifest,
+    fallbackFeedIds: ["fallback-on", "fallback-off"],
+  });
+  assert.equal(result.mode, SELECTION_MODE.FALLBACK);
+  assert.deepEqual(result.matchedFeeds.map((f) => f.id), ["fallback-on"]);
+});
+
 test("filterItemsToMatchedFeeds: publisher-only item outlet matches section-level feed name", () => {
   // Live RSS items have outlet=feed.name, but legacy fixtures often store the publisher only.
   // Bidirectional substring match handles both.
