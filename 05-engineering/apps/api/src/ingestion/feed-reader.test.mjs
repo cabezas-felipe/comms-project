@@ -456,14 +456,9 @@ test("readFeedItems: env TEMPO_RSS_INGESTION=fixture preserves fixture path", as
 
 // ─── Ingestion mode resolution ───────────────────────────────────────────────
 //
-// `resolveMode` has three precedence rules (explicit env > NODE_ENV=test
-// fixture > live default).  Each test below pins one rule with an explicit
-// env snapshot so a future refactor cannot silently flip the default back
-// to "fixture wherever NODE_ENV != production" — the misconfiguration that
-// produced fixture items for live users.
-//
-// The function takes an env object so we never have to mutate process.env
-// here (which would race other tests in the same runtime).
+// Each test below pins one precedence rule with an explicit env snapshot —
+// no process.env mutation, so these run race-free alongside the rest of the
+// suite.
 
 describe("resolveMode: ingestion mode + resolution source", () => {
   test("explicit TEMPO_RSS_INGESTION=live wins regardless of NODE_ENV", () => {
