@@ -835,6 +835,100 @@ test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior snaps
   }
 });
 
+test("POST /api/dashboard/refresh: watermark unchanged → _meta.recall and _meta.funnel surface from pipeline log", async () => {
+  // Diagnostics-visibility contract: when the pipeline short-circuits on a
+  // matching watermark it still computes recall + funnel before the skip
+  // decision.  The route must surface those under `_meta.recall` /
+  // `_meta.funnel` so an operator looking at a stable empty snapshot can see
+  // *why* recall went thin without re-running the pipeline by hand.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  const RECALL_DIAG = {
+    mode: "hybrid_strict",
+    keywordRecallCount: 2,
+    embeddedCount: 0,
+    similarityKept: 0,
+    unionCount: 2,
+    finalRelevant: 2,
+    degraded: true,
+    degraded_reason: "embedding_error_fail_closed",
+    keywordFallbackAfterEmbeddingFailure: true,
+  };
+  const FUNNEL_DIAG = {
+    totalNormalized: 10,
+    afterTimeWindow: 9,
+    afterSourceSelection: 8,
+    afterGeoFilter: 6,
+    afterTopicKeyword: 4,
+    afterBeatFit: 2,
+    finalStories: null,
+    executionMode: "watermark_skip",
+    primaryDropStage: "not_executed",
+    topicKeywordRecallIsNoop: false,
+  };
+
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _watermark: "wm-stable-xyz",
+    _selectionMeta: {
+      sourceSelectionMode: "strict",
+      sourceFallbackUsed: false,
+      sourceFallbackReason: null,
+      matchedSourceCount: 1,
+      selectedSourceCount: 1,
+      unmatchedSelectedSources: [],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: ["nyt-politics"],
+      relevantItemCount: 0,
+    },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-stable-xyz",
+      candidateCount: 4,
+      selectedFeedCount: 1,
+      recall: RECALL_DIAG,
+      funnel: FUNNEL_DIAG,
+      beatFit: { version: "v1", enabled: true, threshold: 0.5, recallCount: 2, includedCount: 2, excludedCount: 0, excludeReasonHistogram: {} },
+      selection: null,
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.unchanged, true);
+    assert.equal(res.body._meta.refreshSkippedReason, "unchanged_watermark");
+    assert.deepEqual(res.body._meta.recall, RECALL_DIAG);
+    assert.deepEqual(res.body._meta.funnel, FUNNEL_DIAG);
+    // The recall block on the skip path must carry the same trust-debugging
+    // signals the full-run path exposes.
+    assert.equal(res.body._meta.recall.degraded, true);
+    assert.equal(res.body._meta.recall.degraded_reason, "embedding_error_fail_closed");
+    assert.equal(res.body._meta.recall.keywordFallbackAfterEmbeddingFailure, true);
+    assert.equal(res.body._meta.funnel.executionMode, "watermark_skip");
+    assert.equal(res.body._meta.funnel.primaryDropStage, "not_executed");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
 test("POST /api/dashboard/refresh: watermark changed → full run executes, response carries new watermark", async () => {
   const prevRun = _refreshPipeline.run;
   const prevRead = _snapshotRepo.read;

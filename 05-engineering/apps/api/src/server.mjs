@@ -740,6 +740,12 @@ async function executeRefreshFlow(identity) {
         elapsedMs,
         identitySource: identity.source,
       });
+      // Surface recall + funnel on the watermark-skip branch too: the pipeline
+      // computed them before deciding to short-circuit, and operators reading
+      // `_meta.recall`/`_meta.funnel` to debug a stable empty snapshot need
+      // the same diagnostic surface as the full-run branch.  Keep the keys
+      // optional so older log shapes (e.g. test mocks that don't supply them)
+      // simply omit them rather than emit `undefined` placeholders.
       const skipMeta = {
         unchanged: true,
         refreshSkippedReason: "unchanged_watermark",
@@ -747,6 +753,9 @@ async function executeRefreshFlow(identity) {
         candidateCount: log.candidateCount,
         selectedFeedCount: log.selectedFeedCount,
       };
+      if (log.recall) skipMeta.recall = log.recall;
+      if (log.funnel) skipMeta.funnel = log.funnel;
+      if (log.beatFit) skipMeta.beatFit = log.beatFit;
       if (priorSnapshot) {
         const { body, baseMeta, selectionMeta } = stripPersistedFields(priorSnapshot);
         return {
