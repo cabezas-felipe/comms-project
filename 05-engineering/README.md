@@ -19,23 +19,60 @@ Run from **this directory** (`05-engineering/`):
 
 After changing shared packages, run `npm run build:packages` before prototype dev/build if types or `dist/` outputs change.
 
-## Supabase deploy order
+## Supabase migrations
 
-When shipping the `contract_version` column (migration 003):
+Migrations live in `apps/api/src/db/migrations/*.sql` and are applied in lexical order via the `db:migrate` runner. Each successful apply records a row in `public.schema_migrations`, so reruns are no-ops.
 
-1. **Run migration first** — apply `apps/api/src/db/migrations/003_contract_version_column.sql` in the Supabase SQL editor before deploying any new API code.
-2. **Verify** — in the SQL editor:
-   ```sql
-   -- column exists and is populated
-   SELECT key, contract_version FROM settings;
+**One-time setup** — add a postgres connection string to `apps/api/.env`:
 
-   -- data JSON no longer contains contractVersion
-   SELECT COUNT(*) FROM settings WHERE data ? 'contractVersion';
-   -- expected: 0
-   ```
-3. **Deploy API and frontend together** — once the migration is confirmed clean.
+```
+DATABASE_URL=postgresql://postgres:<DB_PASSWORD>@db.<project-ref>.supabase.co:5432/postgres
+```
 
-Migration status (closeout): migration `003_contract_version_column` has been applied on the Tempo Supabase project, `settings.contract_version` is populated, and `settings.data` no longer contains `contractVersion` keys.
+Find it in Supabase Dashboard → your project → "Connect" button → URI (or Project Settings → Database). The pooler URL works too if the region matches; use the direct host shown above when in doubt.
+
+**Apply pending migrations:**
+
+```sh
+npm run db:migrate --workspace=@tempo/api          # apply all pending
+npm run db:migrate:dry --workspace=@tempo/api      # list pending only
+```
+
+**Backfill the ledger** for migrations applied before the runner existed (or applied manually in the SQL editor):
+
+```sh
+npm run db:migrate --workspace=@tempo/api -- --mark-applied=001_initial.sql,002_user_settings.sql
+```
+
+This inserts ledger rows without executing the SQL. Use it once per environment to bring the tracker in sync; every subsequent migration runs through the runner.
+
+**Deploy order with a migration in flight:**
+
+1. `npm run db:migrate --workspace=@tempo/api` against the target environment's `DATABASE_URL` first.
+2. Deploy API + frontend together once the migration is confirmed.
+
+## Source scope (Phase 1: Washington Post only)
+
+The Supabase manifest's `active` flag is the **primary** lever that decides which feeds run during ingestion. The runtime guard `TEMPO_RSS_ALLOWLIST` (defaults to `washington post`) is defense-in-depth — it filters again at fetch time. `TEMPO_INGESTION_ALLOWLIST` is accepted as a legacy alias for backwards compatibility; new configuration should use `TEMPO_RSS_ALLOWLIST`.
+
+The `db:scope:*` scripts wrap the manifest writes safely. They record every row they disable in a `public.phase1_disabled_feeds` tracker table (created on first run) so `restore` only touches rows that this script disabled — never rows that were already inactive for unrelated reasons.
+
+```sh
+npm run db:scope:verify --workspace=@tempo/api          # read-only state dump (+ JSON via -- --json)
+npm run db:scope:apply:dry --workspace=@tempo/api       # preview the apply without writing
+npm run db:scope:apply --workspace=@tempo/api           # disable non-WaPo rows + record in tracker
+npm run db:scope:restore:dry --workspace=@tempo/api     # preview the restore
+npm run db:scope:restore --workspace=@tempo/api         # restore prev_active to recorded rows + clear tracker
+```
+
+`apply` is idempotent (re-running on a fully applied state is a no-op). `restore` consults the tracker first; if the tracker is empty, it does nothing.
+
+To open up beyond Phase 1 you also need to remove the runtime guard:
+
+```sh
+# In your API environment (.env or process env):
+TEMPO_RSS_ALLOWLIST=*
+```
 
 ## Deployment
 
@@ -64,7 +101,7 @@ Vercel prints a preview URL. Share for review before promoting to production.
 
 ### Production deploy sequence
 
-If this release includes a DB migration, complete the [Supabase deploy order](#supabase-deploy-order) steps first.
+If this release includes a DB migration, run `npm run db:migrate --workspace=@tempo/api` against the target environment first (see [Supabase migrations](#supabase-migrations)).
 
 ```sh
 npm run deploy:frontend:prod
