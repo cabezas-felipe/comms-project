@@ -5,23 +5,13 @@
 //      (`normalizeSourceItems`, then the refresh pipeline) expect.
 //
 // Mode is selected by env `TEMPO_RSS_INGESTION`:
-//   - `fixture` → read source-items.json (kept for test determinism only).
+//   - `fixture` → read source-items.json (test determinism only).
 //   - `live`    → fetch RSS feeds from the manifest.
-//   - unset     → defaults to `fixture` ONLY when NODE_ENV=test; every other
-//                  environment (development, staging, production, unset)
-//                  defaults to `live`.  This inversion of the previous
-//                  "fixture wherever NODE_ENV != production" default closes
-//                  the silent-fixture-fallback hole that produced
-//                  source_selection=0 for live users in local/staging dev:
-//                  fixture mode is now opt-in for tests, not the silent
-//                  default for non-prod runtimes.
+//   - unset     → fixture ONLY when NODE_ENV=test; every other environment
+//                  (development, staging, production, unset) defaults to live.
 //
-// Hard safety guard (`assertProductionSafe`):
-//   Fixture mode is NEVER permitted under NODE_ENV=production.  If a misset
-//   env or a stray opts.mode tries to resolve to fixture in production, the
-//   reader throws synchronously before any fetch / file-read so the
-//   misconfiguration surfaces in the deploy logs instead of silently
-//   serving fixture data to real users.
+// `assertProductionSafe` enforces a hard rule: fixture mode under
+// NODE_ENV=production throws synchronously before any fetch / file-read.
 //
 // Tests can bypass env by passing `opts.mode` and `opts.fetchImpl`.
 
@@ -43,37 +33,22 @@ const DEFAULT_MAX_TOTAL = 200;
 const BLOCKED_LOG_DEFAULT_CAP = 5;
 
 // Hardcoded restricted default allowlist used when no operator config is
-// present.  This pins the "WaPo-focused source-by-source rollout" posture
-// described in `data/source-feeds.json` so that future manifest expansion
-// cannot silently widen ingestion just because a new feed row landed in
-// the manifest.  Operators who want broader access set an env var or pass
-// `opts.allowlist` (array to override, `null` to disable).
-//
-// Why a hardcoded value rather than reading the manifest:  the manifest
-// can change from any direction (Supabase write, repo PR, ad-hoc patch);
-// the allowlist guard is meant to be a separate, deliberate kill switch.
-// Pinning the default here means widening the source pool always requires
-// an explicit operator action — exactly the property Codex flagged as
-// missing in the original Phase 3 patch.
+// present.  Pinning it here (rather than reading from the manifest) keeps
+// the guard a separate, deliberate kill switch: widening the source pool
+// always requires explicit operator action (env var or `opts.allowlist`).
 const DEFAULT_ALLOWLIST = Object.freeze(["washington post"]);
 
-// Env var aliases.  The Phase 3 work introduced `TEMPO_RSS_*` names
-// alongside an older `TEMPO_INGESTION_*` convention used elsewhere in
-// the deploy.  Both are honored — newer wins when set, legacy is the
-// fallback — so existing ops configs keep working while new deploys can
-// adopt the rss-scoped names.  Documented in the resolver functions
-// below; tests pin the precedence so no future refactor can drop
-// support for the legacy names without flagging.
+// Env var aliases — both newer (`TEMPO_RSS_*`) and legacy (`TEMPO_INGESTION_*`)
+// names are honored, with newer winning when set.  Precedence is pinned by
+// tests so dropping legacy support requires a deliberate change.
 const ENV_ALLOWLIST_NEWER = "TEMPO_RSS_ALLOWLIST";
 const ENV_ALLOWLIST_LEGACY = "TEMPO_INGESTION_ALLOWLIST";
 const ENV_VERBOSE_NEWER = "TEMPO_RSS_ALLOWLIST_VERBOSE";
 const ENV_VERBOSE_LEGACY = "TEMPO_INGESTION_GUARD_VERBOSE";
 
-// Tag for resolveMode's `source` field so callers (and the per-refresh
-// log line) can quote where the mode actually came from.  Useful when a
-// production deploy turns up a fixture-mode failure: the operator sees
-// `resolution_source=opts_override` vs `explicit_env` vs `node_env_default`
-// and immediately knows which signal to investigate.
+// Tag for resolveMode's `source` field — quoted in the per-refresh log line
+// and the production guard's error so operators can see which signal drove
+// the mode decision without grepping env state.
 export const INGESTION_MODE_SOURCE = Object.freeze({
   EXPLICIT_ENV: "explicit_env",       // TEMPO_RSS_INGESTION set to live|fixture
   NODE_ENV_DEFAULT: "node_env_default", // fell through to NODE_ENV-based default
@@ -217,7 +192,7 @@ function readAllowlistEnv() {
  *                  explicit empty array from the caller.  When opts is
  *                  absent and env yields nothing, the resolver falls back
  *                  to `DEFAULT_ALLOWLIST` so manifest expansion cannot
- *                  silently widen ingestion (Phase 3 fix patch).
+ *                  silently widen ingestion.
  *
  * The asymmetry between `null` (disabled) and `[]` (permissive) is
  * deliberate: a caller who genuinely wants to bypass the env/default
@@ -237,9 +212,8 @@ function readAllowlistEnv() {
  *
  * The second arg accepts either a `{ newer, legacy }` snapshot (preferred,
  * used by tests that mock the env without touching `process.env`) or a
- * plain string treated as the newer var (back-compat with the original
- * Phase 3 signature).  Default is read from `process.env` lazily so the
- * function stays test-friendly.
+ * plain string treated as the newer var.  Default is read from
+ * `process.env` lazily so the function stays test-friendly.
  */
 export function resolveAllowlist(optsAllowlist, env = readAllowlistEnv()) {
   if (optsAllowlist === null) return null;
