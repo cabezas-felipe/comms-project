@@ -7,6 +7,7 @@ import {
   parseFallbackFeedIdsEnv,
   parseFallbackEnabledEnv,
   buildMatchedOutletSet,
+  buildMatchedFeedIdSet,
   filterItemsToMatchedFeeds,
   FALLBACK_REASON,
   SELECTION_MODE,
@@ -303,5 +304,144 @@ test("filterItemsToMatchedFeeds: publisher-only item outlet matches section-leve
   assert.deepEqual(
     filtered.map((i) => i.sourceId).sort(),
     ["publisher-only", "section-form"]
+  );
+});
+
+// ─── Feed-id index + matching (live-mode robustness) ────────────────────────
+
+test("buildMatchedFeedIdSet: collects ids of matched feeds, ignores empties", () => {
+  const set = buildMatchedFeedIdSet([
+    { id: "wapo-politics", name: "The Washington Post — Politics" },
+    { id: "wapo-world",    name: "The Washington Post — World" },
+    { id: "",              name: "Empty Id" },        // dropped
+    { name: "No Id" },                                 // dropped
+    null,                                              // dropped
+  ]);
+  assert.deepEqual([...set].sort(), ["wapo-politics", "wapo-world"]);
+});
+
+test("filterItemsToMatchedFeeds: live items match by feedId even when outlet name diverges from matched feed name", () => {
+  // Reproduces the user e06d512d production drop-to-zero:
+  //   matchedFeedIds = [wapo-politics, wapo-world, ...] (5 WaPo feeds)
+  //   afterSourceSelection = 0
+  //
+  // Modeled cause: the matcher's manifest snapshot exposes section-level
+  // canonical names (e.g. from source-feeds.json), but the live feed-reader
+  // fetched items via a manifest snapshot whose canonical_name resolved to
+  // the publisher form ("The Washington Post").  Both snapshots agree on
+  // `feed.id`, but the outlet-name strings disagree after normalization.
+  // Pre-fix path used outlet-only matching → set={"washington post politics",
+  // "washington post world", ...} but item.outlet="The Washington Post" →
+  // normalized "washington post" — and "washington post politics" doesn't
+  // include "washington post" backwards (item-in-feed match) hits, but
+  // bidirectional check actually does pass…
+  //
+  // Pin the harder case: a live item whose normalized outlet does NOT
+  // bidirectionally match any of the section-level matched outlets — only
+  // feedId-based matching will save it.
+  const matchedFeeds = [
+    { id: "wapo-politics", name: "The Washington Post — Politics", kind: "rss", weight: 95, active: true },
+    { id: "wapo-world",    name: "The Washington Post — World",    kind: "rss", weight: 92, active: true },
+  ];
+  const items = [
+    // Live RSS item: feedId from manifest, outlet emitted from a divergent
+    // canonical name shape (e.g. "WashingtonPost.com" — no space).  Outlet
+    // alone does NOT substring-match either matched feed's normalized form.
+    { sourceId: "live-item-1", feedId: "wapo-politics", outlet: "WashingtonPost.com" },
+    { sourceId: "live-item-2", feedId: "wapo-world",    outlet: "WashingtonPost.com" },
+    // Unrelated live item with a feedId outside the matched set: still drops.
+    { sourceId: "unrelated",   feedId: "bbc-world",     outlet: "BBC" },
+  ];
+  const keys = {
+    feedIds: buildMatchedFeedIdSet(matchedFeeds),
+    outlets: buildMatchedOutletSet(matchedFeeds),
+  };
+  const filtered = filterItemsToMatchedFeeds(items, keys);
+  assert.deepEqual(
+    filtered.map((i) => i.sourceId).sort(),
+    ["live-item-1", "live-item-2"],
+    "items must be matched by stable feedId even when outlet-name normalization diverges"
+  );
+});
+
+test("filterItemsToMatchedFeeds: feedId match still strict-empty when matched feeds is empty", () => {
+  const keys = {
+    feedIds: buildMatchedFeedIdSet([]),
+    outlets: buildMatchedOutletSet([]),
+  };
+  const items = [{ sourceId: "x", feedId: "wapo-politics", outlet: "The Washington Post" }];
+  assert.deepEqual(
+    filterItemsToMatchedFeeds(items, keys),
+    [],
+    "no matched feeds → empty result regardless of item shape (strict-empty preserved)"
+  );
+});
+
+test("filterItemsToMatchedFeeds: outlet fallback still applies for fixture items with no feedId", () => {
+  // Fixture-shaped items (no feedId) must continue to match via the legacy
+  // bidirectional outlet substring path.  This is the property that lets
+  // hand-crafted test rawItems pass through without us having to retrofit a
+  // feedId on every fixture.
+  const matchedFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", weight: 80, active: true },
+  ];
+  const keys = {
+    feedIds: buildMatchedFeedIdSet(matchedFeeds),
+    outlets: buildMatchedOutletSet(matchedFeeds),
+  };
+  const filtered = filterItemsToMatchedFeeds(
+    [
+      { sourceId: "fixture-pub", outlet: "Reuters" },          // no feedId, publisher form
+      { sourceId: "fixture-sec", outlet: "Reuters — World News" }, // no feedId, section form
+      { sourceId: "fixture-x",   outlet: "BBC" },
+    ],
+    keys
+  );
+  assert.deepEqual(filtered.map((i) => i.sourceId).sort(), ["fixture-pub", "fixture-sec"]);
+});
+
+test("filterItemsToMatchedFeeds: legacy Set signature still works (backward compat)", () => {
+  // External callers that still pass a plain Set (the pre-fix signature) get
+  // the same outlet-only behavior as before — we did not break the contract.
+  const set = buildMatchedOutletSet([MANIFEST[0]]); // wapo-politics
+  const items = [
+    { sourceId: "a", outlet: "The Washington Post — Politics" },
+    { sourceId: "b", outlet: "BBC" },
+  ];
+  const filtered = filterItemsToMatchedFeeds(items, set);
+  assert.deepEqual(filtered.map((i) => i.sourceId), ["a"]);
+});
+
+test("filterItemsToMatchedFeeds: feedId match precedes outlet — wrong outlet but right id still passes", () => {
+  // Defends against a future refactor that might inadvertently invert the
+  // precedence (outlet first → reject before checking id).  Pin id-first
+  // semantics so a name-string surprise can't override the stable id.
+  const matchedFeeds = [
+    { id: "wapo-politics", name: "The Washington Post — Politics", kind: "rss", weight: 95, active: true },
+  ];
+  const keys = {
+    feedIds: buildMatchedFeedIdSet(matchedFeeds),
+    outlets: buildMatchedOutletSet(matchedFeeds),
+  };
+  const items = [
+    { sourceId: "weird-outlet", feedId: "wapo-politics", outlet: "ZZ Top Daily" }, // outlet bears zero relation
+  ];
+  const filtered = filterItemsToMatchedFeeds(items, keys);
+  assert.equal(filtered.length, 1, "feedId is authoritative — outlet drift cannot drop a matched-id item");
+});
+
+test("buildMatchedOutletSet: falls back to feed.id when name is missing (parity with mapEntry)", () => {
+  // Pre-fix the helper skipped any feed with falsy `name`, but `mapEntry`
+  // emits items with `outlet=feed.id` in that case — leading to a set that
+  // could never contain those items' outlets.  Pin the parity so a future
+  // refactor can't reintroduce the asymmetry.
+  const set = buildMatchedOutletSet([
+    { id: "wapo-politics", name: "" }, // empty name → fallback to id
+    { id: "wapo-world", name: null },  // null name → fallback to id
+    { id: "with-name", name: "Reuters" },
+  ]);
+  assert.deepEqual(
+    [...set].sort(),
+    ["reuters", "wapo politics", "wapo world"]
   );
 });

@@ -497,6 +497,12 @@ export function mapEntry(feed, entry, fetchedAt = Date.now()) {
   return {
     // clusterId omitted — normalizer fills with `provisional:${sourceId}`
     sourceId,
+    // Stable manifest-row identifier carried through so the source-selection
+    // stage can match candidates against `selection.matchedFeeds` by id —
+    // robust to upstream canonical_name drift / whitespace / "The " variance
+    // that an outlet-name string match would miss.  Empty string when the
+    // manifest row had no id (defensive — every row should have one).
+    feedId: String(feed.id ?? ""),
     outlet: String(feed.name ?? feed.id ?? "Unknown"),
     kind: "traditional",
     weight: Number(feed.weight ?? 0),

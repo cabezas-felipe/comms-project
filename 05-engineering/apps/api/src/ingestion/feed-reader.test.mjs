@@ -210,6 +210,24 @@ test("mapEntry: returns null for entry with no headline and no link", () => {
   assert.equal(mapEntry(feed, {}), null);
 });
 
+test("mapEntry: carries feedId from manifest row so source-selection can match by stable id", () => {
+  // The source-selection stage uses item.feedId for an exact match against
+  // selected feeds, surviving any canonical_name drift between the matcher's
+  // manifest snapshot and the reader's.  Pin the field so a future refactor
+  // can't drop the plumb-through.
+  const feed = { id: "wapo-politics", name: "The Washington Post — Politics", weight: 95 };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.feedId, "wapo-politics");
+});
+
+test("mapEntry: feedId is empty string when manifest row has no id (defensive)", () => {
+  // Defensive: every manifest row should have an id, but if upstream loaders
+  // ever surface an idless row we don't want `String(undefined)` to leak.
+  const feed = { name: "Anonymous Source", weight: 50 };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.feedId, "");
+});
+
 // ─── readFeedItems (live mode) ──────────────────────────────────────────────
 
 const FETCHED_AT_MIN = (n) => nowMinusMinutes(n);

@@ -102,3 +102,21 @@ test("normalizeSourceItems throws TypeError when input is not an array", () => {
   assert.throws(() => normalizeSourceItems(null), /rawItems must be an array/);
   assert.throws(() => normalizeSourceItems({ key: "value" }), /rawItems must be an array/);
 });
+
+test("normalizeSourceItem preserves feedId when present (live items only)", () => {
+  const item = normalizeSourceItem({ ...MINIMAL_VALID, feedId: "wapo-politics" });
+  assert.equal(item.feedId, "wapo-politics");
+});
+
+test("normalizeSourceItem leaves feedId undefined when absent (legacy fixtures)", () => {
+  const item = normalizeSourceItem(MINIMAL_VALID);
+  assert.equal(item.feedId, undefined);
+});
+
+test("normalizeSourceItem treats empty-string feedId as absent (defensive)", () => {
+  // Defensive: an empty-string feedId from a defective manifest row would
+  // make every item match every selected feed if we treated it as a real id.
+  // Pin: empty → undefined → outlet-name fallback engages instead.
+  const item = normalizeSourceItem({ ...MINIMAL_VALID, feedId: "" });
+  assert.equal(item.feedId, undefined);
+});
