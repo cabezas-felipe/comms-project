@@ -46,13 +46,28 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
 
 // Inject a deterministic test identity so protected routes authenticate without a live Supabase instance.
 const TEST_USER_ID = "test-user-id";
 _auth.resolver = async () => ({ userId: TEST_USER_ID, source: "bearer" });
+
+// Inject a deterministic embedding stub so the recall stage doesn't fail-closed
+// in tests that don't have TEMPO_OPENAI_API_KEY.  These route tests don't
+// exercise embedding-recall semantics — they just need the recall stage to
+// produce a non-empty union when keyword recall has hits.  Returning vectors
+// proportional to a few signal tokens keeps the cosine ranking deterministic
+// without speaking to a real provider.
+_embeddings.embed = async (texts) => {
+  const TOKENS = ["us", "colombia", "ofac", "diplomatic", "security", "petro", "reuters"];
+  return texts.map((t) => {
+    const lower = String(t ?? "").toLowerCase();
+    const matches = TOKENS.filter((tok) => lower.includes(tok)).length;
+    return [matches, Math.min(lower.length, 1000) / 1000];
+  });
+};
 
 after(async () => {
   await rm(tmpDir, { recursive: true, force: true });
@@ -511,6 +526,97 @@ test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns 
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: embedFn throws WITH lexical hits → lexical fallback (degraded, not hard-empty)", async () => {
+  // The dashboard false-empty regression we are guarding against: a real
+  // embedding outage with obvious lexical matches (the fixture item carries
+  // a topic that matches VALID_BODY's `Diplomatic relations`) must surface
+  // those items via the lexical-fallback path rather than collapsing the
+  // dashboard to zero.  Override the global stub with a throwing one so the
+  // production fail-path is observable, not masked.
+  const prevEmbed = _embeddings.embed;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  let snapshotWritten = null;
+  _embeddings.embed = async () => {
+    throw new Error("simulated provider 503: service unavailable");
+  };
+  _snapshotRepo.write = async (_uid, payload) => { snapshotWritten = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    // Lexical fallback surfaces the fixture item (real ingest, no fabrication).
+    assert.ok(Array.isArray(res.body.stories), "stories must be present");
+    assert.ok(res.body.stories.length >= 1, "lexical fallback must surface keyword/topic hits");
+    for (const story of res.body.stories) {
+      for (const src of story.sources) {
+        assert.ok(typeof src.id === "string" && src.id.length > 0, "every source must carry a real id");
+        assert.ok(typeof src.url === "string" && src.url.length > 0, "every source must carry a real url");
+      }
+    }
+    // Operator-facing surface: degraded_reason and the lexical-fallback flag
+    // must reach _meta.recall so the cliff is observable.
+    const recall = res.body._meta?.recall;
+    assert.ok(recall, "_meta.recall must be present on a degraded run");
+    assert.equal(recall.degraded, true);
+    assert.equal(recall.degraded_reason, "embedding_error_fail_closed");
+    assert.equal(recall.keywordFallbackAfterEmbeddingFailure, true);
+    // Snapshot is written with the lexical fallback content — never empty
+    // when lexical hits exist.
+    assert.ok(snapshotWritten !== null);
+    assert.ok(snapshotWritten.stories.length >= 1);
+  } finally {
+    _embeddings.embed = prevEmbed;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: embedFn throws WITHOUT lexical hits → strict-empty fail-closed", async () => {
+  // Strict-empty path: when settings have no topic/keyword that matches the
+  // fixture item, a thrown embedFn yields zero stories and `_meta.recall`
+  // surfaces `degraded_reason` without `keywordFallbackAfterEmbeddingFailure`.
+  // Use a settings payload with disjoint topics/keywords from the fixture.
+  const NO_MATCH_BODY = {
+    contractVersion: "2026-04-22-slice1",
+    topics: ["Migration policy"],          // fixture topic is "Diplomatic relations"
+    keywords: ["asylum"],                  // fixture body/headline have no asylum
+    geographies: ["US"],
+    traditionalSources: ["Reuters"],
+    socialSources: [],
+  };
+  const prevEmbed = _embeddings.embed;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _embeddings.embed = async () => { throw new Error("provider 503"); };
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    // Reset settings to the no-match payload, run refresh, then restore.
+    await request(app).put("/api/settings").send(NO_MATCH_BODY).set("Content-Type", "application/json");
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.stories, []);
+    const recall = res.body._meta?.recall;
+    assert.ok(recall);
+    assert.equal(recall.degraded, true);
+    assert.equal(recall.degraded_reason, "embedding_error_fail_closed");
+    assert.notEqual(recall.keywordFallbackAfterEmbeddingFailure, true);
+  } finally {
+    _embeddings.embed = prevEmbed;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    // Restore the suite-wide VALID_BODY so subsequent tests run unaffected.
+    await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
   }
 });
 
@@ -1799,6 +1905,59 @@ test("extraction trigger: extraction failure does not fail request — returns 2
   }
 });
 
+test("extraction trigger: failure with empty AI-derivable arrays in baseline does not inject placeholders", async () => {
+  // Regression guard: at first onboarding the client sends keywords/geographies/
+  // traditionalSources/socialSources as empty arrays. When extraction fails,
+  // those fields must remain empty in the persisted settings — no seeded
+  // placeholders, no inferred defaults.
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  const writeCalls = [];
+  _narrativeRepo.read = async () => "Watching Colombia–US.";
+  _extraction.extract = async () => { throw new Error("both models timed out"); };
+  _writeSettings.write = async (payload, userId) => { writeCalls.push({ payload, userId }); };
+
+  try {
+    const firstOnboardingBody = {
+      contractVersion: "2026-04-22-slice1",
+      topics: ["Colombia–US bilateral"],
+      keywords: [],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+      onboardingRawText: "Watching Colombia–US.",
+    };
+    const res = await request(app)
+      .put("/api/settings")
+      .send(firstOnboardingBody)
+      .set("Content-Type", "application/json");
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta?.extractionStatus, "failed");
+    assert.equal(writeCalls.length, 1, "no extraction write-back on failure");
+
+    // Persisted payload preserves user-entered topics and keeps every other
+    // AI-derivable field empty — no seeded values leak in.
+    const persisted = writeCalls[0].payload;
+    assert.deepEqual(persisted.topics, ["Colombia–US bilateral"]);
+    assert.deepEqual(persisted.keywords, []);
+    assert.deepEqual(persisted.geographies, []);
+    assert.deepEqual(persisted.traditionalSources, []);
+    assert.deepEqual(persisted.socialSources, []);
+
+    // Response mirrors persisted state.
+    assert.deepEqual(res.body.keywords, []);
+    assert.deepEqual(res.body.geographies, []);
+    assert.deepEqual(res.body.traditionalSources, []);
+    assert.deepEqual(res.body.socialSources, []);
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+  }
+});
+
 test("extraction trigger: narrative read returns null — falls back to onboardingRawText and extraction runs", async () => {
   const prevRead = _narrativeRepo.read;
   const prevExtract = _extraction.extract;
@@ -1896,6 +2055,94 @@ test("extraction chain: primary fails, fallback (Sonnet) succeeds — two attemp
     _narrativeRepo.read = prevRead;
     _extraction.extract = prevExtract;
     _writeSettings.write = prevWrite;
+  }
+});
+
+test("extraction chain: route reads env-configured models in order (no hardcoded literals)", async () => {
+  // Spec: server.mjs must NOT hardcode model literals — both primary and
+  // fallback flow through resolveExtractionChain() at call time.  Setting the
+  // env vars to recognizable sentinels and watching what the route hands to
+  // _extraction.extract proves the chain is env-driven end-to-end.
+  const prevPrimaryEnv = process.env.TEMPO_AI_CLASSIFIER_MODEL;
+  const prevFallbackEnv = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  process.env.TEMPO_AI_CLASSIFIER_MODEL = "anthropic:env-primary-test";
+  process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = "anthropic:env-fallback-test";
+
+  const attempts = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => "Colombia diplomacy.";
+  _extraction.extract = async (_text, model) => {
+    attempts.push(model);
+    if (model === "anthropic:env-primary-test") throw new Error("primary down");
+    return MOCK_EXTRACTION;
+  };
+  _writeSettings.write = async () => {};
+
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send({ ...VALID_BODY, onboardingRawText: "Colombia diplomacy." })
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.equal(attempts.length, 2, "both env-configured models must be attempted");
+    assert.equal(attempts[0], "anthropic:env-primary-test", "primary must come from TEMPO_AI_CLASSIFIER_MODEL");
+    assert.equal(attempts[1], "anthropic:env-fallback-test", "fallback must come from TEMPO_AI_CLASSIFIER_FALLBACK_MODEL");
+    assert.equal(res.body._meta?.extractionStatus, "succeeded");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+    if (prevPrimaryEnv !== undefined) process.env.TEMPO_AI_CLASSIFIER_MODEL = prevPrimaryEnv;
+    else delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
+    if (prevFallbackEnv !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = prevFallbackEnv;
+    else delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  }
+});
+
+test("extraction chain: fallback is attempted when primary fails (under env-configured chain)", async () => {
+  // Mirrors the existing Opus→Sonnet test but with explicit env vars + a
+  // primary that throws a recognizable error message.  Asserts the route's
+  // chain orchestration is env-driven AND retains the strict two-step
+  // semantics (don't skip fallback on primary failure).
+  const prevPrimaryEnv = process.env.TEMPO_AI_CLASSIFIER_MODEL;
+  const prevFallbackEnv = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  process.env.TEMPO_AI_CLASSIFIER_MODEL = "anthropic:cfg-primary";
+  process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = "anthropic:cfg-fallback";
+
+  const attempts = [];
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  _narrativeRepo.read = async () => "Colombia diplomacy.";
+  _extraction.extract = async (_text, model) => {
+    attempts.push(model);
+    if (model === "anthropic:cfg-primary") {
+      // Error message shape mimics a real Anthropic timeout so the
+      // classifyExtractionError → "timeout" branch is exercised in the log.
+      throw new Error("Anthropic extraction timed out (cfg-primary)");
+    }
+    return MOCK_EXTRACTION;
+  };
+  _writeSettings.write = async () => {};
+
+  try {
+    const res = await request(app)
+      .put("/api/settings")
+      .send({ ...VALID_BODY, onboardingRawText: "Colombia diplomacy." })
+      .set("Content-Type", "application/json");
+    assert.equal(res.status, 200);
+    assert.deepEqual(attempts, ["anthropic:cfg-primary", "anthropic:cfg-fallback"]);
+    assert.equal(res.body._meta?.extractionStatus, "succeeded");
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+    if (prevPrimaryEnv !== undefined) process.env.TEMPO_AI_CLASSIFIER_MODEL = prevPrimaryEnv;
+    else delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
+    if (prevFallbackEnv !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = prevFallbackEnv;
+    else delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
   }
 });
 

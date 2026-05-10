@@ -1,0 +1,493 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  RECALL_MODE,
+  resolveRecallConfig,
+  buildProfileText,
+  buildItemText,
+  cosineSimilarity,
+  runEmbeddingRecall,
+} from "./embedding-recall.mjs";
+
+// ─── Fixture helpers ──────────────────────────────────────────────────────────
+
+function makeItem(overrides = {}) {
+  return {
+    sourceId: "src-1",
+    outlet: "Reuters",
+    headline: "Test Headline",
+    body: ["Test body."],
+    minutesAgo: 30,
+    ...overrides,
+  };
+}
+
+const BASE_SETTINGS = {
+  topics: ["Diplomatic relations", "Migration policy"],
+  keywords: ["OFAC", "sanctions"],
+  geographies: ["US", "Colombia"],
+  traditionalSources: ["Reuters"],
+  socialSources: [],
+};
+
+const HYBRID_CONFIG = Object.freeze({
+  mode: RECALL_MODE.HYBRID_STRICT,
+  embedTopK: 5,
+  embedMaxItems: 100,
+  embeddingModel: "text-embedding-3-small",
+});
+
+// Deterministic stub embedder.  The first text gets a profile-flavored vector;
+// each item text gets a vector based on whether it contains a "signal" token.
+// Cosine ranks the matching items above non-matching items reliably.
+function makeStubEmbedder({ signalTokens = ["us", "colombia", "ofac"], throwOnCall = null } = {}) {
+  return async (texts) => {
+    if (throwOnCall) throw throwOnCall;
+    return texts.map((t) => {
+      const lower = String(t).toLowerCase();
+      const matches = signalTokens.filter((tok) => lower.includes(tok)).length;
+      // Two-dim vector: [signal_strength, length]
+      return [matches, Math.min(lower.length, 1000) / 1000];
+    });
+  };
+}
+
+// ─── resolveRecallConfig ──────────────────────────────────────────────────────
+
+test("resolveRecallConfig: defaults to hybrid_strict with documented K/M/model", () => {
+  const prevMode = process.env.TEMPO_RECALL_MODE;
+  const prevK = process.env.TEMPO_EMBED_TOP_K;
+  const prevM = process.env.TEMPO_EMBED_MAX_ITEMS;
+  const prevModel = process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+  delete process.env.TEMPO_RECALL_MODE;
+  delete process.env.TEMPO_EMBED_TOP_K;
+  delete process.env.TEMPO_EMBED_MAX_ITEMS;
+  delete process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+  try {
+    const cfg = resolveRecallConfig();
+    assert.equal(cfg.mode, "hybrid_strict");
+    assert.equal(cfg.embedTopK, 80);
+    assert.equal(cfg.embedMaxItems, 250);
+    assert.equal(cfg.embeddingModel, "text-embedding-3-small");
+  } finally {
+    if (prevMode === undefined) delete process.env.TEMPO_RECALL_MODE; else process.env.TEMPO_RECALL_MODE = prevMode;
+    if (prevK === undefined) delete process.env.TEMPO_EMBED_TOP_K; else process.env.TEMPO_EMBED_TOP_K = prevK;
+    if (prevM === undefined) delete process.env.TEMPO_EMBED_MAX_ITEMS; else process.env.TEMPO_EMBED_MAX_ITEMS = prevM;
+    if (prevModel === undefined) delete process.env.TEMPO_OPENAI_EMBEDDING_MODEL; else process.env.TEMPO_OPENAI_EMBEDDING_MODEL = prevModel;
+  }
+});
+
+test("resolveRecallConfig: explicit keyword mode is honored", () => {
+  const prev = process.env.TEMPO_RECALL_MODE;
+  process.env.TEMPO_RECALL_MODE = "keyword";
+  try {
+    assert.equal(resolveRecallConfig().mode, "keyword");
+  } finally {
+    if (prev === undefined) delete process.env.TEMPO_RECALL_MODE; else process.env.TEMPO_RECALL_MODE = prev;
+  }
+});
+
+test("resolveRecallConfig: unknown mode falls through to hybrid_strict (safer default)", () => {
+  const prev = process.env.TEMPO_RECALL_MODE;
+  process.env.TEMPO_RECALL_MODE = "experimental";
+  try {
+    assert.equal(resolveRecallConfig().mode, "hybrid_strict");
+  } finally {
+    if (prev === undefined) delete process.env.TEMPO_RECALL_MODE; else process.env.TEMPO_RECALL_MODE = prev;
+  }
+});
+
+// ─── buildProfileText / buildItemText ─────────────────────────────────────────
+
+test("buildProfileText: composes topics, keywords, geographies, sources, narrative in order", () => {
+  const text = buildProfileText({
+    ...BASE_SETTINGS,
+    onboardingNarrative: "I cover bilateral US-Colombia comms.",
+  });
+  assert.match(text, /Topics: Diplomatic relations, Migration policy/);
+  assert.match(text, /Keywords: OFAC, sanctions/);
+  assert.match(text, /Geographies: US, Colombia/);
+  assert.match(text, /Sources: Reuters/);
+  assert.match(text, /Beat narrative: I cover bilateral US-Colombia comms\./);
+});
+
+test("buildProfileText: returns empty string for empty settings (fallback handled by recall stage)", () => {
+  assert.equal(buildProfileText({}), "");
+  assert.equal(buildProfileText(null), "");
+});
+
+test("buildItemText: uses real ingested fields only (outlet, headline, body)", () => {
+  const t = buildItemText({
+    outlet: "Reuters",
+    headline: "U.S. weighs new tariffs",
+    body: ["Treasury issued draft language today."],
+  });
+  assert.match(t, /Reuters/);
+  assert.match(t, /U\.S\. weighs new tariffs/);
+  assert.match(t, /Treasury issued draft language today\./);
+});
+
+// ─── cosineSimilarity ────────────────────────────────────────────────────────
+
+test("cosineSimilarity: identical vectors → 1", () => {
+  assert.equal(cosineSimilarity([1, 2, 3], [1, 2, 3]), 1);
+});
+
+test("cosineSimilarity: orthogonal vectors → 0", () => {
+  assert.equal(cosineSimilarity([1, 0], [0, 1]), 0);
+});
+
+test("cosineSimilarity: zero vector returns 0 (no NaN leak)", () => {
+  assert.equal(cosineSimilarity([0, 0], [1, 1]), 0);
+});
+
+// ─── runEmbeddingRecall ──────────────────────────────────────────────────────
+
+test("runEmbeddingRecall: keyword mode bypasses embedFn entirely", async () => {
+  let embedCalls = 0;
+  const embedFn = async () => { embedCalls++; return []; };
+  const candidate = [makeItem({ sourceId: "a" }), makeItem({ sourceId: "b" })];
+  const keyword = [candidate[0]];
+  const result = await runEmbeddingRecall({
+    candidateItems: candidate,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: keyword,
+    embedFn,
+    config: { ...HYBRID_CONFIG, mode: RECALL_MODE.KEYWORD },
+  });
+  assert.equal(embedCalls, 0, "embedFn must NOT be invoked under keyword mode");
+  assert.deepEqual(result.items.map((i) => i.sourceId), ["a"]);
+  assert.equal(result.diagnostics.mode, "keyword");
+});
+
+test("runEmbeddingRecall: hybrid_strict widens recall via semantic match (item without keyword still passes)", async () => {
+  // Keyword recall picks up only "kw-hit". Embedding picks up "no-kw-but-semantic"
+  // because its text contains a configured geo signal even though no exact keyword.
+  const items = [
+    makeItem({ sourceId: "kw-hit", headline: "OFAC ruling on sanctions" }),
+    makeItem({ sourceId: "no-kw-but-semantic", headline: "U.S. and Colombia coordinate response" }),
+    makeItem({ sourceId: "off-topic", headline: "Local sports recap" }),
+  ];
+  const keywordRecall = [items[0]];
+
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: keywordRecall,
+    embedFn: makeStubEmbedder(),
+    config: { ...HYBRID_CONFIG, embedTopK: 2 },
+  });
+
+  const ids = result.items.map((i) => i.sourceId);
+  assert.ok(ids.includes("kw-hit"), "keyword recall items preserved");
+  assert.ok(ids.includes("no-kw-but-semantic"), "semantic-only candidate widened in via embedding");
+  assert.equal(result.diagnostics.mode, "hybrid_strict");
+  assert.equal(result.diagnostics.embeddedCount, 3);
+  assert.equal(result.diagnostics.similarityKept, 2);
+  assert.equal(result.diagnostics.degraded, false);
+  assert.equal(result.diagnostics.degraded_reason, null);
+});
+
+test("runEmbeddingRecall: union dedups when keyword item is also a top-K semantic match", async () => {
+  const item = makeItem({ sourceId: "shared", headline: "U.S. OFAC update" });
+  const result = await runEmbeddingRecall({
+    candidateItems: [item],
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [item],
+    embedFn: makeStubEmbedder(),
+    config: HYBRID_CONFIG,
+  });
+  const ids = result.items.map((i) => i.sourceId);
+  assert.deepEqual(ids, ["shared"], "shared sourceId must appear exactly once after union");
+});
+
+test("runEmbeddingRecall: embedFn throws + keyword hits present → lexical fallback (degraded, not strict-empty)", async () => {
+  // Updated policy: when lexical recall has items, an embedding failure
+  // surfaces them (with `keywordFallbackAfterEmbeddingFailure: true`) rather
+  // than zeroing the run.  Trust protections still hold — every returned
+  // item already passed source/topic/keyword gates; embeddings only widen.
+  const items = [makeItem({ sourceId: "a", headline: "OFAC update" })];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: items,
+    embedFn: makeStubEmbedder({ throwOnCall: new Error("provider 500") }),
+    config: HYBRID_CONFIG,
+  });
+  assert.deepEqual(result.items.map((i) => i.sourceId), ["a"]);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_error_fail_closed");
+  assert.equal(result.diagnostics.keywordFallbackAfterEmbeddingFailure, true);
+});
+
+test("runEmbeddingRecall: embedFn throws + keyword EMPTY → strict-empty (no fallback target)", async () => {
+  // When lexical recall is empty there's nothing to fall back to — keep the
+  // run honest with strict-empty rather than synthesizing items.
+  const result = await runEmbeddingRecall({
+    candidateItems: [makeItem()],
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [],
+    embedFn: makeStubEmbedder({ throwOnCall: new Error("provider 500") }),
+    config: HYBRID_CONFIG,
+  });
+  assert.deepEqual(result.items, []);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_error_fail_closed");
+  assert.equal(result.diagnostics.keywordFallbackAfterEmbeddingFailure, undefined);
+  assert.equal(result.diagnostics.unionCount, 0);
+  assert.equal(result.diagnostics.finalRelevant, 0);
+});
+
+test("runEmbeddingRecall: surfaces 'timeout' reason for AbortError-style errors", async () => {
+  const result = await runEmbeddingRecall({
+    candidateItems: [makeItem()],
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [],
+    embedFn: makeStubEmbedder({ throwOnCall: new Error("request timed out after 8000ms") }),
+    config: HYBRID_CONFIG,
+  });
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_timeout_fail_closed");
+});
+
+test("runEmbeddingRecall: wrong-shaped embed response → strict-empty when keyword recall is empty", async () => {
+  const result = await runEmbeddingRecall({
+    candidateItems: [makeItem(), makeItem({ sourceId: "b" })],
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [],
+    embedFn: async () => [[1, 2]], // 1 vector for 3 inputs (profile + 2 items)
+    config: HYBRID_CONFIG,
+  });
+  assert.deepEqual(result.items, []);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_invalid_response_fail_closed");
+});
+
+test("runEmbeddingRecall: wrong-shaped embed response + keyword hits → lexical fallback", async () => {
+  const items = [makeItem({ sourceId: "a", headline: "OFAC update" })];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: items,
+    embedFn: async () => [[1, 2]], // wrong shape
+    config: HYBRID_CONFIG,
+  });
+  assert.deepEqual(result.items.map((i) => i.sourceId), ["a"]);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_invalid_response_fail_closed");
+  assert.equal(result.diagnostics.keywordFallbackAfterEmbeddingFailure, true);
+});
+
+test("runEmbeddingRecall: missing embedFn + keyword hits → lexical fallback (degraded)", async () => {
+  // Updated policy: when lexical recall has items, missing embedFn surfaces
+  // them with diagnostics flag.  Strict-empty is reserved for the cases
+  // where lexical also has nothing to offer.
+  const items = [makeItem({ sourceId: "a" })];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: items,
+    embedFn: null,
+    config: HYBRID_CONFIG,
+  });
+  assert.deepEqual(result.items.map((i) => i.sourceId), ["a"]);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_unavailable_fail_closed");
+  assert.equal(result.diagnostics.keywordFallbackAfterEmbeddingFailure, true);
+});
+
+test("runEmbeddingRecall: missing embedFn + keyword EMPTY → strict-empty", async () => {
+  const result = await runEmbeddingRecall({
+    candidateItems: [makeItem()],
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [],
+    embedFn: null,
+    config: HYBRID_CONFIG,
+  });
+  assert.deepEqual(result.items, []);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_unavailable_fail_closed");
+  assert.equal(result.diagnostics.keywordFallbackAfterEmbeddingFailure, undefined);
+});
+
+test("runEmbeddingRecall: empty candidate pool propagates empty (no embedFn invocation)", async () => {
+  let calls = 0;
+  const embedFn = async () => { calls++; return []; };
+  const result = await runEmbeddingRecall({
+    candidateItems: [],
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [],
+    embedFn,
+    config: HYBRID_CONFIG,
+  });
+  assert.deepEqual(result.items, []);
+  assert.equal(calls, 0);
+  assert.equal(result.diagnostics.embeddedCount, 0);
+});
+
+test("runEmbeddingRecall: empty profile text → strict fail-closed (no keyword pass-through)", async () => {
+  // Option A strictest: an empty profile (typically pre-onboarding) means we
+  // have no signal to compare against.  Returning the keyword recall under
+  // these conditions risks delivering items the user wouldn't recognize as
+  // their beat.  Empty + diagnostic is the safer surface.
+  let calls = 0;
+  const embedFn = async () => { calls++; return []; };
+  const items = [makeItem({ sourceId: "a" })];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: {}, // no topics/keywords/geos/sources/narrative
+    keywordRecallItems: items,
+    embedFn,
+    config: HYBRID_CONFIG,
+  });
+  assert.equal(calls, 0, "embedFn must not be invoked when profile text is empty");
+  assert.deepEqual(result.items, []);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "empty_profile_text_fail_closed");
+  assert.equal(result.diagnostics.embeddedCount, 0);
+  assert.equal(result.diagnostics.similarityKept, 0);
+  assert.equal(result.diagnostics.unionCount, 0);
+  assert.equal(result.diagnostics.finalRelevant, 0);
+});
+
+test("runEmbeddingRecall: caps candidate pool at embedMaxItems before embedding", async () => {
+  let receivedTextsLength = 0;
+  const embedFn = async (texts) => {
+    receivedTextsLength = texts.length;
+    return texts.map(() => [1, 0]); // dummy uniform vectors
+  };
+  const items = Array.from({ length: 10 }, (_, i) => makeItem({ sourceId: `src-${i}` }));
+  await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [],
+    embedFn,
+    config: { ...HYBRID_CONFIG, embedMaxItems: 3, embedTopK: 10 },
+  });
+  // 1 profile + 3 items (capped from 10) = 4 inputs
+  assert.equal(receivedTextsLength, 4);
+});
+
+test("runEmbeddingRecall: tied cosine scores resolve deterministically by input order then sourceId", async () => {
+  // Three items embed to the same vector → cosine ties.  Selection must
+  // honor input order first, then sourceId — never depend on V8's hidden
+  // sort ordering.
+  const items = [
+    makeItem({ sourceId: "z-last", headline: "same" }),
+    makeItem({ sourceId: "a-first", headline: "same" }),
+    makeItem({ sourceId: "m-mid", headline: "same" }),
+  ];
+  const embedFn = async (texts) => texts.map(() => [1, 0]); // every vector identical
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [],
+    embedFn,
+    config: { ...HYBRID_CONFIG, embedTopK: 2 },
+  });
+  // Top-2 must be the first two by input order — not the alphabetically
+  // earliest sourceIds — because seq dominates over sourceId tiebreak.
+  assert.deepEqual(result.items.map((i) => i.sourceId), ["z-last", "a-first"]);
+});
+
+test("runEmbeddingRecall: applies embedTopK cap to semantic candidates", async () => {
+  const items = Array.from({ length: 5 }, (_, i) =>
+    makeItem({ sourceId: `s-${i}`, headline: i < 3 ? "U.S. ofac update" : "unrelated story" })
+  );
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [],
+    embedFn: makeStubEmbedder(),
+    config: { ...HYBRID_CONFIG, embedTopK: 2 },
+  });
+  assert.equal(result.diagnostics.similarityKept, 2);
+  assert.equal(result.items.length, 2);
+});
+
+// ─── WaPo Iran/oil regression fixtures ───────────────────────────────────────
+//
+// Based on a real false-empty observed in production: a WaPo story
+// "Gulf nations hoped to move beyond oil. The Iran war made that much harder"
+// matched no canonical topic enum and the user's `topic` field on the item
+// was empty (RSS items don't carry a Tempo topic), so the keyword regex was
+// the only escape hatch.  These tests pin that the lexical gate alone catches
+// it and that an embedding failure does NOT collapse the run to zero.
+
+const WAPO_IRAN_SETTINGS = Object.freeze({
+  topics: ["Diplomatic relations", "Trade policy", "Energy trade", "Agricultural trade"],
+  keywords: ["oil", "petroleum", "agriculture", "sanctions", "trade"],
+  geographies: ["US", "Iran"],
+  traditionalSources: ["Washington Post"],
+  socialSources: [],
+});
+
+const WAPO_IRAN_ITEM = Object.freeze({
+  sourceId: "wapo-gulf-iran-oil",
+  outlet: "The Washington Post — World",
+  // Item topic is empty (typical for RSS); recall must rely on keyword regex.
+  topic: "",
+  headline: "Gulf nations hoped to move beyond oil. The Iran war made that much harder.",
+  body: [
+    "Sanctions and military strikes have rerouted petroleum trade across the Gulf, " +
+    "with U.S. allies recalibrating their long-term energy posture.",
+  ],
+  geographies: [],
+  url: "https://www.washingtonpost.com/world/2026/01/01/gulf-iran-oil",
+  weight: 88,
+  kind: "traditional",
+  byline: "Test Reporter",
+  minutesAgo: 30,
+});
+
+test("WaPo Iran/oil: keyword recall alone catches the lexical hit (no item topic, regex via 'oil'/'petroleum')", async () => {
+  // Sanity-check that the lexical contract holds: even with an empty item.topic,
+  // a WaPo story whose headline contains a configured keyword surfaces.  This
+  // pins the regression on keyword-based recall.
+  const { applyTopicKeywordFilter } = await import("../dashboard/refresh-pipeline.mjs");
+  const passed = applyTopicKeywordFilter([WAPO_IRAN_ITEM], WAPO_IRAN_SETTINGS);
+  assert.equal(passed.length, 1, "WaPo Iran/oil headline must match keywords 'oil' and 'petroleum'");
+  assert.equal(passed[0].sourceId, "wapo-gulf-iran-oil");
+});
+
+test("WaPo Iran/oil: embedding failure with lexical hit → lexical-fallback (degraded), not hard-empty", async () => {
+  // The bug we are guarding against: a refresh that hit an embedding timeout
+  // and collapsed the dashboard to zero stories despite obvious lexical hits.
+  // With the strict-spec policy this stays an empty-state — but the spec for
+  // this slice softens it to "preserve lexical hits when embeddings fail".
+  const lexicalHits = [WAPO_IRAN_ITEM];
+  const result = await runEmbeddingRecall({
+    candidateItems: [WAPO_IRAN_ITEM],
+    settings: WAPO_IRAN_SETTINGS,
+    keywordRecallItems: lexicalHits,
+    embedFn: makeStubEmbedder({ throwOnCall: new Error("provider timed out after 8000ms") }),
+    config: HYBRID_CONFIG,
+  });
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].sourceId, "wapo-gulf-iran-oil");
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_timeout_fail_closed");
+  assert.equal(result.diagnostics.keywordFallbackAfterEmbeddingFailure, true);
+  assert.equal(result.diagnostics.unionCount, 1);
+  assert.equal(result.diagnostics.finalRelevant, 1);
+});
+
+test("WaPo Iran/oil: items returned in lexical fallback are real ingested items (no fabrication)", async () => {
+  // Trust invariant: the fallback path must never synthesize content.  Every
+  // returned item must carry the original sourceId and url from the ingest.
+  const result = await runEmbeddingRecall({
+    candidateItems: [WAPO_IRAN_ITEM],
+    settings: WAPO_IRAN_SETTINGS,
+    keywordRecallItems: [WAPO_IRAN_ITEM],
+    embedFn: null, // missing embedFn
+    config: HYBRID_CONFIG,
+  });
+  assert.equal(result.items.length, 1);
+  const out = result.items[0];
+  assert.equal(out.sourceId, WAPO_IRAN_ITEM.sourceId);
+  assert.equal(out.url, WAPO_IRAN_ITEM.url);
+  assert.equal(out.outlet, WAPO_IRAN_ITEM.outlet);
+  assert.equal(out.headline, WAPO_IRAN_ITEM.headline);
+  // The lexical fallback must never invent a topic or summary.
+  assert.equal(out.topic, "");
+});

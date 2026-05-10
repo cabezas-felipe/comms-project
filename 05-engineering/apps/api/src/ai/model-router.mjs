@@ -15,6 +15,32 @@ function getCapabilityDefaults() {
   };
 }
 
+// Defaults for the onboarding extraction chain.  The route handler reads these
+// via `resolveExtractionChain()` and never hardcodes the literals — so a
+// model deprecation or A/B swap requires only an env flip, not a redeploy of
+// route code.  Production defaults match what shipped historically (Opus
+// primary, Sonnet fallback) so behavior is unchanged when the env is unset.
+const DEFAULT_EXTRACTION_PRIMARY = "anthropic:claude-opus-4-7";
+const DEFAULT_EXTRACTION_FALLBACK = "anthropic:claude-sonnet-4-6";
+
+/**
+ * Resolve the two-model extraction chain from env, falling back to the
+ * shipping defaults.  Reads env at call time so tests can override after
+ * module import.  Returns `{ primary, fallback }` — never `null`/`undefined`,
+ * so callers can pass the values straight through to `extractOnboarding`.
+ *
+ * Env vars:
+ *   TEMPO_AI_CLASSIFIER_MODEL          → primary  (default: anthropic:claude-opus-4-7)
+ *   TEMPO_AI_CLASSIFIER_FALLBACK_MODEL → fallback (default: anthropic:claude-sonnet-4-6)
+ */
+export function resolveExtractionChain() {
+  const primary =
+    (process.env.TEMPO_AI_CLASSIFIER_MODEL ?? "").trim() || DEFAULT_EXTRACTION_PRIMARY;
+  const fallback =
+    (process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL ?? "").trim() || DEFAULT_EXTRACTION_FALLBACK;
+  return { primary, fallback };
+}
+
 // Real Anthropic token pricing (USD per million tokens, as of 2026-04).
 const ANTHROPIC_COSTS = {
   "claude-haiku-4-5-20251001": { inputPerMTok: 0.80, outputPerMTok: 4.00 },

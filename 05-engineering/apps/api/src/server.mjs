@@ -4,8 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
-import { getAiCapabilityMap, getAiMetrics, assertAiConfig } from "./ai/model-router.mjs";
-import { extractOnboarding } from "./ai/onboarding-extractor.mjs";
+import { getAiCapabilityMap, getAiMetrics, assertAiConfig, resolveExtractionChain } from "./ai/model-router.mjs";
+import { extractOnboarding, resolveTimeoutMs as resolveExtractionTimeoutMs } from "./ai/onboarding-extractor.mjs";
 import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
@@ -14,6 +14,7 @@ import { trackServerEvent } from "./telemetry.mjs";
 import { readSnapshot, writeSnapshot, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket } from "./db/dashboard-snapshot-repo.mjs";
 import { appendRejections as appendStoryRejections } from "./db/story-rejection-log-repo.mjs";
 import { clusterItems } from "./ai/cluster-engine.mjs";
+import { embedTexts } from "./ai/embeddings.mjs";
 import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
 import {
   tryAcquire as tryAcquireRefresh,
@@ -220,6 +221,13 @@ export const _snapshotRepo = {
 export const _clusterEngine = { cluster: clusterItems };
 
 /**
+ * Mutable embeddings hook. Tests override `embed` to inject deterministic
+ * vectors (or simulate timeout/error for fail-closed coverage) without
+ * calling the OpenAI embeddings API.
+ */
+export const _embeddings = { embed: embedTexts };
+
+/**
  * Mutable refresh pipeline hook. Tests override run to simulate pipeline
  * outcomes (success, fallback, grounding failures) without running the full
  * pipeline.
@@ -234,9 +242,16 @@ export const _refreshPipeline = {
       writeHeldFn: opts.userId ? (items) => _snapshotRepo.writeHeld(opts.userId, items) : null,
       readPriorSnapshotFn: opts.userId ? () => _snapshotRepo.read(opts.userId) : null,
       writeRejectionsFn: opts.userId ? (recs) => _rejectionLog.write(opts.userId, recs) : null,
-      // priorWatermark is supplied directly by the route handler from the
-      // persisted snapshot blob; avoiding double-reads of the snapshot.
+      // priorWatermark + priorStoryCount are supplied directly by the route
+      // handler from the persisted snapshot blob; avoiding double-reads of
+      // the snapshot.  priorStoryCount lets the pipeline suppress the
+      // watermark short-circuit when the prior snapshot was empty (so a
+      // degraded run can't trap subsequent refreshes at zero).
       priorWatermark: opts.priorWatermark ?? null,
+      priorStoryCount: opts.priorStoryCount ?? null,
+      // Embedding-aware recall: in `hybrid_strict` mode the pipeline calls
+      // this fn with [profileText, ...itemTexts]; absent/throwing → fail-closed.
+      embedFn: (texts) => _embeddings.embed(texts),
     }),
 };
 
@@ -275,6 +290,34 @@ try {
 }
 
 /**
+ * One-shot startup diagnostic for the onboarding extraction subsystem.
+ * Prints the effective primary/fallback model + timeout that the route will
+ * use, so a deploy that picked up an unexpected env (or missed an env reload)
+ * is visible immediately without waiting for the first save attempt.
+ *
+ * Why this exists: the historical regression was a 1.2s default timeout
+ * collapsing both models silently; that's now caught at boot, not at a user's
+ * first onboarding submission.  Skipped under NODE_ENV=test so the API test
+ * suite stays quiet.
+ */
+function logExtractionConfigOnStartup() {
+  if (process.env.NODE_ENV === "test") return;
+  const { primary, fallback } = resolveExtractionChain();
+  const timeoutMs = resolveExtractionTimeoutMs();
+  console.log(
+    `[ai.config] extraction chain primary=${primary} fallback=${fallback} timeoutMs=${timeoutMs}`
+  );
+  if (timeoutMs < 5000) {
+    console.warn(
+      `[ai.config] WARNING: TEMPO_AI_TIMEOUT_MS=${timeoutMs} is below 5000ms — Anthropic Opus + Sonnet round-trips routinely take 3-8s on first call. ` +
+        `A short timeout collapses BOTH models in the chain and silently falls back to baseline-only persist. ` +
+        `Raise the value (or unset it) in your .env, not as an ad-hoc shell override.`
+    );
+  }
+}
+logExtractionConfigOnStartup();
+
+/**
  * Load the ingestion manifest for source-selection (Phase 2).  Mirrors the
  * source-of-truth used by GET /api/ingestion/sources: Supabase via
  * listIngestionFeeds when enabled, else the file at data/source-feeds.json.
@@ -297,6 +340,21 @@ async function loadManifestForSelection() {
     return null;
   }
 }
+// Tag an extraction error so failure logs distinguish "the model timed out"
+// from "the provider returned an error" from "we failed schema validation".
+// Operators reading [onboarding.extract] lines can spot timeout drift (the
+// historical regression) without grepping stack traces.
+function classifyExtractionError(err) {
+  if (!(err instanceof Error)) return "unknown";
+  const msg = err.message.toLowerCase();
+  if (msg.includes("timed out") || msg.includes("abort")) return "timeout";
+  // Anthropic SDK + the OpenAI provider both surface non-2xx as `HTTP <code>`.
+  if (/http \d{3}/.test(msg)) return "provider_http_error";
+  if (msg.includes("api key") || msg.includes("required for")) return "config_error";
+  if (msg.includes("zod") || msg.includes("validation") || msg.includes("invalid")) return "schema_error";
+  return "provider_error";
+}
+
 // Trim, filter empties, and deduplicate (case-insensitive, first-occurrence wins).
 // Applied to model-returned string arrays before persistence.
 function normalizeStringArray(arr) {
@@ -374,6 +432,13 @@ app.put("/api/settings", async (req, res) => {
 
     // Post-save extraction — only when onboardingRawText was provided.
     // Non-fatal: settings + narrative already committed before this block.
+    //
+    // Safe-fallback contract: when both primary and fallback models fail, the
+    // baseline `result.data` (already persisted) is what the client sees. The
+    // client is responsible for sending empty arrays for AI-derivable fields
+    // (keywords, geographies, traditional/social sources) at first onboarding —
+    // we never inject seeded placeholders here. `_meta.extractionStatus` makes
+    // the failure visible to the UI without blocking navigation.
     let settingsToReturn = result.data;
     let extractionStatus = "not_attempted"; // "succeeded" | "failed"
     if (onboardingRawText) {
@@ -388,20 +453,24 @@ app.put("/api/settings", async (req, res) => {
           console.warn("[onboarding.extract] mock-only mode enabled; skipping extraction in non-test runtime");
           extractionStatus = "failed";
         } else {
-          // Strict two-model chain: Opus primary, Sonnet fallback.
-          // No mock/default fallback — if both fail, extraction is skipped non-fatally.
+          // Strict two-model chain.  Models are resolved from env at call
+          // time via `resolveExtractionChain()` (defaults: Opus primary,
+          // Sonnet fallback) — no literals hardcoded here, so a deprecation
+          // or A/B swap is a single env flip.  No mock/default fallback: if
+          // both models fail, extraction is skipped non-fatally.
+          const { primary: primaryModel, fallback: fallbackModel } = resolveExtractionChain();
           let extracted = null;
           try {
-            extracted = await _extraction.extract(narrative, "anthropic:claude-opus-4-7");
+            extracted = await _extraction.extract(narrative, primaryModel);
           } catch (primaryErr) {
             console.warn(
-              `[onboarding.extract] primary (anthropic:claude-opus-4-7) failed: ${primaryErr instanceof Error ? primaryErr.message : primaryErr}`
+              `[onboarding.extract] primary failed model=${primaryModel} kind=${classifyExtractionError(primaryErr)} err=${primaryErr instanceof Error ? primaryErr.message : primaryErr}`
             );
             try {
-              extracted = await _extraction.extract(narrative, "anthropic:claude-sonnet-4-6");
+              extracted = await _extraction.extract(narrative, fallbackModel);
             } catch (fallbackErr) {
               console.warn(
-                `[onboarding.extract] fallback (anthropic:claude-sonnet-4-6) failed: ${fallbackErr instanceof Error ? fallbackErr.message : fallbackErr}`
+                `[onboarding.extract] fallback failed model=${fallbackModel} kind=${classifyExtractionError(fallbackErr)} err=${fallbackErr instanceof Error ? fallbackErr.message : fallbackErr}`
               );
             }
           }
@@ -617,19 +686,36 @@ async function executeRefreshFlow(identity) {
   }
 
   try {
-    const [settings, rawItems, manifestFeeds, priorSnapshot] = await Promise.all([
+    const [settings, rawItems, manifestFeeds, priorSnapshot, narrative] = await Promise.all([
       readSettings(identity.userId),
       readFeedItems(DATA_DIR),
       loadManifestForSelection(),
       _snapshotRepo.read(identity.userId).catch(() => null),
+      // Onboarding narrative is the richest source of beat context for the
+      // embedding profile.  Read failures are non-fatal — we just lose some
+      // signal and the recall stage falls through to settings-only profile.
+      _narrativeRepo.read(identity.userId).catch(() => null),
     ]);
 
     const priorWatermark = priorSnapshot?._watermark ?? null;
+    // Story count drives the trap-guard inside the pipeline: when the prior
+    // snapshot is empty AND the current run has candidates, the pipeline
+    // suppresses the watermark short-circuit and lets clustering re-run.
+    const priorStoryCount = Array.isArray(priorSnapshot?.stories)
+      ? priorSnapshot.stories.length
+      : null;
+
+    // Decorate the in-memory settings with the narrative so buildProfileText
+    // picks it up.  We never persist this back — it's transient per refresh.
+    const settingsWithNarrative =
+      typeof narrative === "string" && narrative.trim().length > 0
+        ? { ...settings, onboardingNarrative: narrative.trim() }
+        : settings;
 
     const clusterModel = getAiCapabilityMap().clustering;
     const { payload, log } = await _refreshPipeline.run({
       userId: identity.userId,
-      settings,
+      settings: settingsWithNarrative,
       rawItems,
       clusterModel,
       contractVersion: DEFAULT_SETTINGS.contractVersion,
@@ -637,6 +723,7 @@ async function executeRefreshFlow(identity) {
       fallbackFeedIds: parseFallbackFeedIdsEnv(process.env.TEMPO_FALLBACK_SOURCE_IDS),
       fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
       priorWatermark,
+      priorStoryCount,
     });
 
     // ─── Phase 4 short-circuit: watermark unchanged ─────────────────────────
@@ -749,6 +836,11 @@ async function executeRefreshFlow(identity) {
           watermark: log.watermark,
           candidateCount: log.candidateCount,
           selectedFeedCount: log.selectedFeedCount,
+          // Phase 1 relevance Stage 2 — internal explainability surface.
+          // Backwards-compatible: clients ignore unknown _meta keys.
+          beatFit: log.beatFit,
+          recall: log.recall,
+          funnel: log.funnel,
         },
       },
     };
