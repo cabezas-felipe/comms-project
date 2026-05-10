@@ -85,6 +85,17 @@ function feedHasImplementedConnector(feed) {
   return IMPLEMENTED_CONNECTOR_KINDS.has(feed?.kind);
 }
 
+/**
+ * Manifest rows with `active === false` are operator-disabled and must NOT
+ * be treated as selectable matches.  Rows with `active` omitted (`undefined`)
+ * stay eligible — older fixtures and tests don't carry the field, and
+ * forcing it to `true` everywhere would be a breaking schema change for no
+ * trust-bearing reason.  Only the explicit `false` flag disqualifies a row.
+ */
+function feedIsActive(feed) {
+  return feed?.active !== false;
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
@@ -148,7 +159,16 @@ export function resolveSelectedSources(opts) {
       unmatched.push(name);
       continue;
     }
-    const availableMatches = allMatches.filter(({ feed }) => feedHasImplementedConnector(feed));
+    // A match is "available" only when the connector is implemented AND the
+    // feed is not operator-disabled.  We collapse both checks into one filter
+    // so the existing `unavailable` bucket continues to capture both reasons
+    // — adding a third bucket would force a schema change at every consumer
+    // of `_meta.selection`.  In practice "inactive" is rare (a manual flag
+    // flip) and operationally indistinguishable from "no connector" at the
+    // selection layer; both mean "we cannot ingest from this row right now".
+    const availableMatches = allMatches.filter(
+      ({ feed }) => feedHasImplementedConnector(feed) && feedIsActive(feed)
+    );
     if (availableMatches.length === 0) {
       unavailable.push(name);
       continue;
@@ -200,8 +220,11 @@ export function resolveSelectedSources(opts) {
   }
 
   const fallbackSet = new Set(fallbackFeedIds.map(String));
+  // Fallback baseline must respect the same "active" gate as strict matching
+  // — otherwise an operator who flipped a feed off via `active=false` would
+  // still see it surface through the fallback path, defeating the kill switch.
   const fallbackFeeds = (manifestFeeds ?? []).filter(
-    (f) => f && fallbackSet.has(String(f.id)) && feedHasImplementedConnector(f)
+    (f) => f && fallbackSet.has(String(f.id)) && feedHasImplementedConnector(f) && feedIsActive(f)
   );
 
   return {
