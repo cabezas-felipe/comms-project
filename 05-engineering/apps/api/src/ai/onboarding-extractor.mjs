@@ -143,6 +143,25 @@ async function extractWithOpenAICompatible({ apiKey, model, text, timeoutMs }) {
   }
 }
 
+// 15s default — Anthropic Opus + Sonnet round-trips routinely run 3–8s on
+// first call (cold cache, 512-token completion). The previous 1.2s default
+// caused both primary and fallback to time out simultaneously, collapsing the
+// save flow to a baseline-only persist. Override per-environment via
+// TEMPO_AI_TIMEOUT_MS when needed (CI mocks set it lower).
+export const DEFAULT_EXTRACTION_TIMEOUT_MS = 15000;
+
+/**
+ * Resolves the active extraction timeout from env, falling back to the
+ * production-safe default. Exported so tests can verify the default and the
+ * override path without coupling to a free-floating constant.
+ */
+export function resolveTimeoutMs() {
+  const raw = process.env.TEMPO_AI_TIMEOUT_MS;
+  if (raw === undefined || raw === "") return DEFAULT_EXTRACTION_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_EXTRACTION_TIMEOUT_MS;
+}
+
 /**
  * Extract onboarding fields from free text using the specified model.
  * Throws on provider error, API key missing, timeout, or schema validation failure.
@@ -151,7 +170,7 @@ async function extractWithOpenAICompatible({ apiKey, model, text, timeoutMs }) {
 export async function extractOnboarding(text, model) {
   const provider = providerFor(model);
   const modelName = model.includes(":") ? model.slice(model.indexOf(":") + 1) : model;
-  const timeoutMs = Number(process.env.TEMPO_AI_TIMEOUT_MS || 1200);
+  const timeoutMs = resolveTimeoutMs();
 
   if (provider === "mock-anthropic" || provider === "mock-openai") {
     return extractionOutputSchema.parse(mockExtract(text));

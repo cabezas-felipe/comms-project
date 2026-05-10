@@ -6,6 +6,8 @@ const {
   extractionOutputSchema,
   buildExtractionPrompt,
   extractOnboarding,
+  DEFAULT_EXTRACTION_TIMEOUT_MS,
+  resolveTimeoutMs,
 } = await import("./onboarding-extractor.mjs");
 
 // ── metadata ─────────────────────────────────────────────────────────────────
@@ -186,4 +188,73 @@ test("extractOnboarding falls through to mock-openai for unknown model prefix (d
   assert.ok(Array.isArray(result.topics));
   assert.ok(Array.isArray(result.traditionalSources));
   assert.ok(Array.isArray(result.socialSources));
+});
+
+// ── timeout default + override ───────────────────────────────────────────────
+
+test("DEFAULT_EXTRACTION_TIMEOUT_MS is the production-safe 15s", () => {
+  // Regression guard: the old 1.2s default caused both Opus + Sonnet to time
+  // out simultaneously and silently degrade onboarding to a baseline-only
+  // persist. Anything under 5s is a regression.
+  assert.equal(DEFAULT_EXTRACTION_TIMEOUT_MS, 15000);
+});
+
+test("resolveTimeoutMs returns the default when TEMPO_AI_TIMEOUT_MS is unset", () => {
+  const prev = process.env.TEMPO_AI_TIMEOUT_MS;
+  delete process.env.TEMPO_AI_TIMEOUT_MS;
+  try {
+    assert.equal(resolveTimeoutMs(), DEFAULT_EXTRACTION_TIMEOUT_MS);
+  } finally {
+    if (prev !== undefined) process.env.TEMPO_AI_TIMEOUT_MS = prev;
+  }
+});
+
+test("resolveTimeoutMs returns the default when TEMPO_AI_TIMEOUT_MS is empty string", () => {
+  const prev = process.env.TEMPO_AI_TIMEOUT_MS;
+  process.env.TEMPO_AI_TIMEOUT_MS = "";
+  try {
+    assert.equal(resolveTimeoutMs(), DEFAULT_EXTRACTION_TIMEOUT_MS);
+  } finally {
+    if (prev !== undefined) process.env.TEMPO_AI_TIMEOUT_MS = prev;
+    else delete process.env.TEMPO_AI_TIMEOUT_MS;
+  }
+});
+
+test("resolveTimeoutMs honors TEMPO_AI_TIMEOUT_MS override", () => {
+  const prev = process.env.TEMPO_AI_TIMEOUT_MS;
+  process.env.TEMPO_AI_TIMEOUT_MS = "20000";
+  try {
+    assert.equal(resolveTimeoutMs(), 20000);
+  } finally {
+    if (prev !== undefined) process.env.TEMPO_AI_TIMEOUT_MS = prev;
+    else delete process.env.TEMPO_AI_TIMEOUT_MS;
+  }
+});
+
+test("resolveTimeoutMs honors TEMPO_AI_TIMEOUT_MS=15000 (production .env baseline)", () => {
+  // Pin the 15000ms path explicitly — this is the production baseline shipped
+  // in apps/api/.env templates.  If a future refactor changes resolveTimeoutMs
+  // semantics around this exact string, this assertion fails loudly.
+  const prev = process.env.TEMPO_AI_TIMEOUT_MS;
+  process.env.TEMPO_AI_TIMEOUT_MS = "15000";
+  try {
+    assert.equal(resolveTimeoutMs(), 15000);
+  } finally {
+    if (prev !== undefined) process.env.TEMPO_AI_TIMEOUT_MS = prev;
+    else delete process.env.TEMPO_AI_TIMEOUT_MS;
+  }
+});
+
+test("resolveTimeoutMs falls back to default when override is non-numeric or non-positive", () => {
+  const prev = process.env.TEMPO_AI_TIMEOUT_MS;
+  for (const bad of ["nope", "0", "-500", "NaN"]) {
+    process.env.TEMPO_AI_TIMEOUT_MS = bad;
+    assert.equal(
+      resolveTimeoutMs(),
+      DEFAULT_EXTRACTION_TIMEOUT_MS,
+      `bad value "${bad}" should fall back to default`
+    );
+  }
+  if (prev !== undefined) process.env.TEMPO_AI_TIMEOUT_MS = prev;
+  else delete process.env.TEMPO_AI_TIMEOUT_MS;
 });

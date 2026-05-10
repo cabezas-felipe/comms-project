@@ -1,11 +1,27 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+
+// Tests in this file predate the embedding-recall stage and don't inject
+// embedFn.  Under the strict fail-closed contract for `hybrid_strict`, every
+// such call would return an empty candidate set — making every assertion
+// about story counts/cluster output a false negative.  Set the file-scoped
+// default to `keyword` mode so legacy tests exercise the legacy recall path;
+// tests that target the embedding stage opt back into `hybrid_strict` by
+// passing `recallConfig: HYBRID_RECALL_CONFIG` explicitly.
+//
+// Safe to set at module top: `node --test` runs each test file in a child
+// process, so this env mutation does not leak across files.
+process.env.TEMPO_RECALL_MODE = "keyword";
+
 import {
   selectSourcePool,
   apply24hFilter,
   applyRelevanceFilter,
   applyTopicKeywordFilter,
   runRefreshPipeline,
+  primaryDropStage,
+  formatFunnel,
+  summarizeFunnel,
 } from "./refresh-pipeline.mjs";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
@@ -376,6 +392,7 @@ test("runRefreshPipeline: all items included when configured geographies is empt
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-04-22-slice1",
+    beatFitEnabled: false, // this test targets geo filter only; bypass relevance gate
   });
   assert.ok(seenIds.includes("src-any"), "no configured geos → all items pass geo filter");
 });
@@ -398,6 +415,7 @@ test("runRefreshPipeline: story geographies are never fabricated — empty when 
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-04-22-slice1",
+    beatFitEnabled: false, // narrow test on geo-fabrication guard; bypass relevance gate
   });
   assert.equal(payload.stories.length, 1);
   assert.deepEqual(payload.stories[0].geographies, [], "geographies must be empty, not fabricated");
@@ -536,6 +554,7 @@ test("runRefreshPipeline: previously held item is promoted when confidence rises
     readHeldFn: async () => [{ ...heldItem, geoCategory: "implicit_geo", geoConfidence: 0.5 }],
     geoAssessFn: async () => ({ confidence: 0.90 }),
     writeHeldFn: async () => {},
+    beatFitEnabled: false, // hold-bucket promotion test; bypass relevance gate
   });
 
   assert.ok(promoted.includes("was-held"), "previously held item must reach cluster when confidence rises");
@@ -1324,4 +1343,1063 @@ test("runRefreshPipeline: rejection records carry watermark stamp for dedup", as
   });
   assert.ok(Array.isArray(captured) && captured.length === 1);
   assert.ok(/^[0-9a-f]{16}$/.test(captured[0].watermark), "rejection record must carry watermark stamp");
+});
+
+// ─── Phase 1 relevance Stage 2 integration (beat-fit + strict-empty) ─────────
+//
+// These tests drive the full pipeline with the locked product pair from spec D1
+// and assert that the beat-fit gate + strict-empty policy are honored end to
+// end. Settings reflect the real post-extraction shape for our pilot user.
+
+const PHASE1_SETTINGS = {
+  contractVersion: "2026-04-22-slice1",
+  topics: ["Diplomatic relations", "Migration policy"],
+  keywords: ["migration", "sanctions"],
+  geographies: ["US", "Colombia"],
+  traditionalSources: ["The Washington Post — World"],
+  socialSources: [],
+};
+
+test("Phase 1 pairwise: include candidate clears the beat-fit gate", async () => {
+  const include = makeItem({
+    sourceId: "include",
+    outlet: "The Washington Post — World",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    headline: "U.S. strikes two Iranian-flagged tankers as tensions continue amid ceasefire",
+    body: ["WASHINGTON — The Pentagon confirmed two strikes on tankers in the Gulf of Oman."],
+    minutesAgo: 30,
+  });
+  const { payload, log } = await runRefreshPipeline({
+    settings: PHASE1_SETTINGS,
+    rawItems: [include],
+    clusterFn: async (items) => [
+      {
+        title: "U.S. action",
+        subtitle: "Strikes update",
+        source_item_ids: [items[0].sourceId],
+        summary: "U.S. strikes two tankers.",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        factual_claims: ["The Pentagon confirmed two strikes."],
+        claim_evidence_map: { "0": [items[0].sourceId] },
+      },
+    ],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 1, "include candidate must reach a story");
+  assert.equal(log.beatFit.includedCount, 1);
+  assert.equal(log.beatFit.excludedCount, 0);
+});
+
+test("Phase 1 pairwise: exclude candidate is filtered before clustering", async () => {
+  const exclude = makeItem({
+    sourceId: "exclude",
+    outlet: "The Washington Post — World",
+    geographies: [],
+    topic: "",
+    headline: "Iran war is crushing Asia's farmers, threatening global food supply",
+    body: ["Wheat and grain prices have surged across Asia, hammering smallholder farmers."],
+    minutesAgo: 30,
+  });
+  let clusterCalled = false;
+  const { payload, log } = await runRefreshPipeline({
+    settings: PHASE1_SETTINGS,
+    rawItems: [exclude],
+    clusterFn: async () => {
+      clusterCalled = true;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 0, "off-beat candidate must not become a story");
+  // Note: the exclude candidate carries no configured topic/keyword either, so
+  // the recall stage (applyTopicKeywordFilter) drops it before beat-fit even
+  // sees it. That's the correct, conservative outcome — strict-empty either
+  // way. The key contract is `payload.stories.length === 0`.
+  assert.equal(clusterCalled, false, "cluster must not run when no candidate clears");
+  assert.ok(log.beatFit, "beat-fit log block must be present");
+});
+
+test("Phase 1 strict-empty: pairwise mixed run produces only the include story", async () => {
+  // Both items reach recall (one via topic+geo, one via keyword) so beat-fit
+  // is the gate. The exclude candidate must be dropped at scoring; only the
+  // include story should be clustered.
+  const include = makeItem({
+    sourceId: "include",
+    outlet: "The Washington Post — World",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    headline: "U.S. strikes two Iranian-flagged tankers as tensions continue amid ceasefire",
+    body: ["WASHINGTON — The Pentagon confirmed two strikes on tankers in the Gulf of Oman."],
+    minutesAgo: 30,
+  });
+  const exclude = makeItem({
+    sourceId: "exclude",
+    outlet: "The Washington Post — World",
+    geographies: ["US"],                  // forces past geo filter
+    topic: "Migration policy",            // forces past topic+keyword recall
+    headline: "Iran war is crushing Asia's farmers, threatening global food supply",
+    body: ["Wheat and grain prices have surged across Asia, hammering smallholder farmers."],
+    minutesAgo: 30,
+  });
+  const seenIds = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: PHASE1_SETTINGS,
+    rawItems: [include, exclude],
+    clusterFn: async (items) => {
+      seenIds.push(...items.map((i) => i.sourceId));
+      return items.map((i) => ({
+        title: "Test",
+        subtitle: "Sub",
+        source_item_ids: [i.sourceId],
+        summary: "Summary.",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        factual_claims: ["A claim."],
+        claim_evidence_map: { "0": [i.sourceId] },
+      }));
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.deepEqual(seenIds.sort(), ["include"], "only the include candidate should reach clustering");
+  assert.equal(payload.stories.length, 1);
+  assert.equal(log.beatFit.includedCount, 1);
+  assert.equal(log.beatFit.excludedCount, 1);
+  assert.ok(
+    log.beatFit.excludeReasonHistogram.excluded_offbeat_geo >= 1 ||
+      log.beatFit.excludeReasonHistogram.excluded_commodity_framing >= 1,
+    "exclude histogram must record either offbeat-geo or commodity-framing"
+  );
+});
+
+test("Phase 1 strict-empty: when nothing clears beat-fit, payload.stories is []", async () => {
+  // Single off-beat item that passes recall but fails beat-fit.
+  const offbeat = makeItem({
+    sourceId: "x",
+    outlet: "The Washington Post — World",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    headline: "Asian commodity markets brace for fertilizer crunch",
+    body: ["Farmers across Asia face commodity stress; harvest season looms."],
+    minutesAgo: 30,
+  });
+  let clusterCalled = false;
+  const { payload, log } = await runRefreshPipeline({
+    settings: PHASE1_SETTINGS,
+    rawItems: [offbeat],
+    clusterFn: async () => {
+      clusterCalled = true;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 0, "strict-empty must NOT fall back to a weak top story");
+  assert.equal(clusterCalled, false, "no clustering when zero candidates clear beat-fit");
+  assert.equal(log.beatFit.includedCount, 0);
+  assert.ok(log.beatFit.excludedCount >= 1);
+});
+
+// ─── Funnel diagnostics (strict-empty observability) ─────────────────────────
+
+test("primaryDropStage: identifies the stage with the largest absolute drop", () => {
+  const funnel = {
+    totalNormalized: 100,
+    afterTimeWindow: 80,         // -20 time_window_24h
+    afterSourceSelection: 30,    // -50 source_selection  ← biggest drop
+    afterGeoFilter: 28,          // -2  geo_filter
+    afterTopicKeyword: 5,        // -23 topic_keyword_recall
+    afterBeatFit: 5,             // -0  beat_fit_precision
+    finalStories: 3,             // -2  clustering_and_grounding
+  };
+  assert.equal(primaryDropStage(funnel), "source_selection");
+});
+
+test("primaryDropStage: returns 'none' when no stage drops items", () => {
+  const funnel = {
+    totalNormalized: 5,
+    afterTimeWindow: 5,
+    afterSourceSelection: 5,
+    afterGeoFilter: 5,
+    afterTopicKeyword: 5,
+    afterBeatFit: 5,
+    finalStories: 5,
+  };
+  assert.equal(primaryDropStage(funnel), "none");
+});
+
+test("primaryDropStage: tolerates missing fields (treated as 0)", () => {
+  // Stages with undefined inputs/outputs must not throw or pick a phantom stage.
+  const funnel = { totalNormalized: 10, afterTimeWindow: 8 };
+  // 8 → 0 (afterSourceSelection missing) is the largest drop.
+  assert.equal(primaryDropStage(funnel), "source_selection");
+});
+
+test("formatFunnel: renders stages in pipeline order with ' → ' separators", () => {
+  const funnel = {
+    totalNormalized: 100,
+    afterTimeWindow: 80,
+    afterSourceSelection: 30,
+    afterGeoFilter: 28,
+    afterTopicKeyword: 5,
+    afterBeatFit: 5,
+    finalStories: 3,
+  };
+  const s = formatFunnel(funnel);
+  assert.match(s, /^normalize=100 → time_window_24h=80 → source_selection=30 → geo_filter=28 → topic_keyword_recall=5 → beat_fit_precision=5 → clustering_and_grounding=3$/);
+});
+
+test("summarizeFunnel: flags topicKeywordRecallIsNoop when settings have neither topics nor keywords", () => {
+  const funnel = {
+    totalNormalized: 10, afterTimeWindow: 10, afterSourceSelection: 10,
+    afterGeoFilter: 10, afterTopicKeyword: 10, afterBeatFit: 10, finalStories: 0,
+  };
+  const summary = summarizeFunnel(funnel, { topics: [], keywords: [] });
+  assert.equal(summary.topicKeywordRecallIsNoop, true);
+  assert.equal(summary.primaryDropStage, "clustering_and_grounding");
+});
+
+test("summarizeFunnel: topicKeywordRecallIsNoop is false when either topics or keywords are configured", () => {
+  const funnel = {
+    totalNormalized: 5, afterTimeWindow: 5, afterSourceSelection: 5,
+    afterGeoFilter: 5, afterTopicKeyword: 5, afterBeatFit: 5, finalStories: 5,
+  };
+  assert.equal(summarizeFunnel(funnel, { topics: ["X"], keywords: [] }).topicKeywordRecallIsNoop, false);
+  assert.equal(summarizeFunnel(funnel, { topics: [], keywords: ["x"] }).topicKeywordRecallIsNoop, false);
+});
+
+test("runRefreshPipeline: log.funnel populated on full-run path with all per-stage counts", async () => {
+  const include = makeItem({
+    sourceId: "in",
+    outlet: "Reuters",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    headline: "U.S. policy update on bilateral relations",
+    body: ["The State Department issued a statement."],
+    minutesAgo: 30,
+  });
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [include],
+    clusterFn: async (items) => [
+      {
+        title: "Update",
+        subtitle: "Sub",
+        source_item_ids: [items[0].sourceId],
+        summary: "Summary.",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        factual_claims: ["A claim."],
+        claim_evidence_map: { "0": [items[0].sourceId] },
+      },
+    ],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.ok(log.funnel, "log.funnel must be present on every refresh");
+  for (const field of [
+    "totalNormalized",
+    "afterTimeWindow",
+    "afterSourceSelection",
+    "afterGeoFilter",
+    "afterTopicKeyword",
+    "afterBeatFit",
+    "finalStories",
+    "primaryDropStage",
+    "topicKeywordRecallIsNoop",
+  ]) {
+    assert.ok(field in log.funnel, `log.funnel.${field} must be present`);
+  }
+  assert.equal(log.funnel.totalNormalized, 1);
+  assert.equal(log.funnel.finalStories, 1);
+  assert.equal(log.funnel.primaryDropStage, "none");
+});
+
+test("runRefreshPipeline: log.funnel.primaryDropStage flags the source_selection cliff in strict-empty runs", async () => {
+  // BASE_SETTINGS picks "Reuters"/"El Tiempo" outlets; this BBC item is dropped
+  // at the source-selection stage. Result: stories=0 with primary_drop pointing
+  // at source_selection.
+  const items = [
+    makeItem({ sourceId: "x1", outlet: "BBC", topic: "Diplomatic relations", geographies: ["US"], minutesAgo: 30 }),
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 0);
+  assert.equal(log.funnel.afterSourceSelection, 0);
+  assert.equal(log.funnel.primaryDropStage, "source_selection");
+});
+
+test("runRefreshPipeline: log.funnel.primaryDropStage is beat_fit_precision when recall has items but beat-fit drops them", async () => {
+  // Item passes recall (topic match on "Diplomatic relations" + keyword
+  // match on "sanctions") but beat-fit drops it: no explicit geo overlap
+  // and no policy actor in the text, so the off-beat-geo + commodity-framing
+  // penalties pull the score below 0.40.
+  const items = [
+    makeItem({
+      sourceId: "x1",
+      outlet: "Reuters",
+      topic: "Diplomatic relations",
+      geographies: [],
+      headline: "Asian farmers brace for new commodity sanctions",
+      body: ["Wheat and grain commodity markets across Asia ripple."],
+      minutesAgo: 30,
+    }),
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 0);
+  assert.equal(log.funnel.afterTopicKeyword, 1);
+  assert.equal(log.funnel.afterBeatFit, 0);
+  assert.equal(log.funnel.primaryDropStage, "beat_fit_precision");
+});
+
+test("runRefreshPipeline: log.funnel present on watermark-skip branch too", async () => {
+  // First run computes a watermark and persists; second run with the same
+  // priorWatermark short-circuits and must still surface log.funnel.
+  const items = [
+    makeItem({
+      sourceId: "in",
+      outlet: "Reuters",
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "U.S. policy update",
+      minutesAgo: 30,
+    }),
+  ];
+  const first = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    beatFitEnabled: false, // keep this test focused on watermark+funnel, not beat-fit
+  });
+  assert.ok(first.log.watermark);
+  const second = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    beatFitEnabled: false,
+    priorWatermark: first.log.watermark,
+  });
+  assert.equal(second.payload, null, "watermark-skip returns payload=null to caller");
+  assert.equal(second.log.unchanged, true);
+  assert.ok(second.log.funnel, "log.funnel must be populated even on the watermark-skip branch");
+  assert.equal(second.log.funnel.totalNormalized, 1);
+  // Skip-branch semantics: clustering/grounding never ran. The funnel must
+  // honestly say so rather than reporting a fake "0 stories" cliff.
+  assert.equal(second.log.funnel.executionMode, "watermark_skip");
+  assert.equal(second.log.funnel.finalStories, null, "finalStories must be null (not 0) on skip path");
+  assert.equal(
+    second.log.funnel.primaryDropStage,
+    "not_executed",
+    "primaryDropStage must not blame clustering when clustering didn't run"
+  );
+  // Sanity: the full-run branch (first call) keeps the old contract.
+  assert.equal(first.log.funnel.executionMode, "full_run");
+  assert.equal(typeof first.log.funnel.finalStories, "number");
+  assert.notEqual(first.log.funnel.primaryDropStage, "not_executed");
+});
+
+// ─── Funnel skip-mode unit tests (Fix 2) ─────────────────────────────────────
+
+test("summarizeFunnel: executionMode defaults to 'full_run' when not specified (back-compat)", () => {
+  const funnel = {
+    totalNormalized: 5, afterTimeWindow: 5, afterSourceSelection: 5,
+    afterGeoFilter: 5, afterTopicKeyword: 5, afterBeatFit: 5, finalStories: 5,
+  };
+  const summary = summarizeFunnel(funnel, {});
+  assert.equal(summary.executionMode, "full_run");
+});
+
+test("summarizeFunnel: executionMode='watermark_skip' forces primaryDropStage='not_executed'", () => {
+  // Even if the inputs would otherwise diagnose a cliff, skip mode must
+  // override — clustering never ran, so we cannot honestly attribute a drop.
+  const funnel = {
+    totalNormalized: 100, afterTimeWindow: 80, afterSourceSelection: 30,
+    afterGeoFilter: 28, afterTopicKeyword: 5, afterBeatFit: 5, finalStories: null,
+  };
+  const summary = summarizeFunnel(funnel, {}, { executionMode: "watermark_skip" });
+  assert.equal(summary.executionMode, "watermark_skip");
+  assert.equal(summary.primaryDropStage, "not_executed");
+  assert.equal(summary.finalStories, null);
+});
+
+test("primaryDropStage: ignores stages with null counts (treats them as 'not computed', not '0')", () => {
+  // The skip path sets finalStories=null. The classifier MUST NOT pick
+  // clustering_and_grounding as the largest drop just because null coerces to 0.
+  const funnel = {
+    totalNormalized: 10, afterTimeWindow: 10, afterSourceSelection: 10,
+    afterGeoFilter: 10, afterTopicKeyword: 10, afterBeatFit: 10, finalStories: null,
+  };
+  assert.equal(primaryDropStage(funnel), "none");
+});
+
+test("formatFunnel: renders null stage counts as 'n/a' so skip mode reads correctly", () => {
+  const funnel = {
+    totalNormalized: 33, afterTimeWindow: 17, afterSourceSelection: 17,
+    afterGeoFilter: 17, afterTopicKeyword: 0, afterBeatFit: 0, finalStories: null,
+  };
+  const s = formatFunnel(funnel);
+  assert.match(s, /clustering_and_grounding=n\/a/);
+});
+
+// ─── Embedding-aware recall (hybrid_strict) ──────────────────────────────────
+//
+// These tests pin the contract for the recall stage at the pipeline level:
+//   1. Recall widening — a relevant item without an exact keyword still
+//      reaches clustering when the embedder ranks it highly enough.
+//   2. Fail-closed — embedding error/timeout returns empty stories with an
+//      explicit `degraded_reason`, never a keyword-only fallback.
+//   3. Mode toggle — `keyword` mode bypasses the embedder entirely; the
+//      injected embedFn must never be called.
+//   4. Source safety — inactive manifest rows do not surface even when their
+//      items would otherwise be the strongest semantic match.
+//   5. No fabrication — every published story's sources map back to a real
+//      ingested item with sourceId + url.
+
+const HYBRID_RECALL_CONFIG = Object.freeze({
+  mode: "hybrid_strict",
+  embedTopK: 5,
+  embedMaxItems: 100,
+  embeddingModel: "text-embedding-3-small",
+});
+
+const KEYWORD_RECALL_CONFIG = Object.freeze({
+  mode: "keyword",
+  embedTopK: 5,
+  embedMaxItems: 100,
+  embeddingModel: "text-embedding-3-small",
+});
+
+// Stub embedder: returns a 2-d vector encoding (signal-token count, length).
+// Items containing "us"/"colombia"/"ofac"/"diplomatic" rank above non-matches.
+function stubEmbedFn(throwError = null) {
+  const TOKENS = ["us", "colombia", "ofac", "diplomatic", "petro"];
+  return async (texts) => {
+    if (throwError) throw throwError;
+    return texts.map((t) => {
+      const lower = String(t).toLowerCase();
+      const matches = TOKENS.filter((tok) => lower.includes(tok)).length;
+      return [matches, Math.min(lower.length, 1000) / 1000];
+    });
+  };
+}
+
+test("runRefreshPipeline: hybrid_strict widens recall — item without exact keyword still reaches clustering", async () => {
+  // Item carries no configured topic and no configured keyword. Under
+  // keyword-only recall it would be dropped.  In hybrid_strict the embedder
+  // ranks it high (geo signal in headline) and it survives to clustering.
+  const semanticOnly = makeItem({
+    sourceId: "semantic-only",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Other",
+    geographies: ["US"],
+    headline: "Petro and U.S. envoy hold call on bilateral coordination",
+    body: ["The presidents discussed bilateral coordination."],
+  });
+  const seenIds = [];
+  await runRefreshPipeline({
+    settings: {
+      ...BASE_SETTINGS,
+      // Strip keywords/topics so legacy recall would NOT pick this up.
+      keywords: ["sanctions"],
+      topics: ["Migration policy"],
+    },
+    rawItems: [semanticOnly],
+    clusterFn: async (items) => {
+      seenIds.push(...items.map((i) => i.sourceId));
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+    beatFitEnabled: false, // recall-stage test; precision filters bypassed for narrowness
+  });
+  assert.ok(
+    seenIds.includes("semantic-only"),
+    "semantic-only candidate must reach clustering under hybrid_strict"
+  );
+});
+
+test("runRefreshPipeline: hybrid_strict embedding timeout WITH no lexical hits → strict-empty", async () => {
+  // No topic/keyword match → lexical fallback has nothing to surface →
+  // run is strict-empty.  Pins the original safety invariant for the case
+  // where embeddings are the only widening signal.
+  const item = makeItem({
+    sourceId: "no-lexical-hit",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Other",
+    headline: "Local market roundup", // no OFAC, no sanctions
+    body: ["Unrelated commentary."],
+  });
+  let clusterCalled = false;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => { clusterCalled = true; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(new Error("request timed out after 8000ms")),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(payload.stories.length, 0, "no lexical fallback target → strict-empty");
+  assert.equal(clusterCalled, false);
+  assert.equal(log.recall.degraded, true);
+  assert.equal(log.recall.degraded_reason, "embedding_timeout_fail_closed");
+  assert.notEqual(log.recall.keywordFallbackAfterEmbeddingFailure, true);
+});
+
+test("runRefreshPipeline: hybrid_strict embedding error WITH no lexical hits → strict-empty", async () => {
+  const item = makeItem({
+    sourceId: "no-hit",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Other",
+    headline: "Wholly unrelated",
+    body: ["nothing."],
+  });
+  const { log, payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(new Error("provider 503 service unavailable")),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(payload.stories.length, 0);
+  assert.equal(log.recall.degraded, true);
+  assert.equal(log.recall.degraded_reason, "embedding_error_fail_closed");
+});
+
+test("runRefreshPipeline: hybrid_strict embedding timeout WITH lexical hits → lexical fallback (degraded)", async () => {
+  // The dashboard-false-empty regression we are guarding against: an
+  // embedding timeout with obvious lexical hits MUST NOT collapse the run
+  // to zero.  The lexical-fallback path surfaces the items, flagged as
+  // `keywordFallbackAfterEmbeddingFailure: true` so the cliff is visible.
+  const item = makeItem({
+    sourceId: "kw-match",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Diplomatic relations",
+    headline: "Treasury sanctions package widens",
+    body: ["Sanctions update."],
+    geographies: ["US"],
+  });
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async (items) => items.map((i) => ({
+      meta_story_id: "ms-1",
+      title: "Sanctions",
+      subtitle: "Sub",
+      source_item_ids: [i.sourceId],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      factual_claims: ["a claim"],
+      claim_evidence_map: { "0": [i.sourceId] },
+    })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(new Error("request timed out after 8000ms")),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(payload.stories.length, 1, "lexical fallback surfaces the item; clustering produces a story");
+  assert.equal(payload.stories[0].sources[0].id, "kw-match");
+  assert.equal(log.recall.degraded, true);
+  assert.equal(log.recall.degraded_reason, "embedding_timeout_fail_closed");
+  assert.equal(log.recall.keywordFallbackAfterEmbeddingFailure, true);
+});
+
+test("runRefreshPipeline: keyword mode bypasses embedFn entirely (legacy preserved)", async () => {
+  let embedCalls = 0;
+  const item = makeItem({
+    sourceId: "kw-hit",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    headline: "OFAC update issued today",
+  });
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async (items) => items.map((i) => ({
+      meta_story_id: "ms-1",
+      title: "Test",
+      subtitle: "Sub",
+      source_item_ids: [i.sourceId],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      factual_claims: ["A claim."],
+      claim_evidence_map: { "0": [i.sourceId] },
+    })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: async () => { embedCalls++; return []; },
+    recallConfig: KEYWORD_RECALL_CONFIG,
+  });
+  assert.equal(embedCalls, 0, "embedFn must NOT be invoked under explicit keyword mode");
+  assert.equal(payload.stories.length, 1, "legacy keyword recall still produces stories");
+  assert.equal(log.recall.mode, "keyword");
+});
+
+test("runRefreshPipeline: source safety — inactive manifest feeds never surface even when semantically strongest", async () => {
+  const manifestFeeds = [
+    { id: "wapo", name: "The Washington Post — World", kind: "rss", url: "https://x", weight: 88, active: true },
+    // Inactive feed: even if items from this outlet were in rawItems, source
+    // selection drops them BEFORE the embedding stage runs.
+    { id: "blacklisted", name: "Blacklisted Outlet", kind: "rss", url: "https://y", weight: 10, active: false },
+  ];
+  const rawItems = [
+    makeItem({
+      sourceId: "wapo-item",
+      outlet: "The Washington Post — World",
+      minutesAgo: 30,
+      headline: "U.S. and Colombia coordinate diplomatic call",
+    }),
+    makeItem({
+      sourceId: "blacklisted-item",
+      outlet: "Blacklisted Outlet",
+      minutesAgo: 30,
+      headline: "U.S. Colombia Petro OFAC diplomatic call (semantically strongest)",
+    }),
+  ];
+  const seenIds = [];
+  await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["The Washington Post"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    clusterFn: async (items) => {
+      seenIds.push(...items.map((i) => i.sourceId));
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+    beatFitEnabled: false,
+  });
+  assert.ok(!seenIds.includes("blacklisted-item"), "items from inactive feeds must never reach clustering");
+});
+
+test("runRefreshPipeline: no fabrication — every published story source has a real ingested sourceId + url", async () => {
+  const realItem = makeItem({
+    sourceId: "real-1",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    url: "https://reuters.example/real-1",
+    headline: "U.S. and Colombia diplomatic update",
+  });
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [realItem],
+    clusterFn: async (items) => [{
+      meta_story_id: "ms-real",
+      title: "Real Story",
+      subtitle: "Sub",
+      source_item_ids: items.map((i) => i.sourceId),
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      factual_claims: ["A claim."],
+      claim_evidence_map: { "0": items.map((i) => i.sourceId) },
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(payload.stories.length, 1);
+  for (const story of payload.stories) {
+    for (const src of story.sources) {
+      assert.ok(src.id && typeof src.id === "string", "every source must carry a real id");
+      assert.ok(src.url && typeof src.url === "string", "every source must carry a real url");
+      // The id must equal an ingested raw item's sourceId — no fabricated entries.
+      assert.equal(src.id, "real-1");
+    }
+  }
+});
+
+test("runRefreshPipeline: log.recall populated on full-run path with mode + counts + degraded flag", async () => {
+  const item = makeItem({
+    sourceId: "x",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    headline: "OFAC update on US Colombia",
+    topic: "Diplomatic relations",
+    geographies: ["US"],
+  });
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.ok(log.recall, "log.recall must be present on every refresh");
+  for (const f of [
+    "mode",
+    "embeddedCount",
+    "similarityKept",
+    "keywordRecallCount",
+    "unionCount",
+    "finalRelevant",
+    "degraded",
+    "degraded_reason",
+  ]) {
+    assert.ok(f in log.recall, `log.recall.${f} must be present`);
+  }
+  assert.equal(log.recall.mode, "hybrid_strict");
+  assert.equal(log.recall.degraded, false);
+  assert.equal(log.recall.degraded_reason, null);
+});
+
+test("runRefreshPipeline: hybrid_strict + missing embedFn WITH lexical hits → lexical fallback (degraded, not strict-empty)", async () => {
+  // Updated policy: when lexical recall has items, the absence of an embedFn
+  // surfaces them with `keywordFallbackAfterEmbeddingFailure: true` so the
+  // dashboard isn't trapped at zero on a degraded run.
+  const item = makeItem({
+    sourceId: "kw-hit-fallback",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Diplomatic relations",
+    headline: "OFAC ruling expands sanctions",
+    body: ["A real headline."],
+    geographies: ["US"],
+  });
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async (items) => items.map((i) => ({
+      meta_story_id: "ms-fallback",
+      title: "Sanctions",
+      subtitle: "Sub",
+      source_item_ids: [i.sourceId],
+      summary: "Summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      factual_claims: ["a claim"],
+      claim_evidence_map: { "0": [i.sourceId] },
+    })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    recallConfig: HYBRID_RECALL_CONFIG,
+    // no embedFn → lexical fallback with degraded flag
+  });
+  assert.equal(payload.stories.length, 1, "lexical fallback surfaces the item under hybrid_strict");
+  assert.equal(log.recall.degraded, true);
+  assert.equal(log.recall.degraded_reason, "embedding_unavailable_fail_closed");
+  assert.equal(log.recall.keywordFallbackAfterEmbeddingFailure, true);
+});
+
+test("runRefreshPipeline: hybrid_strict + missing embedFn WITH no lexical hits → strict-empty", async () => {
+  const item = makeItem({
+    sourceId: "no-hit",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Other",
+    headline: "Wholly unrelated",
+    body: ["nothing"],
+  });
+  let clusterCalled = false;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => { clusterCalled = true; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(payload.stories.length, 0);
+  assert.equal(clusterCalled, false);
+  assert.equal(log.recall.degraded, true);
+  assert.equal(log.recall.degraded_reason, "embedding_unavailable_fail_closed");
+  assert.notEqual(log.recall.keywordFallbackAfterEmbeddingFailure, true);
+});
+
+test("runRefreshPipeline: hybrid_strict + empty profile text → strict fail-closed (no keyword pass-through)", async () => {
+  // A user with no topics/keywords/geos/sources/narrative produces an empty
+  // profile.  Under strict policy this is treated as an operational gap, not
+  // a soft fallback.  Empty + diagnostic prevents recommending items the
+  // user never expressed a beat for.
+  const item = makeItem({
+    sourceId: "kw-only",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    headline: "OFAC ruling",
+  });
+  const settingsNoProfile = {
+    contractVersion: "2026-04-22-slice1",
+    topics: [],
+    keywords: [],
+    geographies: [],
+    traditionalSources: [],
+    socialSources: [],
+  };
+  let embedCalled = false;
+  const { payload, log } = await runRefreshPipeline({
+    settings: settingsNoProfile,
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: async () => { embedCalled = true; return []; },
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(embedCalled, false, "embedFn must not be invoked when profile is empty");
+  assert.equal(payload.stories.length, 0);
+  assert.equal(log.recall.degraded, true);
+  assert.equal(log.recall.degraded_reason, "empty_profile_text_fail_closed");
+});
+
+// ─── Topic/keyword stage breakdown (false-empty diagnostics) ────────────────
+
+test("analyzeTopicKeywordStage: pins the four mutually-exclusive partition counts", async () => {
+  const { analyzeTopicKeywordStage } = await import("./refresh-pipeline.mjs");
+  const settings = { topics: ["Diplomatic relations"], keywords: ["sanctions"] };
+  const items = [
+    { topic: "Diplomatic relations", headline: "no kw here", body: [] },          // topicOnly
+    { topic: "Other", headline: "Treasury sanctions update", body: [] },         // keywordOnly
+    { topic: "Diplomatic relations", headline: "sanctions", body: [] },           // both
+    { topic: "Other", headline: "Local sports", body: [] },                       // neither
+  ];
+  const b = analyzeTopicKeywordStage(items, settings);
+  assert.equal(b.inputCount, 4);
+  assert.equal(b.topicOnly, 1);
+  assert.equal(b.keywordOnly, 1);
+  assert.equal(b.both, 1);
+  assert.equal(b.neither, 1);
+  assert.equal(b.passCount, 3);
+  assert.equal(b.primaryDropCause, null, "at least one item passed");
+});
+
+test("analyzeTopicKeywordStage: primaryDropCause distinguishes 'no_topic_match' vs 'no_keyword_match' vs 'no_topic_no_keyword'", async () => {
+  const { analyzeTopicKeywordStage } = await import("./refresh-pipeline.mjs");
+  const items = [{ topic: "Other", headline: "unrelated", body: [] }];
+  // both topics + keywords configured, neither matched
+  let b = analyzeTopicKeywordStage(items, { topics: ["X"], keywords: ["y"] });
+  assert.equal(b.primaryDropCause, "no_topic_no_keyword");
+  // only topics configured, no match
+  b = analyzeTopicKeywordStage(items, { topics: ["X"], keywords: [] });
+  assert.equal(b.primaryDropCause, "no_topic_match");
+  // only keywords configured, no match
+  b = analyzeTopicKeywordStage(items, { topics: [], keywords: ["y"] });
+  assert.equal(b.primaryDropCause, "no_keyword_match");
+});
+
+test("analyzeTopicKeywordStage: passNoConfig accounts for no-op pass-through (settings have neither)", async () => {
+  const { analyzeTopicKeywordStage } = await import("./refresh-pipeline.mjs");
+  const items = [{ topic: "x", headline: "y", body: [] }];
+  const b = analyzeTopicKeywordStage(items, { topics: [], keywords: [] });
+  assert.equal(b.passNoConfig, 1);
+  assert.equal(b.passCount, 1);
+  assert.equal(b.primaryDropCause, null);
+});
+
+test("runRefreshPipeline: log.recall.topicKeywordBreakdown surfaces stage diagnostics", async () => {
+  // Mixed item set: one keyword-only hit, one topic-only hit, one neither.
+  const items = [
+    makeItem({ sourceId: "kw", outlet: "Reuters", minutesAgo: 30, topic: "Other", headline: "OFAC update", geographies: ["US"] }),
+    makeItem({ sourceId: "topic", outlet: "Reuters", minutesAgo: 30, topic: "Diplomatic relations", headline: "no keyword", geographies: ["US"] }),
+    makeItem({ sourceId: "miss", outlet: "Reuters", minutesAgo: 30, topic: "Other", headline: "unrelated", geographies: ["US"] }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    recallConfig: KEYWORD_RECALL_CONFIG,
+  });
+  const b = log.recall.topicKeywordBreakdown;
+  assert.ok(b, "topicKeywordBreakdown must be present on log.recall");
+  assert.equal(b.inputCount, 3);
+  assert.equal(b.topicOnly, 1);
+  assert.equal(b.keywordOnly, 1);
+  assert.equal(b.neither, 1);
+  assert.equal(b.passCount, 2);
+});
+
+// ─── Watermark trap guard ────────────────────────────────────────────────────
+
+test("runRefreshPipeline: priorWatermark match + priorStoryCount=0 + items present → suppress short-circuit", async () => {
+  // The trap: a prior degraded run wrote an empty snapshot AND a watermark.
+  // On the next refresh with the same lexical input, the watermark matches —
+  // but we MUST NOT skip clustering, otherwise we keep serving zero stories
+  // forever.  The guard re-runs clustering when priorStoryCount === 0.
+  const item = makeItem({
+    sourceId: "fresh-cluster",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Diplomatic relations",
+    headline: "Treasury sanctions package",
+    body: ["sanctions update"],
+    geographies: ["US"],
+  });
+  let clusterCalls = 0;
+  // First run captures the watermark.
+  const first = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => { clusterCalls++; return []; }, // produces 0 stories deliberately
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    recallConfig: KEYWORD_RECALL_CONFIG,
+  });
+  assert.equal(clusterCalls, 1);
+  assert.equal(first.payload.stories.length, 0);
+
+  // Second run: identical input → identical watermark.  Without the guard
+  // this would short-circuit (payload=null).  With priorStoryCount=0 it
+  // suppresses the skip and re-runs clustering.
+  const second = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async (items) => {
+      clusterCalls++;
+      return items.map((i) => ({
+        meta_story_id: "now-yields",
+        title: "Sanctions",
+        subtitle: "Sub",
+        source_item_ids: [i.sourceId],
+        summary: "Summary.",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        factual_claims: ["a claim"],
+        claim_evidence_map: { "0": [i.sourceId] },
+      }));
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    recallConfig: KEYWORD_RECALL_CONFIG,
+    priorWatermark: first.log.watermark,
+    priorStoryCount: 0,
+  });
+  assert.equal(clusterCalls, 2, "clustering must re-run when prior snapshot was empty");
+  assert.notEqual(second.payload, null, "guard must suppress the short-circuit");
+  assert.equal(second.payload.stories.length, 1, "fresh clustering attempt produced a story");
+});
+
+test("runRefreshPipeline: priorWatermark match + priorStoryCount > 0 → short-circuit preserved (optimization intact)", async () => {
+  const item = makeItem({
+    sourceId: "stable",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Diplomatic relations",
+    headline: "OFAC ruling",
+    geographies: ["US"],
+  });
+  let clusterCalls = 0;
+  const first = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async (items) => {
+      clusterCalls++;
+      return items.map((i) => ({
+        meta_story_id: "ms-stable",
+        title: "T",
+        subtitle: "S",
+        source_item_ids: [i.sourceId],
+        summary: "Summary.",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        factual_claims: ["a claim"],
+        claim_evidence_map: { "0": [i.sourceId] },
+      }));
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    recallConfig: KEYWORD_RECALL_CONFIG,
+  });
+
+  const second = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    recallConfig: KEYWORD_RECALL_CONFIG,
+    priorWatermark: first.log.watermark,
+    priorStoryCount: first.payload.stories.length, // > 0
+  });
+  assert.equal(clusterCalls, 1, "clustering must NOT re-run when prior had stories AND watermark matches");
+  assert.equal(second.payload, null, "short-circuit must engage (payload=null, route serves prior snapshot)");
+  assert.equal(second.log.unchanged, true);
+});
+
+// ─── WaPo Iran/oil regression at the pipeline level ──────────────────────────
+
+test("WaPo Iran/oil regression: pipeline does not collapse to zero when lexical matches present and embedding fails", async () => {
+  // Real false-empty observed: the WaPo Iran/oil story matched no canonical
+  // topic enum (item.topic empty), so only the keyword regex carried it.
+  // Settings here mirror the production fixture in the spec.
+  // Settings mirror the production fixture in the spec; outlet uses the full
+  // section-level name so the legacy outlet-set source pool (used here without
+  // manifestFeeds) matches exactly.  Production resolves "Washington Post" →
+  // section feeds via the source-matcher; that path is exercised separately.
+  const wapoSettings = {
+    contractVersion: "2026-04-22-slice1",
+    topics: ["Diplomatic relations", "Trade policy", "Energy trade", "Agricultural trade"],
+    keywords: ["oil", "petroleum", "agriculture", "sanctions", "trade"],
+    geographies: ["US", "Iran"],
+    traditionalSources: ["The Washington Post — World"],
+    socialSources: [],
+  };
+  const item = makeItem({
+    sourceId: "wapo-iran-oil",
+    outlet: "The Washington Post — World",
+    minutesAgo: 30,
+    topic: "", // RSS items don't carry a Tempo topic
+    geographies: [],
+    headline: "Gulf nations hoped to move beyond oil. The Iran war made that much harder.",
+    body: [
+      "Sanctions and military strikes have rerouted petroleum trade across the Gulf, " +
+      "with U.S. allies recalibrating their long-term energy posture.",
+    ],
+    url: "https://www.washingtonpost.com/world/2026/01/01/gulf-iran-oil",
+    weight: 88,
+  });
+  const { payload, log } = await runRefreshPipeline({
+    settings: wapoSettings,
+    rawItems: [item],
+    clusterFn: async (items) => items.map((i) => ({
+      meta_story_id: "ms-wapo-iran",
+      title: "Gulf reroutes oil trade",
+      subtitle: "Iran war complicates diversification.",
+      source_item_ids: [i.sourceId],
+      summary: "Coverage of Gulf petroleum trade after Iran war.",
+      tags: { topics: ["Diplomatic relations"], keywords: ["oil", "sanctions"], geographies: ["US"] },
+      factual_claims: ["Sanctions rerouted petroleum trade across the Gulf."],
+      claim_evidence_map: { "0": [i.sourceId] },
+    })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(new Error("embeddings provider 503")),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(payload.stories.length, 1, "embedding failure with obvious lexical hits must NOT collapse to empty");
+  assert.equal(payload.stories[0].sources[0].id, "wapo-iran-oil");
+  assert.equal(payload.stories[0].sources[0].url, item.url, "no fabricated url — original ingested url preserved");
+  // Diagnostics must surface the degraded fallback for ops visibility.
+  assert.equal(log.recall.degraded, true);
+  assert.equal(log.recall.degraded_reason, "embedding_error_fail_closed");
+  assert.equal(log.recall.keywordFallbackAfterEmbeddingFailure, true);
+  // Topic/keyword breakdown must record this as a keyword-only hit (no
+  // canonical topic on the RSS item).
+  assert.equal(log.recall.topicKeywordBreakdown.keywordOnly, 1);
+  assert.equal(log.recall.topicKeywordBreakdown.passCount, 1);
 });

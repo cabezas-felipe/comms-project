@@ -6,6 +6,7 @@ import {
   summarizeCluster,
   providerFor,
   assertAiConfig,
+  resolveExtractionChain,
 } from "./model-router.mjs";
 import { withTimeout, heuristicSummary } from "./guardrails.mjs";
 
@@ -211,5 +212,56 @@ test("provider error increments providerErrors and summarizationFallbacks", asyn
     else delete process.env.TEMPO_AI_SUMMARY_MODEL;
     if (savedKey1) process.env.TEMPO_ANTHROPIC_API_KEY = savedKey1;
     if (savedKey2) process.env.ANTHROPIC_API_KEY = savedKey2;
+  }
+});
+
+// ── resolveExtractionChain ──────────────────────────────────────────────────
+
+test("resolveExtractionChain returns shipping defaults when env is unset", () => {
+  const prevPrimary = process.env.TEMPO_AI_CLASSIFIER_MODEL;
+  const prevFallback = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
+  delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  try {
+    const chain = resolveExtractionChain();
+    assert.equal(chain.primary, "anthropic:claude-opus-4-7");
+    assert.equal(chain.fallback, "anthropic:claude-sonnet-4-6");
+  } finally {
+    if (prevPrimary !== undefined) process.env.TEMPO_AI_CLASSIFIER_MODEL = prevPrimary;
+    if (prevFallback !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = prevFallback;
+  }
+});
+
+test("resolveExtractionChain reads TEMPO_AI_CLASSIFIER_MODEL + TEMPO_AI_CLASSIFIER_FALLBACK_MODEL", () => {
+  const prevPrimary = process.env.TEMPO_AI_CLASSIFIER_MODEL;
+  const prevFallback = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  process.env.TEMPO_AI_CLASSIFIER_MODEL = "anthropic:custom-primary";
+  process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = "anthropic:custom-fallback";
+  try {
+    const chain = resolveExtractionChain();
+    assert.equal(chain.primary, "anthropic:custom-primary");
+    assert.equal(chain.fallback, "anthropic:custom-fallback");
+  } finally {
+    if (prevPrimary !== undefined) process.env.TEMPO_AI_CLASSIFIER_MODEL = prevPrimary;
+    else delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
+    if (prevFallback !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = prevFallback;
+    else delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  }
+});
+
+test("resolveExtractionChain falls back to defaults on whitespace/empty env", () => {
+  const prevPrimary = process.env.TEMPO_AI_CLASSIFIER_MODEL;
+  const prevFallback = process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  process.env.TEMPO_AI_CLASSIFIER_MODEL = "   ";
+  process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = "";
+  try {
+    const chain = resolveExtractionChain();
+    assert.equal(chain.primary, "anthropic:claude-opus-4-7");
+    assert.equal(chain.fallback, "anthropic:claude-sonnet-4-6");
+  } finally {
+    if (prevPrimary !== undefined) process.env.TEMPO_AI_CLASSIFIER_MODEL = prevPrimary;
+    else delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
+    if (prevFallback !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = prevFallback;
+    else delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
   }
 });

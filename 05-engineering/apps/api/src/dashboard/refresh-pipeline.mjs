@@ -13,6 +13,12 @@ import {
   SELECTION_MODE,
 } from "../ingestion/source-matcher.mjs";
 import { computeWatermark, watermarksMatch } from "./refresh-watermark.mjs";
+import { applyBeatFitFilter, BEAT_FIT_THRESHOLD, BEAT_FIT_VERSION } from "./beat-fit-scorer.mjs";
+import {
+  RECALL_MODE,
+  resolveRecallConfig,
+  runEmbeddingRecall,
+} from "../ingestion/embedding-recall.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -94,6 +100,116 @@ function reuseOrAssignIds(metaStories, priorStories) {
 }
 
 const TWENTY_FOUR_HOURS_MINUTES = 24 * 60;
+
+// ─── Funnel diagnostics ──────────────────────────────────────────────────────
+//
+// When stories=0 we want to know — from logs alone — which stage of the
+// pipeline collapsed the funnel. The funnel object records the count after
+// each filter so the operator can read it linearly and spot the cliff. The
+// "primary drop stage" is the stage with the largest absolute drop from its
+// input; if every stage is fine but no stories emerged, that points at
+// clustering/grounding instead.
+
+const FUNNEL_STAGES = Object.freeze([
+  // [field-on-funnel, label-in-log, prior-field]
+  ["totalNormalized", "normalize", null],
+  ["afterTimeWindow", "time_window_24h", "totalNormalized"],
+  ["afterSourceSelection", "source_selection", "afterTimeWindow"],
+  ["afterGeoFilter", "geo_filter", "afterSourceSelection"],
+  ["afterTopicKeyword", "topic_keyword_recall", "afterGeoFilter"],
+  ["afterBeatFit", "beat_fit_precision", "afterTopicKeyword"],
+  ["finalStories", "clustering_and_grounding", "afterBeatFit"],
+]);
+
+/**
+ * Execution markers attached to every funnel object. `full_run` means every
+ * stage ran end-to-end (counts are real). `watermark_skip` means the pipeline
+ * short-circuited before clustering because the input watermark matched the
+ * prior snapshot — clustering/grounding never ran, so `finalStories` is
+ * intentionally `null` (NOT `0`) and `primaryDropStage` is `not_executed`.
+ *
+ * Operators reading `[pipeline.funnel]` should treat `executionMode` as the
+ * source of truth for "did the pipeline actually produce a number for the
+ * final stage?" before drawing conclusions about drop locations.
+ */
+export const FUNNEL_EXECUTION_MODE = Object.freeze({
+  FULL_RUN: "full_run",
+  WATERMARK_SKIP: "watermark_skip",
+});
+
+/**
+ * Identify the stage that dropped the most items (absolute count) given a
+ * fully-populated funnel object. Returns "none" when no drop occurred, and
+ * `not_executed` when the funnel represents a skip path (any stage with
+ * `null` is treated as "not computed" rather than "dropped to 0").
+ *
+ * Exported for testing — the production callers consume `summarizeFunnel`
+ * which returns the full diagnostic shape.
+ */
+export function primaryDropStage(funnel) {
+  let maxDrop = 0;
+  let maxStage = "none";
+  for (const [field, label, prior] of FUNNEL_STAGES) {
+    if (!prior) continue;
+    const cur = funnel[field];
+    const prev = funnel[prior];
+    // `null` on either side means the stage didn't execute; we cannot
+    // attribute a drop to a stage that never ran.
+    if (cur === null || prev === null) continue;
+    const drop = (prev ?? 0) - (cur ?? 0);
+    if (drop > maxDrop) {
+      maxDrop = drop;
+      maxStage = label;
+    }
+  }
+  return maxStage;
+}
+
+/**
+ * Format the funnel as a one-line console string showing the per-stage
+ * counts in pipeline order. Used by the [pipeline.funnel] log line.
+ * `null` stages render as `n/a` so the operator can see "not executed"
+ * at a glance vs a real "0" drop.
+ */
+export function formatFunnel(funnel) {
+  return FUNNEL_STAGES
+    .map(([field, label]) => {
+      const v = funnel[field];
+      return `${label}=${v === null ? "n/a" : (v ?? 0)}`;
+    })
+    .join(" → ");
+}
+
+/**
+ * Build a diagnostic summary suitable for logs and `_meta.funnel`.
+ *
+ * Adds:
+ *   - `executionMode` — "full_run" or "watermark_skip"
+ *   - `primaryDropStage` — derived from the per-stage counts; `not_executed`
+ *     on skip paths so we don't falsely claim a clustering drop when
+ *     clustering never ran.
+ *   - `topicKeywordRecallIsNoop` — true iff settings carry no topics AND no
+ *     keywords (the recall stage passes everything in that case).
+ *
+ * `executionMode` defaults to "full_run" for backwards-compat with callers
+ * that don't specify it; pass `{ executionMode: "watermark_skip" }` from the
+ * skip branch.
+ */
+export function summarizeFunnel(funnel, settings = {}, opts = {}) {
+  const executionMode = opts.executionMode ?? FUNNEL_EXECUTION_MODE.FULL_RUN;
+  const noTopics = !(settings.topics && settings.topics.length > 0);
+  const noKeywords = !(settings.keywords && settings.keywords.length > 0);
+  const drop =
+    executionMode === FUNNEL_EXECUTION_MODE.WATERMARK_SKIP
+      ? "not_executed"
+      : primaryDropStage(funnel);
+  return {
+    ...funnel,
+    executionMode,
+    primaryDropStage: drop,
+    topicKeywordRecallIsNoop: noTopics && noKeywords,
+  };
+}
 
 // Valid schema-enum values (must match packages/contracts schemas.ts)
 const VALID_GEOGRAPHIES = new Set(["US", "Colombia"]);
@@ -199,6 +315,85 @@ export function applyTopicKeywordFilter(items, settings) {
   });
 }
 
+/**
+ * Returns a per-stage breakdown of why items passed/failed the topic+keyword
+ * recall stage.  Used purely for diagnostics — never alters filter behavior.
+ *
+ * Counts are mutually-exclusive partition of the input set:
+ *   - topicOnly   — passed via topic match, no keyword match
+ *   - keywordOnly — passed via keyword match, no topic match
+ *   - both        — passed both topic and keyword
+ *   - neither     — failed both gates (filter rejects)
+ *   - passNoConfig — when settings have neither topic nor keyword configured,
+ *                    the filter is a no-op pass-through; counted separately so
+ *                    "everything passed because nothing was checked" is
+ *                    distinguishable from "everything passed because everything
+ *                    matched".
+ *
+ * Hint codes (`primaryDropCause`) attached when zero items pass:
+ *   - `no_input`           — input set was empty before the stage ran
+ *   - `no_topic_no_keyword`— neither gate matched anything (typical false-empty
+ *                            we are debugging when "obvious" lexical matches
+ *                            are missing — a tell that settings/topic taxonomy
+ *                            drifted from the item.topic labels in feed data)
+ *   - `no_topic_match`     — topic gate matched zero, keywords not configured
+ *   - `no_keyword_match`   — keyword gate matched zero, topics not configured
+ *   - null                 — at least one item passed (or stage is no-op)
+ */
+export function analyzeTopicKeywordStage(items, settings) {
+  const inputCount = items?.length ?? 0;
+  const topics = new Set((settings?.topics ?? []).map((t) => normalizeTopicLabel(t)));
+  const keywordRegex = buildKeywordTokenRegex(settings?.keywords);
+  const hasTopics = topics.size > 0;
+  const hasKeywords = !!keywordRegex;
+
+  const breakdown = {
+    inputCount,
+    hasTopics,
+    hasKeywords,
+    topicOnly: 0,
+    keywordOnly: 0,
+    both: 0,
+    neither: 0,
+    passNoConfig: 0,
+    passCount: 0,
+    primaryDropCause: null,
+  };
+
+  if (!hasTopics && !hasKeywords) {
+    breakdown.passNoConfig = inputCount;
+    breakdown.passCount = inputCount;
+    if (inputCount === 0) breakdown.primaryDropCause = "no_input";
+    return breakdown;
+  }
+
+  for (const item of items ?? []) {
+    const topicMatch = hasTopics && topics.has(normalizeTopicLabel(item?.topic ?? ""));
+    let keywordMatch = false;
+    if (hasKeywords) {
+      const text =
+        (item?.headline ?? "") +
+        " " +
+        (Array.isArray(item?.body) ? item.body.join(" ") : (item?.body ?? ""));
+      keywordMatch = keywordRegex.test(text);
+    }
+    if (topicMatch && keywordMatch) breakdown.both++;
+    else if (topicMatch) breakdown.topicOnly++;
+    else if (keywordMatch) breakdown.keywordOnly++;
+    else breakdown.neither++;
+  }
+  breakdown.passCount = breakdown.topicOnly + breakdown.keywordOnly + breakdown.both;
+
+  if (inputCount === 0) {
+    breakdown.primaryDropCause = "no_input";
+  } else if (breakdown.passCount === 0) {
+    if (hasTopics && hasKeywords) breakdown.primaryDropCause = "no_topic_no_keyword";
+    else if (hasTopics) breakdown.primaryDropCause = "no_topic_match";
+    else breakdown.primaryDropCause = "no_keyword_match";
+  }
+  return breakdown;
+}
+
 // ─── Build response story shape ───────────────────────────────────────────────
 
 /**
@@ -271,6 +466,18 @@ function buildStory(metaStory, sourceItems) {
  * @param {string}   [opts.priorWatermark]    — last persisted watermark (Phase 4); when matching the
  *                                              candidate watermark, the pipeline short-circuits and
  *                                              skips clustering/grounding/lock/rejection writes.
+ * @param {number|null} [opts.priorStoryCount] — number of stories in the prior persisted snapshot.
+ *                                              When this is `0` and we have items to cluster, the
+ *                                              watermark short-circuit is suppressed so a previously
+ *                                              empty snapshot doesn't trap us at zero — clustering and
+ *                                              grounding get another chance.  Pass `null` (default)
+ *                                              when the count is unknown; the guard does not engage.
+ * @param {Function} [opts.embedFn]            — async (texts: string[]) => number[][]; recall stage
+ *                                              uses this to compute the profile + per-item embeddings.
+ *                                              Caller injects from src/ai/embeddings.mjs in production
+ *                                              and from tests with deterministic stubs.  Required when
+ *                                              recall mode is `hybrid_strict`; missing → fail-closed.
+ * @param {object}   [opts.recallConfig]       — override for `resolveRecallConfig()` (tests only).
  *
  * @returns {{ payload: object, log: object }}
  *   payload — ready-to-persist dashboard payload
@@ -293,7 +500,12 @@ export async function runRefreshPipeline({
   fallbackEnabled = true,
   writeRejectionsFn = null,
   priorWatermark = null,
+  priorStoryCount = null,
+  beatFitEnabled = true,
+  embedFn = null,
+  recallConfig = null,
 }) {
+  const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
   if (normErrors.length > 0) {
@@ -401,8 +613,104 @@ export async function runRefreshPipeline({
     console.log(`[pipeline] ${geoHeldItems.length} item(s) in geo hold bucket after this refresh`);
   }
 
-  // 5. Topic + keyword filter (geo handled in step 4)
-  const relevantItems = applyTopicKeywordFilter(geoPassedItems, settings);
+  // 5. Recall stage (embedding-aware).
+  //
+  //    Legacy keyword/topic filter still runs first so we never narrow recall
+  //    vs the keyword baseline. In `hybrid_strict` mode (default) we then
+  //    union it with semantic top-K from cosine similarity over a profile
+  //    embedding; in `keyword` mode the embedding stage is bypassed entirely.
+  //
+  //    Fail-closed: an embedding error/timeout returns []; the pipeline does
+  //    NOT silently fall back to keyword-only output. The route handler reads
+  //    `log.recall.degraded_reason` to surface the cliff to operators without
+  //    leaking speculative content to the user.
+  // Stage-level breakdown computed before the filter runs so diagnostics can
+  // distinguish "no input arrived" / "no topic match" / "no keyword match" /
+  // "neither matched" — the four causes operators ask about when a clearly
+  // relevant story is missing from the dashboard.  Counts are mutually
+  // exclusive and add up to inputCount.
+  const topicKeywordBreakdown = analyzeTopicKeywordStage(geoPassedItems, settings);
+  const keywordRecallItems = applyTopicKeywordFilter(geoPassedItems, settings);
+  console.log(
+    `[pipeline.topic-keyword] input=${topicKeywordBreakdown.inputCount}` +
+      ` topicOnly=${topicKeywordBreakdown.topicOnly}` +
+      ` keywordOnly=${topicKeywordBreakdown.keywordOnly}` +
+      ` both=${topicKeywordBreakdown.both}` +
+      ` neither=${topicKeywordBreakdown.neither}` +
+      ` pass=${topicKeywordBreakdown.passCount}` +
+      ` hasTopics=${topicKeywordBreakdown.hasTopics}` +
+      ` hasKeywords=${topicKeywordBreakdown.hasKeywords}` +
+      (topicKeywordBreakdown.primaryDropCause
+        ? ` drop_cause=${topicKeywordBreakdown.primaryDropCause}`
+        : "")
+  );
+
+  const recallResult = await runEmbeddingRecall({
+    candidateItems: geoPassedItems,
+    settings,
+    keywordRecallItems,
+    embedFn,
+    config: effectiveRecallConfig,
+  });
+  const recallItems = recallResult.items;
+  const recallDiagnostics = {
+    ...recallResult.diagnostics,
+    // Surface the lexical-stage breakdown alongside the embedding stats so
+    // operators get a single `_meta.recall` object that answers both "how
+    // did the lexical gate behave?" and "did embeddings widen recall?".
+    topicKeywordBreakdown,
+  };
+  console.log(
+    `[pipeline.recall] mode=${recallDiagnostics.mode}` +
+      ` keyword=${recallDiagnostics.keywordRecallCount}` +
+      ` embedded=${recallDiagnostics.embeddedCount ?? "n/a"}` +
+      ` similarityKept=${recallDiagnostics.similarityKept ?? "n/a"}` +
+      ` finalRelevant=${recallDiagnostics.finalRelevant}` +
+      (recallDiagnostics.degraded_reason ? ` degraded_reason=${recallDiagnostics.degraded_reason}` : "") +
+      (recallDiagnostics.keywordFallbackAfterEmbeddingFailure ? " keyword_fallback=true" : "")
+  );
+
+  // 5a. Beat-fit scoring (Phase 1 relevance Stage 2) — precision stage with
+  //     "balanced" posture. Items below BEAT_FIT_THRESHOLD are dropped before
+  //     clustering. Strict-empty: if zero items clear, downstream produces an
+  //     empty payload rather than a weak top-of-list fallback.
+  //
+  //     `beatFitEnabled` defaults to true (production posture). Tests targeting
+  //     unrelated pipeline mechanics can pass `false` to bypass this stage so
+  //     their narrow fixtures don't have to model real beat-fit signals.
+  let beatFitResult;
+  let relevantItems;
+  if (beatFitEnabled) {
+    beatFitResult = applyBeatFitFilter(recallItems, settings);
+    relevantItems = beatFitResult.included;
+    if (recallItems.length > 0) {
+      const histogram = beatFitResult.summary.excludeReasonHistogram;
+      const histStr = Object.entries(histogram).map(([k, v]) => `${k}=${v}`).join(",") || "(none)";
+      console.log(
+        `[pipeline.beat-fit] version=${BEAT_FIT_VERSION} threshold=${beatFitResult.summary.threshold}  ` +
+        `recall=${recallItems.length}  included=${beatFitResult.summary.includedCount}  ` +
+        `excluded=${beatFitResult.summary.excludedCount}  reasons=${histStr}`
+      );
+    }
+    if (recallItems.length > 0 && relevantItems.length === 0) {
+      console.log(
+        `[pipeline.beat-fit] strict-empty: ${recallItems.length} candidate(s) failed threshold ` +
+        `(${beatFitResult.summary.threshold}); returning no stories rather than weak fallback`
+      );
+    }
+  } else {
+    relevantItems = recallItems;
+    beatFitResult = {
+      included: recallItems,
+      excluded: [],
+      summary: {
+        threshold: BEAT_FIT_THRESHOLD,
+        includedCount: recallItems.length,
+        excludedCount: 0,
+        excludeReasonHistogram: {},
+      },
+    };
+  }
 
   // 5b. Phase 4: watermark over the actual clustering candidate set.  This is
   //     the "would clustering see the same input as last time?" check — if so
@@ -411,10 +719,49 @@ export async function runRefreshPipeline({
     candidateItems: relevantItems,
     selectedFeedIds: selectionMeta?.matchedFeedIds ?? [],
   });
-  if (watermarksMatch(priorWatermark, watermarkInfo.watermark)) {
+  // Trap guard: if the prior persisted snapshot has zero stories AND we have
+  // candidates to cluster this run, do NOT short-circuit on watermark match.
+  // The trap looks like this: a prior run was degraded (e.g. embedding
+  // failure → lexical-fallback → clustering produced 0 stories due to
+  // grounding rejection), persisted an empty snapshot AND a watermark.  On
+  // the next refresh, an identical candidate set produces an identical
+  // watermark, and the short-circuit serves the empty snapshot indefinitely.
+  // Letting clustering re-run gives non-deterministic gates (LLM clustering,
+  // grounding) another chance to produce something.  The optimization for
+  // genuinely-stable runs (prior story count > 0) is preserved unchanged.
+  const watermarkMatched = watermarksMatch(priorWatermark, watermarkInfo.watermark);
+  const priorWasEmpty =
+    typeof priorStoryCount === "number" && priorStoryCount === 0;
+  const watermarkSuppressed =
+    watermarkMatched && priorWasEmpty && relevantItems.length > 0;
+  if (watermarkSuppressed) {
+    console.log(
+      `[pipeline.watermark] match suppressed (${watermarkInfo.watermark}) — prior snapshot was empty AND ${relevantItems.length} candidate(s) ready; re-running clustering rather than serving stale empty`
+    );
+  }
+  if (watermarkMatched && !watermarkSuppressed) {
+    // Watermark short-circuit: clustering + grounding never run, so we cannot
+    // honestly report `finalStories=0` (the prior snapshot may carry stories).
+    // Set the final stage to `null` and tag the funnel with
+    // executionMode=watermark_skip so summarizeFunnel emits
+    // primaryDropStage="not_executed" instead of falsely blaming clustering.
+    const skipFunnel = summarizeFunnel(
+      {
+        totalNormalized: normalizedItems.length,
+        afterTimeWindow: recentNormalizedItems.length,
+        afterSourceSelection: recentItems.length,
+        afterGeoFilter: geoPassedItems.length,
+        afterTopicKeyword: recallItems.length,
+        afterBeatFit: relevantItems.length,
+        finalStories: null,
+      },
+      settings,
+      { executionMode: FUNNEL_EXECUTION_MODE.WATERMARK_SKIP }
+    );
     console.log(
       `[pipeline.watermark] unchanged (${watermarkInfo.watermark}) — skipping clustering, grounding, locks, rejections`
     );
+    console.log(`[pipeline.funnel] ${formatFunnel(skipFunnel)}  execution_mode=${skipFunnel.executionMode}  primary_drop=${skipFunnel.primaryDropStage}`);
     return {
       payload: null, // signals caller to re-serve prior snapshot
       log: {
@@ -437,6 +784,20 @@ export async function runRefreshPipeline({
         rejectionRecords: [],
         normErrors: normErrors.length,
         selection: { ...selectionMeta, relevantItemCount: relevantItems.length },
+        // Beat-fit ran on this candidate set even though we short-circuited
+        // before clustering. Surfacing it makes "why is the snapshot stable?"
+        // debuggable from logs alone.
+        beatFit: {
+          version: BEAT_FIT_VERSION,
+          enabled: beatFitEnabled,
+          threshold: beatFitResult.summary.threshold,
+          recallCount: recallItems.length,
+          includedCount: beatFitResult.summary.includedCount,
+          excludedCount: beatFitResult.summary.excludedCount,
+          excludeReasonHistogram: beatFitResult.summary.excludeReasonHistogram,
+        },
+        recall: recallDiagnostics,
+        funnel: skipFunnel,
       },
     };
   }
@@ -541,6 +902,33 @@ export async function runRefreshPipeline({
     stories,
   };
 
+  // Funnel summary — every refresh emits one. When stories=0 we additionally
+  // log a strict-empty diagnosis line that names the primary drop stage so an
+  // operator can spot "where did the 33 items collapse to 0?" without
+  // re-running the pipeline by hand.
+  const funnel = summarizeFunnel(
+    {
+      totalNormalized: normalizedItems.length,
+      afterTimeWindow: recentNormalizedItems.length,
+      afterSourceSelection: recentItems.length,
+      afterGeoFilter: geoPassedItems.length,
+      afterTopicKeyword: recallItems.length,
+      afterBeatFit: relevantItems.length,
+      finalStories: stories.length,
+    },
+    settings,
+    { executionMode: FUNNEL_EXECUTION_MODE.FULL_RUN }
+  );
+  console.log(`[pipeline.funnel] ${formatFunnel(funnel)}  execution_mode=${funnel.executionMode}  primary_drop=${funnel.primaryDropStage}`);
+  if (stories.length === 0) {
+    const noteParts = [];
+    noteParts.push(`primary_drop=${funnel.primaryDropStage}`);
+    if (funnel.topicKeywordRecallIsNoop) noteParts.push("recall_noop=true(no topics+keywords configured)");
+    if (groundingFailures > 0) noteParts.push(`grounding_dropped=${droppedUngroundedStoryCount}`);
+    if (beatFitEnabled && recallItems.length > 0 && relevantItems.length === 0) noteParts.push("beat_fit_strict_empty=true");
+    console.log(`[pipeline.strict-empty] stories=0  ${noteParts.join("  ")}`);
+  }
+
   const log = {
     totalItems: normalizedItems.length,
     poolCount: poolItems.length,
@@ -557,6 +945,25 @@ export async function runRefreshPipeline({
     rejectionRecords, // exposed in log for testability; route persists via writeRejectionsFn
     normErrors: normErrors.length,
     selection: { ...selectionMeta, relevantItemCount: relevantItems.length },
+    // Phase 1 relevance Stage 2 — internal explainability (no UI surface).
+    // Includes the threshold, totals, and a histogram of exclusion reasons so
+    // we can debug "why did 12 items become 0 stories?" from logs alone.
+    beatFit: {
+      version: BEAT_FIT_VERSION,
+      enabled: beatFitEnabled,
+      threshold: beatFitResult.summary.threshold,
+      recallCount: recallItems.length,
+      includedCount: beatFitResult.summary.includedCount,
+      excludedCount: beatFitResult.summary.excludedCount,
+      excludeReasonHistogram: beatFitResult.summary.excludeReasonHistogram,
+    },
+    // Embedding-aware recall observability — mode, embedded/keyword counts,
+    // top-K kept, and any fail-closed `degraded_reason` bubble up here so
+    // operators can answer "did embeddings widen recall this run, or did the
+    // run fall through fail-closed?" from logs alone.
+    recall: recallDiagnostics,
+    // Per-stage funnel + primary-drop-stage diagnosis. Operator-facing only.
+    funnel,
     // Phase 4 hardening: watermark + skip metadata.  `unchanged` is false here
     // because we executed the full pipeline; the short-circuit branch above
     // returns early with `unchanged: true` and `payload: null`.
