@@ -14,6 +14,9 @@ import {
   parseAllowlistEnv,
   formatBlockedList,
   isAllowlistVerboseEnv,
+  resolveMode,
+  assertProductionSafe,
+  INGESTION_MODE_SOURCE,
 } from "./feed-reader.mjs";
 
 // Helpers shared across the new "restricted default + legacy alias" tests.
@@ -208,6 +211,24 @@ test("mapEntry: clusterId is omitted (filled by normalizer with provisional:${so
 test("mapEntry: returns null for entry with no headline and no link", () => {
   const feed = { id: "f", name: "F", weight: 50 };
   assert.equal(mapEntry(feed, {}), null);
+});
+
+test("mapEntry: carries feedId from manifest row so source-selection can match by stable id", () => {
+  // The source-selection stage uses item.feedId for an exact match against
+  // selected feeds, surviving any canonical_name drift between the matcher's
+  // manifest snapshot and the reader's.  Pin the field so a future refactor
+  // can't drop the plumb-through.
+  const feed = { id: "wapo-politics", name: "The Washington Post — Politics", weight: 95 };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.feedId, "wapo-politics");
+});
+
+test("mapEntry: feedId is empty string when manifest row has no id (defensive)", () => {
+  // Defensive: every manifest row should have an id, but if upstream loaders
+  // ever surface an idless row we don't want `String(undefined)` to leak.
+  const feed = { name: "Anonymous Source", weight: 50 };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.feedId, "");
 });
 
 // ─── readFeedItems (live mode) ──────────────────────────────────────────────
@@ -431,6 +452,189 @@ test("readFeedItems: env TEMPO_RSS_INGESTION=fixture preserves fixture path", as
     else process.env.TEMPO_RSS_INGESTION = prev;
     await rm(tmp, { recursive: true, force: true });
   }
+});
+
+// ─── Ingestion mode resolution ───────────────────────────────────────────────
+//
+// `resolveMode` has three precedence rules (explicit env > NODE_ENV=test
+// fixture > live default).  Each test below pins one rule with an explicit
+// env snapshot so a future refactor cannot silently flip the default back
+// to "fixture wherever NODE_ENV != production" — the misconfiguration that
+// produced fixture items for live users.
+//
+// The function takes an env object so we never have to mutate process.env
+// here (which would race other tests in the same runtime).
+
+describe("resolveMode: ingestion mode + resolution source", () => {
+  test("explicit TEMPO_RSS_INGESTION=live wins regardless of NODE_ENV", () => {
+    for (const NODE_ENV of ["test", "development", "staging", "production", undefined]) {
+      const r = resolveMode({ TEMPO_RSS_INGESTION: "live", NODE_ENV });
+      assert.equal(r.mode, "live", `NODE_ENV=${String(NODE_ENV)}`);
+      assert.equal(r.source, INGESTION_MODE_SOURCE.EXPLICIT_ENV);
+    }
+  });
+
+  test("explicit TEMPO_RSS_INGESTION=fixture wins regardless of NODE_ENV (production handled by guard)", () => {
+    // resolveMode itself does NOT enforce the production guard — that is
+    // assertProductionSafe's job, called separately so opts.mode bypass is
+    // also gated.  This test pins the resolver's purity.
+    for (const NODE_ENV of ["test", "development", "staging", undefined]) {
+      const r = resolveMode({ TEMPO_RSS_INGESTION: "fixture", NODE_ENV });
+      assert.equal(r.mode, "fixture", `NODE_ENV=${String(NODE_ENV)}`);
+      assert.equal(r.source, INGESTION_MODE_SOURCE.EXPLICIT_ENV);
+    }
+  });
+
+  test("invalid TEMPO_RSS_INGESTION values fall through to NODE_ENV default (no silent acceptance)", () => {
+    // A typo'd env var ("livee" / "fixturE") must NOT be treated as either
+    // mode — fall through to the NODE_ENV default so a misset config
+    // surfaces as the default behavior, not a silent unknown mode.
+    const r = resolveMode({ TEMPO_RSS_INGESTION: "livee", NODE_ENV: "test" });
+    assert.equal(r.mode, "fixture");
+    assert.equal(r.source, INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT);
+  });
+
+  test("unset TEMPO_RSS_INGESTION + NODE_ENV=test → fixture (test determinism)", () => {
+    const r = resolveMode({ NODE_ENV: "test" });
+    assert.equal(r.mode, "fixture");
+    assert.equal(r.source, INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT);
+  });
+
+  test("unset TEMPO_RSS_INGESTION + NODE_ENV=development → live (no silent fixture in dev)", () => {
+    // The durable fix for the "fixture leaking into local dev" bug: dev now
+    // runs against real RSS by default.  Closes the silent-fixture-fallback
+    // hole without removing fixture mode entirely (still reachable via
+    // explicit TEMPO_RSS_INGESTION=fixture).
+    const r = resolveMode({ NODE_ENV: "development" });
+    assert.equal(r.mode, "live");
+    assert.equal(r.source, INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT);
+  });
+
+  test("unset TEMPO_RSS_INGESTION + NODE_ENV=staging → live", () => {
+    const r = resolveMode({ NODE_ENV: "staging" });
+    assert.equal(r.mode, "live");
+    assert.equal(r.source, INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT);
+  });
+
+  test("unset TEMPO_RSS_INGESTION + NODE_ENV=production → live", () => {
+    const r = resolveMode({ NODE_ENV: "production" });
+    assert.equal(r.mode, "live");
+    assert.equal(r.source, INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT);
+  });
+
+  test("unset TEMPO_RSS_INGESTION + unset NODE_ENV → live (safe-by-default)", () => {
+    // Closes the prior "absent NODE_ENV → fixture" path that allowed local
+    // `npm run dev` to silently serve fixture data.  Now: any unrecognized
+    // env defaults to live; only explicit NODE_ENV=test enables fixture.
+    const r = resolveMode({});
+    assert.equal(r.mode, "live");
+    assert.equal(r.source, INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT);
+  });
+
+  test("env=null argument is tolerated and falls through to safe default", () => {
+    // Pure-function defensive path: an explicit null env (e.g. a defensive
+    // caller that forgot to construct a snapshot) must not throw — treat as
+    // "everything unset" and apply the safe live default.  Passing
+    // `undefined` deliberately triggers the default-parameter binding to
+    // `process.env`, so that case is covered by the other tests via the
+    // ambient test-runner env.
+    assert.equal(resolveMode(null).mode, "live");
+    assert.equal(resolveMode(null).source, INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT);
+  });
+});
+
+describe("assertProductionSafe: fixture-in-prod safety guard", () => {
+  test("throws when NODE_ENV=production and mode=fixture (env-resolved fixture)", () => {
+    assert.throws(
+      () => assertProductionSafe("fixture", INGESTION_MODE_SOURCE.EXPLICIT_ENV, {
+        NODE_ENV: "production",
+        TEMPO_RSS_INGESTION: "fixture",
+      }),
+      /fixture ingestion mode is not allowed under NODE_ENV=production/
+    );
+  });
+
+  test("throws when opts.mode=fixture override is used in production (no bypass via opts)", () => {
+    // Defends against a future refactor that resolves mode from opts.mode
+    // and skips the guard.  Pin opts-source as still gated so production
+    // can't be tricked by a stray test helper or operator script.
+    assert.throws(
+      () => assertProductionSafe("fixture", INGESTION_MODE_SOURCE.OPTS_OVERRIDE, {
+        NODE_ENV: "production",
+      }),
+      /resolution_source=opts_override/
+    );
+  });
+
+  test("error message names the remediation (set TEMPO_RSS_INGESTION=live)", () => {
+    // Operators reading the deploy log need the fix in the error message
+    // itself, not buried in docs.  Pin the remediation string.
+    try {
+      assertProductionSafe("fixture", INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT, {
+        NODE_ENV: "production",
+      });
+      assert.fail("expected assertProductionSafe to throw");
+    } catch (err) {
+      assert.match(err.message, /Set TEMPO_RSS_INGESTION=live/);
+    }
+  });
+
+  test("does NOT throw when NODE_ENV=production and mode=live (the canonical prod path)", () => {
+    assert.doesNotThrow(() =>
+      assertProductionSafe("live", INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT, {
+        NODE_ENV: "production",
+      })
+    );
+  });
+
+  test("does NOT throw when mode=fixture under any non-production NODE_ENV", () => {
+    for (const NODE_ENV of ["test", "development", "staging", undefined]) {
+      assert.doesNotThrow(
+        () => assertProductionSafe("fixture", INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT, { NODE_ENV }),
+        `NODE_ENV=${String(NODE_ENV)} must not trigger guard for fixture mode`
+      );
+    }
+  });
+});
+
+describe("readFeedItems: production-fixture guard wired end-to-end", () => {
+  // These tests mutate process.env.NODE_ENV briefly because readFeedItems
+  // reads it through resolveMode/assertProductionSafe internally.  Wrap in
+  // try/finally so a thrown assertion never leaks state to other tests.
+  async function withNodeEnv(value, fn) {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevIngestion = process.env.TEMPO_RSS_INGESTION;
+    if (value === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = value;
+    try {
+      return await fn();
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      if (prevIngestion === undefined) delete process.env.TEMPO_RSS_INGESTION;
+      else process.env.TEMPO_RSS_INGESTION = prevIngestion;
+    }
+  }
+
+  test("readFeedItems throws when NODE_ENV=production and TEMPO_RSS_INGESTION=fixture", async () => {
+    await withNodeEnv("production", async () => {
+      process.env.TEMPO_RSS_INGESTION = "fixture";
+      await assert.rejects(
+        () => readFeedItems("/unused"),
+        /fixture ingestion mode is not allowed under NODE_ENV=production/
+      );
+    });
+  });
+
+  test("readFeedItems throws when NODE_ENV=production and opts.mode=fixture", async () => {
+    await withNodeEnv("production", async () => {
+      delete process.env.TEMPO_RSS_INGESTION;
+      await assert.rejects(
+        () => readFeedItems("/unused", { mode: "fixture" }),
+        /resolution_source=opts_override/
+      );
+    });
+  });
 });
 
 // ─── Allowlist guard ─────────────────────────────────────────────────────────

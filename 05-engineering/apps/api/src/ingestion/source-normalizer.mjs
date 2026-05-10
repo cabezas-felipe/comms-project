@@ -31,6 +31,11 @@ export function normalizeSourceItem(raw) {
     whyItMatters: String(raw.whyItMatters ?? ""),
     whatChanged: String(raw.whatChanged ?? ""),
     sourceId: String(raw.sourceId),
+    // Optional manifest-row id from feed-reader's mapEntry — preserved when
+    // present so source-selection can match by stable id rather than fragile
+    // outlet-name normalization.  Legacy fixture items (no feedId) get
+    // `undefined` and fall back to outlet-based matching downstream.
+    feedId: raw.feedId != null && String(raw.feedId).length > 0 ? String(raw.feedId) : undefined,
     outlet: String(raw.outlet),
     byline: raw.byline != null ? String(raw.byline) : undefined,
     kind: String(raw.kind),

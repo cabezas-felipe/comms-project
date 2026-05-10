@@ -2433,3 +2433,87 @@ test("WaPo Iran/oil regression: pipeline does not collapse to zero when lexical 
   assert.equal(log.recall.topicKeywordBreakdown.keywordOnly, 1);
   assert.equal(log.recall.topicKeywordBreakdown.passCount, 1);
 });
+
+// ─── Regression: live WaPo source-selection (user e06d512d funnel collapse) ──
+
+test("runRefreshPipeline regression: live WaPo items pass source-selection via feedId even when outlet name diverges from manifest canonical name", async () => {
+  // Reproduces the funnel collapse observed for user e06d512d:
+  //   totalNormalized=5, afterTimeWindow=5, afterSourceSelection=0,
+  //   primaryDropStage=source_selection, matchedFeedIds includes the 5
+  //   wapo-* feeds.
+  //
+  // Modeled cause: items emitted by the live feed-reader carry a publisher-
+  // canonical outlet ("The Washington Post" or similar) that does not
+  // bidirectionally substring-match the matcher's section-level outlet
+  // strings ("The Washington Post — Politics", ...) — but every item also
+  // carries `feedId` from the manifest row, which exact-matches one of
+  // `selection.matchedFeedIds`.  Pre-fix the pipeline only tried outlet
+  // matching, so all 5 items got dropped.  Post-fix the feedId index
+  // catches them.
+  const manifestFeeds = [
+    { id: "wapo-politics",   name: "The Washington Post — Politics",   kind: "rss", url: "https://wapo/p", weight: 95, active: true },
+    { id: "wapo-world",      name: "The Washington Post — World",      kind: "rss", url: "https://wapo/w", weight: 92, active: true },
+    { id: "wapo-national",   name: "The Washington Post — National",   kind: "rss", url: "https://wapo/n", weight: 90, active: true },
+    { id: "wapo-business",   name: "The Washington Post — Business",   kind: "rss", url: "https://wapo/b", weight: 88, active: true },
+    { id: "wapo-technology", name: "The Washington Post — Technology", kind: "rss", url: "https://wapo/t", weight: 86, active: true },
+  ];
+  // Five live items — one per WaPo feed.  Outlet uses the publisher-only
+  // canonical form (no section suffix) AND a divergent punctuation shape
+  // ("WashingtonPost.com") so neither equality nor bidirectional substring
+  // against the section-level matched outlet set would catch them.
+  const rawItems = manifestFeeds.map((f, i) =>
+    makeItem({
+      sourceId: `live-wapo-${i}`,
+      feedId: f.id,
+      outlet: "WashingtonPost.com",
+      minutesAgo: 30,
+      headline: "U.S. Colombia diplomatic call coordinates response",
+    })
+  );
+  const seenIds = [];
+  const { log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["Washington Post"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  // Funnel must NOT collapse at source_selection.
+  assert.equal(log.funnel.totalNormalized, 5);
+  assert.equal(log.funnel.afterTimeWindow, 5);
+  assert.equal(log.funnel.afterSourceSelection, 5, "all 5 live WaPo items must survive source-selection via feedId match");
+  // Selection metadata still reports the matched WaPo feeds.
+  assert.deepEqual(
+    log.selection.matchedFeedIds.sort(),
+    ["wapo-business", "wapo-national", "wapo-politics", "wapo-technology", "wapo-world"]
+  );
+  assert.equal(log.selection.sourceSelectionMode, "strict");
+  assert.equal(log.selection.sourceFallbackUsed, false);
+});
+
+test("runRefreshPipeline regression: strict-empty preserved — items with no matching feedId AND no outlet match still drop", async () => {
+  // Counterpart to the regression above: ensure the new feedId index does
+  // not silently broaden matching.  Items whose feedId is outside
+  // `selection.matchedFeedIds` AND whose outlet does not substring-match
+  // any matched outlet must still be filtered out — strict-empty semantics
+  // hold and we have not turned source-selection into a no-op.
+  const manifestFeeds = [
+    { id: "wapo-politics", name: "The Washington Post — Politics", kind: "rss", url: "https://wapo/p", weight: 95, active: true },
+  ];
+  const rawItems = [
+    makeItem({ sourceId: "wapo-real",  feedId: "wapo-politics", outlet: "The Washington Post — Politics", minutesAgo: 30 }),
+    makeItem({ sourceId: "bbc-strange", feedId: "bbc-world",     outlet: "BBC",                              minutesAgo: 30 }),
+  ];
+  const seenIds = [];
+  await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, traditionalSources: ["Washington Post"], socialSources: [] },
+    rawItems,
+    manifestFeeds,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.ok(seenIds.includes("wapo-real"), "matched-id item must reach clustering");
+  assert.ok(!seenIds.includes("bbc-strange"), "non-matched-id item with non-matching outlet must NOT survive source-selection");
+});

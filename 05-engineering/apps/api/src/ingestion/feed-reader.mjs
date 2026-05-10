@@ -5,9 +5,23 @@
 //      (`normalizeSourceItems`, then the refresh pipeline) expect.
 //
 // Mode is selected by env `TEMPO_RSS_INGESTION`:
-//   - `fixture` → read source-items.json (back-compat for tests/dev).
+//   - `fixture` → read source-items.json (kept for test determinism only).
 //   - `live`    → fetch RSS feeds from the manifest.
-//   - unset     → defaults to `live` in production (NODE_ENV=production), else `fixture`.
+//   - unset     → defaults to `fixture` ONLY when NODE_ENV=test; every other
+//                  environment (development, staging, production, unset)
+//                  defaults to `live`.  This inversion of the previous
+//                  "fixture wherever NODE_ENV != production" default closes
+//                  the silent-fixture-fallback hole that produced
+//                  source_selection=0 for live users in local/staging dev:
+//                  fixture mode is now opt-in for tests, not the silent
+//                  default for non-prod runtimes.
+//
+// Hard safety guard (`assertProductionSafe`):
+//   Fixture mode is NEVER permitted under NODE_ENV=production.  If a misset
+//   env or a stray opts.mode tries to resolve to fixture in production, the
+//   reader throws synchronously before any fetch / file-read so the
+//   misconfiguration surfaces in the deploy logs instead of silently
+//   serving fixture data to real users.
 //
 // Tests can bypass env by passing `opts.mode` and `opts.fetchImpl`.
 
@@ -55,10 +69,64 @@ const ENV_ALLOWLIST_LEGACY = "TEMPO_INGESTION_ALLOWLIST";
 const ENV_VERBOSE_NEWER = "TEMPO_RSS_ALLOWLIST_VERBOSE";
 const ENV_VERBOSE_LEGACY = "TEMPO_INGESTION_GUARD_VERBOSE";
 
-function resolveMode() {
-  const explicit = process.env.TEMPO_RSS_INGESTION;
-  if (explicit === "live" || explicit === "fixture") return explicit;
-  return process.env.NODE_ENV === "production" ? "live" : "fixture";
+// Tag for resolveMode's `source` field so callers (and the per-refresh
+// log line) can quote where the mode actually came from.  Useful when a
+// production deploy turns up a fixture-mode failure: the operator sees
+// `resolution_source=opts_override` vs `explicit_env` vs `node_env_default`
+// and immediately knows which signal to investigate.
+export const INGESTION_MODE_SOURCE = Object.freeze({
+  EXPLICIT_ENV: "explicit_env",       // TEMPO_RSS_INGESTION set to live|fixture
+  NODE_ENV_DEFAULT: "node_env_default", // fell through to NODE_ENV-based default
+  OPTS_OVERRIDE: "opts_override",     // caller passed opts.mode (test path)
+});
+
+/**
+ * Resolve ingestion mode + the signal it came from.
+ *
+ * Precedence (first match wins):
+ *   1. `TEMPO_RSS_INGESTION` set to "live" or "fixture"  → that mode, source=explicit_env.
+ *   2. NODE_ENV === "test"                                → fixture, source=node_env_default.
+ *   3. anything else (development, staging, production, unset) → live, source=node_env_default.
+ *
+ * Pure / accepts an `env` snapshot so tests can pin behavior without
+ * mutating `process.env` (which would race other tests in the same
+ * runtime).  Default reads `process.env` lazily.
+ *
+ * @returns {{ mode: "live"|"fixture", source: string }}
+ */
+export function resolveMode(env = process.env) {
+  const explicit = env?.TEMPO_RSS_INGESTION;
+  if (explicit === "live" || explicit === "fixture") {
+    return { mode: explicit, source: INGESTION_MODE_SOURCE.EXPLICIT_ENV };
+  }
+  const mode = env?.NODE_ENV === "test" ? "fixture" : "live";
+  return { mode, source: INGESTION_MODE_SOURCE.NODE_ENV_DEFAULT };
+}
+
+/**
+ * Hard safety guard — fixture mode is never allowed under NODE_ENV=production.
+ *
+ * Called after the final mode is known (whether from opts.mode or from
+ * resolveMode) so opts.mode cannot bypass the guard either.  Throws a
+ * synchronous Error with a clear remediation hint so the misconfiguration
+ * surfaces immediately instead of silently serving fixture data.
+ *
+ * Pure / accepts an env snapshot for the same reasons resolveMode does.
+ */
+export function assertProductionSafe(mode, source, env = process.env) {
+  if (env?.NODE_ENV === "production" && mode === "fixture") {
+    const explicit = env?.TEMPO_RSS_INGESTION;
+    const explicitDescription =
+      explicit === undefined ? "<unset>" : JSON.stringify(explicit);
+    throw new Error(
+      "[feed-reader] fixture ingestion mode is not allowed under " +
+        `NODE_ENV=production (resolution_source=${source}, ` +
+        `TEMPO_RSS_INGESTION=${explicitDescription}). ` +
+        "Set TEMPO_RSS_INGESTION=live explicitly, or unset it to fall " +
+        "through to the production default. Fixture mode is reserved for " +
+        "test determinism (NODE_ENV=test) and must never serve real users."
+    );
+  }
 }
 
 function maxItemsPerFeed() {
@@ -288,7 +356,24 @@ export function isAllowlistVerboseEnv(env = process.env) {
  * @returns {Promise<Array>} raw items
  */
 export async function readFeedItems(dataDir, opts = {}) {
-  const mode = opts.mode ?? resolveMode();
+  // Resolve mode + record where it came from so the per-refresh log line
+  // and the production safety guard both have the same signal.  opts.mode
+  // (test path) bypasses env resolution but is STILL gated by the
+  // production guard — a misset opts.mode in production must fail loud.
+  let mode;
+  let source;
+  if (opts.mode === "live" || opts.mode === "fixture") {
+    mode = opts.mode;
+    source = INGESTION_MODE_SOURCE.OPTS_OVERRIDE;
+  } else {
+    ({ mode, source } = resolveMode());
+  }
+  assertProductionSafe(mode, source);
+  // One low-noise line per refresh — surfaces fixture-mode surprises in
+  // dev (and the resolution signal makes "why is this fixture?" a single
+  // log grep instead of a full env audit).  Stays separate from the
+  // existing live-path summary log so neither is harder to read.
+  console.log(`[feed-reader] mode=${mode} resolution_source=${source}`);
   if (mode === "fixture") return readFixtureItems(dataDir);
   return readLiveItems(dataDir, opts);
 }
@@ -497,6 +582,12 @@ export function mapEntry(feed, entry, fetchedAt = Date.now()) {
   return {
     // clusterId omitted — normalizer fills with `provisional:${sourceId}`
     sourceId,
+    // Stable manifest-row identifier carried through so the source-selection
+    // stage can match candidates against `selection.matchedFeeds` by id —
+    // robust to upstream canonical_name drift / whitespace / "The " variance
+    // that an outlet-name string match would miss.  Empty string when the
+    // manifest row had no id (defensive — every row should have one).
+    feedId: String(feed.id ?? ""),
     outlet: String(feed.name ?? feed.id ?? "Unknown"),
     kind: "traditional",
     weight: Number(feed.weight ?? 0),

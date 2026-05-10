@@ -9,6 +9,7 @@ import { normalizeTopicLabel } from "@tempo/contracts";
 import {
   resolveSelectedSources,
   buildMatchedOutletSet,
+  buildMatchedFeedIdSet,
   filterItemsToMatchedFeeds,
   SELECTION_MODE,
 } from "../ingestion/source-matcher.mjs";
@@ -535,8 +536,34 @@ export async function runRefreshPipeline({
       fallbackFeedIds,
       fallbackEnabled,
     });
-    const matchedOutlets = buildMatchedOutletSet(selection.matchedFeeds);
-    selectedItems = filterItemsToMatchedFeeds(recentNormalizedItems, matchedOutlets);
+    // Layer two indices over `selection.matchedFeeds`:
+    //   - feedIds (exact match) — authoritative for live items that carry
+    //     `feedId` from feed-reader.mapEntry; survives canonical_name drift
+    //     between the matcher's manifest snapshot and the reader's.
+    //   - outlets (bidirectional substring) — legacy path used by fixture
+    //     items that have only `outlet`.  Kept so existing tests and the
+    //     fixture pipeline don't change behavior.
+    const matchedKeys = {
+      feedIds: buildMatchedFeedIdSet(selection.matchedFeeds),
+      outlets: buildMatchedOutletSet(selection.matchedFeeds),
+    };
+    selectedItems = filterItemsToMatchedFeeds(recentNormalizedItems, matchedKeys);
+    // Low-noise diagnostic: when source-selection collapses a non-empty
+    // input pool to zero despite matched feeds, log a small sample so
+    // operators can see the mismatch shape without grepping per-item logs.
+    if (
+      selectedItems.length === 0 &&
+      recentNormalizedItems.length > 0 &&
+      selection.matchedFeeds.length > 0
+    ) {
+      const sample = recentNormalizedItems.slice(0, 3).map((it) => ({
+        feedId: it?.feedId ?? null,
+        outlet: it?.outlet ?? null,
+      }));
+      console.warn(
+        `[pipeline.selection] source_selection drop-to-zero: input=${recentNormalizedItems.length} matchedFeeds=${selection.matchedFeeds.length} matchedFeedIds=${JSON.stringify([...matchedKeys.feedIds])} matchedOutlets=${JSON.stringify([...matchedKeys.outlets])} sampleItems=${JSON.stringify(sample)}`
+      );
+    }
     selectionMeta = {
       sourceSelectionMode: selection.mode,
       sourceFallbackUsed: selection.fallbackUsed,

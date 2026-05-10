@@ -268,35 +268,90 @@ export function parseFallbackEnabledEnv(raw) {
  * Build a Set of normalized outlet names corresponding to matched feeds.
  * Items in the candidate pool whose `outlet` (normalized) is in this set are
  * considered "in pool" for the user's selection.
+ *
+ * When `f.name` is absent we fall back to `f.id` so the index stays in step
+ * with `mapEntry`'s `feed.name ?? feed.id ?? "Unknown"` chain — otherwise a
+ * Supabase row with `canonical_name=null` (rare but observed) would make
+ * `mapEntry` emit items with `outlet=feed.id` that this set could never
+ * contain, dropping a legitimate WaPo candidate at source-selection.
  */
 export function buildMatchedOutletSet(matchedFeeds) {
   const set = new Set();
   for (const f of matchedFeeds ?? []) {
-    if (f?.name) set.add(normalizeForMatching(f.name));
+    const nameOrId = f?.name || f?.id;
+    if (nameOrId) set.add(normalizeForMatching(nameOrId));
   }
   return set;
 }
 
 /**
- * Filter normalized items down to those whose outlet matches one of the
- * selected feeds (by normalized name).  Bidirectional substring match — so a
- * fixture item with outlet "Reuters" matches a manifest feed named
- * "Reuters — World News" (feed contains item) AND a live RSS item with
- * outlet "Reuters — World News" matches a publisher selection that resolved
- * to that same feed (item contains feed string after normalization).
- *
- * When `matchedOutlets` is empty, returns an empty array (caller should
- * distinguish "strict empty" from "no selection").
+ * Build a Set of feed-id strings for the matched feeds.  Pairs with
+ * `buildMatchedOutletSet` so callers can match items by stable manifest id
+ * (robust against outlet-name drift) AND fall back to outlet substring match
+ * for legacy fixtures that don't carry a feedId.
  */
-export function filterItemsToMatchedFeeds(items, matchedOutlets) {
-  if (!matchedOutlets || matchedOutlets.size === 0) return [];
+export function buildMatchedFeedIdSet(matchedFeeds) {
+  const set = new Set();
+  for (const f of matchedFeeds ?? []) {
+    if (f?.id != null && String(f.id).length > 0) set.add(String(f.id));
+  }
+  return set;
+}
+
+/**
+ * Filter normalized items down to those that belong to one of the selected
+ * feeds.  Two layered match strategies, applied per item:
+ *
+ *   1. Stable feed-id match — when the item carries `feedId` (live RSS
+ *      items, set by `mapEntry`), exact equality against `keys.feedIds`.
+ *      This is the authoritative path: it survives any canonical-name drift
+ *      between the matcher's manifest snapshot and the feed-reader's.
+ *
+ *   2. Bidirectional outlet substring match — fallback for fixture items
+ *      that have no `feedId`.  Preserves the publisher-vs-section behavior
+ *      from before this fix (outlet "Reuters" matches feed
+ *      "Reuters — World News" and vice versa).
+ *
+ * Backward-compat: when `keys` is a plain `Set`, treats it as the outlet set
+ * and uses the legacy outlet-only path verbatim.  Existing tests and
+ * external callers that still pass `buildMatchedOutletSet(...)` keep working
+ * unchanged.
+ *
+ * Strict-empty: when both feed-id and outlet sets are empty (or the legacy
+ * Set is empty), returns `[]` — caller distinguishes "strict empty" from
+ * "no selection" via `selection.fallbackUsed` upstream.
+ */
+export function filterItemsToMatchedFeeds(items, keys) {
+  // Legacy signature: a plain Set means outlet-only matching (older tests
+  // and any external callers that pre-date the feed-id index).  Routing
+  // through the same predicate keeps strict-empty + substring semantics
+  // identical to the previous implementation.
+  if (keys instanceof Set) {
+    return _filterByOutletOnly(items, keys);
+  }
+  const feedIds = keys?.feedIds ?? null;
+  const outlets = keys?.outlets ?? null;
+  const hasFeedIds = feedIds && feedIds.size > 0;
+  const hasOutlets = outlets && outlets.size > 0;
+  if (!hasFeedIds && !hasOutlets) return [];
   return items.filter((it) => {
-    const itemNorm = normalizeForMatching(it.outlet);
-    if (!itemNorm) return false;
-    for (const feedNorm of matchedOutlets) {
-      if (feedNorm === itemNorm) return true;
-      if (feedNorm.includes(itemNorm) || itemNorm.includes(feedNorm)) return true;
-    }
+    if (hasFeedIds && it?.feedId && feedIds.has(String(it.feedId))) return true;
+    if (hasOutlets) return _itemOutletMatchesAny(it, outlets);
     return false;
   });
+}
+
+function _filterByOutletOnly(items, matchedOutlets) {
+  if (!matchedOutlets || matchedOutlets.size === 0) return [];
+  return items.filter((it) => _itemOutletMatchesAny(it, matchedOutlets));
+}
+
+function _itemOutletMatchesAny(item, outlets) {
+  const itemNorm = normalizeForMatching(item?.outlet);
+  if (!itemNorm) return false;
+  for (const feedNorm of outlets) {
+    if (feedNorm === itemNorm) return true;
+    if (feedNorm.includes(itemNorm) || itemNorm.includes(feedNorm)) return true;
+  }
+  return false;
 }
