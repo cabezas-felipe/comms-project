@@ -32,11 +32,10 @@ export default function Onboarding() {
   const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>("type");
   const [topics, setTopics] = useState("");
-  const [keywords, setKeywords] = useState("OFAC, sanctions, deportation routing, bilateral");
-  const [geos] = useState<string[]>(["US", "Colombia"]);
-  const [sources, setSources] = useState(
-    "NYT, Washington Post, Reuters, El Tiempo, El País, Semana"
-  );
+  // Other settings fields (keywords/geographies/sources) are populated by the
+  // backend extraction pipeline from the user's narrative — never seeded with
+  // hard-coded demo defaults from the client. If extraction fails, those fields
+  // stay empty rather than persisting unrelated placeholders.
   const [recState, setRecState] = useState<RecordingState>("idle");
   const [submitting, setSubmitting] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -127,22 +126,33 @@ export default function Onboarding() {
     }
     setSubmitting(true);
 
-    const splitTrim = (s: string) => s.split(/[,\n]+/).map((v) => v.trim()).filter(Boolean);
+    const trimmedNarrative = topics.trim();
 
-    // Step 1: Build minimal safe payload from entered values — no AI, no blocking calls.
+    // Step 1: Build minimal safe payload from user-entered narrative ONLY.
+    // No seeded keyword/geography/source defaults are attached here — those
+    // fields are derived server-side by the extraction pipeline from the raw
+    // narrative. If extraction fails, the persisted settings keep these arrays
+    // empty rather than leaking unrelated placeholders into Settings.
+    //
+    // Topics are persisted as a single-entry array containing the full trimmed
+    // narrative — NOT a comma/newline split. The narrative is prose, not a
+    // delimited list, so splitting it produces fragmented chunks that surface
+    // as garbage "topics" in the fallback (extraction-failed) path. The
+    // backend's extraction pipeline replaces this single entry with proper
+    // canonical labels when it succeeds.
     const minimalPayload = settingsPayloadSchema.parse({
       contractVersion: CONTRACT_VERSION,
-      topics: splitTrim(topics),
-      keywords: splitTrim(keywords),
-      geographies: geos,
-      traditionalSources: splitTrim(sources),
+      topics: [trimmedNarrative],
+      keywords: [],
+      geographies: [],
+      traditionalSources: [],
       socialSources: [],
     });
 
     // Step 2: Persist raw text + baseline settings. Failure blocks navigation.
     let saveResult: Awaited<ReturnType<typeof saveSettingsPayload>>;
     try {
-      saveResult = await saveSettingsPayload(minimalPayload, { onboardingRawText: topics.trim() });
+      saveResult = await saveSettingsPayload(minimalPayload, { onboardingRawText: trimmedNarrative });
     } catch (err) {
       const stage = err instanceof SaveSettingsError ? err.stage : "backend";
       const statusCode = err instanceof SaveSettingsError ? err.statusCode : undefined;

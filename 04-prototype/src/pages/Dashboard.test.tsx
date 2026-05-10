@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import Dashboard from "@/pages/Dashboard";
@@ -7,9 +7,24 @@ import { CONTRACT_VERSION, type StoryDto } from "@tempo/contracts";
 const fetchSpy = vi.fn();
 const bootstrapSpy = vi.fn();
 
+const { MockDashboardFetchError } = vi.hoisted(() => {
+  class MockDashboardFetchError extends Error {
+    kind: string;
+    status?: number;
+    constructor(kind: string, message: string, status?: number) {
+      super(message);
+      this.name = "DashboardFetchError";
+      this.kind = kind;
+      this.status = status;
+    }
+  }
+  return { MockDashboardFetchError };
+});
+
 vi.mock("@/lib/api", () => ({
   fetchDashboardWithMeta: (...args: unknown[]) => fetchSpy(...args),
   bootstrapDashboard: (...args: unknown[]) => bootstrapSpy(...args),
+  DashboardFetchError: MockDashboardFetchError,
 }));
 
 vi.mock("@/lib/analytics", () => ({
@@ -43,6 +58,8 @@ describe("Phase 5: Dashboard load path selection", () => {
     bootstrapSpy.mockResolvedValue({ ...OK_RESULT, decision: "served_fresh_snapshot" });
     renderAt({ bootstrap: true });
     await waitFor(() => expect(bootstrapSpy).toHaveBeenCalledTimes(1));
+    // Await the post-resolution UI so the trailing state update flushes inside act().
+    await screen.findByTestId("dashboard-empty");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -50,6 +67,7 @@ describe("Phase 5: Dashboard load path selection", () => {
     fetchSpy.mockResolvedValue(OK_RESULT);
     renderAt(null);
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
     expect(bootstrapSpy).not.toHaveBeenCalled();
   });
 
@@ -57,7 +75,62 @@ describe("Phase 5: Dashboard load path selection", () => {
     fetchSpy.mockResolvedValue(OK_RESULT);
     renderAt({ from: "settings" });
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
     expect(bootstrapSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("Dashboard load states (no fake-story fallback)", () => {
+  it("renders Loading state on initial mount before fetch resolves", async () => {
+    let resolveFetch: ((v: unknown) => void) | null = null;
+    fetchSpy.mockImplementation(
+      () => new Promise((resolve) => { resolveFetch = resolve; })
+    );
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-loading")).toBeInTheDocument();
+    // Settle the pending promise and await the next state so the post-resolve
+    // setState fires inside Testing Library's act() boundary, not after the
+    // test exits.
+    await act(async () => {
+      resolveFetch?.(OK_RESULT);
+    });
+    await screen.findByTestId("dashboard-empty");
+  });
+
+  it("renders Empty state (briefing) when backend returns 0 stories on success", async () => {
+    fetchSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
+    expect(screen.getByText("No stories yet.")).toBeInTheDocument();
+    // Critical: no fake-story fallback rendered
+    expect(screen.queryByTestId("dashboard-error")).toBeNull();
+  });
+
+  it("renders Error state with retry when fetch fails (no STORIES rendered)", async () => {
+    fetchSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
+    expect(screen.getByText("We couldn't load your stories.")).toBeInTheDocument();
+    // No fake stories should leak through — the dashboard must not render the
+    // static demo set when the API errors.
+    expect(screen.queryByText("Story A")).toBeNull();
+  });
+
+  it("renders Error state when bootstrap fails (Landing/Onboarding entry)", async () => {
+    bootstrapSpy.mockRejectedValue(new MockDashboardFetchError("http", "503", 503));
+    renderAt({ bootstrap: true });
+    expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
+  });
+
+  it("retry button re-invokes the loader after an error", async () => {
+    fetchSpy
+      .mockRejectedValueOnce(new MockDashboardFetchError("network", "boom"))
+      .mockResolvedValueOnce(OK_RESULT);
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });
 

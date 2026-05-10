@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
-import { STORIES, Source, Story } from "@/data/stories";
+import { Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
 import StoryCard from "@/components/StoryCard";
 import SourceReader from "@/components/SourceReader";
-import { EmptyState, ErrorState } from "@/components/StateBlocks";
+import { EmptyState, ErrorState, LoadingState } from "@/components/StateBlocks";
 import {
   trackDashboardViewed,
   trackSourceOpenError,
@@ -127,9 +127,13 @@ export default function Dashboard() {
   const [selectedGeographies, setSelectedGeographies] = useState<ReadonlySet<string>>(() => new Set());
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
-  const [stories, setStories] = useState<Story[]>(emptyMode ? [] : STORIES);
+  // Stories are seeded empty — no static demo fallback. The dashboard renders
+  // Loading/Empty/Error blocks until the backend supplies a payload.
+  const [stories, setStories] = useState<Story[]>([]);
   const [isLoading, setIsLoading] = useState(!emptyMode);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(emptyMode);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadCounter, setReloadCounter] = useState(0);
   const [selectionMeta, setSelectionMeta] = useState<DashboardSelectionMeta | null>(null);
 
   const tagSections = useMemo(() => aggregateTagSections(stories), [stories]);
@@ -176,6 +180,7 @@ export default function Dashboard() {
     if (emptyMode) return;
     let canceled = false;
     setIsLoading(true);
+    setLoadError(null);
 
     // Phase 5: bootstrap path runs the (potentially expensive) refresh check
     // server-side and falls back to a fresh snapshot when ≤ 60 min old.  GET
@@ -190,13 +195,18 @@ export default function Dashboard() {
         setStories(payload.stories.map(dtoToStory));
         setSelectionMeta(selection);
         setLoadError(null);
+        setHasLoadedOnce(true);
       })
       .catch((error: unknown) => {
         if (canceled) return;
         const message = error instanceof Error ? error.message : "Failed to load dashboard data.";
         setLoadError(message);
         trackSourceOpenError({ message, code: "dashboard_payload_load_failed" });
-        notifyError("We couldn't refresh stories. Showing cached data.");
+        // Only surface a toast when there's prior fresh data on screen — the
+        // full-page error block already conveys the failure on first load.
+        if (stories.length > 0) {
+          notifyError("We couldn't refresh stories. Showing previous run.");
+        }
       })
       .finally(() => {
         if (!canceled) setIsLoading(false);
@@ -204,7 +214,13 @@ export default function Dashboard() {
     return () => {
       canceled = true;
     };
-  }, [emptyMode, useBootstrap]);
+    // `stories.length` intentionally excluded — only used to gate the toast.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emptyMode, useBootstrap, reloadCounter]);
+
+  const handleRetry = useCallback(() => {
+    setReloadCounter((n) => n + 1);
+  }, []);
 
   const handleReset = () => {
     setSelectedTopics(new Set());
@@ -303,29 +319,57 @@ export default function Dashboard() {
           {/* Selection status — Phase 2: small cues for fallback / unmatched / strict-empty */}
           <SelectionStatusCue meta={selectionMeta} hasStories={filtered.length > 0} />
 
-          {/* Error banner — non-blocking, stories still show below */}
-          {loadError && (
-            <ErrorState variant="dense" onRetry={() => window.location.reload()} />
+          {/* Inline banner when a refresh failed but a previous run is on-screen */}
+          {loadError && stories.length > 0 && (
+            <ErrorState variant="dense" onRetry={handleRetry} />
           )}
 
-          {/* Feed zone */}
-          {filtered.length === 0 ? (
-            <EmptyState variant="dense" onRetry={handleReset} />
-          ) : (
-            <ul className="divide-y divide-rule/60">
-              {filtered.map(({ story, sig }) => (
-                <li key={story.id}>
-                  <StoryCard
-                    story={story}
-                    sig={sig}
-                    expanded={expandedId === story.id}
-                    onToggle={() => setExpandedId(expandedId === story.id ? null : story.id)}
-                    onOpenSource={(sourceId) => handleOpenSource(story.id, sourceId)}
-                  />
-                </li>
-              ))}
-            </ul>
-          )}
+          {/* Feed zone — distinguishes loading / fetch error / legitimate empty */}
+          {(() => {
+            // Initial load (or retry) with no on-screen data yet.
+            if (isLoading && stories.length === 0) {
+              return (
+                <div data-testid="dashboard-loading">
+                  <LoadingState variant="dense" />
+                </div>
+              );
+            }
+            // Fetch failed and we have nothing to show — full error block, retry only.
+            if (loadError && stories.length === 0) {
+              return (
+                <div data-testid="dashboard-error">
+                  <ErrorState variant="briefing" onRetry={handleRetry} />
+                </div>
+              );
+            }
+            // Backend returned 0 stories (legitimately empty after a successful fetch).
+            if (!isLoading && !loadError && stories.length === 0 && hasLoadedOnce) {
+              return (
+                <div data-testid="dashboard-empty">
+                  <EmptyState variant="briefing" />
+                </div>
+              );
+            }
+            // Stories present, but current filters knock the visible list to zero.
+            if (filtered.length === 0) {
+              return <EmptyState variant="dense" onRetry={handleReset} />;
+            }
+            return (
+              <ul className="divide-y divide-rule/60">
+                {filtered.map(({ story, sig }) => (
+                  <li key={story.id}>
+                    <StoryCard
+                      story={story}
+                      sig={sig}
+                      expanded={expandedId === story.id}
+                      onToggle={() => setExpandedId(expandedId === story.id ? null : story.id)}
+                      onOpenSource={(sourceId) => handleOpenSource(story.id, sourceId)}
+                    />
+                  </li>
+                ))}
+              </ul>
+            );
+          })()}
 
           <div className="px-6 py-8 text-center">
             <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
