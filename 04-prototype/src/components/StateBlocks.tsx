@@ -79,27 +79,40 @@ export function EmptyState({ variant, onRetry }: StateProps) {
   }
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24 text-center">
+      <Inbox className="h-6 w-6 text-muted-foreground" />
       <p className="max-w-[36ch] font-display text-2xl leading-snug">
-        Nothing requires action right now.
+        No stories yet.
       </p>
-      <p className="text-sm text-muted-foreground">
-        We'll surface a recommendation when the next signal crosses threshold.
+      <p className="max-w-[44ch] text-sm text-muted-foreground">
+        Your selected sources haven't published anything matching your topics in
+        the last refresh window. We'll surface stories as soon as the next
+        signal crosses threshold.
       </p>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="mt-2 rounded-sm border border-rule/60 px-3 py-1.5 text-sm hover:bg-secondary"
+        >
+          Refresh
+        </button>
+      )}
     </div>
   );
 }
 
 /* ---------------- Error ---------------- */
 export function ErrorState({ variant, onRetry }: StateProps) {
-  const msg = "Refresh failed — showing saved stories.";
+  // Inline banner: refresh failed but a previous run is still on-screen.
+  // Full-page (briefing/minimal): we have nothing to show.
   if (variant === "dense") {
+    const inlineMsg = "Refresh failed — showing previous run.";
     return (
       <div className="border-y border-destructive/30 bg-destructive/5 px-6 py-4">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-2 text-sm">
             <AlertCircle className="h-4 w-4 text-destructive" />
             <span className="font-mono text-xs uppercase tracking-wider text-destructive">
-              feed_error · {msg}
+              feed_error · {inlineMsg}
             </span>
           </div>
           {onRetry && (
@@ -117,11 +130,15 @@ export function ErrorState({ variant, onRetry }: StateProps) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-24 text-center">
       <AlertCircle className="h-6 w-6 text-destructive" />
-      <p className="font-display text-xl">{msg}</p>
+      <p className="font-display text-xl">We couldn't load your stories.</p>
+      <p className="max-w-[44ch] text-sm text-muted-foreground">
+        The dashboard service didn't respond. Check your connection and try
+        again — if this keeps happening, ping the team in #tempo-status.
+      </p>
       {onRetry && (
         <button
           onClick={onRetry}
-          className="rounded-sm bg-foreground px-4 py-1.5 text-sm text-background hover:bg-foreground/90"
+          className="mt-2 rounded-sm bg-foreground px-4 py-1.5 text-sm text-background hover:bg-foreground/90"
         >
           Try again
         </button>

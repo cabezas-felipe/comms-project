@@ -1,11 +1,9 @@
 import {
-  CONTRACT_VERSION,
   dashboardPayloadSchema,
   dashboardSelectionMetaSchema,
   type DashboardPayload,
   type DashboardSelectionMeta,
 } from "@tempo/contracts";
-import { STORIES, type Story } from "@/data/stories";
 import { supabase } from "./supabase";
 import { getProtoSession } from "./auth";
 
@@ -18,10 +16,25 @@ export interface DashboardBootstrapResult extends DashboardFetchResult {
   /**
    * Backend's decision about how to satisfy the bootstrap request.
    * `null` only when the response was a contract-validated payload but the
-   * server omitted the field (older API), or when a network failure forced
-   * a local fallback.
+   * server omitted the field (older API).
    */
   decision: DashboardBootstrapDecision | null;
+}
+
+/**
+ * Error thrown when the dashboard endpoint fails after retries are exhausted.
+ * Wraps the last underlying cause so the UI can surface a precise message and
+ * the caller can branch on `kind` for empty/error rendering.
+ */
+export class DashboardFetchError extends Error {
+  readonly kind: "http" | "network" | "contract" | "abort";
+  readonly status?: number;
+  constructor(kind: "http" | "network" | "contract" | "abort", message: string, status?: number) {
+    super(message);
+    this.name = "DashboardFetchError";
+    this.kind = kind;
+    this.status = status;
+  }
 }
 
 function wait(ms: number): Promise<void> {
@@ -47,11 +60,18 @@ export type DashboardBootstrapDecision =
   | "ran_refresh"
   | "no_snapshot";
 
-function localFallbackPayload(stories: Story[] = STORIES): DashboardPayload {
-  return dashboardPayloadSchema.parse({
-    contractVersion: CONTRACT_VERSION,
-    stories,
-  });
+/**
+ * Coerce any non-Abort error caught in a fetch loop to a `DashboardFetchError`
+ * with a stable `kind`. Pass-through when the error is already a typed
+ * `DashboardFetchError` (e.g. an HTTP non-2xx thrown from inside the try
+ * block), otherwise classify Zod parse failures as "contract" and everything
+ * else as "network". Callers must handle AbortError before invoking this.
+ */
+function normalizeFetchError(error: unknown, fallbackMessage: string): DashboardFetchError {
+  if (error instanceof DashboardFetchError) return error;
+  const isContract = error instanceof Error && error.name === "ZodError";
+  const message = error instanceof Error ? error.message : fallbackMessage;
+  return new DashboardFetchError(isContract ? "contract" : "network", message);
 }
 
 function parseSelectionMetaSafe(raw: unknown): DashboardSelectionMeta | null {
@@ -97,6 +117,7 @@ export async function fetchDashboardWithMeta(
 
   const identityHeaders = await buildIdentityHeaders();
 
+  let lastError: DashboardFetchError | null = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       const response = await fetcher(endpoint, {
@@ -107,7 +128,11 @@ export async function fetchDashboardWithMeta(
         },
       });
       if (!response.ok) {
-        throw new Error(`Dashboard API returned HTTP ${response.status}`);
+        throw new DashboardFetchError(
+          "http",
+          `Dashboard API returned HTTP ${response.status}`,
+          response.status
+        );
       }
       const raw = (await response.json()) as { _meta?: { selection?: unknown } };
       const payload = dashboardPayloadSchema.parse(raw);
@@ -117,14 +142,15 @@ export async function fetchDashboardWithMeta(
       if (error instanceof Error && error.name === "AbortError") {
         throw error;
       }
-      if (attempt === retries) {
-        return { payload: localFallbackPayload(), selection: null };
-      }
+      const dfe = normalizeFetchError(error, "Unknown dashboard fetch error");
+      lastError = dfe;
+      if (attempt === retries) throw dfe;
       await sleep(RETRY_BACKOFF_MS * (attempt + 1));
     }
   }
 
-  return { payload: localFallbackPayload(), selection: null };
+  // unreachable — the loop either returns or throws on the final attempt
+  throw lastError ?? new DashboardFetchError("network", "Dashboard fetch failed");
 }
 
 const VALID_BOOTSTRAP_DECISIONS: ReadonlySet<DashboardBootstrapDecision> = new Set([
@@ -161,6 +187,7 @@ export async function bootstrapDashboard(
 
   const identityHeaders = await buildIdentityHeaders();
 
+  let lastError: DashboardFetchError | null = null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       const response = await fetcher(endpoint, {
@@ -171,9 +198,15 @@ export async function bootstrapDashboard(
         },
       });
       if (!response.ok) {
-        throw new Error(`Bootstrap API returned HTTP ${response.status}`);
+        throw new DashboardFetchError(
+          "http",
+          `Bootstrap API returned HTTP ${response.status}`,
+          response.status
+        );
       }
-      const raw = (await response.json()) as { _meta?: { selection?: unknown; bootstrapDecision?: unknown } };
+      const raw = (await response.json()) as {
+        _meta?: { selection?: unknown; bootstrapDecision?: unknown };
+      };
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
       const decision = parseBootstrapDecision(raw?._meta?.bootstrapDecision);
@@ -182,12 +215,12 @@ export async function bootstrapDashboard(
       if (error instanceof Error && error.name === "AbortError") {
         throw error;
       }
-      if (attempt === retries) {
-        return { payload: localFallbackPayload(), selection: null, decision: null };
-      }
+      const dfe = normalizeFetchError(error, "Unknown bootstrap error");
+      lastError = dfe;
+      if (attempt === retries) throw dfe;
       await sleep(RETRY_BACKOFF_MS * (attempt + 1));
     }
   }
 
-  return { payload: localFallbackPayload(), selection: null, decision: null };
+  throw lastError ?? new DashboardFetchError("network", "Bootstrap failed");
 }

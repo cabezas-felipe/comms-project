@@ -144,6 +144,87 @@ describe("Onboarding — analytics", () => {
   });
 });
 
+describe("Onboarding — payload construction (no seeded defaults)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockNavigate.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("submits empty arrays for keywords/geographies/traditionalSources/socialSources at first onboarding", async () => {
+    // Regression guard: legacy code seeded keywords with "OFAC, sanctions, ..."
+    // and geographies with ["US", "Colombia"]. When AI extraction failed those
+    // unrelated seeds got persisted into the user's settings. The frontend now
+    // sends empty arrays for every AI-derivable field; only `topics` carries
+    // user input directly.
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce(BASE_PAYLOAD);
+    renderOnboarding();
+    await submitWithText("Watching Colombia–US bilateral relations.");
+
+    await waitFor(() => {
+      expect(vi.mocked(settingsApi.saveSettingsPayload)).toHaveBeenCalledOnce();
+    });
+
+    const [submittedPayload] = vi.mocked(settingsApi.saveSettingsPayload).mock.calls[0];
+    expect(submittedPayload.keywords).toEqual([]);
+    expect(submittedPayload.geographies).toEqual([]);
+    expect(submittedPayload.traditionalSources).toEqual([]);
+    expect(submittedPayload.socialSources).toEqual([]);
+    // Belt and suspenders: none of the legacy seed strings appear anywhere.
+    const blob = JSON.stringify(submittedPayload);
+    for (const seed of ["OFAC", "sanctions", "deportation", "NYT", "Washington Post", "El Tiempo"]) {
+      expect(blob).not.toContain(seed);
+    }
+  });
+
+  it("baseline topics is a single-entry array containing the full trimmed narrative (no splitting)", async () => {
+    // Regression guard: the baseline (pre-extraction) save used to split the
+    // narrative on commas/newlines, producing fragmented topic chunks like
+    // "Colombia–US bilateral" + "migration policy" + "I read NYT and El Tiempo".
+    // The narrative is prose, not a delimited list — splitting it leaks garbage
+    // into the persisted settings whenever the extraction pipeline fails. Now
+    // baseline carries one entry: the full trimmed text.
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce(BASE_PAYLOAD);
+    renderOnboarding();
+    const narrative = "Colombia–US bilateral, migration policy. I read NYT and El Tiempo.";
+    await submitWithText(narrative);
+
+    await waitFor(() => {
+      expect(vi.mocked(settingsApi.saveSettingsPayload)).toHaveBeenCalledOnce();
+    });
+    const [submittedPayload] = vi.mocked(settingsApi.saveSettingsPayload).mock.calls[0];
+    expect(submittedPayload.topics).toEqual([narrative]);
+    expect(submittedPayload.topics).toHaveLength(1);
+  });
+
+  it("trims surrounding whitespace before placing the narrative into topics", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce(BASE_PAYLOAD);
+    renderOnboarding();
+    await submitWithText("   Watching Colombia–US bilateral relations.   ");
+
+    await waitFor(() => {
+      expect(vi.mocked(settingsApi.saveSettingsPayload)).toHaveBeenCalledOnce();
+    });
+    const [submittedPayload] = vi.mocked(settingsApi.saveSettingsPayload).mock.calls[0];
+    expect(submittedPayload.topics).toEqual(["Watching Colombia–US bilateral relations."]);
+  });
+
+  it("the second arg to saveSettingsPayload carries the raw narrative for backend extraction", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce(BASE_PAYLOAD);
+    renderOnboarding();
+    await submitWithText("  Watching Colombia–US.  ");
+
+    await waitFor(() => {
+      expect(vi.mocked(settingsApi.saveSettingsPayload)).toHaveBeenCalledOnce();
+    });
+    const [, opts] = vi.mocked(settingsApi.saveSettingsPayload).mock.calls[0];
+    expect(opts?.onboardingRawText).toBe("Watching Colombia–US.");
+  });
+});
+
 describe("Onboarding — extraction status toast", () => {
   beforeEach(() => {
     vi.clearAllMocks();

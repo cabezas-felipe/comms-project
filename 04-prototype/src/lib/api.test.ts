@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTRACT_VERSION } from "@tempo/contracts";
-import { bootstrapDashboard, fetchDashboardPayload, fetchDashboardWithMeta } from "@/lib/api";
+import {
+  bootstrapDashboard,
+  DashboardFetchError,
+  fetchDashboardPayload,
+  fetchDashboardWithMeta,
+} from "@/lib/api";
 import { STORIES } from "@/data/stories";
 
 vi.mock("@/lib/supabase", () => ({
@@ -30,55 +35,109 @@ describe("fetchDashboardPayload", () => {
     expect(payload.stories.length).toBeGreaterThan(0);
   });
 
-  it("retries and then falls back to local payload", async () => {
+  it("retries then throws DashboardFetchError (no fake-story fallback)", async () => {
     const fetcher = vi.fn().mockRejectedValue(new Error("network down"));
     const sleep = vi.fn().mockResolvedValue(undefined);
-    const payload = await fetchDashboardPayload({
-      fetcher,
-      retries: 2,
-      sleep,
-    });
+    await expect(
+      fetchDashboardPayload({ fetcher, retries: 2, sleep })
+    ).rejects.toBeInstanceOf(DashboardFetchError);
     expect(fetcher).toHaveBeenCalledTimes(3);
     expect(sleep).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenNthCalledWith(1, 200);
     expect(sleep).toHaveBeenNthCalledWith(2, 400);
-    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
-    expect(payload.stories.length).toBe(STORIES.length);
   });
 
-  it("falls back immediately when retries is 0", async () => {
+  it("does not return STORIES fallback after retry exhaustion (regression guard)", async () => {
     const fetcher = vi.fn().mockRejectedValue(new Error("network down"));
     const sleep = vi.fn().mockResolvedValue(undefined);
-    const payload = await fetchDashboardPayload({ fetcher, retries: 0, sleep });
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(sleep).not.toHaveBeenCalled();
-    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
-    expect(payload.stories.length).toBe(STORIES.length);
+    const result = await fetchDashboardPayload({ fetcher, retries: 1, sleep })
+      .then((p) => ({ ok: true as const, payload: p }))
+      .catch((e) => ({ ok: false as const, error: e }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBeInstanceOf(DashboardFetchError);
+    }
+    // Belt-and-suspenders: ensure the fake-story payload is never produced.
+    expect(STORIES.length).toBeGreaterThan(0); // sanity — STORIES is real demo data
+    // (No way to "compare against STORIES" because the function throws.)
   });
 
-  it("falls back to local payload when server returns HTTP error", async () => {
+  it("throws immediately when retries is 0 and the fetch fails", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error("network down"));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      fetchDashboardPayload({ fetcher, retries: 0, sleep })
+    ).rejects.toBeInstanceOf(DashboardFetchError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("throws DashboardFetchError(kind=http) when server returns HTTP error", async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: false,
       status: 503,
       json: async () => ({}),
     });
     const sleep = vi.fn().mockResolvedValue(undefined);
-    const payload = await fetchDashboardPayload({ fetcher, retries: 1, sleep });
+    let caught: unknown;
+    try {
+      await fetchDashboardPayload({ fetcher, retries: 1, sleep });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(DashboardFetchError);
+    expect((caught as DashboardFetchError).kind).toBe("http");
+    expect((caught as DashboardFetchError).status).toBe(503);
     expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
-    expect(payload.stories.length).toBe(STORIES.length);
   });
 
-  it("falls back to local payload when server response fails contract validation", async () => {
+  it("backs off between HTTP non-2xx retries (parity with network failure path)", async () => {
+    // Regression guard: HTTP non-2xx used to skip the sleep() between attempts
+    // because the if/else branch on `!response.ok` exited the try block before
+    // reaching the catch where backoff lives. All retryable failure modes
+    // (http, network, contract) must share the same sleep schedule.
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      fetchDashboardPayload({ fetcher, retries: 2, sleep })
+    ).rejects.toBeInstanceOf(DashboardFetchError);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenNthCalledWith(1, 200);
+    expect(sleep).toHaveBeenNthCalledWith(2, 400);
+  });
+
+  it("backs off between contract-validation retries", async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => ({ contractVersion: "wrong-version", stories: [] }),
     });
     const sleep = vi.fn().mockResolvedValue(undefined);
-    const payload = await fetchDashboardPayload({ fetcher, retries: 1, sleep });
+    await expect(
+      fetchDashboardPayload({ fetcher, retries: 2, sleep })
+    ).rejects.toBeInstanceOf(DashboardFetchError);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenNthCalledWith(1, 200);
+    expect(sleep).toHaveBeenNthCalledWith(2, 400);
+  });
+
+  it("throws DashboardFetchError when response fails contract validation", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: "wrong-version", stories: [] }),
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      fetchDashboardPayload({ fetcher, retries: 1, sleep })
+    ).rejects.toBeInstanceOf(DashboardFetchError);
     expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
   });
 
   it("Phase 2: fetchDashboardWithMeta surfaces _meta.selection from API response", async () => {
@@ -209,7 +268,7 @@ describe("fetchDashboardPayload — identity header propagation", () => {
       return { ok: true, status: 200, json: async () => ({ contractVersion: CONTRACT_VERSION, stories: STORIES }) } as Response;
     });
 
-    await fetchDashboardPayload({ fetcher, retries: 0 });
+    await fetchDashboardPayload({ fetcher, retries: 0 }).catch(() => undefined);
 
     expect(capturedHeaders["Authorization"]).toBe("Bearer test-bearer-token");
     expect(capturedHeaders["x-recognized-email"]).toBeUndefined();
@@ -229,7 +288,7 @@ describe("fetchDashboardPayload — identity header propagation", () => {
       return { ok: false, status: 503, json: async () => ({}) } as Response;
     });
 
-    await fetchDashboardPayload({ fetcher, retries: 0 });
+    await fetchDashboardPayload({ fetcher, retries: 0 }).catch(() => undefined);
 
     expect(capturedHeaders["x-recognized-email"]).toBe("user@example.com");
     expect(capturedHeaders["Authorization"]).toBeUndefined();
@@ -249,7 +308,7 @@ describe("fetchDashboardPayload — identity header propagation", () => {
       return { ok: false, status: 401, json: async () => ({}) } as Response;
     });
 
-    await fetchDashboardPayload({ fetcher, retries: 0 });
+    await fetchDashboardPayload({ fetcher, retries: 0 }).catch(() => undefined);
 
     expect(capturedHeaders["Authorization"]).toBeUndefined();
     expect(capturedHeaders["x-recognized-email"]).toBeUndefined();
@@ -336,16 +395,38 @@ describe("Phase 5: bootstrapDashboard", () => {
     expect(decision).toBeNull();
   });
 
-  it("retries on non-2xx then falls back to local payload + decision=null", async () => {
+  it("throws DashboardFetchError on non-2xx after retries exhausted (no STORIES fallback)", async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: false,
       status: 503,
       json: async () => ({}),
     });
     const sleep = vi.fn().mockResolvedValue(undefined);
-    const { payload, decision } = await bootstrapDashboard({ fetcher, retries: 1, sleep });
+    let caught: unknown;
+    try {
+      await bootstrapDashboard({ fetcher, retries: 1, sleep });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(DashboardFetchError);
+    expect((caught as DashboardFetchError).kind).toBe("http");
+    expect((caught as DashboardFetchError).status).toBe(503);
     expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
-    expect(decision).toBeNull();
+  });
+
+  it("backs off between HTTP non-2xx retries (bootstrap parity)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({}),
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      bootstrapDashboard({ fetcher, retries: 2, sleep })
+    ).rejects.toBeInstanceOf(DashboardFetchError);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenNthCalledWith(1, 200);
+    expect(sleep).toHaveBeenNthCalledWith(2, 400);
   });
 });
