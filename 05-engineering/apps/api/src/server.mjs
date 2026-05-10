@@ -740,12 +740,19 @@ async function executeRefreshFlow(identity) {
         elapsedMs,
         identitySource: identity.source,
       });
-      // Surface recall + funnel on the watermark-skip branch too: the pipeline
-      // computed them before deciding to short-circuit, and operators reading
-      // `_meta.recall`/`_meta.funnel` to debug a stable empty snapshot need
-      // the same diagnostic surface as the full-run branch.  Keep the keys
-      // optional so older log shapes (e.g. test mocks that don't supply them)
-      // simply omit them rather than emit `undefined` placeholders.
+      // Surface recall + funnel + beatFit + selection on the watermark-skip
+      // branch too: the pipeline computed them before deciding to
+      // short-circuit, and operators reading `_meta.*` to debug a stable
+      // empty snapshot need the same diagnostic surface as the full-run
+      // branch.  Each key is optional — when the log doesn't carry it (older
+      // test mocks, partial returns) we omit it rather than emit an
+      // `undefined` placeholder, keeping the response shape backward-compatible.
+      //
+      // The prior-snapshot branch below ALSO runs `attachInternalsToMeta`,
+      // which overrides `selection` with the persisted `_selectionMeta` (the
+      // authoritative source when a snapshot exists).  Adding selection here
+      // covers the no-prior-snapshot edge case where `_selectionMeta` is not
+      // available, so diagnostics stay consistent across both branches.
       const skipMeta = {
         unchanged: true,
         refreshSkippedReason: "unchanged_watermark",
@@ -756,6 +763,7 @@ async function executeRefreshFlow(identity) {
       if (log.recall) skipMeta.recall = log.recall;
       if (log.funnel) skipMeta.funnel = log.funnel;
       if (log.beatFit) skipMeta.beatFit = log.beatFit;
+      if (log.selection) skipMeta.selection = log.selection;
       if (priorSnapshot) {
         const { body, baseMeta, selectionMeta } = stripPersistedFields(priorSnapshot);
         return {
