@@ -2212,6 +2212,36 @@ test("analyzeTopicKeywordStage: passNoConfig accounts for no-op pass-through (se
   assert.equal(b.primaryDropCause, null);
 });
 
+test("analyzeTopicKeywordStage: empty input → primaryDropCause='no_input' regardless of settings shape", async () => {
+  // Pins the fourth partition cause: when zero items reach the topic-keyword
+  // stage, the diagnostic must blame upstream stages ("no_input") rather than
+  // the topic/keyword gates themselves — operators reading `_meta.recall.
+  // topicKeywordBreakdown.primaryDropCause = 'no_input'` know to look at
+  // source-selection / time-window / geo-filter, not at their topic enum.
+  const { analyzeTopicKeywordStage } = await import("./refresh-pipeline.mjs");
+
+  // With both gates configured.
+  let b = analyzeTopicKeywordStage([], { topics: ["X"], keywords: ["y"] });
+  assert.equal(b.inputCount, 0);
+  assert.equal(b.passCount, 0);
+  assert.equal(b.primaryDropCause, "no_input");
+
+  // With only topics configured.
+  b = analyzeTopicKeywordStage([], { topics: ["X"], keywords: [] });
+  assert.equal(b.primaryDropCause, "no_input");
+
+  // With only keywords configured.
+  b = analyzeTopicKeywordStage([], { topics: [], keywords: ["y"] });
+  assert.equal(b.primaryDropCause, "no_input");
+
+  // No-config no-op: empty input still reads as no_input rather than masquerading
+  // as "everything passed because nothing was checked".
+  b = analyzeTopicKeywordStage([], { topics: [], keywords: [] });
+  assert.equal(b.primaryDropCause, "no_input");
+  assert.equal(b.passNoConfig, 0);
+  assert.equal(b.passCount, 0);
+});
+
 test("runRefreshPipeline: log.recall.topicKeywordBreakdown surfaces stage diagnostics", async () => {
   // Mixed item set: one keyword-only hit, one topic-only hit, one neither.
   const items = [

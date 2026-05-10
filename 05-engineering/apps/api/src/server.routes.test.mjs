@@ -835,6 +835,346 @@ test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior snaps
   }
 });
 
+test("POST /api/dashboard/refresh: watermark unchanged → _meta.recall and _meta.funnel surface from pipeline log", async () => {
+  // Diagnostics-visibility contract: when the pipeline short-circuits on a
+  // matching watermark it still computes recall + funnel before the skip
+  // decision.  The route must surface those under `_meta.recall` /
+  // `_meta.funnel` so an operator looking at a stable empty snapshot can see
+  // *why* recall went thin without re-running the pipeline by hand.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  const RECALL_DIAG = {
+    mode: "hybrid_strict",
+    keywordRecallCount: 2,
+    embeddedCount: 0,
+    similarityKept: 0,
+    unionCount: 2,
+    finalRelevant: 2,
+    degraded: true,
+    degraded_reason: "embedding_error_fail_closed",
+    keywordFallbackAfterEmbeddingFailure: true,
+  };
+  const FUNNEL_DIAG = {
+    totalNormalized: 10,
+    afterTimeWindow: 9,
+    afterSourceSelection: 8,
+    afterGeoFilter: 6,
+    afterTopicKeyword: 4,
+    afterBeatFit: 2,
+    finalStories: null,
+    executionMode: "watermark_skip",
+    primaryDropStage: "not_executed",
+    topicKeywordRecallIsNoop: false,
+  };
+
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _watermark: "wm-stable-xyz",
+    _selectionMeta: {
+      sourceSelectionMode: "strict",
+      sourceFallbackUsed: false,
+      sourceFallbackReason: null,
+      matchedSourceCount: 1,
+      selectedSourceCount: 1,
+      unmatchedSelectedSources: [],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: ["nyt-politics"],
+      relevantItemCount: 0,
+    },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-stable-xyz",
+      candidateCount: 4,
+      selectedFeedCount: 1,
+      recall: RECALL_DIAG,
+      funnel: FUNNEL_DIAG,
+      beatFit: { version: "v1", enabled: true, threshold: 0.5, recallCount: 2, includedCount: 2, excludedCount: 0, excludeReasonHistogram: {} },
+      selection: null,
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.unchanged, true);
+    assert.equal(res.body._meta.refreshSkippedReason, "unchanged_watermark");
+    assert.deepEqual(res.body._meta.recall, RECALL_DIAG);
+    assert.deepEqual(res.body._meta.funnel, FUNNEL_DIAG);
+    // The recall block on the skip path must carry the same trust-debugging
+    // signals the full-run path exposes.
+    assert.equal(res.body._meta.recall.degraded, true);
+    assert.equal(res.body._meta.recall.degraded_reason, "embedding_error_fail_closed");
+    assert.equal(res.body._meta.recall.keywordFallbackAfterEmbeddingFailure, true);
+    assert.equal(res.body._meta.funnel.executionMode, "watermark_skip");
+    assert.equal(res.body._meta.funnel.primaryDropStage, "not_executed");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: watermark unchanged with NO prior snapshot → diagnostics still surface in empty body", async () => {
+  // Edge case: the watermark-skip log carries useful diagnostics (recall,
+  // funnel, beatFit, selection) even when no prior snapshot is on disk.  The
+  // route's `emptyDashboardResponse` path must merge those into `_meta` so
+  // observability parity holds across both branches of the skip return.
+  // This exercises the route's handling of `priorSnapshot === null` while the
+  // pipeline still produced a full skip-time diagnostic block.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  const RECALL_DIAG = {
+    mode: "hybrid_strict",
+    keywordRecallCount: 0,
+    embeddedCount: 0,
+    similarityKept: 0,
+    unionCount: 0,
+    finalRelevant: 0,
+    degraded: false,
+    degraded_reason: null,
+    topicKeywordBreakdown: {
+      inputCount: 0, hasTopics: true, hasKeywords: true,
+      topicOnly: 0, keywordOnly: 0, both: 0, neither: 0,
+      passNoConfig: 0, passCount: 0, primaryDropCause: "no_input",
+    },
+  };
+  const FUNNEL_DIAG = {
+    totalNormalized: 0, afterTimeWindow: 0, afterSourceSelection: 0,
+    afterGeoFilter: 0, afterTopicKeyword: 0, afterBeatFit: 0,
+    finalStories: null,
+    executionMode: "watermark_skip", primaryDropStage: "not_executed",
+    topicKeywordRecallIsNoop: false,
+  };
+  const BEAT_FIT_DIAG = {
+    version: "v1", enabled: true, threshold: 0.5,
+    recallCount: 0, includedCount: 0, excludedCount: 0, excludeReasonHistogram: {},
+  };
+  const SELECTION_DIAG = {
+    sourceSelectionMode: "strict",
+    sourceFallbackUsed: false,
+    sourceFallbackReason: null,
+    matchedSourceCount: 1,
+    selectedSourceCount: 1,
+    unmatchedSelectedSources: [],
+    unavailableConnectorCount: 0,
+    unavailableConnectorSources: [],
+    matchedFeedIds: ["nyt-politics"],
+    relevantItemCount: 0,
+  };
+
+  // No prior snapshot on disk.
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-empty-skip",
+      candidateCount: 0,
+      selectedFeedCount: 1,
+      recall: RECALL_DIAG,
+      funnel: FUNNEL_DIAG,
+      beatFit: BEAT_FIT_DIAG,
+      selection: SELECTION_DIAG,
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    // Empty body shape: hasSnapshot=false, no stories.
+    assert.equal(res.body._meta.hasSnapshot, false);
+    assert.deepEqual(res.body.stories, []);
+    // Skip diagnostics still flow through.
+    assert.equal(res.body._meta.unchanged, true);
+    assert.equal(res.body._meta.refreshSkippedReason, "unchanged_watermark");
+    assert.equal(res.body._meta.watermark, "wm-empty-skip");
+    assert.deepEqual(res.body._meta.recall, RECALL_DIAG);
+    assert.deepEqual(res.body._meta.funnel, FUNNEL_DIAG);
+    assert.deepEqual(res.body._meta.beatFit, BEAT_FIT_DIAG);
+    assert.deepEqual(res.body._meta.selection, SELECTION_DIAG);
+    assert.equal(res.body._meta.recall.topicKeywordBreakdown.primaryDropCause, "no_input");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: watermark unchanged → log fields without recall/funnel/beatFit produce no `undefined` placeholders", async () => {
+  // Backward-compat guard: older pipeline log shapes (test mocks, legacy
+  // returns) don't carry recall/funnel/beatFit/selection.  The route must
+  // omit those keys entirely rather than emit `_meta.recall = undefined`,
+  // which would clutter logs and break consumers that introspect for "key
+  // present" rather than "value truthy".
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-bare",
+      candidateCount: 0,
+      selectedFeedCount: 0,
+      // Intentionally omit recall/funnel/beatFit/selection.
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.unchanged, true);
+    assert.equal(res.body._meta.watermark, "wm-bare");
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body._meta, "recall"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body._meta, "funnel"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body._meta, "beatFit"), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(res.body._meta, "selection"), false);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: route forwards priorStoryCount from prior snapshot to pipeline (trap-guard wiring)", async () => {
+  // The empty-snapshot trap-guard lives in the pipeline; the route's job is
+  // to read the prior snapshot and forward `priorStoryCount` as the input
+  // signal.  This pins the route side of the wire — without it, the guard
+  // never engages and a stale empty snapshot stays trapped at zero stories.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  // Empty prior snapshot (zero stories) — exercises the priorStoryCount=0 path.
+  let priorStoryCountSeen = "not-passed";
+  let priorWatermarkSeen = "not-passed";
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [], // 0 stories — guard input
+    _watermark: "wm-prior-empty",
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async (opts) => {
+    priorStoryCountSeen = opts.priorStoryCount;
+    priorWatermarkSeen = opts.priorWatermark;
+    return {
+      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      log: {
+        poolCount: 0, relevantCount: 0,
+        usedFallbackClustering: false, groundingFailures: 0,
+        droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+        watermark: "wm-prior-empty",
+        candidateCount: 0, selectedFeedCount: 0,
+        unchanged: false, refreshSkippedReason: null,
+        selection: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 0, selectedSourceCount: 0, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 0 },
+      },
+    };
+  };
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(priorWatermarkSeen, "wm-prior-empty", "priorWatermark must be forwarded");
+    assert.equal(priorStoryCountSeen, 0, "priorStoryCount must reflect prior snapshot stories.length");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: route forwards priorStoryCount > 0 when prior snapshot has stories (skip preserved upstream)", async () => {
+  // Mirror of the trap-guard wiring test: when prior snapshot has stories,
+  // priorStoryCount > 0 must reach the pipeline so the optimization stays
+  // intact for healthy stable runs.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  let priorStoryCountSeen = "not-passed";
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [
+      { id: "s1", metaStoryId: "s1", title: "T1", subtitle: "Sub.", geographies: ["US"], topic: "Diplomatic relations", takeaway: "T", summary: "S", whyItMatters: "W", whatChanged: "C", priority: "standard", outletCount: 1, tags: { topics: [], keywords: [], geographies: [] }, sources: [] },
+      { id: "s2", metaStoryId: "s2", title: "T2", subtitle: "Sub.", geographies: ["US"], topic: "Diplomatic relations", takeaway: "T", summary: "S", whyItMatters: "W", whatChanged: "C", priority: "standard", outletCount: 1, tags: { topics: [], keywords: [], geographies: [] }, sources: [] },
+    ],
+    _watermark: "wm-prior-healthy",
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async (opts) => {
+    priorStoryCountSeen = opts.priorStoryCount;
+    return {
+      payload: null, // pipeline short-circuits — guard does NOT engage
+      log: {
+        unchanged: true,
+        refreshSkippedReason: "unchanged_watermark",
+        watermark: "wm-prior-healthy",
+        candidateCount: 1, selectedFeedCount: 1,
+      },
+    };
+  };
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(priorStoryCountSeen, 2, "priorStoryCount must reflect non-empty stories.length");
+    // Prior-snapshot path on skip: stories array is preserved from snapshot.
+    assert.equal(res.body.stories.length, 2);
+    assert.equal(res.body._meta.unchanged, true);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
 test("POST /api/dashboard/refresh: watermark changed → full run executes, response carries new watermark", async () => {
   const prevRun = _refreshPipeline.run;
   const prevRead = _snapshotRepo.read;
