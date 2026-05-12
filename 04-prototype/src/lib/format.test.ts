@@ -50,7 +50,7 @@ describe("formatKeywordLabel", () => {
     expect(formatKeywordLabel("OFAC enforcement")).toBe("OFAC Enforcement");
   });
 
-  it("lower-cases a fully-uppercase normal word that is not an acronym only when no letters", () => {
+  it("treats any all-uppercase token with letters as an acronym (locks the heuristic)", () => {
     // A token with letters that's already uppercase is treated as an acronym
     // (heuristic — we cannot disambiguate "USA" from "YELLING").  This locks
     // the behavior so it doesn't drift accidentally.
