@@ -12,6 +12,7 @@ import {
   trackStoryExpanded,
 } from "@/lib/analytics";
 import { bootstrapDashboard, fetchDashboardWithMeta, refreshDashboard } from "@/lib/api";
+import { formatKeywordLabel } from "@/lib/format";
 import {
   aggregateTagSections,
   isEmptySelection,
@@ -341,13 +342,18 @@ export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
                 <>
                   <span className="mx-1 text-rule" aria-hidden="true">·</span>
                   {tagSections.keywords.map((k) => (
+                    // Display-only formatting: `k` is the canonical raw value
+                    // used for key/testId/selection/filtering; only the pill's
+                    // visible label is title-cased so lowercase settings
+                    // keywords ("oil") look consistent next to canonical
+                    // topics/geographies in the row.
                     <Pill
                       key={`keyword-${k}`}
                       active={selectedKeywords.has(k)}
                       onClick={() => toggleKeyword(k)}
                       testId={`pill-keyword-${k}`}
                     >
-                      {k}
+                      {formatKeywordLabel(k)}
                     </Pill>
                   ))}
                 </>

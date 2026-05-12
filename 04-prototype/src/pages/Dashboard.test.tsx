@@ -335,6 +335,102 @@ describe("Phase 6: dynamic header pills", () => {
   });
 });
 
+// ─── Phase 7: keyword pill display formatting (presentation-only) ───────────
+//
+// Settings keywords are often lowercase ("oil", "sanctions"); next to
+// canonical-cased topics/geographies they look inconsistent.  The dashboard
+// title-cases keyword pills for display ONLY — the canonical raw value still
+// powers testId/key/selection/filtering.  Acronyms (all-uppercase) pass
+// through unchanged.
+
+describe("Phase 7: keyword pill display formatting", () => {
+  it("renders a lowercase keyword as title-case in the pill label", async () => {
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    // `pill-keyword-sanctions` testId stays on the canonical raw value;
+    // only the visible text is formatted.
+    const pill = screen.getByTestId("pill-keyword-sanctions");
+    expect(pill.textContent).toBe("Sanctions");
+    expect(screen.getByTestId("pill-keyword-asylum").textContent).toBe("Asylum");
+  });
+
+  it("preserves an all-uppercase acronym keyword as-is", async () => {
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    const pill = screen.getByTestId("pill-keyword-OFAC");
+    expect(pill.textContent).toBe("OFAC");
+  });
+
+  it("title-cases each word in a multi-word keyword (e.g. 'iran trade')", async () => {
+    renderWithStories([
+      makeStoryDto({
+        id: "multi",
+        title: "Multi-word Story",
+        tags: {
+          topics: ["Diplomatic relations"],
+          keywords: ["iran trade"],
+          geographies: ["US"],
+        },
+      }),
+    ]);
+    await waitFor(() => expect(screen.getByText("Multi-word Story")).toBeInTheDocument());
+    const pill = screen.getByTestId("pill-keyword-iran trade");
+    expect(pill.textContent).toBe("Iran Trade");
+  });
+
+  it("clicking a formatted pill filters by the canonical raw value (not the display label)", async () => {
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    // Pill label reads "Sanctions" but canonical filter value is "sanctions".
+    const pill = screen.getByTestId("pill-keyword-sanctions");
+    expect(pill.textContent).toBe("Sanctions");
+    fireEvent.click(pill);
+    await waitFor(() => {
+      expect(screen.getByText("Story A")).toBeInTheDocument();
+      expect(screen.queryByText("Story B")).toBeNull();
+    });
+    expect(pill.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("does not re-format topic or geography pill labels (canonical display preserved)", async () => {
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    expect(screen.getByTestId("pill-topic-Diplomatic relations").textContent).toBe(
+      "Diplomatic relations"
+    );
+    expect(screen.getByTestId("pill-topic-Migration policy").textContent).toBe(
+      "Migration policy"
+    );
+    expect(screen.getByTestId("pill-geo-US").textContent).toBe("US");
+    expect(screen.getByTestId("pill-geo-Colombia").textContent).toBe("Colombia");
+  });
+
+  it("preserves existing section order and filter semantics with formatted labels", async () => {
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+
+    // Order check (still by testId / canonical value): All → Topics → Keywords → Geographies.
+    const row = screen.getByTestId("header-pill-row");
+    const ids = Array.from(row.querySelectorAll("[data-testid]"))
+      .map((el) => el.getAttribute("data-testid") ?? "")
+      .filter((id) => id.startsWith("pill-"));
+    const firstIndex = (prefix: string) => ids.findIndex((id) => id.startsWith(prefix));
+    expect(firstIndex("pill-all")).toBeLessThan(firstIndex("pill-topic-"));
+    expect(firstIndex("pill-topic-")).toBeLessThan(firstIndex("pill-keyword-"));
+    expect(firstIndex("pill-keyword-")).toBeLessThan(firstIndex("pill-geo-"));
+
+    // OR-within / AND-across semantics still hold even though one pill's
+    // label changed casing.  Selecting topic + a (formatted) keyword that
+    // mismatches yields zero stories.
+    fireEvent.click(screen.getByTestId("pill-topic-Migration policy"));
+    fireEvent.click(screen.getByTestId("pill-keyword-OFAC"));
+    await waitFor(() => {
+      expect(screen.queryByText("Story A")).toBeNull();
+      expect(screen.queryByText("Story B")).toBeNull();
+    });
+  });
+});
+
 // ─── H1 headline rules ───────────────────────────────────────────────────────
 
 describe("buildHeadline", () => {
