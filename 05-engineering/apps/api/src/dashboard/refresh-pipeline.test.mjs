@@ -22,6 +22,8 @@ import {
   primaryDropStage,
   formatFunnel,
   summarizeFunnel,
+  constrainTagsToSettings,
+  deriveStoryTags,
 } from "./refresh-pipeline.mjs";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
@@ -2516,4 +2518,462 @@ test("runRefreshPipeline regression: strict-empty preserved — items with no ma
   });
   assert.ok(seenIds.includes("wapo-real"), "matched-id item must reach clustering");
   assert.ok(!seenIds.includes("bbc-strange"), "non-matched-id item with non-matching outlet must NOT survive source-selection");
+});
+
+// ─── Settings-only tag governance ────────────────────────────────────────────
+//
+// Settings is the controlled vocabulary.  Refresh/classification must NOT
+// invent new taxonomy values; story.tags axes must each be a subset of the
+// matching settings list.  These tests guard the contract from the unit
+// helper up through the pipeline so an out-of-settings value like "General"
+// cannot leak onto the dashboard.
+
+test("constrainTagsToSettings: drops topics not in settings (e.g. 'General')", () => {
+  const tags = {
+    topics: ["Diplomatic relations", "General"],
+    keywords: [],
+    geographies: [],
+  };
+  const out = constrainTagsToSettings(tags, BASE_SETTINGS);
+  assert.deepEqual(out.topics, ["Diplomatic relations"]);
+});
+
+test("constrainTagsToSettings: drops keywords not in settings", () => {
+  const tags = {
+    topics: [],
+    keywords: ["OFAC", "tariffs", "sanctions"],
+    geographies: [],
+  };
+  const out = constrainTagsToSettings(tags, BASE_SETTINGS);
+  assert.deepEqual(out.keywords.sort(), ["OFAC", "sanctions"]);
+});
+
+test("constrainTagsToSettings: drops geographies not in settings", () => {
+  const tags = { topics: [], keywords: [], geographies: ["US", "France", "Colombia"] };
+  const out = constrainTagsToSettings(tags, BASE_SETTINGS);
+  assert.deepEqual(out.geographies.sort(), ["Colombia", "US"]);
+});
+
+test("constrainTagsToSettings: empty when no settings axis configured (never fabricates)", () => {
+  const tags = {
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+    geographies: ["US"],
+  };
+  const out = constrainTagsToSettings(tags, {
+    topics: [],
+    keywords: [],
+    geographies: [],
+  });
+  assert.deepEqual(out, { topics: [], keywords: [], geographies: [] });
+});
+
+test("constrainTagsToSettings: case-insensitive keyword/geography match preserves settings casing", () => {
+  const tags = {
+    topics: [],
+    keywords: ["ofac", "Sanctions"],
+    geographies: ["us", "colombia"],
+  };
+  const out = constrainTagsToSettings(tags, BASE_SETTINGS);
+  // Output values come from settings (settings is authoritative for spelling).
+  assert.deepEqual(out.keywords.sort(), ["OFAC", "sanctions"]);
+  assert.deepEqual(out.geographies.sort(), ["Colombia", "US"]);
+});
+
+test("constrainTagsToSettings: topic synonyms resolve to the matching settings entry", () => {
+  // BASE_SETTINGS.topics includes "Diplomatic relations"; the model often
+  // emits "bilateral relations" which normalizes to "Diplomatic relations".
+  // Governance should accept the synonym and emit the settings-cased value.
+  const tags = { topics: ["bilateral relations"], keywords: [], geographies: [] };
+  const out = constrainTagsToSettings(tags, BASE_SETTINGS);
+  assert.deepEqual(out.topics, ["Diplomatic relations"]);
+});
+
+test("constrainTagsToSettings: deduplicates repeated model values", () => {
+  const tags = {
+    topics: ["Diplomatic relations", "Diplomatic relations"],
+    keywords: ["OFAC", "ofac"],
+    geographies: ["US", "us", "US"],
+  };
+  const out = constrainTagsToSettings(tags, BASE_SETTINGS);
+  assert.deepEqual(out.topics, ["Diplomatic relations"]);
+  assert.deepEqual(out.keywords, ["OFAC"]);
+  assert.deepEqual(out.geographies, ["US"]);
+});
+
+test("constrainTagsToSettings: does not mutate settings or input tags", () => {
+  const settings = {
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+    geographies: ["US"],
+  };
+  const settingsSnapshot = JSON.parse(JSON.stringify(settings));
+  const tags = {
+    topics: ["Diplomatic relations", "General"],
+    keywords: ["OFAC", "tariffs"],
+    geographies: ["US", "France"],
+  };
+  const tagsSnapshot = JSON.parse(JSON.stringify(tags));
+  constrainTagsToSettings(tags, settings);
+  assert.deepEqual(settings, settingsSnapshot, "settings must not be mutated");
+  assert.deepEqual(tags, tagsSnapshot, "input tags must not be mutated");
+});
+
+test("runRefreshPipeline: model-provided 'General' topic is excluded from story tags when absent from settings", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const metaStory = {
+    meta_story_id: "general-leak",
+    title: "General Story",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Summary.",
+    tags: {
+      topics: ["General", "Diplomatic relations"],
+      keywords: ["OFAC"],
+      geographies: ["US"],
+    },
+    factual_claims: ["Reuters reports: Test Headline"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.ok(
+    !payload.stories[0].tags.topics.includes("General"),
+    "'General' must be excluded — it is not in settings.topics"
+  );
+  assert.deepEqual(payload.stories[0].tags.topics, ["Diplomatic relations"]);
+});
+
+test("runRefreshPipeline: every story tag axis is a subset of settings", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const metaStory = {
+    meta_story_id: "broad-tag-story",
+    title: "Story With Broad Tags",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Summary.",
+    tags: {
+      // Mix of in-settings and out-of-settings values across all axes.
+      topics: ["Diplomatic relations", "Energy policy", "General"],
+      keywords: ["OFAC", "tariffs", "sanctions", "espionage"],
+      geographies: ["US", "France", "Colombia", "Spain"],
+    },
+    factual_claims: ["Reuters reports: Test Headline"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const tags = payload.stories[0].tags;
+  const settingsTopics = new Set(BASE_SETTINGS.topics);
+  const settingsKeywords = new Set(BASE_SETTINGS.keywords);
+  const settingsGeos = new Set(BASE_SETTINGS.geographies);
+  for (const t of tags.topics) {
+    assert.ok(settingsTopics.has(t), `topic '${t}' must be in settings.topics`);
+  }
+  for (const k of tags.keywords) {
+    assert.ok(settingsKeywords.has(k), `keyword '${k}' must be in settings.keywords`);
+  }
+  for (const g of tags.geographies) {
+    assert.ok(settingsGeos.has(g), `geography '${g}' must be in settings.geographies`);
+  }
+});
+
+test("runRefreshPipeline: story.tags.geographies is never fabricated even when source carries non-settings geo", async () => {
+  // Source item has "France" geo but France isn't in settings; the model
+  // also echoes it into the story tags.  Governance must drop it.
+  const rawItems = [
+    makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30, geographies: ["US", "France"] }),
+  ];
+  const metaStory = {
+    meta_story_id: "geo-leak",
+    title: "Geo Leak Story",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Summary.",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: [],
+      geographies: ["US", "France"],
+    },
+    factual_claims: ["Reuters reports: Test Headline"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.deepEqual(payload.stories[0].tags.geographies, ["US"], "France must not appear — not in settings.geographies");
+});
+
+// ─── Evidence-backed tag derivation (settings ∩ source evidence) ────────────
+//
+// buildStory derives final tags from `settings ∩ source-evidence` — model
+// tags are NOT authoritative.  Two failure modes these tests guard against:
+//   (a) model "leak": model echoes an in-settings tag the sources don't
+//       support → must be DROPPED.
+//   (b) model "miss": model omits a tag but source evidence supports a
+//       settings value → must be ADDED back.
+
+test("deriveStoryTags: topics drawn from source.topic, intersected with settings", () => {
+  const sourceItems = [
+    makeItem({ topic: "Diplomatic relations" }),
+    makeItem({ topic: "Energy policy" }), // not in BASE_SETTINGS.topics
+  ];
+  const out = deriveStoryTags(sourceItems, BASE_SETTINGS);
+  assert.deepEqual(out.topics, ["Diplomatic relations"]);
+});
+
+test("deriveStoryTags: topic synonym in source resolves to the settings entry", () => {
+  // BASE_SETTINGS.topics includes "Diplomatic relations"; source carries
+  // "bilateral relations" which normalizes to it.
+  const sourceItems = [makeItem({ topic: "bilateral relations" })];
+  const out = deriveStoryTags(sourceItems, BASE_SETTINGS);
+  assert.deepEqual(out.topics, ["Diplomatic relations"]);
+});
+
+test("deriveStoryTags: geographies drawn from source.geographies, intersected with settings", () => {
+  const sourceItems = [
+    makeItem({ geographies: ["US", "France"] }),
+    makeItem({ geographies: ["Colombia"] }),
+  ];
+  const out = deriveStoryTags(sourceItems, BASE_SETTINGS);
+  // France dropped (not in settings); US + Colombia preserved.
+  assert.deepEqual(out.geographies.sort(), ["Colombia", "US"]);
+});
+
+test("deriveStoryTags: keywords require whole-word evidence in source headline/body", () => {
+  const sourceItems = [
+    makeItem({
+      headline: "Treasury weighs OFAC expansion",
+      body: ["No other relevant terms here."],
+    }),
+  ];
+  const out = deriveStoryTags(sourceItems, BASE_SETTINGS);
+  // BASE_SETTINGS.keywords = ["OFAC", "sanctions"]. Only OFAC appears.
+  assert.deepEqual(out.keywords, ["OFAC"]);
+});
+
+test("deriveStoryTags: substring inside a larger word does NOT satisfy keyword evidence", () => {
+  const sourceItems = [
+    makeItem({ headline: "ofacility opens new wing", body: ["unrelated"] }),
+  ];
+  const out = deriveStoryTags(sourceItems, BASE_SETTINGS);
+  assert.deepEqual(out.keywords, [], "'ofacility' must not satisfy 'OFAC' keyword evidence");
+});
+
+test("deriveStoryTags: returns empty axis when a settings list is empty (never fabricates)", () => {
+  const sourceItems = [makeItem({ topic: "Diplomatic relations", geographies: ["US"] })];
+  const out = deriveStoryTags(sourceItems, {
+    topics: [],
+    keywords: [],
+    geographies: [],
+  });
+  assert.deepEqual(out, { topics: [], keywords: [], geographies: [] });
+});
+
+test("deriveStoryTags: does not consult model tags at all", () => {
+  // Model would claim Migration policy + sanctions + Colombia, but sources
+  // support none of those.  Output must be derived only from sources.
+  const sourceItems = [
+    makeItem({
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "Routine diplomatic update",
+      body: ["A quiet briefing with no triggering terms."],
+    }),
+  ];
+  const out = deriveStoryTags(sourceItems, BASE_SETTINGS);
+  assert.deepEqual(out.topics, ["Diplomatic relations"]);
+  assert.deepEqual(out.keywords, []);
+  assert.deepEqual(out.geographies, ["US"]);
+});
+
+test("runRefreshPipeline: in-settings model tag without source evidence is dropped (leak guard)", async () => {
+  // Source supports "Diplomatic relations" + US.  Model also claims
+  // "Migration policy" (in settings but no source evidence), "sanctions"
+  // (in settings but absent from text), and "Colombia" (in settings but
+  // no source has it).  All three must be dropped.
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "Diplomatic update",
+      body: ["A quiet briefing with no triggering terms."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "leak-guard",
+    title: "Leak Guard Story",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Summary.",
+    tags: {
+      topics: ["Diplomatic relations", "Migration policy"], // Migration unsupported
+      keywords: ["sanctions"], // unsupported (no whole-word match)
+      geographies: ["US", "Colombia"], // Colombia unsupported
+    },
+    factual_claims: ["Reuters reports: Diplomatic update"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const tags = payload.stories[0].tags;
+  assert.deepEqual(tags.topics, ["Diplomatic relations"], "Migration policy must be dropped — no source evidence");
+  assert.deepEqual(tags.keywords, [], "'sanctions' must be dropped — not in any source text");
+  assert.deepEqual(tags.geographies, ["US"], "Colombia must be dropped — no source carries it");
+});
+
+test("runRefreshPipeline: model omits tags but source evidence supports them — tags re-added", async () => {
+  // Model returns empty tag axes; the pipeline must still emit the settings
+  // values the sources support.
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US", "Colombia"],
+      headline: "OFAC update reverberates",
+      body: ["New sanctions package announced."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "rescue",
+    title: "Rescue Tags From Evidence",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Summary.",
+    tags: { topics: [], keywords: [], geographies: [] }, // model omitted everything
+    factual_claims: ["Reuters reports: OFAC update reverberates"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const tags = payload.stories[0].tags;
+  assert.deepEqual(tags.topics, ["Diplomatic relations"], "topic must be recovered from source.topic");
+  assert.deepEqual(tags.keywords.sort(), ["OFAC", "sanctions"], "both settings keywords appear in text");
+  assert.deepEqual(tags.geographies.sort(), ["Colombia", "US"], "both source geos are settings-backed");
+});
+
+test("runRefreshPipeline: multi-source story aggregates evidence across all sources", async () => {
+  // src-A contributes US + OFAC mention; src-B contributes Colombia + sanctions mention.
+  const rawItems = [
+    makeItem({
+      sourceId: "src-A",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "OFAC weighs new tools",
+      body: ["No other terms."],
+    }),
+    makeItem({
+      sourceId: "src-B",
+      outlet: "El Tiempo",
+      minutesAgo: 45,
+      topic: "Diplomatic relations",
+      geographies: ["Colombia"],
+      headline: "Bogota briefed",
+      body: ["Sanctions framework under discussion."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "multi-source",
+    title: "Multi Source",
+    subtitle: "Sub.",
+    source_item_ids: ["src-A", "src-B"],
+    summary: "Summary.",
+    tags: { topics: [], keywords: [], geographies: [] },
+    factual_claims: ["Reuters reports: OFAC weighs new tools"],
+    claim_evidence_map: { "0": ["src-A"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const tags = payload.stories[0].tags;
+  assert.deepEqual(tags.topics, ["Diplomatic relations"]);
+  assert.deepEqual(tags.keywords.sort(), ["OFAC", "sanctions"]);
+  assert.deepEqual(tags.geographies.sort(), ["Colombia", "US"]);
+});
+
+test("runRefreshPipeline: repeated out-of-settings entities in story text do not auto-add taxonomy", async () => {
+  // The story headline/body repeatedly mention "Brazil" and "espionage" —
+  // values that are NOT in settings.  Even though the model dutifully
+  // echoes them into tags, they must never reach the output.  This also
+  // verifies that settings itself is never expanded.
+  const settings = {
+    contractVersion: "2026-04-22-slice1",
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+    geographies: ["US"],
+    traditionalSources: ["Reuters"],
+    socialSources: [],
+  };
+  const settingsBefore = JSON.parse(JSON.stringify(settings));
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      headline: "Brazil espionage probe widens; Brazil officials brief OFAC",
+      body: ["Brazil. Brazil. Brazil. Espionage. Espionage. OFAC."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "brazil-espionage",
+    title: "Brazil Espionage Probe",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Brazil espionage investigation broadens.",
+    tags: {
+      topics: ["Diplomatic relations", "Brazil intelligence affairs"],
+      keywords: ["OFAC", "espionage", "Brazil"],
+      geographies: ["US", "Brazil"],
+    },
+    factual_claims: ["Reuters reports: Brazil espionage probe widens; Brazil officials brief OFAC"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const tags = payload.stories[0].tags;
+  assert.deepEqual(tags.topics, ["Diplomatic relations"], "no new topic should appear");
+  assert.deepEqual(tags.keywords, ["OFAC"], "espionage/Brazil keywords must not leak");
+  assert.deepEqual(tags.geographies, ["US"], "Brazil must not leak");
+  assert.deepEqual(settings, settingsBefore, "settings must not be auto-expanded");
 });

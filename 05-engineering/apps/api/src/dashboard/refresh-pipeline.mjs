@@ -220,6 +220,159 @@ const VALID_TOPICS = new Set([
   "Security cooperation",
 ]);
 
+// ─── Settings-only + evidence-backed tag governance ──────────────────────────
+//
+// Final story tags must satisfy BOTH:
+//   (1) settings vocabulary — each axis ⊆ the matching settings list.
+//   (2) source evidence — each emitted value must be supported by at least
+//       one source item in the story.
+//
+// Why two gates: settings alone trusts the model too much (it can echo
+// in-settings values that have no support in the actual sources), and
+// evidence alone would let any out-of-settings label leak through.  We
+// compute `final = settings ∩ evidence` per axis; model tags are not
+// authoritative.
+//
+// Evidence per axis:
+//   - topics       : `sourceItem.topic` (with `normalizeTopicLabel` so
+//                    synonyms like "bilateral relations" resolve against
+//                    settings without expanding the taxonomy).
+//   - geographies  : `sourceItem.geographies` (case-insensitive match;
+//                    out-of-settings geos like "France" are dropped).
+//   - keywords     : whole-word presence in `sourceItem.headline` + body
+//                    (consistent with `applyTopicKeywordFilter` matching).
+//
+// Output values are always the canonical settings-cased string (settings is
+// authoritative for spelling).  When nothing matches, the axis is an empty
+// array — never a fabricated placeholder.  Settings is treated as read-only
+// throughout; nothing here mutates or appends to it.
+//
+// `constrainTagsToSettings` (settings ∩ model-tag list) remains exported as
+// a standalone utility, but `buildStory` no longer uses it — production tag
+// derivation goes through `deriveStoryTags(sourceItems, settings)` below.
+
+function buildSettingsLookup(values, { useTopicNormalization = false } = {}) {
+  const lookup = new Map();
+  if (!Array.isArray(values)) return lookup;
+  for (const v of values) {
+    if (typeof v !== "string") continue;
+    const trimmed = v.trim();
+    if (!trimmed) continue;
+    const key = useTopicNormalization
+      ? normalizeTopicLabel(trimmed).toLowerCase()
+      : trimmed.toLowerCase();
+    if (!lookup.has(key)) lookup.set(key, trimmed);
+  }
+  return lookup;
+}
+
+function constrainAxisToSettings(modelValues, settingsValues, opts = {}) {
+  if (!Array.isArray(modelValues) || modelValues.length === 0) return [];
+  const lookup = buildSettingsLookup(settingsValues, opts);
+  if (lookup.size === 0) return [];
+  const out = [];
+  const emitted = new Set();
+  for (const m of modelValues) {
+    if (typeof m !== "string") continue;
+    const trimmed = m.trim();
+    if (!trimmed) continue;
+    const key = opts.useTopicNormalization
+      ? normalizeTopicLabel(trimmed).toLowerCase()
+      : trimmed.toLowerCase();
+    const canonical = lookup.get(key);
+    if (!canonical) continue;
+    if (emitted.has(canonical)) continue;
+    emitted.add(canonical);
+    out.push(canonical);
+  }
+  return out;
+}
+
+/**
+ * Constrain a model-produced story.tags object to the settings vocabulary.
+ * Returns a fresh `{ topics, keywords, geographies }` shape with axes that
+ * are subsets of `settings.{topics,keywords,geographies}` respectively.
+ * Never mutates `settings` or `tags`.  Exported for unit testing.
+ */
+export function constrainTagsToSettings(tags, settings) {
+  const t = tags && typeof tags === "object" ? tags : {};
+  return {
+    topics: constrainAxisToSettings(t.topics, settings?.topics, {
+      useTopicNormalization: true,
+    }),
+    keywords: constrainAxisToSettings(t.keywords, settings?.keywords),
+    geographies: constrainAxisToSettings(t.geographies, settings?.geographies),
+  };
+}
+
+function concatSourceText(sourceItems) {
+  if (!Array.isArray(sourceItems)) return "";
+  const parts = [];
+  for (const it of sourceItems) {
+    if (!it) continue;
+    if (typeof it.headline === "string") parts.push(it.headline);
+    if (Array.isArray(it.body)) parts.push(it.body.join(" "));
+    else if (typeof it.body === "string") parts.push(it.body);
+  }
+  return parts.join("\n");
+}
+
+function evidenceBackedKeywords(sourceItems, settingsKeywords) {
+  if (!Array.isArray(settingsKeywords) || settingsKeywords.length === 0) return [];
+  const text = concatSourceText(sourceItems);
+  if (!text) return [];
+  const out = [];
+  const emitted = new Set();
+  for (const raw of settingsKeywords) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (emitted.has(trimmed)) continue;
+    // Whole-word match (matches buildKeywordTokenRegex semantics: \b…\b,
+    // case-insensitive, multi-word keywords match as contiguous phrases).
+    const re = new RegExp(`\\b${escapeRegex(trimmed)}\\b`, "i");
+    if (re.test(text)) {
+      emitted.add(trimmed);
+      out.push(trimmed);
+    }
+  }
+  return out;
+}
+
+/**
+ * Derive a story's tags from source evidence + settings vocabulary.
+ *
+ *   topics       = settings.topics ∩ {normalize(source.topic) for each source}
+ *   geographies  = settings.geographies ∩ ⋃ source.geographies
+ *   keywords     = { kw ∈ settings.keywords | kw appears as a whole word in
+ *                    some source's headline/body }
+ *
+ * Model tags are NOT consulted here — they may agree with this output, but
+ * the contract is "settings ∩ evidence", so an in-settings value the model
+ * dreamed up without source support is dropped, and a settings value the
+ * model omitted but the sources support is added back.  Output values use
+ * the canonical settings spelling.  Returns a fresh `{ topics, keywords,
+ * geographies }` shape; never mutates `sourceItems` or `settings`.
+ *
+ * Exported for unit testing.
+ */
+export function deriveStoryTags(sourceItems, settings) {
+  const items = Array.isArray(sourceItems) ? sourceItems : [];
+  const topicEvidence = items
+    .map((i) => i?.topic)
+    .filter((t) => typeof t === "string");
+  const geoEvidence = items
+    .flatMap((i) => (Array.isArray(i?.geographies) ? i.geographies : []))
+    .filter((g) => typeof g === "string");
+  return {
+    topics: constrainAxisToSettings(topicEvidence, settings?.topics, {
+      useTopicNormalization: true,
+    }),
+    keywords: evidenceBackedKeywords(items, settings?.keywords),
+    geographies: constrainAxisToSettings(geoEvidence, settings?.geographies),
+  };
+}
+
 // ─── Source pool selection ────────────────────────────────────────────────────
 
 /**
@@ -402,7 +555,7 @@ export function analyzeTopicKeywordStage(items, settings) {
  * expected by dashboardPayloadSchema.  Derives schema-constrained fields (topic,
  * geographies, priority) from the source items so they stay within enum bounds.
  */
-function buildStory(metaStory, sourceItems) {
+function buildStory(metaStory, sourceItems, settings) {
   const validGeos = sourceItems
     .flatMap((i) => i.geographies)
     .filter((g) => VALID_GEOGRAPHIES.has(g));
@@ -428,7 +581,7 @@ function buildStory(metaStory, sourceItems) {
     whatChanged: `Latest update ${freshestMinutesAgo} min ago.`,
     priority,
     outletCount: sourceItems.length,
-    tags: metaStory.tags,
+    tags: deriveStoryTags(sourceItems, settings),
     sources: sourceItems.map((item) => ({
       id: item.sourceId,
       outlet: item.outlet,
@@ -921,7 +1074,7 @@ export async function runRefreshPipeline({
     const sourceItems = ms.source_item_ids
       .map((id) => sourceItemsById.get(id))
       .filter(Boolean);
-    return buildStory(ms, sourceItems);
+    return buildStory(ms, sourceItems, settings);
   });
 
   const payload = {
