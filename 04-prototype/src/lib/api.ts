@@ -10,6 +10,13 @@ import { getProtoSession } from "./auth";
 export interface DashboardFetchResult {
   payload: DashboardPayload;
   selection: DashboardSelectionMeta | null;
+  /**
+   * ISO-8601 timestamp lifted from `_meta.refreshedAt`. `null` when the
+   * backend omits it or supplies a value that does not parse as a Date.
+   * Parsed defensively off the raw response — not part of the contract
+   * schema — so older/forward responses can't break dashboard fetches.
+   */
+  refreshedAt: string | null;
 }
 
 export interface DashboardBootstrapResult extends DashboardFetchResult {
@@ -45,6 +52,7 @@ function wait(ms: number): Promise<void> {
 
 const DEFAULT_ENDPOINT = "/api/dashboard";
 const DEFAULT_BOOTSTRAP_ENDPOINT = "/api/dashboard/bootstrap";
+const DEFAULT_REFRESH_ENDPOINT = "/api/dashboard/refresh";
 const DEFAULT_RETRIES = 2;
 const RETRY_BACKOFF_MS = 200;
 
@@ -78,6 +86,12 @@ function parseSelectionMetaSafe(raw: unknown): DashboardSelectionMeta | null {
   if (!raw || typeof raw !== "object") return null;
   const result = dashboardSelectionMetaSchema.safeParse(raw);
   return result.success ? result.data : null;
+}
+
+function parseRefreshedAtSafe(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? raw : null;
 }
 
 // Mirrors server-side resolver precedence: bearer > email_recognition.
@@ -134,10 +148,13 @@ export async function fetchDashboardWithMeta(
           response.status
         );
       }
-      const raw = (await response.json()) as { _meta?: { selection?: unknown } };
+      const raw = (await response.json()) as {
+        _meta?: { selection?: unknown; refreshedAt?: unknown };
+      };
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
-      return { payload, selection };
+      const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
+      return { payload, selection, refreshedAt };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;
@@ -205,12 +222,13 @@ export async function bootstrapDashboard(
         );
       }
       const raw = (await response.json()) as {
-        _meta?: { selection?: unknown; bootstrapDecision?: unknown };
+        _meta?: { selection?: unknown; bootstrapDecision?: unknown; refreshedAt?: unknown };
       };
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
       const decision = parseBootstrapDecision(raw?._meta?.bootstrapDecision);
-      return { payload, selection, decision };
+      const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
+      return { payload, selection, decision, refreshedAt };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;
@@ -223,4 +241,61 @@ export async function bootstrapDashboard(
   }
 
   throw lastError ?? new DashboardFetchError("network", "Bootstrap failed");
+}
+
+/**
+ * Hourly background refresh from the mounted dashboard.
+ *
+ * Same shape as `fetchDashboardWithMeta` but POSTs to `/api/dashboard/refresh`
+ * so the backend re-runs the pipeline (vs the GET path that returns the
+ * persisted snapshot).  Identity headers, retry/backoff, and contract
+ * validation match the other dashboard helpers so callers can treat the
+ * result interchangeably.
+ */
+export async function refreshDashboard(
+  options: FetchDashboardOptions = {}
+): Promise<DashboardFetchResult> {
+  const endpoint = options.endpoint ?? DEFAULT_REFRESH_ENDPOINT;
+  const retries = options.retries ?? DEFAULT_RETRIES;
+  const fetcher = options.fetcher ?? fetch;
+  const sleep = options.sleep ?? wait;
+
+  const identityHeaders = await buildIdentityHeaders();
+
+  let lastError: DashboardFetchError | null = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetcher(endpoint, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          ...identityHeaders,
+        },
+      });
+      if (!response.ok) {
+        throw new DashboardFetchError(
+          "http",
+          `Refresh API returned HTTP ${response.status}`,
+          response.status
+        );
+      }
+      const raw = (await response.json()) as {
+        _meta?: { selection?: unknown; refreshedAt?: unknown };
+      };
+      const payload = dashboardPayloadSchema.parse(raw);
+      const selection = parseSelectionMetaSafe(raw?._meta?.selection);
+      const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
+      return { payload, selection, refreshedAt };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw error;
+      }
+      const dfe = normalizeFetchError(error, "Unknown refresh error");
+      lastError = dfe;
+      if (attempt === retries) throw dfe;
+      await sleep(RETRY_BACKOFF_MS * (attempt + 1));
+    }
+  }
+
+  throw lastError ?? new DashboardFetchError("network", "Refresh failed");
 }

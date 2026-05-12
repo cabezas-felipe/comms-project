@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
@@ -11,7 +11,7 @@ import {
   trackSourceOpened,
   trackStoryExpanded,
 } from "@/lib/analytics";
-import { bootstrapDashboard, fetchDashboardWithMeta } from "@/lib/api";
+import { bootstrapDashboard, fetchDashboardWithMeta, refreshDashboard } from "@/lib/api";
 import {
   aggregateTagSections,
   isEmptySelection,
@@ -75,6 +75,8 @@ function SelectionStatusCue({
   );
 }
 
+const HOURLY_REFRESH_MS = 60 * 60 * 1000;
+
 function dtoToStory(dto: StoryDto): Story {
   return {
     id: dto.id,
@@ -108,7 +110,19 @@ function dtoToStory(dto: StoryDto): Story {
   };
 }
 
-export default function Dashboard() {
+type DashboardProps = {
+  /**
+   * App-level setter for the most recent successful dashboard refresh
+   * timestamp.  Called on every successful bootstrap / GET / hourly refresh
+   * with the backend-provided `refreshedAt` (or `null` when the response
+   * omits it).  Failures intentionally do NOT call this — the previously
+   * known timestamp stays put.  Optional so existing tests can render
+   * `<Dashboard />` without plumbing.
+   */
+  setLastRefreshedAt?: (value: string | null) => void;
+};
+
+export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
   const [searchParams] = useSearchParams();
   const location = useLocation();
   const emptyMode = searchParams.get("empty") === "1";
@@ -190,12 +204,13 @@ export default function Dashboard() {
       : fetchDashboardWithMeta();
 
     loader
-      .then(({ payload, selection }) => {
+      .then(({ payload, selection, refreshedAt }) => {
         if (canceled) return;
         setStories(payload.stories.map(dtoToStory));
         setSelectionMeta(selection);
         setLoadError(null);
         setHasLoadedOnce(true);
+        setLastRefreshedAt?.(refreshedAt ?? null);
       })
       .catch((error: unknown) => {
         if (canceled) return;
@@ -216,7 +231,46 @@ export default function Dashboard() {
     };
     // `stories.length` intentionally excluded — only used to gate the toast.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [emptyMode, useBootstrap, reloadCounter]);
+  }, [emptyMode, useBootstrap, reloadCounter, setLastRefreshedAt]);
+
+  // Hourly background refresh while the dashboard is mounted.  Independent of
+  // the initial loader (bootstrap/GET): ticks fire every 60 min, POST to
+  // `/api/dashboard/refresh`, and on success replace stories/selectionMeta and
+  // clear any prior loadError.  On failure we keep the existing data on
+  // screen — the dashboard never blanks out from a refresh tick.  A ref guards
+  // against overlapping in-flight refreshes (defensive — at 60min cadence,
+  // unlikely, but cheap).
+  const refreshingRef = useRef(false);
+  useEffect(() => {
+    if (emptyMode) return;
+    let canceled = false;
+    const tick = async () => {
+      if (refreshingRef.current) return;
+      refreshingRef.current = true;
+      try {
+        const { payload, selection, refreshedAt } = await refreshDashboard();
+        if (canceled) return;
+        setStories(payload.stories.map(dtoToStory));
+        setSelectionMeta(selection);
+        setLoadError(null);
+        setHasLoadedOnce(true);
+        setLastRefreshedAt?.(refreshedAt ?? null);
+      } catch (error: unknown) {
+        if (canceled) return;
+        const message =
+          error instanceof Error ? error.message : "Failed to refresh dashboard.";
+        trackSourceOpenError({ message, code: "dashboard_refresh_failed" });
+        notifyError("We couldn't refresh stories. Showing previous run.");
+      } finally {
+        refreshingRef.current = false;
+      }
+    };
+    const id = setInterval(tick, HOURLY_REFRESH_MS);
+    return () => {
+      canceled = true;
+      clearInterval(id);
+    };
+  }, [emptyMode, setLastRefreshedAt]);
 
   const handleRetry = useCallback(() => {
     setReloadCounter((n) => n + 1);
