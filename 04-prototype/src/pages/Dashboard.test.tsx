@@ -3,11 +3,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import Dashboard, { buildHeadline } from "@/pages/Dashboard";
 import { CONTRACT_VERSION, type StoryDto } from "@tempo/contracts";
+import type { DashboardFetchResult } from "@/lib/api";
 
 const fetchSpy = vi.fn();
 const bootstrapSpy = vi.fn();
-const refreshSpy = vi.fn();
 const notifyErrorSpy = vi.fn();
+const recordSpy = vi.fn();
+
+// Heartbeat result is mutable across renders so individual tests can drive
+// "the app-scope scheduler just succeeded" without spinning up the real
+// provider (which would need auth + storage scaffolding).
+let mockHeartbeatResult: DashboardFetchResult | null = null;
 
 const { MockDashboardFetchError } = vi.hoisted(() => {
   class MockDashboardFetchError extends Error {
@@ -26,7 +32,6 @@ const { MockDashboardFetchError } = vi.hoisted(() => {
 vi.mock("@/lib/api", () => ({
   fetchDashboardWithMeta: (...args: unknown[]) => fetchSpy(...args),
   bootstrapDashboard: (...args: unknown[]) => bootstrapSpy(...args),
-  refreshDashboard: (...args: unknown[]) => refreshSpy(...args),
   DashboardFetchError: MockDashboardFetchError,
 }));
 
@@ -39,13 +44,22 @@ vi.mock("@/lib/analytics", () => ({
 
 vi.mock("@/lib/notify", () => ({ notifyError: (...args: unknown[]) => notifyErrorSpy(...args) }));
 
+vi.mock("@/lib/refresh-context", () => ({
+  useRefreshContext: () => ({
+    lastRefreshedAt: null,
+    heartbeatResult: mockHeartbeatResult,
+    recordSuccessfulRefresh: recordSpy,
+  }),
+}));
+
 const OK_RESULT = { payload: { contractVersion: CONTRACT_VERSION, stories: [] }, selection: null };
 
 afterEach(() => {
   fetchSpy.mockReset();
   bootstrapSpy.mockReset();
-  refreshSpy.mockReset();
   notifyErrorSpy.mockReset();
+  recordSpy.mockReset();
+  mockHeartbeatResult = null;
 });
 
 function renderAt(state: object | null) {
@@ -467,127 +481,102 @@ describe("buildHeadline", () => {
   });
 });
 
-// ─── Chunk 2: hourly background refresh ──────────────────────────────────────
+// ─── App-scope refresh heartbeat → Dashboard overlay ─────────────────────────
+// The 60-minute attempt scheduler now lives in `lib/refresh-heartbeat` and is
+// mounted by `RefreshHeartbeatProvider` at app scope.  The Dashboard's local
+// responsibility shrinks to two things: (1) call `recordSuccessfulRefresh` on
+// its initial bootstrap/GET loader, and (2) overlay heartbeat-driven payloads
+// onto the on-screen story list so a long-lived dashboard view doesn't show
+// stale content while the header timestamp moves forward.
 
-const HOUR_MS = 60 * 60 * 1000;
-
-function renderAtPath(path: string, state: object | null = null) {
-  return render(
-    <MemoryRouter initialEntries={[{ pathname: path.split("?")[0], search: path.includes("?") ? `?${path.split("?")[1]}` : "", state }]}>
-      <Routes>
-        <Route path="/dashboard" element={<Dashboard />} />
-      </Routes>
-    </MemoryRouter>
-  );
-}
-
-describe("Chunk 2: hourly dashboard refresh", () => {
-  it("schedules an hourly refresh tick once the dashboard mounts (non-empty mode)", async () => {
-    vi.useFakeTimers();
-    try {
-      fetchSpy.mockResolvedValue(OK_RESULT);
-      refreshSpy.mockResolvedValue({ ...OK_RESULT, refreshedAt: "2026-05-11T13:00:00Z" });
-      renderAt(null);
-      // Initial loader settles
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      expect(refreshSpy).not.toHaveBeenCalled();
-      // Cross the hour boundary — refresh tick fires exactly once.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(HOUR_MS);
-      });
-      expect(refreshSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
+describe("Dashboard initial loader integration with refresh context", () => {
+  it("calls recordSuccessfulRefresh with the result of an initial GET", async () => {
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      refreshedAt: "2026-05-11T12:00:00Z",
+    });
+    renderAt(null);
+    await screen.findByTestId("dashboard-empty");
+    expect(recordSpy).toHaveBeenCalledTimes(1);
+    expect(recordSpy.mock.calls[0][0]).toMatchObject({
+      refreshedAt: "2026-05-11T12:00:00Z",
+    });
   });
 
-  it("does not schedule refresh ticks in emptyMode (?empty=1)", async () => {
-    vi.useFakeTimers();
-    try {
-      renderAtPath("/dashboard?empty=1");
-      // Initial loader skipped in emptyMode
-      expect(fetchSpy).not.toHaveBeenCalled();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(HOUR_MS * 3);
-      });
-      expect(refreshSpy).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("calls recordSuccessfulRefresh with the result of an initial bootstrap", async () => {
+    bootstrapSpy.mockResolvedValue({
+      ...OK_RESULT,
+      decision: "served_fresh_snapshot",
+      refreshedAt: "2026-05-11T12:30:00Z",
+    });
+    renderAt({ bootstrap: true });
+    await screen.findByTestId("dashboard-empty");
+    expect(recordSpy).toHaveBeenCalledTimes(1);
+    expect(recordSpy.mock.calls[0][0]).toMatchObject({
+      refreshedAt: "2026-05-11T12:30:00Z",
+    });
   });
 
-  it("updates stories from the refresh tick payload on success", async () => {
-    vi.useFakeTimers();
-    try {
-      fetchSpy.mockResolvedValue({
-        payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "init", title: "Initial Story" })] },
-        selection: null,
-      });
-      refreshSpy.mockResolvedValue({
-        payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "next", title: "Refreshed Story" })] },
-        selection: null,
-        refreshedAt: "2026-05-11T13:00:00Z",
-      });
-      renderAt(null);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(screen.getByText("Initial Story")).toBeInTheDocument();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(HOUR_MS);
-      });
-      expect(screen.getByText("Refreshed Story")).toBeInTheDocument();
+  it("does NOT call recordSuccessfulRefresh when the initial loader fails", async () => {
+    fetchSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    renderAt(null);
+    await screen.findByTestId("dashboard-error");
+    expect(recordSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("Heartbeat → Dashboard story overlay", () => {
+  it("replaces on-screen stories when a heartbeat-driven refresh result arrives via context", async () => {
+    fetchSpy.mockResolvedValue({
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [makeStoryDto({ id: "init", title: "Initial Story" })],
+      },
+      selection: null,
+    });
+    renderAt(null);
+    expect(await screen.findByText("Initial Story")).toBeInTheDocument();
+
+    // Heartbeat tick succeeds at app scope — provider pushes a new result.
+    mockHeartbeatResult = {
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [makeStoryDto({ id: "next", title: "Refreshed Story" })],
+      },
+      selection: null,
+      refreshedAt: "2026-05-11T13:00:00Z",
+    };
+    // Force a re-render by triggering a state change in the dashboard (router
+    // unaware of context changes from this mock); fastest path is to
+    // re-render the tree.
+    fireEvent.click(screen.getByTestId("pill-all"));
+    // Now bump the context value — Dashboard's effect should pick it up.
+    // (mockHeartbeatResult is mutated in-place; the click triggers a re-render
+    // which re-runs useRefreshContext and yields the new value.)
+    await waitFor(() => {
       expect(screen.queryByText("Initial Story")).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+    });
+    expect(screen.getByText("Refreshed Story")).toBeInTheDocument();
   });
 
-  it("keeps existing stories on refresh failure and notifies without crashing the page", async () => {
-    vi.useFakeTimers();
-    try {
-      fetchSpy.mockResolvedValue({
-        payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "init", title: "Initial Story" })] },
-        selection: null,
-      });
-      refreshSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
-      renderAt(null);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(screen.getByText("Initial Story")).toBeInTheDocument();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(HOUR_MS);
-      });
-      // Prior story still on screen; full-page error block did not render.
-      expect(screen.getByText("Initial Story")).toBeInTheDocument();
-      expect(screen.queryByTestId("dashboard-error")).toBeNull();
-      expect(notifyErrorSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("clears the interval on unmount (no further refresh calls)", async () => {
-    vi.useFakeTimers();
-    try {
-      fetchSpy.mockResolvedValue(OK_RESULT);
-      refreshSpy.mockResolvedValue({ ...OK_RESULT, refreshedAt: null });
-      const { unmount } = renderAt(null);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      unmount();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(HOUR_MS * 5);
-      });
-      expect(refreshSpy).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("does not overlay in emptyMode (?empty=1)", async () => {
+    mockHeartbeatResult = {
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [makeStoryDto({ id: "next", title: "Refreshed Story" })],
+      },
+      selection: null,
+      refreshedAt: "2026-05-11T13:00:00Z",
+    };
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/dashboard", search: "?empty=1" }]}>
+        <Routes>
+          <Route path="/dashboard" element={<Dashboard />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    // emptyMode renders the empty block from the synchronous initial state —
+    // no overlay should leak the heartbeat payload into view.
+    expect(screen.queryByText("Refreshed Story")).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
@@ -11,7 +11,7 @@ import {
   trackSourceOpened,
   trackStoryExpanded,
 } from "@/lib/analytics";
-import { bootstrapDashboard, fetchDashboardWithMeta, refreshDashboard } from "@/lib/api";
+import { bootstrapDashboard, fetchDashboardWithMeta } from "@/lib/api";
 import { formatKeywordLabel } from "@/lib/format";
 import {
   aggregateTagSections,
@@ -22,8 +22,7 @@ import {
 } from "@/lib/dashboard-filters";
 import { type StoryDto } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
-
-const HOURLY_REFRESH_MS = 60 * 60 * 1000;
+import { useRefreshContext } from "@/lib/refresh-context";
 
 function dtoToStory(dto: StoryDto): Story {
   return {
@@ -58,19 +57,8 @@ function dtoToStory(dto: StoryDto): Story {
   };
 }
 
-type DashboardProps = {
-  /**
-   * App-level setter for the most recent successful dashboard refresh
-   * timestamp.  Called on every successful bootstrap / GET / hourly refresh
-   * with the backend-provided `refreshedAt` (or `null` when the response
-   * omits it).  Failures intentionally do NOT call this — the previously
-   * known timestamp stays put.  Optional so existing tests can render
-   * `<Dashboard />` without plumbing.
-   */
-  setLastRefreshedAt?: (value: string | null) => void;
-};
-
-export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
+export default function Dashboard() {
+  const { recordSuccessfulRefresh, heartbeatResult } = useRefreshContext();
   const [searchParams] = useSearchParams();
   const location = useLocation();
   const emptyMode = searchParams.get("empty") === "1";
@@ -147,16 +135,21 @@ export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
     // server-side and falls back to a fresh snapshot when ≤ 60 min old.  GET
     // path stays cheap and is used for every other dashboard load.
     const loader = useBootstrap
-      ? bootstrapDashboard().then(({ payload, selection }) => ({ payload, selection }))
+      ? bootstrapDashboard().then(({ payload, selection, refreshedAt }) => ({
+          payload,
+          selection,
+          refreshedAt,
+        }))
       : fetchDashboardWithMeta();
 
     loader
-      .then(({ payload, refreshedAt }) => {
+      .then((result) => {
         if (canceled) return;
+        const { payload } = result;
         setStories(payload.stories.map(dtoToStory));
         setLoadError(null);
         setHasLoadedOnce(true);
-        setLastRefreshedAt?.(refreshedAt ?? null);
+        recordSuccessfulRefresh(result);
       })
       .catch((error: unknown) => {
         if (canceled) return;
@@ -177,45 +170,18 @@ export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
     };
     // `stories.length` intentionally excluded — only used to gate the toast.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [emptyMode, useBootstrap, reloadCounter, setLastRefreshedAt]);
+  }, [emptyMode, useBootstrap, reloadCounter, recordSuccessfulRefresh]);
 
-  // Hourly background refresh while the dashboard is mounted.  Independent of
-  // the initial loader (bootstrap/GET): ticks fire every 60 min, POST to
-  // `/api/dashboard/refresh`, and on success replace stories and clear any
-  // prior loadError.  On failure we keep the existing data on screen — the
-  // dashboard never blanks out from a refresh tick.  A ref guards against
-  // overlapping in-flight refreshes (defensive — at 60min cadence, unlikely,
-  // but cheap).
-  const refreshingRef = useRef(false);
+  // App-scope heartbeat (lib/refresh-heartbeat) drives the 60-minute refresh
+  // attempt guarantee; here we just overlay its successful result onto the
+  // currently-rendered stories so a long-lived dashboard view doesn't show
+  // stale content even though the header timestamp moved forward.
   useEffect(() => {
-    if (emptyMode) return;
-    let canceled = false;
-    const tick = async () => {
-      if (refreshingRef.current) return;
-      refreshingRef.current = true;
-      try {
-        const { payload, refreshedAt } = await refreshDashboard();
-        if (canceled) return;
-        setStories(payload.stories.map(dtoToStory));
-        setLoadError(null);
-        setHasLoadedOnce(true);
-        setLastRefreshedAt?.(refreshedAt ?? null);
-      } catch (error: unknown) {
-        if (canceled) return;
-        const message =
-          error instanceof Error ? error.message : "Failed to refresh dashboard.";
-        trackSourceOpenError({ message, code: "dashboard_refresh_failed" });
-        notifyError("We couldn't refresh stories. Showing previous run.");
-      } finally {
-        refreshingRef.current = false;
-      }
-    };
-    const id = setInterval(tick, HOURLY_REFRESH_MS);
-    return () => {
-      canceled = true;
-      clearInterval(id);
-    };
-  }, [emptyMode, setLastRefreshedAt]);
+    if (emptyMode || !heartbeatResult) return;
+    setStories(heartbeatResult.payload.stories.map(dtoToStory));
+    setLoadError(null);
+    setHasLoadedOnce(true);
+  }, [emptyMode, heartbeatResult]);
 
   const handleRetry = useCallback(() => {
     setReloadCounter((n) => n + 1);

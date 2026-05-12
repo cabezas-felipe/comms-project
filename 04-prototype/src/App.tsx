@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
@@ -12,11 +11,16 @@ import Settings from "./pages/Settings.tsx";
 import AppHeader from "./components/AppHeader.tsx";
 import ProtectedRoute from "./components/ProtectedRoute.tsx";
 import { AuthProvider } from "./lib/auth.tsx";
+import { RefreshHeartbeatProvider, useRefreshContext } from "./lib/refresh-context.tsx";
 
 const queryClient = new QueryClient();
 
+function HeaderWithRefreshState() {
+  const { lastRefreshedAt } = useRefreshContext();
+  return <AppHeader lastRefreshedAt={lastRefreshedAt} />;
+}
+
 const App = () => {
-  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
@@ -29,28 +33,30 @@ const App = () => {
               v7_relativeSplatPath: true,
             }}
           >
-            <AppHeader lastRefreshedAt={lastRefreshedAt} />
-            <Routes>
-              <Route path="/" element={<EntryLandingPage />} />
-              <Route path="/onboarding" element={<Onboarding />} />
-              <Route
-                path="/dashboard"
-                element={
-                  <ProtectedRoute>
-                    <Dashboard setLastRefreshedAt={setLastRefreshedAt} />
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/settings"
-                element={
-                  <ProtectedRoute>
-                    <Settings />
-                  </ProtectedRoute>
-                }
-              />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
+            <RefreshHeartbeatProvider>
+              <HeaderWithRefreshState />
+              <Routes>
+                <Route path="/" element={<EntryLandingPage />} />
+                <Route path="/onboarding" element={<Onboarding />} />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <ProtectedRoute>
+                      <Dashboard />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/settings"
+                  element={
+                    <ProtectedRoute>
+                      <Settings />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </RefreshHeartbeatProvider>
           </BrowserRouter>
         </AuthProvider>
       </TooltipProvider>
