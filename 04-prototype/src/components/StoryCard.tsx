@@ -1,5 +1,6 @@
 import { Story } from "@/data/stories";
 import { DerivedSignals, keySources, Trend } from "@/lib/derive";
+import { storyScanLabels } from "@/lib/dashboard-filters";
 import { timeAgo } from "@/lib/format";
 import { ArrowUpRight, ArrowDownRight, Minus } from "lucide-react";
 
@@ -25,6 +26,7 @@ export default function StoryCard({ story, sig, expanded, onToggle, onOpenSource
   const TrendIcon = t.icon;
   const titleColor = sig.trend === "falling" ? "text-foreground/70" : "text-foreground";
   const sources = keySources(story, 5);
+  const scanLabels = storyScanLabels(story);
 
   return (
     <article className={`px-6 py-4 transition-colors ${expanded ? "bg-surface" : "hover:bg-surface/60"}`}>
@@ -36,8 +38,12 @@ export default function StoryCard({ story, sig, expanded, onToggle, onOpenSource
             <TrendIcon className="h-3 w-3" strokeWidth={2.5} />
             <span>{t.label}</span>
           </span>
-          <span className="text-rule">·</span>
-          <span className="text-muted-foreground">{story.topic}</span>
+          {scanLabels.length > 0 && (
+            <>
+              <span className="text-rule">·</span>
+              <span className="text-muted-foreground">{scanLabels.join(" · ")}</span>
+            </>
+          )}
         </div>
 
         {/* Two-column: headline + takeaway · activity meta */}

@@ -36,6 +36,33 @@ function keywordsOf(story: Story): string[] {
   return story.tags?.keywords ?? [];
 }
 
+/**
+ * Build up to 2 human-readable labels for the dashboard story card's scan row.
+ * Mirrors the header-pill vocabulary (topics → keywords) but omits geographies.
+ *
+ * Priority — first match wins, max 2 strings:
+ *   1. Two topics    → [T[0], T[1]]
+ *   2. Two keywords  → [K[0], K[1]]
+ *   3. Topic + kw    → [T[0], K[0]]  (fixed section order: topic left, keyword right)
+ *   4. Single topic  → [T[0]]
+ *   5. Single kw     → [K[0]]
+ *
+ * Within a section, values are deduped and sorted A→Z (locale-aware) — same
+ * order used by `aggregateTagSections`.
+ */
+export function storyScanLabels(story: Story): string[] {
+  const uniqSort = (values: string[]) =>
+    [...new Set(values)].sort((a, b) => a.localeCompare(b));
+  const T = uniqSort(topicsOf(story));
+  const K = uniqSort(keywordsOf(story));
+  if (T.length >= 2) return [T[0], T[1]];
+  if (K.length >= 2) return [K[0], K[1]];
+  if (T.length >= 1 && K.length >= 1) return [T[0], K[0]];
+  if (T.length >= 1) return [T[0]];
+  if (K.length >= 1) return [K[0]];
+  return [];
+}
+
 /** Resolve the geographies set for a story (preferring tags, falling back to geographies). */
 function geographiesOf(story: Story): string[] {
   if (story.tags?.geographies && story.tags.geographies.length > 0) return story.tags.geographies;
