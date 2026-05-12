@@ -6,6 +6,8 @@ import { CONTRACT_VERSION, type StoryDto } from "@tempo/contracts";
 
 const fetchSpy = vi.fn();
 const bootstrapSpy = vi.fn();
+const refreshSpy = vi.fn();
+const notifyErrorSpy = vi.fn();
 
 const { MockDashboardFetchError } = vi.hoisted(() => {
   class MockDashboardFetchError extends Error {
@@ -24,6 +26,7 @@ const { MockDashboardFetchError } = vi.hoisted(() => {
 vi.mock("@/lib/api", () => ({
   fetchDashboardWithMeta: (...args: unknown[]) => fetchSpy(...args),
   bootstrapDashboard: (...args: unknown[]) => bootstrapSpy(...args),
+  refreshDashboard: (...args: unknown[]) => refreshSpy(...args),
   DashboardFetchError: MockDashboardFetchError,
 }));
 
@@ -34,13 +37,15 @@ vi.mock("@/lib/analytics", () => ({
   trackStoryExpanded: vi.fn(),
 }));
 
-vi.mock("@/lib/notify", () => ({ notifyError: vi.fn() }));
+vi.mock("@/lib/notify", () => ({ notifyError: (...args: unknown[]) => notifyErrorSpy(...args) }));
 
 const OK_RESULT = { payload: { contractVersion: CONTRACT_VERSION, stories: [] }, selection: null };
 
 afterEach(() => {
   fetchSpy.mockReset();
   bootstrapSpy.mockReset();
+  refreshSpy.mockReset();
+  notifyErrorSpy.mockReset();
 });
 
 function renderAt(state: object | null) {
@@ -327,5 +332,130 @@ describe("Phase 6: dynamic header pills", () => {
     await waitFor(() => expect(pill.getAttribute("aria-pressed")).toBe("true"));
     fireEvent.click(pill);
     await waitFor(() => expect(pill.getAttribute("aria-pressed")).toBe("false"));
+  });
+});
+
+// ─── Chunk 2: hourly background refresh ──────────────────────────────────────
+
+const HOUR_MS = 60 * 60 * 1000;
+
+function renderAtPath(path: string, state: object | null = null) {
+  return render(
+    <MemoryRouter initialEntries={[{ pathname: path.split("?")[0], search: path.includes("?") ? `?${path.split("?")[1]}` : "", state }]}>
+      <Routes>
+        <Route path="/dashboard" element={<Dashboard />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+describe("Chunk 2: hourly dashboard refresh", () => {
+  it("schedules an hourly refresh tick once the dashboard mounts (non-empty mode)", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchSpy.mockResolvedValue(OK_RESULT);
+      refreshSpy.mockResolvedValue({ ...OK_RESULT, refreshedAt: "2026-05-11T13:00:00Z" });
+      renderAt(null);
+      // Initial loader settles
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy).not.toHaveBeenCalled();
+      // Cross the hour boundary — refresh tick fires exactly once.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HOUR_MS);
+      });
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not schedule refresh ticks in emptyMode (?empty=1)", async () => {
+    vi.useFakeTimers();
+    try {
+      renderAtPath("/dashboard?empty=1");
+      // Initial loader skipped in emptyMode
+      expect(fetchSpy).not.toHaveBeenCalled();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HOUR_MS * 3);
+      });
+      expect(refreshSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("updates stories from the refresh tick payload on success", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchSpy.mockResolvedValue({
+        payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "init", title: "Initial Story" })] },
+        selection: null,
+      });
+      refreshSpy.mockResolvedValue({
+        payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "next", title: "Refreshed Story" })] },
+        selection: null,
+        refreshedAt: "2026-05-11T13:00:00Z",
+      });
+      renderAt(null);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText("Initial Story")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HOUR_MS);
+      });
+      expect(screen.getByText("Refreshed Story")).toBeInTheDocument();
+      expect(screen.queryByText("Initial Story")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps existing stories on refresh failure and notifies without crashing the page", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchSpy.mockResolvedValue({
+        payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "init", title: "Initial Story" })] },
+        selection: null,
+      });
+      refreshSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+      renderAt(null);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText("Initial Story")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HOUR_MS);
+      });
+      // Prior story still on screen; full-page error block did not render.
+      expect(screen.getByText("Initial Story")).toBeInTheDocument();
+      expect(screen.queryByTestId("dashboard-error")).toBeNull();
+      expect(notifyErrorSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the interval on unmount (no further refresh calls)", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchSpy.mockResolvedValue(OK_RESULT);
+      refreshSpy.mockResolvedValue({ ...OK_RESULT, refreshedAt: null });
+      const { unmount } = renderAt(null);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      unmount();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HOUR_MS * 5);
+      });
+      expect(refreshSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
