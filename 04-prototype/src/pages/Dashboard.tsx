@@ -20,61 +20,8 @@ import {
   toggleInSet,
   type TagSelection,
 } from "@/lib/dashboard-filters";
-import { type DashboardSelectionMeta, type StoryDto } from "@tempo/contracts";
+import { type StoryDto } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
-
-// Phase 2: minimal status badge surfacing source-selection metadata from the
-// API.  Renders nothing when there's nothing meaningful to say (strict mode +
-// no unmatched + non-empty stories).  Visual treatment intentionally compact —
-// the dashboard's information architecture is unchanged.
-function SelectionStatusCue({
-  meta,
-  hasStories,
-}: {
-  meta: DashboardSelectionMeta | null;
-  hasStories: boolean;
-}) {
-  if (!meta) return null;
-
-  const messages: string[] = [];
-  if (meta.sourceFallbackUsed) {
-    const reason = meta.sourceFallbackReason ?? "no match";
-    messages.push(
-      reason === "no_selected_sources"
-        ? "Showing fallback sources — pick sources in Settings to personalize."
-        : reason === "all_unavailable_connectors"
-          ? "Selected sources have no connector yet — showing fallback baseline."
-          : "No selected sources matched the manifest — showing fallback baseline."
-    );
-  }
-  const unmatched = meta.unmatchedSelectedSources ?? [];
-  if (unmatched.length > 0 && !meta.sourceFallbackUsed) {
-    messages.push(`${unmatched.length} selected source${unmatched.length === 1 ? "" : "s"} unavailable: ${unmatched.join(", ")}`);
-  }
-  if (
-    !meta.sourceFallbackUsed &&
-    !hasStories &&
-    typeof meta.relevantItemCount === "number" &&
-    meta.relevantItemCount === 0 &&
-    (meta.matchedSourceCount ?? 0) > 0
-  ) {
-    messages.push("No stories match your topics or keywords in the last 24 hours.");
-  }
-
-  if (messages.length === 0) return null;
-  return (
-    <div className="px-6 py-2 border-b border-rule/60">
-      {messages.map((m, i) => (
-        <p
-          key={i}
-          className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
-        >
-          {m}
-        </p>
-      ))}
-    </div>
-  );
-}
 
 const HOURLY_REFRESH_MS = 60 * 60 * 1000;
 
@@ -149,7 +96,6 @@ export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(emptyMode);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadCounter, setReloadCounter] = useState(0);
-  const [selectionMeta, setSelectionMeta] = useState<DashboardSelectionMeta | null>(null);
 
   const tagSections = useMemo(() => aggregateTagSections(stories), [stories]);
   const tagSelection = useMemo<TagSelection>(
@@ -205,10 +151,9 @@ export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
       : fetchDashboardWithMeta();
 
     loader
-      .then(({ payload, selection, refreshedAt }) => {
+      .then(({ payload, refreshedAt }) => {
         if (canceled) return;
         setStories(payload.stories.map(dtoToStory));
-        setSelectionMeta(selection);
         setLoadError(null);
         setHasLoadedOnce(true);
         setLastRefreshedAt?.(refreshedAt ?? null);
@@ -236,11 +181,11 @@ export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
 
   // Hourly background refresh while the dashboard is mounted.  Independent of
   // the initial loader (bootstrap/GET): ticks fire every 60 min, POST to
-  // `/api/dashboard/refresh`, and on success replace stories/selectionMeta and
-  // clear any prior loadError.  On failure we keep the existing data on
-  // screen — the dashboard never blanks out from a refresh tick.  A ref guards
-  // against overlapping in-flight refreshes (defensive — at 60min cadence,
-  // unlikely, but cheap).
+  // `/api/dashboard/refresh`, and on success replace stories and clear any
+  // prior loadError.  On failure we keep the existing data on screen — the
+  // dashboard never blanks out from a refresh tick.  A ref guards against
+  // overlapping in-flight refreshes (defensive — at 60min cadence, unlikely,
+  // but cheap).
   const refreshingRef = useRef(false);
   useEffect(() => {
     if (emptyMode) return;
@@ -249,10 +194,9 @@ export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
       if (refreshingRef.current) return;
       refreshingRef.current = true;
       try {
-        const { payload, selection, refreshedAt } = await refreshDashboard();
+        const { payload, refreshedAt } = await refreshDashboard();
         if (canceled) return;
         setStories(payload.stories.map(dtoToStory));
-        setSelectionMeta(selection);
         setLoadError(null);
         setHasLoadedOnce(true);
         setLastRefreshedAt?.(refreshedAt ?? null);
@@ -375,9 +319,6 @@ export default function Dashboard({ setLastRefreshedAt }: DashboardProps = {}) {
               )}
             </div>
           </div>
-
-          {/* Selection status — Phase 2: small cues for fallback / unmatched / strict-empty */}
-          <SelectionStatusCue meta={selectionMeta} hasStories={filtered.length > 0} />
 
           {/* Inline banner when a refresh failed but a previous run is on-screen */}
           {loadError && stories.length > 0 && (
