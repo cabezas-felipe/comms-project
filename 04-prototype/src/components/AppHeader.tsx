@@ -1,6 +1,5 @@
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { formatClock } from "@/lib/format";
-import { useEffect, useState } from "react";
+import { formatRefreshTimestamp } from "@/lib/format";
 import { Settings as SettingsIcon, LogOut } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import {
@@ -11,16 +10,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-export default function AppHeader() {
-  const [now, setNow] = useState(new Date());
+type AppHeaderProps = {
+  lastRefreshedAt?: string | null;
+};
+
+export default function AppHeader({ lastRefreshedAt }: AppHeaderProps = {}) {
   const location = useLocation();
   const navigate = useNavigate();
   const { logout, recognizedIdentity } = useAuth();
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 30_000);
-    return () => clearInterval(id);
-  }, []);
 
   if (["/", "/onboarding"].includes(location.pathname)) return null;
   if (!recognizedIdentity) return null;
@@ -50,7 +47,9 @@ export default function AppHeader() {
           {!isSettings && (
             <div className="hidden text-right md:block">
               <div className="eyebrow leading-none">Last refresh</div>
-              <div className="font-mono text-xs text-foreground">{formatClock(now)}</div>
+              <div className="font-mono text-xs text-foreground">
+                {formatRefreshTimestamp(lastRefreshedAt)}
+              </div>
             </div>
           )}
           <DropdownMenu>
