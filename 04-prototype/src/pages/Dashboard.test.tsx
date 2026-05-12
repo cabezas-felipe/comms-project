@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import Dashboard from "@/pages/Dashboard";
+import Dashboard, { buildHeadline } from "@/pages/Dashboard";
 import { CONTRACT_VERSION, type StoryDto } from "@tempo/contracts";
 
 const fetchSpy = vi.fn();
@@ -332,6 +332,42 @@ describe("Phase 6: dynamic header pills", () => {
     await waitFor(() => expect(pill.getAttribute("aria-pressed")).toBe("true"));
     fireEvent.click(pill);
     await waitFor(() => expect(pill.getAttribute("aria-pressed")).toBe("false"));
+  });
+});
+
+// ─── H1 headline rules ───────────────────────────────────────────────────────
+
+describe("buildHeadline", () => {
+  it("mixed three-part: rising → steady → falling, only the first chunk says 'narratives'", () => {
+    expect(buildHeadline({ rising: 3, steady: 2, falling: 1 })).toBe(
+      "3 narratives rising · 2 steady · 1 falling"
+    );
+  });
+
+  it("steady-first when rising is zero, falling second uses short form", () => {
+    expect(buildHeadline({ rising: 0, steady: 2, falling: 1 })).toBe(
+      "2 narratives steady · 1 falling"
+    );
+  });
+
+  it("only falling — singular form", () => {
+    expect(buildHeadline({ rising: 0, steady: 0, falling: 1 })).toBe("1 narrative falling");
+  });
+
+  it("only rising — singular form", () => {
+    expect(buildHeadline({ rising: 1, steady: 0, falling: 0 })).toBe("1 narrative rising");
+  });
+
+  it("only rising — plural form", () => {
+    expect(buildHeadline({ rising: 4, steady: 0, falling: 0 })).toBe("4 narratives rising");
+  });
+
+  it("only steady — plural form (replaces the old 'All steady.' branch)", () => {
+    expect(buildHeadline({ rising: 0, steady: 3, falling: 0 })).toBe("3 narratives steady");
+  });
+
+  it("nothing in view → 'Quiet for this view.'", () => {
+    expect(buildHeadline({ rising: 0, steady: 0, falling: 0 })).toBe("Quiet for this view.");
   });
 });
 
