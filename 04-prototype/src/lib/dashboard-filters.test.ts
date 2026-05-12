@@ -3,6 +3,7 @@ import {
   aggregateTagSections,
   isEmptySelection,
   storyMatchesSelection,
+  storyScanLabels,
   toggleInSet,
   type TagSelection,
 } from "./dashboard-filters";
@@ -23,6 +24,13 @@ function makeStory(overrides: Partial<Story> = {}): Story {
     sources: [],
     ...overrides,
   };
+}
+
+/** Test-only: story shape missing `topic` for scan-label edge cases. */
+function storyWithoutTopic(overrides: Partial<Story> = {}): Story {
+  const base = makeStory(overrides);
+  const { topic: _t, ...rest } = base;
+  return rest as Story;
 }
 
 function selection(t: string[] = [], k: string[] = [], g: string[] = []): TagSelection {
@@ -141,6 +149,102 @@ describe("isEmptySelection", () => {
     expect(isEmptySelection(selection(["Diplomatic relations"]))).toBe(false);
     expect(isEmptySelection(selection([], ["k"]))).toBe(false);
     expect(isEmptySelection(selection([], [], ["US"]))).toBe(false);
+  });
+});
+
+describe("storyScanLabels", () => {
+  it("returns the two alphabetically first topics when ≥2 topics exist", () => {
+    const story = makeStory({
+      tags: {
+        topics: ["Migration policy", "Diplomatic relations", "Security cooperation"],
+        keywords: ["sanctions"],
+        geographies: ["US"],
+      },
+    });
+    expect(storyScanLabels(story)).toEqual(["Diplomatic relations", "Migration policy"]);
+  });
+
+  it("returns the two alphabetically first keywords when ≥2 keywords and <2 topics", () => {
+    const keywords = ["sanctions", "asylum", "OFAC"];
+    const story = makeStory({
+      tags: {
+        topics: [],
+        keywords,
+        geographies: ["US"],
+      },
+    });
+    const sorted = [...new Set(keywords)].sort((a, b) => a.localeCompare(b));
+    expect(storyScanLabels(story)).toEqual(sorted.slice(0, 2));
+  });
+
+  it("returns [topic, keyword] in fixed section order when one of each", () => {
+    const story = makeStory({
+      tags: {
+        topics: ["Migration policy"],
+        keywords: ["sanctions"],
+        geographies: ["US", "Colombia"],
+      },
+    });
+    expect(storyScanLabels(story)).toEqual(["Migration policy", "sanctions"]);
+  });
+
+  it("returns single topic when only one topic and no keywords", () => {
+    const story = makeStory({
+      tags: {
+        topics: ["Diplomatic relations"],
+        keywords: [],
+        geographies: ["US"],
+      },
+    });
+    expect(storyScanLabels(story)).toEqual(["Diplomatic relations"]);
+  });
+
+  it("returns single keyword when only one keyword and no topics", () => {
+    const story = storyWithoutTopic({
+      tags: {
+        topics: [],
+        keywords: ["sanctions"],
+        geographies: ["US"],
+      },
+    });
+    expect(storyScanLabels(story)).toEqual(["sanctions"]);
+  });
+
+  it("falls back to story.topic when tags are absent", () => {
+    const legacy = makeStory({ topic: "Diplomatic relations", tags: undefined });
+    expect(storyScanLabels(legacy)).toEqual(["Diplomatic relations"]);
+  });
+
+  it("dedupes topics and keywords before counting/sorting", () => {
+    const story = makeStory({
+      tags: {
+        topics: ["Migration policy", "Migration policy"],
+        keywords: ["sanctions", "sanctions"],
+        geographies: ["US"],
+      },
+    });
+    // After dedupe: 1 topic, 1 keyword → priority 3 (topic + keyword)
+    expect(storyScanLabels(story)).toEqual(["Migration policy", "sanctions"]);
+  });
+
+  // Geographies are intentionally ignored on the scan row. With no topic
+  // fallback and empty topics/keywords tags, T and K are both empty → [].
+  it("never includes geography on the scan row", () => {
+    const story = storyWithoutTopic({
+      tags: {
+        topics: [],
+        keywords: [],
+        geographies: ["US", "Colombia"],
+      },
+    });
+    expect(storyScanLabels(story)).toEqual([]);
+  });
+
+  // No `story.topic` (so no topic fallback) and no `tags` at all → there is
+  // simply no topics/keywords evidence to draw on, so the scan row is empty.
+  it("returns an empty array when no topics or keywords are available", () => {
+    const story = storyWithoutTopic({ tags: undefined });
+    expect(storyScanLabels(story)).toEqual([]);
   });
 });
 
