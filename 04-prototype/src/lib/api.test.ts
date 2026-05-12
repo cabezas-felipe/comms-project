@@ -5,6 +5,7 @@ import {
   DashboardFetchError,
   fetchDashboardPayload,
   fetchDashboardWithMeta,
+  refreshDashboard,
 } from "@/lib/api";
 import { STORIES } from "@/data/stories";
 
@@ -237,6 +238,58 @@ describe("fetchDashboardPayload", () => {
     expect(selection).toBeNull();
   });
 
+  it("fetchDashboardWithMeta surfaces _meta.refreshedAt when present and valid", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { refreshedAt: "2026-05-08T00:00:00Z" },
+      }),
+    });
+    const { refreshedAt } = await fetchDashboardWithMeta({ fetcher });
+    expect(refreshedAt).toBe("2026-05-08T00:00:00Z");
+  });
+
+  it("fetchDashboardWithMeta returns refreshedAt=null when _meta.refreshedAt is missing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: CONTRACT_VERSION, stories: STORIES }),
+    });
+    const { refreshedAt } = await fetchDashboardWithMeta({ fetcher });
+    expect(refreshedAt).toBeNull();
+  });
+
+  it("fetchDashboardWithMeta returns refreshedAt=null when _meta.refreshedAt is not a valid date string", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { refreshedAt: "not-a-date" },
+      }),
+    });
+    const { refreshedAt } = await fetchDashboardWithMeta({ fetcher });
+    expect(refreshedAt).toBeNull();
+  });
+
+  it("fetchDashboardWithMeta returns refreshedAt=null when _meta.refreshedAt is the wrong type", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { refreshedAt: 1715126400000 },
+      }),
+    });
+    const { refreshedAt } = await fetchDashboardWithMeta({ fetcher });
+    expect(refreshedAt).toBeNull();
+  });
+
   it("rethrows AbortError immediately without retrying or sleeping", async () => {
     const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
     const fetcher = vi.fn().mockRejectedValue(abortError);
@@ -414,6 +467,52 @@ describe("Phase 5: bootstrapDashboard", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it("bootstrapDashboard surfaces _meta.refreshedAt when present and valid", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: {
+          hasSnapshot: true,
+          refreshedAt: "2026-05-08T12:34:56Z",
+          bootstrapDecision: "served_fresh_snapshot",
+        },
+      }),
+    });
+    const { refreshedAt } = await bootstrapDashboard({ fetcher, retries: 0 });
+    expect(refreshedAt).toBe("2026-05-08T12:34:56Z");
+  });
+
+  it("bootstrapDashboard returns refreshedAt=null when _meta.refreshedAt is missing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { hasSnapshot: true, bootstrapDecision: "ran_refresh" },
+      }),
+    });
+    const { refreshedAt } = await bootstrapDashboard({ fetcher, retries: 0 });
+    expect(refreshedAt).toBeNull();
+  });
+
+  it("bootstrapDashboard returns refreshedAt=null when _meta.refreshedAt is invalid", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { hasSnapshot: true, refreshedAt: "definitely not a date" },
+      }),
+    });
+    const { refreshedAt } = await bootstrapDashboard({ fetcher, retries: 0 });
+    expect(refreshedAt).toBeNull();
+  });
+
   it("backs off between HTTP non-2xx retries (bootstrap parity)", async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: false,
@@ -428,5 +527,176 @@ describe("Phase 5: bootstrapDashboard", () => {
     expect(sleep).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenNthCalledWith(1, 200);
     expect(sleep).toHaveBeenNthCalledWith(2, 400);
+  });
+});
+
+describe("refreshDashboard", () => {
+  it("POSTs to /api/dashboard/refresh by default and returns { payload, selection, refreshedAt }", async () => {
+    let capturedUrl = "";
+    let capturedMethod = "";
+    const fetcher = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      capturedUrl = url;
+      capturedMethod = init.method ?? "";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          contractVersion: CONTRACT_VERSION,
+          stories: STORIES,
+          _meta: {
+            refreshedAt: "2026-05-08T12:34:56Z",
+            selection: {
+              sourceSelectionMode: "strict",
+              sourceFallbackUsed: false,
+              matchedSourceCount: 2,
+              selectedSourceCount: 2,
+              unmatchedSelectedSources: [],
+              unavailableConnectorCount: 0,
+              relevantItemCount: 4,
+            },
+          },
+        }),
+      };
+    });
+    const { payload, selection, refreshedAt } = await refreshDashboard({ fetcher, retries: 0 });
+    expect(capturedUrl).toBe("/api/dashboard/refresh");
+    expect(capturedMethod).toBe("POST");
+    expect(payload.contractVersion).toBe(CONTRACT_VERSION);
+    expect(refreshedAt).toBe("2026-05-08T12:34:56Z");
+    expect(selection?.sourceSelectionMode).toBe("strict");
+    expect(selection?.matchedSourceCount).toBe(2);
+  });
+
+  it("returns refreshedAt=null when _meta.refreshedAt is missing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: CONTRACT_VERSION, stories: STORIES }),
+    });
+    const { refreshedAt } = await refreshDashboard({ fetcher, retries: 0 });
+    expect(refreshedAt).toBeNull();
+  });
+
+  it("returns refreshedAt=null when _meta.refreshedAt is not a parseable date string", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { refreshedAt: "definitely not a date" },
+      }),
+    });
+    const { refreshedAt } = await refreshDashboard({ fetcher, retries: 0 });
+    expect(refreshedAt).toBeNull();
+  });
+
+  it("returns refreshedAt=null when _meta.refreshedAt is the wrong type", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { refreshedAt: 1715126400000 },
+      }),
+    });
+    const { refreshedAt } = await refreshDashboard({ fetcher, retries: 0 });
+    expect(refreshedAt).toBeNull();
+  });
+
+  it("returns selection=null when _meta.selection is malformed (defensive parse)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { selection: { sourceSelectionMode: "not-a-valid-mode" } },
+      }),
+    });
+    const { selection } = await refreshDashboard({ fetcher, retries: 0 });
+    expect(selection).toBeNull();
+  });
+
+  it("throws DashboardFetchError(kind=http) on non-2xx after retries exhausted", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    let caught: unknown;
+    try {
+      await refreshDashboard({ fetcher, retries: 1, sleep });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(DashboardFetchError);
+    expect((caught as DashboardFetchError).kind).toBe("http");
+    expect((caught as DashboardFetchError).status).toBe(503);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws DashboardFetchError(kind=network) on network failures and respects retries", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error("network down"));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    let caught: unknown;
+    try {
+      await refreshDashboard({ fetcher, retries: 2, sleep });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(DashboardFetchError);
+    expect((caught as DashboardFetchError).kind).toBe("network");
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenNthCalledWith(1, 200);
+    expect(sleep).toHaveBeenNthCalledWith(2, 400);
+  });
+
+  it("backs off between HTTP non-2xx retries (parity with other helpers)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({}),
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      refreshDashboard({ fetcher, retries: 2, sleep })
+    ).rejects.toBeInstanceOf(DashboardFetchError);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenNthCalledWith(1, 200);
+    expect(sleep).toHaveBeenNthCalledWith(2, 400);
+  });
+
+  it("throws DashboardFetchError(kind=contract) when response fails contract validation", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: "wrong-version", stories: [] }),
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    let caught: unknown;
+    try {
+      await refreshDashboard({ fetcher, retries: 1, sleep });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(DashboardFetchError);
+    expect((caught as DashboardFetchError).kind).toBe("contract");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("rethrows AbortError immediately without retrying or sleeping", async () => {
+    const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
+    const fetcher = vi.fn().mockRejectedValue(abortError);
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      refreshDashboard({ fetcher, retries: 2, sleep })
+    ).rejects.toThrow("aborted");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });
