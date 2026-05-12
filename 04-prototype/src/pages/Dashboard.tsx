@@ -483,15 +483,27 @@ function findSourceInStories(
   return null;
 }
 
-function buildHeadline(counts: { rising: number; steady: number; falling: number }): string {
+export function buildHeadline(counts: {
+  rising: number;
+  steady: number;
+  falling: number;
+}): string {
   const total = counts.rising + counts.steady + counts.falling;
-  if (total === 0) return "Steady tempo across your beat.";
-  if (counts.rising === 0 && counts.falling === 0) return "All steady.";
+  if (total === 0) return "Quiet for this view.";
+
+  const order = ["rising", "steady", "falling"] as const;
   const parts: string[] = [];
-  if (counts.rising > 0)
-    parts.push(`${counts.rising} ${counts.rising === 1 ? "narrative" : "narratives"} rising`);
-  if (counts.steady > 0) parts.push(`${counts.steady} steady`);
-  if (counts.falling > 0) parts.push(`${counts.falling} falling`);
+  let isFirst = true;
+  for (const state of order) {
+    const n = counts[state];
+    if (n === 0) continue;
+    if (isFirst) {
+      parts.push(`${n} ${n === 1 ? "narrative" : "narratives"} ${state}`);
+      isFirst = false;
+    } else {
+      parts.push(`${n} ${state}`);
+    }
+  }
   return parts.join(" · ");
 }
 
