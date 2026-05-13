@@ -5,7 +5,7 @@ import {
   generateMetaStoryId,
 } from "../ai/cluster-engine.mjs";
 import { applyGeoFilter, mockAssessGeoConfidence } from "./geo-filter.mjs";
-import { normalizeTopicLabel } from "@tempo/contracts";
+import { normalizeTopicLabel, normalizeSourceIdentity } from "@tempo/contracts";
 import {
   resolveSelectedSources,
   buildMatchedOutletSet,
@@ -580,7 +580,18 @@ function buildStory(metaStory, sourceItems, settings) {
     whyItMatters: metaStory.subtitle,
     whatChanged: `Latest update ${freshestMinutesAgo} min ago.`,
     priority,
-    outletCount: sourceItems.length,
+    // `outletCount` reports unique source identities (one per distinct outlet/
+    // handle); the prototype's collapsed story-card chip surfaces this as
+    // "N sources". Total pieces are still available via `sources.length`.
+    // `normalizeSourceIdentity` collapses casing/whitespace so the same outlet
+    // emitted with formatting drift ("Reuters" / "reuters ") counts once.
+    // Blank/whitespace-only outlets normalize to "" and are filtered out so
+    // missing-data rows never inflate the count.
+    outletCount: new Set(
+      sourceItems
+        .map((i) => normalizeSourceIdentity(i.outlet))
+        .filter((k) => k.length > 0)
+    ).size,
     tags: deriveStoryTags(sourceItems, settings),
     sources: sourceItems.map((item) => ({
       id: item.sourceId,

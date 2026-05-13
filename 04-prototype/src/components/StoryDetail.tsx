@@ -53,9 +53,6 @@ export default function StoryDetail({ story, onClose }: Props) {
         <section>
           <div className="mb-3 flex items-baseline justify-between">
             <h3 className="eyebrow">Sources · {story.sources.length}</h3>
-            <span className="font-mono text-[11px] text-muted-foreground">
-              {story.outletCount} outlets total
-            </span>
           </div>
           <ul className="divide-y divide-rule/50 border-y border-rule/50">
             {story.sources.map((s) => (

@@ -95,3 +95,20 @@ export function normalizeSourceName(name: string): string {
   const trimmed = name.trim();
   return SOURCE_NAME_ALIASES[trimmed.toLowerCase()] ?? trimmed;
 }
+
+/**
+ * Produce a comparison key for "is this the same source identity?" decisions.
+ *
+ * Trims, collapses internal whitespace to a single space, and lowercases.  Use
+ * this as the Set/Map key when computing unique source counts (e.g. the
+ * collapsed story-card chip, the API's `outletCount`).  Display labels stay
+ * untouched — callers should keep the original `outlet` string for UI; only
+ * the count derives from this normalized form.
+ *
+ * Intentionally narrower than `normalizeSourceName`, which additionally
+ * resolves alias spellings ("nyt" → "New York Times").  Identity collapse is
+ * about formatting variance only; alias resolution is a separate concern.
+ */
+export function normalizeSourceIdentity(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}

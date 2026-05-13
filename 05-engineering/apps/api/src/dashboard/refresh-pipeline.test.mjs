@@ -2977,3 +2977,273 @@ test("runRefreshPipeline: repeated out-of-settings entities in story text do not
   assert.deepEqual(tags.geographies, ["US"], "Brazil must not leak");
   assert.deepEqual(settings, settingsBefore, "settings must not be auto-expanded");
 });
+
+// ─── outletCount = unique source identities ─────────────────────────────────
+//
+// Story-card collapsed chip displays unique outlets/handles, not row count.
+// `outletCount` is the contract field that powers that chip, so the pipeline
+// must emit `|distinct outlets|` rather than `sources.length`.
+
+test("runRefreshPipeline: outletCount reflects unique outlet identities, not row count", async () => {
+  const rawItems = [
+    makeItem({
+      sourceId: "src-a",
+      outlet: "Reuters",
+      minutesAgo: 10,
+      headline: "OFAC weighs new tools",
+      body: ["Body A."],
+    }),
+    makeItem({
+      sourceId: "src-b",
+      outlet: "Reuters", // duplicate outlet, distinct piece
+      minutesAgo: 20,
+      headline: "OFAC follow-up filing",
+      body: ["Body B."],
+    }),
+    makeItem({
+      sourceId: "src-c",
+      outlet: "El Tiempo",
+      minutesAgo: 30,
+      headline: "OFAC update echoes regionally",
+      body: ["Body C."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "ofac-dup",
+    title: "OFAC coverage",
+    subtitle: "Sub.",
+    source_item_ids: ["src-a", "src-b", "src-c"],
+    summary: "Summary.",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: ["OFAC"],
+      geographies: ["US"],
+    },
+    factual_claims: [
+      "Reuters reports: OFAC weighs new tools",
+      "Reuters reports: OFAC follow-up filing",
+      "El Tiempo reports: OFAC update echoes regionally",
+    ],
+    claim_evidence_map: { "0": ["src-a"], "1": ["src-b"], "2": ["src-c"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const story = payload.stories[0];
+  assert.equal(story.sources.length, 3, "all 3 source pieces remain on the story");
+  assert.equal(story.outletCount, 2, "outletCount must count unique outlets, not rows");
+});
+
+test("runRefreshPipeline: outletCount collapses casing/whitespace variants of the same outlet", async () => {
+  // Same outlet emitted three ways ("Reuters", "reuters ", "REUTERS") plus one
+  // legitimately distinct outlet — pipeline should report outletCount=2.
+  //
+  // `traditionalSources: []` is used so `selectSourcePool` doesn't drop the
+  // whitespace/case variants on the way in — this test is about the unique
+  // count emitted by buildStory, not about source-selection matching.
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  const rawItems = [
+    makeItem({
+      sourceId: "src-a",
+      outlet: "Reuters",
+      minutesAgo: 10,
+      headline: "OFAC weighs new tools",
+      body: ["Body A."],
+    }),
+    makeItem({
+      sourceId: "src-b",
+      outlet: "reuters ",
+      minutesAgo: 20,
+      headline: "OFAC follow-up filing",
+      body: ["Body B."],
+    }),
+    makeItem({
+      sourceId: "src-c",
+      outlet: "REUTERS",
+      minutesAgo: 30,
+      headline: "OFAC briefing aside",
+      body: ["Body C."],
+    }),
+    makeItem({
+      sourceId: "src-d",
+      outlet: "El Tiempo",
+      minutesAgo: 40,
+      headline: "OFAC update echoes regionally",
+      body: ["Body D."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "ofac-fmt",
+    title: "OFAC coverage",
+    subtitle: "Sub.",
+    source_item_ids: ["src-a", "src-b", "src-c", "src-d"],
+    summary: "Summary.",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: ["OFAC"],
+      geographies: ["US"],
+    },
+    factual_claims: [
+      "Reuters reports: OFAC weighs new tools",
+      "reuters reports: OFAC follow-up filing",
+      "REUTERS reports: OFAC briefing aside",
+      "El Tiempo reports: OFAC update echoes regionally",
+    ],
+    claim_evidence_map: {
+      "0": ["src-a"],
+      "1": ["src-b"],
+      "2": ["src-c"],
+      "3": ["src-d"],
+    },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const story = payload.stories[0];
+  assert.equal(story.sources.length, 4, "all 4 source pieces remain on the story");
+  assert.equal(
+    story.outletCount,
+    2,
+    "outletCount must treat case/whitespace variants of the same outlet as one"
+  );
+  // Display labels must NOT be normalized — frontend shows the original casing.
+  const outletsAsRendered = story.sources.map((s) => s.outlet);
+  assert.deepEqual(outletsAsRendered, ["Reuters", "reuters ", "REUTERS", "El Tiempo"]);
+});
+
+test("runRefreshPipeline: outletCount excludes blank/whitespace-only outlets", async () => {
+  // Defensive hardening: if upstream emits a row with an empty or whitespace-
+  // only outlet, the normalized identity is "" — that must NOT count as a
+  // source identity (otherwise missing-data rows would inflate the chip count).
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  const rawItems = [
+    makeItem({
+      sourceId: "src-a",
+      outlet: "Reuters",
+      minutesAgo: 10,
+      headline: "OFAC weighs new tools",
+      body: ["Body A."],
+    }),
+    makeItem({
+      sourceId: "src-b",
+      outlet: "",
+      minutesAgo: 20,
+      headline: "OFAC follow-up filing",
+      body: ["Body B."],
+    }),
+    makeItem({
+      sourceId: "src-c",
+      outlet: "   ",
+      minutesAgo: 30,
+      headline: "OFAC briefing aside",
+      body: ["Body C."],
+    }),
+    makeItem({
+      sourceId: "src-d",
+      outlet: "El Tiempo",
+      minutesAgo: 40,
+      headline: "OFAC update echoes regionally",
+      body: ["Body D."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "ofac-blank",
+    title: "OFAC coverage",
+    subtitle: "Sub.",
+    source_item_ids: ["src-a", "src-b", "src-c", "src-d"],
+    summary: "Summary.",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: ["OFAC"],
+      geographies: ["US"],
+    },
+    factual_claims: [
+      "Reuters reports: OFAC weighs new tools",
+      "Unknown reports: OFAC follow-up filing",
+      "Unknown reports: OFAC briefing aside",
+      "El Tiempo reports: OFAC update echoes regionally",
+    ],
+    claim_evidence_map: {
+      "0": ["src-a"],
+      "1": ["src-b"],
+      "2": ["src-c"],
+      "3": ["src-d"],
+    },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const story = payload.stories[0];
+  assert.equal(story.sources.length, 4, "all 4 source pieces remain on the story");
+  assert.equal(
+    story.outletCount,
+    2,
+    "outletCount must skip blank/whitespace-only outlets (only Reuters + El Tiempo count)"
+  );
+});
+
+test("runRefreshPipeline: outletCount is 0 when every outlet is blank", async () => {
+  // Edge case: a meta-story whose source items all lack outlet data should
+  // emit outletCount=0 rather than 1 (one "" key).  Sources list is preserved
+  // so the expanded view can still render rows with empty outlet strings.
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  const rawItems = [
+    makeItem({
+      sourceId: "src-a",
+      outlet: "",
+      minutesAgo: 10,
+      headline: "OFAC weighs new tools",
+      body: ["Body A."],
+    }),
+    makeItem({
+      sourceId: "src-b",
+      outlet: "   ",
+      minutesAgo: 20,
+      headline: "OFAC follow-up filing",
+      body: ["Body B."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "ofac-blank-only",
+    title: "OFAC coverage",
+    subtitle: "Sub.",
+    source_item_ids: ["src-a", "src-b"],
+    summary: "Summary.",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: ["OFAC"],
+      geographies: ["US"],
+    },
+    factual_claims: [
+      "Unknown reports: OFAC weighs new tools",
+      "Unknown reports: OFAC follow-up filing",
+    ],
+    claim_evidence_map: { "0": ["src-a"], "1": ["src-b"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const story = payload.stories[0];
+  assert.equal(story.sources.length, 2);
+  assert.equal(
+    story.outletCount,
+    0,
+    "outletCount must be 0 when no source has a non-blank outlet"
+  );
+});
