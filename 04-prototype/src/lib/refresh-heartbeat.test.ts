@@ -352,7 +352,7 @@ describe("useRefreshHeartbeat", () => {
     // failed tick.
     const storage = createMemoryStorage();
     const okFetcher = vi.fn().mockResolvedValue(OK_RESULT);
-    let nowMs = 27_000_000;
+    const nowMs = 27_000_000;
     writeLastAttemptAt(nowMs - 2 * REFRESH_INTERVAL_MS, storage);
     const onAttemptStart = vi.fn().mockReturnValueOnce("token-success");
     const onAttemptComplete = vi.fn();
