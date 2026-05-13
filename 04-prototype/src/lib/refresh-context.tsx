@@ -8,13 +8,23 @@ import { notifyError } from "./notify";
 // App-scope refresh state.  Two writers:
 //   1. The heartbeat (runs every 60 min of real elapsed time when authenticated)
 //   2. The dashboard's initial-mount loader (bootstrap / GET) — records the
-//      `refreshedAt` it just received so the header updates immediately on
+//      check timestamp it just received so the header updates immediately on
 //      first paint, without waiting on the heartbeat.
 //
 // Readers:
 //   - <AppHeader> consumes `lastRefreshedAt` for the "Last refresh" badge.
 //   - <Dashboard> consumes `heartbeatResult` to overlay refreshed stories
 //     while the page is mounted.
+//
+// Header display prefers `lastCheckedAt` (the server's most recent feed-check
+// timestamp) over `refreshedAt` (the most recent snapshot write) so the clock
+// advances on every refresh attempt — even watermark short-circuits where the
+// story list doesn't change.  Older API responses without `lastCheckedAt`
+// fall back to `refreshedAt` so prerelease clients still get a sensible value.
+
+function resolveLastCheckDisplayAt(result: DashboardFetchResult): string | null {
+  return result.lastCheckedAt ?? result.refreshedAt ?? null;
+}
 
 interface RefreshContextValue {
   lastRefreshedAt: string | null;
@@ -35,7 +45,7 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
     enabled: !!recognizedIdentity,
     onSuccess: (result) => {
       setHeartbeatResult(result);
-      setLastRefreshedAt(result.refreshedAt ?? null);
+      setLastRefreshedAt(resolveLastCheckDisplayAt(result));
     },
     onError: (error: unknown) => {
       const message = error instanceof Error ? error.message : "Heartbeat refresh failed";
@@ -45,7 +55,7 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
   });
 
   const recordSuccessfulRefresh = useCallback((result: DashboardFetchResult) => {
-    setLastRefreshedAt(result.refreshedAt ?? null);
+    setLastRefreshedAt(resolveLastCheckDisplayAt(result));
   }, []);
 
   const value = useMemo<RefreshContextValue>(

@@ -12,7 +12,7 @@ process.env.TEMPO_DATA_DIR = tmpDir;
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const { readSnapshot, writeSnapshot, getLockedTitles, insertTitleLocks } = await import(
+const { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks } = await import(
   "./dashboard-snapshot-repo.mjs"
 );
 
@@ -128,4 +128,35 @@ test("insertTitleLocks: no-op for empty array", async () => {
 test("getLockedTitles: returns empty map for empty IDs array", async () => {
   const locks = await getLockedTitles("any-user", []);
   assert.equal(locks.size, 0);
+});
+
+// ─── writeSnapshotMeta / lastCheckedAt round-trip ─────────────────────────────
+
+test("writeSnapshotMeta + readSnapshot: lastCheckedAt round-trips through _meta.lastCheckedAt", async () => {
+  const userId = "meta-roundtrip-user";
+  await writeSnapshot(userId, SAMPLE_PAYLOAD);
+  const initial = await readSnapshot(userId);
+  // Initial write doesn't set _lastCheckedAt — server.mjs is responsible for
+  // populating it on full runs.  The repo must omit lastCheckedAt rather than
+  // back-fill it with refreshed_at, so clients can detect the older shape.
+  assert.equal(initial._meta.lastCheckedAt, undefined);
+
+  const checkedAt = "2026-05-12T15:00:00.000Z";
+  await writeSnapshotMeta(userId, { lastCheckedAt: checkedAt });
+  const after = await readSnapshot(userId);
+  assert.equal(after._meta.lastCheckedAt, checkedAt);
+  // refreshedAt is preserved by writeSnapshotMeta — only the check stamp moves.
+  assert.equal(after._meta.refreshedAt, initial._meta.refreshedAt);
+  // Stories unchanged.
+  assert.equal(after.stories.length, SAMPLE_PAYLOAD.stories.length);
+  // Internal storage key must not leak at the top level — it's lifted into _meta.
+  assert.equal(after._lastCheckedAt, undefined);
+});
+
+test("writeSnapshotMeta: no-op when no snapshot exists for user", async () => {
+  await assert.doesNotReject(() =>
+    writeSnapshotMeta("ghost-user", { lastCheckedAt: "2026-05-12T15:00:00.000Z" })
+  );
+  const result = await readSnapshot("ghost-user");
+  assert.equal(result, null);
 });

@@ -24,12 +24,25 @@ function holdBucketFile(userId) {
 }
 
 // ─── File adapter ─────────────────────────────────────────────────────────────
+//
+// `lastCheckedAt` is persisted INSIDE the payload as `_lastCheckedAt` so we
+// don't need a separate column / file field.  On read we lift it out of the
+// payload and into `_meta.lastCheckedAt` so callers see the same shape regardless
+// of storage backend.  Persisted blobs from before this field existed simply
+// omit it — clients fall back to `refreshedAt` for display.
+
+function liftSnapshotMeta(payload, refreshed_at) {
+  const { _lastCheckedAt, ...rest } = payload ?? {};
+  const meta = { refreshedAt: refreshed_at, hasSnapshot: true };
+  if (typeof _lastCheckedAt === "string") meta.lastCheckedAt = _lastCheckedAt;
+  return { ...rest, _meta: meta };
+}
 
 async function readSnapshotFile(userId) {
   try {
     const raw = await fs.readFile(snapshotFile(userId), "utf8");
     const { payload, refreshed_at } = JSON.parse(raw);
-    return { ...payload, _meta: { refreshedAt: refreshed_at, hasSnapshot: true } };
+    return liftSnapshotMeta(payload, refreshed_at);
   } catch {
     return null;
   }
@@ -43,6 +56,23 @@ async function writeSnapshotFile(userId, payload) {
     JSON.stringify({ payload, refreshed_at: new Date().toISOString() }, null, 2),
     "utf8"
   );
+}
+
+// Narrow update path: bump `_lastCheckedAt` on the persisted payload without
+// rewriting `refreshed_at`.  Used by the refresh route on unchanged / in_flight
+// branches so a full page reload still reflects the latest check time.
+// No-op when the snapshot doesn't exist on disk yet.
+async function writeSnapshotMetaFile(userId, { lastCheckedAt }) {
+  const file = snapshotFile(userId);
+  let parsed;
+  try {
+    const raw = await fs.readFile(file, "utf8");
+    parsed = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  parsed.payload = { ...parsed.payload, _lastCheckedAt: lastCheckedAt };
+  await fs.writeFile(file, JSON.stringify(parsed, null, 2), "utf8");
 }
 
 async function readLocksFileRaw(userId) {
@@ -105,7 +135,7 @@ async function readSnapshotSupabase(userId) {
     .maybeSingle();
   if (error) throw new Error(`[snapshot-repo] read failed: ${error.message}`);
   if (!data) return null;
-  return { ...data.payload, _meta: { refreshedAt: data.refreshed_at, hasSnapshot: true } };
+  return liftSnapshotMeta(data.payload, data.refreshed_at);
 }
 
 async function writeSnapshotSupabase(userId, payload) {
@@ -114,6 +144,27 @@ async function writeSnapshotSupabase(userId, payload) {
     .from("dashboard_snapshots")
     .upsert({ user_id: userId, payload, refreshed_at: new Date().toISOString() });
   if (error) throw new Error(`[snapshot-repo] write failed: ${error.message}`);
+}
+
+// Narrow meta update: re-write only the `payload` JSONB column (with
+// `_lastCheckedAt` overlaid) and leave `refreshed_at` untouched.  Skipped
+// silently when the row is missing — no insert, since `lastCheckedAt` without
+// a real prior snapshot is meaningless.
+async function writeSnapshotMetaSupabase(userId, { lastCheckedAt }) {
+  const supabase = getSupabaseClient();
+  const { data, error: readErr } = await supabase
+    .from("dashboard_snapshots")
+    .select("payload")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (readErr) throw new Error(`[snapshot-repo] meta read failed: ${readErr.message}`);
+  if (!data) return;
+  const nextPayload = { ...data.payload, _lastCheckedAt: lastCheckedAt };
+  const { error } = await supabase
+    .from("dashboard_snapshots")
+    .update({ payload: nextPayload })
+    .eq("user_id", userId);
+  if (error) throw new Error(`[snapshot-repo] meta write failed: ${error.message}`);
 }
 
 async function getLockedTitlesSupabase(userId, metaStoryIds) {
@@ -185,6 +236,20 @@ export async function readSnapshot(userId) {
 export async function writeSnapshot(userId, payload) {
   if (isSupabaseEnabled()) return writeSnapshotSupabase(userId, payload);
   return writeSnapshotFile(userId, payload);
+}
+
+/**
+ * Updates only the `lastCheckedAt` field of an existing snapshot.  Preserves
+ * `refreshed_at` and `stories` — designed for refresh outcomes that don't
+ * produce a new pipeline result (watermark unchanged, in-flight skip,
+ * error fallback) but still represent "we checked your feeds at this time".
+ * Silently no-ops when no prior snapshot exists.
+ * @param {string} userId
+ * @param {{ lastCheckedAt: string }} meta
+ */
+export async function writeSnapshotMeta(userId, meta) {
+  if (isSupabaseEnabled()) return writeSnapshotMetaSupabase(userId, meta);
+  return writeSnapshotMetaFile(userId, meta);
 }
 
 /**

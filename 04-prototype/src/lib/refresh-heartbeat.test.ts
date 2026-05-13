@@ -27,6 +27,7 @@ const OK_RESULT = {
   payload: { contractVersion: CONTRACT_VERSION, stories: [] },
   selection: null,
   refreshedAt: "2026-05-11T12:00:00Z",
+  lastCheckedAt: "2026-05-11T12:00:00Z",
 };
 
 beforeEach(() => {

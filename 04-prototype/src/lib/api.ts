@@ -17,6 +17,16 @@ export interface DashboardFetchResult {
    * schema — so older/forward responses can't break dashboard fetches.
    */
   refreshedAt: string | null;
+  /**
+   * ISO-8601 timestamp lifted from `_meta.lastCheckedAt`.  Distinct from
+   * `refreshedAt`: this is the last time the server *checked* the user's
+   * feeds (advances on every refresh attempt, including no-ops like
+   * watermark short-circuits and in-flight skips).  `refreshedAt` only
+   * advances when a new snapshot is written.  `null` when the response is
+   * from an older API that doesn't carry the field — callers should fall
+   * back to `refreshedAt` for display.
+   */
+  lastCheckedAt: string | null;
 }
 
 export interface DashboardBootstrapResult extends DashboardFetchResult {
@@ -94,6 +104,12 @@ function parseRefreshedAtSafe(raw: unknown): string | null {
   return Number.isFinite(parsed) ? raw : null;
 }
 
+function parseLastCheckedAtSafe(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? raw : null;
+}
+
 // Mirrors server-side resolver precedence: bearer > email_recognition.
 // Not production auth for the email path — prototype identity layer only.
 async function buildIdentityHeaders(): Promise<Record<string, string>> {
@@ -149,12 +165,13 @@ export async function fetchDashboardWithMeta(
         );
       }
       const raw = (await response.json()) as {
-        _meta?: { selection?: unknown; refreshedAt?: unknown };
+        _meta?: { selection?: unknown; refreshedAt?: unknown; lastCheckedAt?: unknown };
       };
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
       const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
-      return { payload, selection, refreshedAt };
+      const lastCheckedAt = parseLastCheckedAtSafe(raw?._meta?.lastCheckedAt);
+      return { payload, selection, refreshedAt, lastCheckedAt };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;
@@ -222,13 +239,14 @@ export async function bootstrapDashboard(
         );
       }
       const raw = (await response.json()) as {
-        _meta?: { selection?: unknown; bootstrapDecision?: unknown; refreshedAt?: unknown };
+        _meta?: { selection?: unknown; bootstrapDecision?: unknown; refreshedAt?: unknown; lastCheckedAt?: unknown };
       };
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
       const decision = parseBootstrapDecision(raw?._meta?.bootstrapDecision);
       const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
-      return { payload, selection, decision, refreshedAt };
+      const lastCheckedAt = parseLastCheckedAtSafe(raw?._meta?.lastCheckedAt);
+      return { payload, selection, decision, refreshedAt, lastCheckedAt };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;
@@ -280,12 +298,13 @@ export async function refreshDashboard(
         );
       }
       const raw = (await response.json()) as {
-        _meta?: { selection?: unknown; refreshedAt?: unknown };
+        _meta?: { selection?: unknown; refreshedAt?: unknown; lastCheckedAt?: unknown };
       };
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
       const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
-      return { payload, selection, refreshedAt };
+      const lastCheckedAt = parseLastCheckedAtSafe(raw?._meta?.lastCheckedAt);
+      return { payload, selection, refreshedAt, lastCheckedAt };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;
