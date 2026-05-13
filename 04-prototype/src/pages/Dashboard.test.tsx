@@ -600,10 +600,9 @@ describe("Heartbeat → Dashboard story overlay", () => {
 
 // ─── 2-state "Next refresh" footer ───────────────────────────────────────────
 // Footer drives off the refresh context: the heartbeat owns / stamps
-// `lastAttemptAt` (and `lastRefreshedAt` is the preferred baseline), while
-// the dashboard loader only toggles `isRefreshing` via recordAttemptStart /
-// recordAttemptFinished.  Two states only: "Next refresh in ~Xm"
-// (countdown) or "Refreshing now…" (due/in-flight).
+// `lastAttemptAt`, while the dashboard loader only toggles `isRefreshing` via
+// recordAttemptStart / recordAttemptFinished.  Two states only:
+// "Next refresh in ~Xm" (countdown) or "Refreshing now…" (in-flight).
 
 describe("Next refresh footer (2-state)", () => {
   it("shows minute-rounded countdown when lastAttemptAt is set and not yet due", async () => {
@@ -633,7 +632,7 @@ describe("Next refresh footer (2-state)", () => {
     expect(screen.getByTestId("refresh-footer").textContent).toBe("Refreshing now…");
   });
 
-  it("shows 'Refreshing now…' once now >= nextAttemptAt even without an in-flight tick (no negative countdown)", async () => {
+  it("clamps to 'Next refresh in ~1m' once now >= nextAttemptAt without an in-flight tick", async () => {
     // Last attempt happened just past the heartbeat interval — past the
     // boundary, but no in-flight tick yet (scheduling jitter, hidden tab).
     mockLastAttemptAt = Date.now() - REFRESH_INTERVAL_MS - 60 * 1000;
@@ -643,7 +642,7 @@ describe("Next refresh footer (2-state)", () => {
     renderAt(null);
     await screen.findByTestId("dashboard-empty");
 
-    expect(screen.getByTestId("refresh-footer").textContent).toBe("Refreshing now…");
+    expect(screen.getByTestId("refresh-footer").textContent).toBe("Next refresh in ~1m");
   });
 
   it("shows 'Refreshing now…' before any attempt timestamp exists (initial-mount fallback)", async () => {
@@ -731,34 +730,33 @@ describe("Dashboard loader records refresh attempts", () => {
   });
 });
 
-// ─── Footer baseline alignment with the header ───────────────────────────────
-// Real-world bug: header read "Last refresh 9:24 PM" while the footer claimed
-// "Next refresh in ~59m" because the dashboard's page-load loader stamped a
-// fresh `lastAttemptAt` even though the server's `lastCheckedAt` (what the
-// header surfaces) was still 9:24 PM.  Footer must use the same anchor as
-// the header so the math is coherent.
+// ─── Footer + header anchored to one source of truth ────────────────────────
+// The provider exposes `lastRefreshedAt` (ISO) and `lastAttemptAt` (ms) as
+// two views of a single anchor.  The footer's countdown reads `lastAttemptAt`
+// directly; the header reads the derived ISO.  These tests guard the footer's
+// behavior under the unified contract.
 
-describe("Footer baseline alignment with lastRefreshedAt", () => {
-  it("uses lastRefreshedAt as the countdown baseline even when lastAttemptAt is fresher", async () => {
-    // Header shows ~37 min ago; current time is "now".  Footer should read
-    // ~23m (60 - 37) — NOT ~60m anchored to a freshly-stamped lastAttemptAt.
-    const elapsedMs = 37 * 60 * 1000 + 1000;
-    mockLastRefreshedAt = new Date(Date.now() - elapsedMs).toISOString();
-    mockLastAttemptAt = Date.now() - 1000; // just stamped — must be ignored
+describe("Footer reads single attempt anchor (header + footer share state)", () => {
+  it("derives the countdown from lastAttemptAt — independent of any drift in lastRefreshedAt", async () => {
+    // Even when the mocks deliberately set divergent values, the footer must
+    // only consult `lastAttemptAt`.  Under the real provider contract these
+    // would already be in sync; this is a defensive guard against future
+    // regressions that re-introduce a second baseline.
+    const attemptMs = Date.now() - 1000;
+    mockLastRefreshedAt = new Date(Date.now() - 37 * 60 * 1000).toISOString();
+    mockLastAttemptAt = attemptMs;
     mockIsRefreshing = false;
     fetchSpy.mockResolvedValue(OK_RESULT);
 
     renderAt(null);
     await screen.findByTestId("dashboard-empty");
 
-    expect(screen.getByTestId("refresh-footer").textContent).toBe("Next refresh in ~23m");
+    expect(screen.getByTestId("refresh-footer").textContent).toBe("Next refresh in ~60m");
   });
 
-  it("falls back to lastAttemptAt only when lastRefreshedAt is null", async () => {
-    // No server timestamp yet (e.g. pre-first-refresh on a fresh session) —
-    // local stamp is the only baseline.  Still renders a sensible countdown.
-    mockLastRefreshedAt = null;
+  it("renders a 40-min countdown when lastAttemptAt is 20 min old (no in-flight)", async () => {
     mockLastAttemptAt = Date.now() - (20 * 60 * 1000 + 1000);
+    mockLastRefreshedAt = new Date(mockLastAttemptAt).toISOString();
     mockIsRefreshing = false;
     fetchSpy.mockResolvedValue(OK_RESULT);
 
@@ -768,11 +766,9 @@ describe("Footer baseline alignment with lastRefreshedAt", () => {
     expect(screen.getByTestId("refresh-footer").textContent).toBe("Next refresh in ~40m");
   });
 
-  it("isRefreshing wins over the baseline (true in-flight always shows 'Refreshing now…')", async () => {
-    // Baseline would render "~30m" but a fetch is genuinely in flight —
-    // the in-flight copy must dominate.
-    mockLastRefreshedAt = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  it("isRefreshing wins over the anchor (true in-flight always shows 'Refreshing now…')", async () => {
     mockLastAttemptAt = Date.now() - 30 * 60 * 1000;
+    mockLastRefreshedAt = new Date(mockLastAttemptAt).toISOString();
     mockIsRefreshing = true;
     fetchSpy.mockResolvedValue(OK_RESULT);
 
@@ -782,19 +778,20 @@ describe("Footer baseline alignment with lastRefreshedAt", () => {
     expect(screen.getByTestId("refresh-footer").textContent).toBe("Refreshing now…");
   });
 
-  it("renders 'Refreshing now…' when the lastRefreshedAt-derived baseline is past-due", async () => {
+  it("clamps to 'Next refresh in ~1m' when the anchor is past-due and no in-flight attempt exists", async () => {
     // Heartbeat scheduling jitter (or a backgrounded tab) can produce a
     // baseline that's just past the 60-min boundary with no in-flight tick.
-    // Footer prefers the in-flight copy over a negative/zero countdown.
-    mockLastRefreshedAt = new Date(Date.now() - REFRESH_INTERVAL_MS - 60 * 1000).toISOString();
-    mockLastAttemptAt = null;
+    // Keep a bounded countdown until an actual attempt flips `isRefreshing`
+    // — never render a negative or zero countdown, never invent a new copy.
+    mockLastAttemptAt = Date.now() - REFRESH_INTERVAL_MS - 60 * 1000;
+    mockLastRefreshedAt = new Date(mockLastAttemptAt).toISOString();
     mockIsRefreshing = false;
     fetchSpy.mockResolvedValue(OK_RESULT);
 
     renderAt(null);
     await screen.findByTestId("dashboard-empty");
 
-    expect(screen.getByTestId("refresh-footer").textContent).toBe("Refreshing now…");
+    expect(screen.getByTestId("refresh-footer").textContent).toBe("Next refresh in ~1m");
   });
 });
 
