@@ -53,6 +53,19 @@ export interface RefreshHeartbeatOptions {
   onSuccess?: (result: DashboardFetchResult) => void;
   /** Called after a failed refresh tick (used for logging/telemetry). */
   onError?: (error: unknown) => void;
+  /**
+   * Called synchronously when a heartbeat attempt begins — *after* the
+   * attempt timestamp is stamped, *before* the network call.  Fires for
+   * every attempt, success or failure.  Used by the provider to drive the
+   * "Refreshing now…" footer and to keep its `lastAttemptAt` in sync.
+   */
+  onAttemptStart?: (timestamp: number) => void;
+  /**
+   * Called when a heartbeat attempt settles (success or failure), regardless
+   * of cancellation.  Pairs with `onAttemptStart` so the provider can clear
+   * its in-flight flag.
+   */
+  onAttemptComplete?: () => void;
   /** Injection seams for tests. */
   fetcher?: () => Promise<DashboardFetchResult>;
   now?: () => number;
@@ -70,6 +83,8 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
     enabled,
     onSuccess,
     onError,
+    onAttemptStart,
+    onAttemptComplete,
     fetcher = refreshDashboard,
     now = Date.now,
     storage = getDefaultStorage(),
@@ -81,6 +96,8 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
   // own dependencies are limited to `enabled` and `intervalMs`.
   const onSuccessRef = useRef(onSuccess);
   const onErrorRef = useRef(onError);
+  const onAttemptStartRef = useRef(onAttemptStart);
+  const onAttemptCompleteRef = useRef(onAttemptComplete);
   const fetcherRef = useRef(fetcher);
   const nowRef = useRef(now);
   const storageRef = useRef<Storage | null>(storage);
@@ -88,6 +105,8 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
 
   useEffect(() => { onSuccessRef.current = onSuccess; }, [onSuccess]);
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  useEffect(() => { onAttemptStartRef.current = onAttemptStart; }, [onAttemptStart]);
+  useEffect(() => { onAttemptCompleteRef.current = onAttemptComplete; }, [onAttemptComplete]);
   useEffect(() => { fetcherRef.current = fetcher; }, [fetcher]);
   useEffect(() => { nowRef.current = now; }, [now]);
   useEffect(() => { storageRef.current = storage; }, [storage]);
@@ -120,7 +139,9 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
       // Stamp BEFORE the network call so concurrent tabs / a remount during
       // the in-flight fetch don't double-attempt.  Failure doesn't reset
       // this — we deliberately want a 60-minute pace even after errors.
-      writeLastAttemptAt(nowRef.current(), storageRef.current);
+      const startedAt = nowRef.current();
+      writeLastAttemptAt(startedAt, storageRef.current);
+      onAttemptStartRef.current?.(startedAt);
 
       try {
         const result = await fetcherRef.current();
@@ -129,6 +150,7 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
         if (!cancelled) onErrorRef.current?.(err);
       } finally {
         inFlightRef.current = false;
+        onAttemptCompleteRef.current?.();
         if (!cancelled) schedule(intervalMs);
       }
     };

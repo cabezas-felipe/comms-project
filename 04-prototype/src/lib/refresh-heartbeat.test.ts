@@ -265,6 +265,63 @@ describe("useRefreshHeartbeat", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it("fires onAttemptStart / onAttemptComplete around each tick — success path", async () => {
+    const storage = createMemoryStorage();
+    const fetcher = vi.fn().mockResolvedValue(OK_RESULT);
+    const onAttemptStart = vi.fn();
+    const onAttemptComplete = vi.fn();
+    const t0 = 21_000_000;
+    // Overdue so the tick fires immediately on mount.
+    writeLastAttemptAt(t0 - 2 * REFRESH_INTERVAL_MS, storage);
+
+    renderHook(() =>
+      useRefreshHeartbeat({
+        enabled: true,
+        fetcher,
+        now: () => t0,
+        storage,
+        onAttemptStart,
+        onAttemptComplete,
+      })
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(onAttemptStart).toHaveBeenCalledTimes(1);
+    expect(onAttemptStart).toHaveBeenCalledWith(t0);
+    expect(onAttemptComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires onAttemptStart even when the fetch rejects (attempt timestamp updates on failed heartbeat too)", async () => {
+    const storage = createMemoryStorage();
+    const fetcher = vi.fn().mockRejectedValue(new Error("boom"));
+    const onAttemptStart = vi.fn();
+    const onAttemptComplete = vi.fn();
+    const onError = vi.fn();
+    const t0 = 23_000_000;
+    writeLastAttemptAt(t0 - 2 * REFRESH_INTERVAL_MS, storage);
+
+    renderHook(() =>
+      useRefreshHeartbeat({
+        enabled: true,
+        fetcher,
+        now: () => t0,
+        storage,
+        onAttemptStart,
+        onAttemptComplete,
+        onError,
+      })
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    // Storage stamp + the start callback both fire regardless of outcome —
+    // the 60-min cadence must hold even when refreshes error.
+    expect(readLastAttemptAt(storage)).toBe(t0);
+    expect(onAttemptStart).toHaveBeenCalledTimes(1);
+    expect(onAttemptStart).toHaveBeenCalledWith(t0);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onAttemptComplete).toHaveBeenCalledTimes(1);
+  });
+
   it("writes the attempt timestamp before the fetch resolves (so a concurrent tab/remount sees the in-flight attempt)", async () => {
     const storage = createMemoryStorage();
     let resolveFetch: ((v: typeof OK_RESULT) => void) | null = null;
