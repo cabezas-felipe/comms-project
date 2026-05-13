@@ -31,6 +31,7 @@ export {
   normalizeTopicLabel,
   normalizeKeywordLabel,
   normalizeSourceName,
+  normalizeSourceIdentity,
   TOPIC_SYNONYMS,
   KEYWORD_SYNONYMS,
   SOURCE_NAME_ALIASES,

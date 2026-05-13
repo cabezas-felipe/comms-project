@@ -2,6 +2,7 @@ import { Story } from "@/data/stories";
 import { DerivedSignals, keySources, Trend } from "@/lib/derive";
 import { storyScanLabels } from "@/lib/dashboard-filters";
 import { timeAgo } from "@/lib/format";
+import { normalizeSourceIdentity } from "@tempo/contracts";
 import { ArrowUpRight, ArrowDownRight, Minus } from "lucide-react";
 
 const TREND_STYLE: Record<
@@ -27,6 +28,20 @@ export default function StoryCard({ story, sig, expanded, onToggle, onOpenSource
   const titleColor = sig.trend === "falling" ? "text-foreground/70" : "text-foreground";
   const sources = keySources(story, 5);
   const scanLabels = storyScanLabels(story);
+  // Collapsed chip = unique source identities (one row per outlet/handle); the
+  // expanded "Key stories" header uses total pieces (one row per source item).
+  // `normalizeSourceIdentity` collapses casing/whitespace so "Reuters" /
+  // "reuters " / "REUTERS" count once.  Blank/whitespace-only outlets
+  // normalize to "" and are filtered out so missing data never inflates the
+  // count.
+  const uniqueSourceCount = new Set(
+    story.sources
+      .map((s) => normalizeSourceIdentity(s.outlet))
+      .filter((k) => k.length > 0)
+  ).size;
+  const totalPieces = story.sources.length;
+  const showKeyStoriesCount = totalPieces >= 6;
+  const topInList = Math.min(5, totalPieces);
 
   return (
     <article className={`px-6 py-4 transition-colors ${expanded ? "bg-surface" : "hover:bg-surface/60"}`}>
@@ -57,7 +72,7 @@ export default function StoryCard({ story, sig, expanded, onToggle, onOpenSource
             </p>
           </div>
 
-          {/* Activity bar + freshest time + outlet count */}
+          {/* Activity bar + freshest time + unique source count */}
           <div className="hidden shrink-0 items-center gap-3 pt-1 sm:flex">
             <div className="relative h-[2px] w-24 overflow-hidden bg-rule/40">
               <div
@@ -69,7 +84,7 @@ export default function StoryCard({ story, sig, expanded, onToggle, onOpenSource
               {timeAgo(sig.freshestMinutes)}
             </span>
             <span className="font-mono text-[11px] text-muted-foreground">
-              {story.outletCount} outlets
+              {uniqueSourceCount} sources
             </span>
           </div>
         </div>
@@ -88,12 +103,13 @@ export default function StoryCard({ story, sig, expanded, onToggle, onOpenSource
             </div>
           </div>
 
-          {/* Key sources */}
+          {/* Key stories */}
           <div>
             <div className="mb-2 flex items-baseline justify-between">
-              <span className="eyebrow">Key sources · {sources.length}</span>
-              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                of {story.outletCount} outlets
+              <span className="eyebrow">
+                {showKeyStoriesCount
+                  ? `Key stories · top ${topInList} of ${totalPieces}`
+                  : "Key stories"}
               </span>
             </div>
             <ul className="divide-y divide-rule/40 border-y border-rule/40">

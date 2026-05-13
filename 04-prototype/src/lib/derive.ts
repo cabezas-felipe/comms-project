@@ -14,7 +14,7 @@ export interface DerivedSignals {
   medianMinutes: number;
   /** Newest source minutes */
   freshestMinutes: number;
-  /** 0-100 activity score from outletCount + freshness */
+  /** 0-100 activity score from total source pieces + freshness */
   activityScore: number;
   trend: Trend;
   /** 0-100 confidence from source count + outlet diversity */
@@ -33,9 +33,11 @@ export function deriveSignals(story: Story): DerivedSignals {
   const medianMinutes = mins[Math.floor(mins.length / 2)] ?? 0;
   const freshestMinutes = mins[0] ?? 0;
 
-  // Activity: more outlets + fresher = higher
+  // Activity: more coverage + fresher = higher. Volume uses total pieces
+  // (sources.length) so the bar reflects "how much coverage" while the
+  // collapsed chip separately reports unique source identities.
   const freshnessScore = Math.max(0, 100 - freshestMinutes); // 0-100
-  const volumeScore = Math.min(100, story.outletCount * 7);
+  const volumeScore = Math.min(100, story.sources.length * 7);
   const activityScore = Math.round(freshnessScore * 0.55 + volumeScore * 0.45);
 
   const trend: Trend =
