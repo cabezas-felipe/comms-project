@@ -290,6 +290,52 @@ describe("fetchDashboardPayload", () => {
     expect(refreshedAt).toBeNull();
   });
 
+  it("fetchDashboardWithMeta surfaces _meta.lastCheckedAt when present and valid", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: {
+          refreshedAt: "2026-05-08T00:00:00Z",
+          lastCheckedAt: "2026-05-08T01:00:00Z",
+        },
+      }),
+    });
+    const { refreshedAt, lastCheckedAt } = await fetchDashboardWithMeta({ fetcher });
+    expect(refreshedAt).toBe("2026-05-08T00:00:00Z");
+    expect(lastCheckedAt).toBe("2026-05-08T01:00:00Z");
+  });
+
+  it("fetchDashboardWithMeta returns lastCheckedAt=null when omitted (older API)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { refreshedAt: "2026-05-08T00:00:00Z" },
+      }),
+    });
+    const { lastCheckedAt } = await fetchDashboardWithMeta({ fetcher });
+    expect(lastCheckedAt).toBeNull();
+  });
+
+  it("fetchDashboardWithMeta returns lastCheckedAt=null for unparseable date string", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { lastCheckedAt: "not-a-date" },
+      }),
+    });
+    const { lastCheckedAt } = await fetchDashboardWithMeta({ fetcher });
+    expect(lastCheckedAt).toBeNull();
+  });
+
   it("rethrows AbortError immediately without retrying or sleeping", async () => {
     const abortError = Object.assign(new Error("aborted"), { name: "AbortError" });
     const fetcher = vi.fn().mockRejectedValue(abortError);

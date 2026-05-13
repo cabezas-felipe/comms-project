@@ -2575,3 +2575,217 @@ test("PUT /api/settings returns 401 when no identity headers are present", async
     _clearEmailCache();
   }
 });
+
+// ─── _meta.lastCheckedAt: refresh attempts advance the clock even on no-op ───
+//
+// `lastCheckedAt` is the server-side timestamp of the most recent feed check
+// for this user, independent of whether the check produced a new snapshot.
+// The dashboard binds its "Last refresh" header to this value (falling back
+// to `refreshedAt` for older API responses) so the clock visibly moves on
+// every refresh attempt — watermark short-circuits, in-flight skips, and
+// error fallbacks all count.  `refreshedAt` stays pinned to the last
+// successful pipeline write so operator semantics and bootstrap freshness
+// math are unaffected.
+
+test("POST /api/dashboard/refresh: ran path returns lastCheckedAt equal to refreshedAt and persists it", async () => {
+  let writtenPayload = null;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(typeof res.body._meta.lastCheckedAt === "string", "response must include lastCheckedAt");
+    assert.equal(res.body._meta.lastCheckedAt, res.body._meta.refreshedAt,
+      "on full run, lastCheckedAt must equal refreshedAt");
+    assert.equal(writtenPayload?._lastCheckedAt, res.body._meta.lastCheckedAt,
+      "persisted snapshot must carry _lastCheckedAt for later reads");
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: watermark unchanged → lastCheckedAt advances, refreshedAt preserved, writeMeta called", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  // Stamp the prior snapshot with a fixed refreshedAt + lastCheckedAt from a
+  // minute ago so we can assert the route preserves the former and bumps the
+  // latter past it.
+  const PRIOR_AT = new Date(Date.now() - 60_000).toISOString();
+  const PRIOR_SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _watermark: "wm-stable",
+    _meta: { hasSnapshot: true, refreshedAt: PRIOR_AT, lastCheckedAt: PRIOR_AT },
+  };
+  let writeMetaCalls = [];
+  _snapshotRepo.read = async () => PRIOR_SNAPSHOT;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.writeMeta = async (_uid, meta) => { writeMetaCalls.push(meta); };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true, refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-stable", candidateCount: 0, selectedFeedCount: 1,
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.unchanged, true);
+    // refreshedAt stays pinned to the prior snapshot's value — no new write.
+    assert.equal(res.body._meta.refreshedAt, PRIOR_AT,
+      "refreshedAt must not advance on unchanged-watermark short-circuit");
+    // lastCheckedAt advances past the prior timestamp.
+    assert.ok(typeof res.body._meta.lastCheckedAt === "string");
+    assert.ok(Date.parse(res.body._meta.lastCheckedAt) > Date.parse(PRIOR_AT),
+      `lastCheckedAt (${res.body._meta.lastCheckedAt}) must be after prior (${PRIOR_AT})`);
+    // Persistence: writeMeta called with the same lastCheckedAt that landed
+    // in the response — so a full page reload after this attempt picks it up.
+    assert.equal(writeMetaCalls.length, 1, "writeMeta must be called exactly once on unchanged-with-prior");
+    assert.equal(writeMetaCalls[0].lastCheckedAt, res.body._meta.lastCheckedAt);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.writeMeta = prevWriteMeta;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: unchanged with NO prior snapshot → lastCheckedAt in empty body, no writeMeta", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  let writeMetaCalls = 0;
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.writeMeta = async () => { writeMetaCalls++; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true, refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-empty", candidateCount: 0, selectedFeedCount: 0,
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.unchanged, true);
+    assert.equal(res.body._meta.hasSnapshot, false);
+    assert.ok(typeof res.body._meta.lastCheckedAt === "string", "empty body must still carry lastCheckedAt");
+    assert.equal(writeMetaCalls, 0, "no persistence when there's no prior snapshot to attach meta to");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.writeMeta = prevWriteMeta;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: error_fallback → lastCheckedAt advances, refreshedAt preserved from fallback snapshot, writeMeta called", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const PRIOR_AT = new Date(Date.now() - 120_000).toISOString();
+  const LAST_SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: PRIOR_AT, lastCheckedAt: PRIOR_AT },
+  };
+  let writeMetaCalls = [];
+  _refreshPipeline.run = async () => { throw new Error("pipeline exploded"); };
+  _snapshotRepo.read = async () => LAST_SNAPSHOT;
+  _snapshotRepo.writeMeta = async (_uid, meta) => { writeMetaCalls.push(meta); };
+  _snapshotRepo.getLocks = async () => new Map();
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.fallback, true);
+    assert.equal(res.body._meta.refreshedAt, PRIOR_AT, "refreshedAt preserved on error fallback");
+    assert.ok(typeof res.body._meta.lastCheckedAt === "string");
+    assert.ok(Date.parse(res.body._meta.lastCheckedAt) > Date.parse(PRIOR_AT),
+      "lastCheckedAt must advance even on error fallback (we tried)");
+    // Persistence: writeMeta is called exactly once with the same lastCheckedAt
+    // returned in the response — so a full page reload after this attempt does
+    // not regress the "Last refresh" clock back to the fallback snapshot's
+    // older timestamp.
+    assert.equal(writeMetaCalls.length, 1, "writeMeta must be called exactly once on error_fallback");
+    assert.equal(writeMetaCalls[0].lastCheckedAt, res.body._meta.lastCheckedAt);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.writeMeta = prevWriteMeta;
+    _snapshotRepo.getLocks = prevGetLocks;
+  }
+});
+
+test("GET /api/dashboard surfaces persisted _meta.lastCheckedAt", async () => {
+  const LAST_AT = "2026-05-10T09:00:00.000Z";
+  const REFRESHED_AT = "2026-05-10T08:00:00.000Z";
+  const SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: REFRESHED_AT, lastCheckedAt: LAST_AT },
+  };
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => SNAPSHOT;
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.refreshedAt, REFRESHED_AT);
+    assert.equal(res.body._meta.lastCheckedAt, LAST_AT,
+      "GET must surface persisted lastCheckedAt without modification");
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
+test("POST /api/dashboard/bootstrap: served_fresh_snapshot returns persisted lastCheckedAt, does not bump it", async () => {
+  const prev = _snapshotRepo.read;
+  const prevRun = _refreshPipeline.run;
+  const REFRESHED_AT = new Date(Date.now() - 5 * 60_000).toISOString();
+  const LAST_AT = new Date(Date.now() - 2 * 60_000).toISOString();
+  const FRESH_SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: { hasSnapshot: true, refreshedAt: REFRESHED_AT, lastCheckedAt: LAST_AT },
+  };
+  _snapshotRepo.read = async () => FRESH_SNAPSHOT;
+  _refreshPipeline.run = async () => { throw new Error("pipeline must not run"); };
+  try {
+    const res = await request(app).post("/api/dashboard/bootstrap");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.bootstrapDecision, "served_fresh_snapshot");
+    assert.equal(res.body._meta.refreshedAt, REFRESHED_AT);
+    assert.equal(res.body._meta.lastCheckedAt, LAST_AT,
+      "served_fresh_snapshot must not fake a new check — return stored lastCheckedAt as-is");
+  } finally {
+    _snapshotRepo.read = prev;
+    _refreshPipeline.run = prevRun;
+  }
+});

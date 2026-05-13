@@ -11,7 +11,7 @@ import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
-import { readSnapshot, writeSnapshot, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket } from "./db/dashboard-snapshot-repo.mjs";
+import { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket } from "./db/dashboard-snapshot-repo.mjs";
 import { appendRejections as appendStoryRejections } from "./db/story-rejection-log-repo.mjs";
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
@@ -208,6 +208,7 @@ export const _feedManifest = { list: listIngestionFeeds };
 export const _snapshotRepo = {
   read: readSnapshot,
   write: writeSnapshot,
+  writeMeta: writeSnapshotMeta,
   getLocks: getLockedTitles,
   insertLocks: insertTitleLocks,
   readHeld: readHoldBucket,
@@ -652,6 +653,12 @@ app.get("/api/dashboard", async (req, res) => {
  */
 async function executeRefreshFlow(identity) {
   const startedAt = Date.now();
+  // `lastCheckedAt` represents "when did the server initiate / complete a feed
+  // check for this user".  Unlike `refreshedAt`, it advances on every refresh
+  // attempt — including no-op outcomes (watermark unchanged, in_flight skip,
+  // error fallback) — so the dashboard's header clock moves even when the
+  // story list stays put.
+  const lastCheckedAt = new Date().toISOString();
 
   // Phase 4: per-user in-flight guard.  See refresh-guard.mjs for scope notes.
   if (!tryAcquireRefresh(identity.userId)) {
@@ -665,6 +672,10 @@ async function executeRefreshFlow(identity) {
     });
     const inflightSnapshot = await _snapshotRepo.read(identity.userId).catch(() => null);
     if (inflightSnapshot) {
+      // Best-effort: bump persisted lastCheckedAt so a full reload reflects
+      // this attempt.  Races with the concurrent in-flight pipeline are
+      // benign — the eventual full write sets its own (later) lastCheckedAt.
+      await _snapshotRepo.writeMeta(identity.userId, { lastCheckedAt }).catch(() => {});
       const { body, baseMeta, selectionMeta } = stripPersistedFields(inflightSnapshot);
       return {
         kind: "in_flight",
@@ -672,7 +683,7 @@ async function executeRefreshFlow(identity) {
         body: {
           ...body,
           _meta: attachInternalsToMeta(
-            { ...baseMeta, refreshSkippedReason: "in_flight", unchanged: false },
+            { ...baseMeta, refreshSkippedReason: "in_flight", unchanged: false, lastCheckedAt },
             { selectionMeta }
           ),
         },
@@ -681,7 +692,11 @@ async function executeRefreshFlow(identity) {
     return {
       kind: "in_flight",
       httpStatus: 200,
-      body: emptyDashboardResponse({ refreshSkippedReason: "in_flight", unchanged: false }),
+      body: emptyDashboardResponse({
+        refreshSkippedReason: "in_flight",
+        unchanged: false,
+        lastCheckedAt,
+      }),
     };
   }
 
@@ -759,12 +774,17 @@ async function executeRefreshFlow(identity) {
         watermark: log.watermark,
         candidateCount: log.candidateCount,
         selectedFeedCount: log.selectedFeedCount,
+        lastCheckedAt,
       };
       if (log.recall) skipMeta.recall = log.recall;
       if (log.funnel) skipMeta.funnel = log.funnel;
       if (log.beatFit) skipMeta.beatFit = log.beatFit;
       if (log.selection) skipMeta.selection = log.selection;
       if (priorSnapshot) {
+        // Persist the bumped lastCheckedAt onto the existing snapshot so a
+        // full page reload reflects this check.  refreshedAt stays pinned to
+        // the last real snapshot write — only the check timestamp moves.
+        await _snapshotRepo.writeMeta(identity.userId, { lastCheckedAt }).catch(() => {});
         const { body, baseMeta, selectionMeta } = stripPersistedFields(priorSnapshot);
         return {
           kind: "unchanged",
@@ -805,6 +825,10 @@ async function executeRefreshFlow(identity) {
     const finalPayload = { ...payload, stories: lockedStories };
     finalPayload._selectionMeta = log.selection;
     finalPayload._watermark = log.watermark;
+    // Persist lastCheckedAt alongside the snapshot so subsequent reads (GET
+    // /api/dashboard, bootstrap served_fresh_snapshot) surface the same value
+    // the refresh response carries.  On a full run, this equals refreshedAt.
+    finalPayload._lastCheckedAt = lastCheckedAt;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
 
@@ -846,7 +870,8 @@ async function executeRefreshFlow(identity) {
       body: {
         ...responsePayload,
         _meta: {
-          refreshedAt: new Date().toISOString(),
+          refreshedAt: lastCheckedAt,
+          lastCheckedAt,
           hasSnapshot: true,
           selection: log.selection,
           unchanged: false,
@@ -876,11 +901,18 @@ async function executeRefreshFlow(identity) {
     try {
       const lastSnapshot = await _snapshotRepo.read(identity.userId);
       if (lastSnapshot) {
+        // error_fallback represents "we tried" — the pipeline ran and threw,
+        // so a check did occur even if no new snapshot was produced.  Bump
+        // persisted lastCheckedAt (best-effort, non-fatal) so a full reload
+        // after this attempt doesn't regress the "Last refresh" clock back
+        // to the fallback snapshot's older timestamp.  refreshedAt remains
+        // pinned to the fallback snapshot's last successful run.
+        await _snapshotRepo.writeMeta(identity.userId, { lastCheckedAt }).catch(() => {});
         const { body: lastBody, baseMeta } = stripPersistedFields(lastSnapshot);
         return {
           kind: "error_fallback",
           httpStatus: 200,
-          body: { ...lastBody, _meta: { ...baseMeta, fallback: true } },
+          body: { ...lastBody, _meta: { ...baseMeta, fallback: true, lastCheckedAt } },
         };
       }
     } catch { /* ignore */ }
