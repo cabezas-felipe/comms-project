@@ -25,10 +25,12 @@ import {
   constrainTagsToSettings,
   deriveStoryTags,
 } from "./refresh-pipeline.mjs";
+import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
 function makeItem(overrides = {}) {
+  const sourceId = overrides.sourceId ?? "src-1";
   return {
     clusterId: "cluster-1",
     title: "Test cluster",
@@ -39,12 +41,16 @@ function makeItem(overrides = {}) {
     summary: "Test summary",
     whyItMatters: "Test why",
     whatChanged: "Test what changed",
-    sourceId: "src-1",
+    sourceId,
     outlet: "Reuters",
     byline: "Test Author",
     kind: "traditional",
     weight: 75,
-    url: "https://example.com",
+    // URL defaults to a unique-per-sourceId path so cross-feed dedupe (which
+    // groups by canonical URL) does NOT collapse fixture items that aren't
+    // intentionally testing dedupe.  Tests that exercise dedupe behavior
+    // override `url` explicitly to share a canonical URL across items.
+    url: `https://example.com/${sourceId}`,
     minutesAgo: 30,
     headline: "Test Headline",
     body: ["Test body."],
@@ -1527,6 +1533,7 @@ test("primaryDropStage: returns 'none' when no stage drops items", () => {
     afterGeoFilter: 5,
     afterTopicKeyword: 5,
     afterBeatFit: 5,
+    afterDedupe: 5,
     finalStories: 5,
   };
   assert.equal(primaryDropStage(funnel), "none");
@@ -1547,16 +1554,17 @@ test("formatFunnel: renders stages in pipeline order with ' → ' separators", (
     afterGeoFilter: 28,
     afterTopicKeyword: 5,
     afterBeatFit: 5,
+    afterDedupe: 5,
     finalStories: 3,
   };
   const s = formatFunnel(funnel);
-  assert.match(s, /^normalize=100 → time_window_24h=80 → source_selection=30 → geo_filter=28 → topic_keyword_recall=5 → beat_fit_precision=5 → clustering_and_grounding=3$/);
+  assert.match(s, /^normalize=100 → time_window_24h=80 → source_selection=30 → geo_filter=28 → topic_keyword_recall=5 → beat_fit_precision=5 → cross_feed_dedupe=5 → clustering_and_grounding=3$/);
 });
 
 test("summarizeFunnel: flags topicKeywordRecallIsNoop when settings have neither topics nor keywords", () => {
   const funnel = {
     totalNormalized: 10, afterTimeWindow: 10, afterSourceSelection: 10,
-    afterGeoFilter: 10, afterTopicKeyword: 10, afterBeatFit: 10, finalStories: 0,
+    afterGeoFilter: 10, afterTopicKeyword: 10, afterBeatFit: 10, afterDedupe: 10, finalStories: 0,
   };
   const summary = summarizeFunnel(funnel, { topics: [], keywords: [] });
   assert.equal(summary.topicKeywordRecallIsNoop, true);
@@ -1745,7 +1753,7 @@ test("primaryDropStage: ignores stages with null counts (treats them as 'not com
   // clustering_and_grounding as the largest drop just because null coerces to 0.
   const funnel = {
     totalNormalized: 10, afterTimeWindow: 10, afterSourceSelection: 10,
-    afterGeoFilter: 10, afterTopicKeyword: 10, afterBeatFit: 10, finalStories: null,
+    afterGeoFilter: 10, afterTopicKeyword: 10, afterBeatFit: 10, afterDedupe: 10, finalStories: null,
   };
   assert.equal(primaryDropStage(funnel), "none");
 });
@@ -3246,4 +3254,526 @@ test("runRefreshPipeline: outletCount is 0 when every outlet is blank", async ()
     0,
     "outletCount must be 0 when no source has a non-blank outlet"
   );
+});
+
+// ─── Cross-feed dedupe (meta-story pipeline integration) ─────────────────────
+//
+// Pinning the strict-match contract for the cross-feed dedupe stage at the
+// pipeline boundary so a regression at any earlier seam (clustering input,
+// source-id index, story-build projection) is caught here, not just in the
+// unit-level source-deduper tests.  Each test captures the clusterFn input
+// directly so assertions prove what clustering ACTUALLY saw, rather than
+// inferring it from downstream story shape (which can false-pass if
+// `source_item_ids` filtering hides a missed merge).
+
+// Small helper used across these tests: a clusterFn that captures the items
+// it received into the supplied `capture` object, then echoes them back as a
+// single meta-story.  Returns the same shape every time so tests can focus on
+// the dedupe assertion (cluster input, log.dedupe, story.sources) without
+// worrying about clustering / grounding side effects.
+function captureClusterFn(capture, limit = null) {
+  return async (clusterInput) => {
+    capture.input = clusterInput;
+    const ids = limit ? clusterInput.slice(0, limit).map((i) => i.sourceId) : clusterInput.map((i) => i.sourceId);
+    return [
+      {
+        title: "T",
+        subtitle: "S",
+        source_item_ids: ids,
+        summary: "Summary.",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        factual_claims: ["A claim."],
+        claim_evidence_map: { "0": ids },
+      },
+    ];
+  };
+}
+
+test("cross-feed dedupe: canonical URL + exact headline + time within window collapses to one cluster input", async () => {
+  // Same article surfaces from two different feeds (Washington Post —
+  // National + Washington Post — World).  feed-reader hashes feedId into
+  // sourceId so we get two distinct sourceItems with the same canonical URL
+  // and identical headlines.  With |Δ minutesAgo| = 30 ≤ PUBLISH_WINDOW_MINUTES,
+  // the strict rule fires and dedupe must collapse to ONE entry — both in
+  // what clustering sees AND on the resulting story.  Outlet "Reuters"
+  // matches BASE_SETTINGS.traditionalSources so the test exercises dedupe,
+  // not source-pool selection.
+  const sharedUrl = "https://www.washingtonpost.com/news/deportation-piece";
+  const sharedHeadline =
+    "More of the men being deported now have lived in the U.S. for years.";
+  const rawItems = [
+    makeItem({
+      sourceId: "wp-nat-1",
+      feedId: "wp-national",
+      outlet: "Reuters",
+      url: sharedUrl,
+      headline: sharedHeadline,
+      body: ["Short-form national wire copy."],
+      weight: 90,
+      minutesAgo: 60,
+    }),
+    makeItem({
+      sourceId: "wp-world-1",
+      feedId: "wp-world",
+      outlet: "Reuters",
+      url: sharedUrl,
+      headline: sharedHeadline,
+      body: ["A longer, more detailed wire copy with more content text body."],
+      weight: 90,
+      minutesAgo: 30,
+    }),
+  ];
+  const capture = {};
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+
+  // Direct proof: clustering received exactly one candidate, and that one
+  // candidate was the tie-break winner (richer evidence → wp-world-1).
+  assert.equal(capture.input.length, 1, "clusterFn must observe a deduped pool of size 1");
+  assert.equal(
+    capture.input[0].sourceId,
+    "wp-world-1",
+    "winner must be the item with richer body (evidence richness tie-break)"
+  );
+  // Downstream story shape confirms the same.
+  const story = payload.stories[0];
+  assert.equal(story.sources.length, 1);
+  assert.equal(story.sources[0].id, "wp-world-1");
+  // Funnel + dedupe diagnostics report exact counts.
+  assert.equal(log.dedupe.inputCount, 2);
+  assert.equal(log.dedupe.uniqueCount, 1);
+  assert.equal(log.dedupe.collapsedCount, 1);
+  assert.equal(log.funnel.afterBeatFit, 2, "beat-fit count is the pre-dedupe candidate pool");
+  assert.equal(log.funnel.afterDedupe, 1, "afterDedupe count reflects unique articles");
+});
+
+test("cross-feed dedupe: canonical URL match but headline mismatch does NOT merge", async () => {
+  // Same URL reused to host two distinct pieces.  Strict policy: URL alone
+  // is not enough.  Cluster input MUST carry both items, story MUST list
+  // both sources, dedupe diagnostic MUST report zero collapses.
+  const sharedUrl = "https://example.com/url-recycle";
+  const rawItems = [
+    makeItem({
+      sourceId: "piece-a",
+      feedId: "f-a",
+      outlet: "Reuters",
+      url: sharedUrl,
+      headline: "Trump and Petro discuss tariffs",
+      minutesAgo: 20,
+    }),
+    makeItem({
+      sourceId: "piece-b",
+      feedId: "f-b",
+      outlet: "Reuters",
+      url: sharedUrl,
+      headline: "Different article entirely",
+      minutesAgo: 22,
+    }),
+  ];
+  const capture = {};
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+
+  assert.equal(capture.input.length, 2, "headline mismatch must keep both candidates");
+  const inputIds = new Set(capture.input.map((i) => i.sourceId));
+  assert.ok(inputIds.has("piece-a") && inputIds.has("piece-b"));
+  assert.equal(log.dedupe.collapsedCount, 0, "headline mismatch must not collapse");
+  assert.equal(log.dedupe.uniqueCount, 2);
+  assert.equal(log.funnel.afterDedupe, 2);
+  assert.equal(payload.stories[0].sources.length, 2);
+});
+
+test("cross-feed dedupe: canonical URL + headline match but |Δ minutesAgo| > PUBLISH_WINDOW_MINUTES does NOT merge", async () => {
+  // Time-window guard: same URL + same headline at very different times
+  // implies a long-delayed republish or URL recycle — not same-tick
+  // syndication.  Cluster input must see both items.
+  const sharedUrl = "https://example.com/republished";
+  const sharedHeadline = "Shared headline text";
+  const rawItems = [
+    makeItem({
+      sourceId: "early",
+      feedId: "f-early",
+      outlet: "Reuters",
+      url: sharedUrl,
+      headline: sharedHeadline,
+      minutesAgo: 10,
+    }),
+    makeItem({
+      sourceId: "late",
+      feedId: "f-late",
+      outlet: "Reuters",
+      url: sharedUrl,
+      headline: sharedHeadline,
+      minutesAgo: 10 + PUBLISH_WINDOW_MINUTES + 30,
+    }),
+  ];
+  const capture = {};
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+
+  assert.equal(capture.input.length, 2, "items outside the time window must stay distinct");
+  assert.equal(log.dedupe.collapsedCount, 0);
+  assert.equal(log.dedupe.uniqueCount, 2);
+  assert.equal(payload.stories[0].sources.length, 2);
+});
+
+test("cross-feed dedupe: similar headlines but different URLs do NOT merge", async () => {
+  // Conservative match: a shared headline across different canonical URLs is
+  // not enough to merge.  Direct proof via captured cluster input.
+  const sharedHeadline =
+    "More of the men being deported now have lived in the U.S. for years.";
+  const rawItems = [
+    makeItem({
+      sourceId: "a",
+      feedId: "f-a",
+      outlet: "Reuters",
+      url: "https://outlet-a.example.com/story-1",
+      headline: sharedHeadline,
+    }),
+    makeItem({
+      sourceId: "b",
+      feedId: "f-b",
+      outlet: "Reuters",
+      url: "https://outlet-b.example.com/story-2",
+      headline: sharedHeadline,
+    }),
+  ];
+  const capture = {};
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(capture.input.length, 2);
+  assert.equal(log.dedupe.collapsedCount, 0, "different URLs must not merge");
+  assert.equal(payload.stories[0].sources.length, 2);
+});
+
+test("cross-feed dedupe: no-URL items merge on exact normalized headline", async () => {
+  // No-URL path: per policy, two items with no parsable URL merge if their
+  // normalized headlines are exactly equal (case / punctuation / whitespace
+  // variants collapse to the same key via normalizeHeadline).  url="" is the
+  // pipeline-level no-URL shape; canonicalizeUrl returns null for it.
+  const rawItems = [
+    makeItem({
+      sourceId: "wireless-a",
+      feedId: "f-a",
+      outlet: "Reuters",
+      url: "",
+      headline: "  Petro’s response to tariffs!  ",
+      body: ["short copy"],
+      byline: "",
+      minutesAgo: 20,
+    }),
+    makeItem({
+      sourceId: "wireless-b",
+      feedId: "f-b",
+      outlet: "Reuters",
+      url: "",
+      headline: "Petro's response to tariffs",
+      body: ["a much longer body wins evidence richness"],
+      byline: "Reporter Two",
+      minutesAgo: 25,
+    }),
+  ];
+  const capture = {};
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(capture.input.length, 1, "no-URL exact-headline duplicates must collapse to one");
+  assert.equal(
+    capture.input[0].sourceId,
+    "wireless-b",
+    "winner must be the richer-evidence item under the tie-break order"
+  );
+  assert.equal(log.dedupe.collapsedCount, 1);
+  assert.equal(log.dedupe.uniqueCount, 1);
+  assert.equal(payload.stories[0].sources.length, 1);
+});
+
+test("cross-feed dedupe: deterministic winner under the strict tie-break order", async () => {
+  // Three items share canonical URL + headline + |Δt| ≤ window → one cluster.
+  // Tie-break order: evidence → freshness → weight → feedId lex → sourceId lex.
+  // Construct items so the resolution is unambiguous and verifiable per step:
+  //   - "loser-thin": thin body, fresher, higher weight  →  loses on evidence.
+  //   - "rich-older": rich body, older                   →  beats thin on evidence.
+  //   - "rich-fresh": same rich body, fresher            →  beats rich-older on freshness.
+  const sharedUrl = "https://example.com/tiebreak";
+  const richBody = ["a substantially longer body that wins the evidence richness check decisively"];
+  const rawItems = [
+    makeItem({
+      sourceId: "loser-thin",
+      feedId: "f-thin",
+      outlet: "Reuters",
+      url: sharedUrl,
+      body: ["short"],
+      byline: "",
+      minutesAgo: 5,
+      weight: 99,
+    }),
+    makeItem({
+      sourceId: "rich-older",
+      feedId: "f-older",
+      outlet: "Reuters",
+      url: sharedUrl,
+      body: richBody,
+      byline: "",
+      minutesAgo: 40,
+      weight: 50,
+    }),
+    makeItem({
+      sourceId: "rich-fresh",
+      feedId: "f-fresh",
+      outlet: "Reuters",
+      url: sharedUrl,
+      body: richBody,
+      byline: "",
+      minutesAgo: 20,
+      weight: 50,
+    }),
+  ];
+  const capture = {};
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+
+  assert.equal(capture.input.length, 1);
+  assert.equal(
+    capture.input[0].sourceId,
+    "rich-fresh",
+    "tie-break: rich body beats thin (evidence); among ties, fresher wins (freshness)"
+  );
+  assert.equal(log.dedupe.collapsedCount, 2);
+  assert.equal(payload.stories[0].sources[0].id, "rich-fresh");
+});
+
+test("cross-feed dedupe: same input across runs picks the same canonical winner (idempotence)", async () => {
+  const sharedUrl = "https://example.com/idempotent";
+  const rawItems = [
+    makeItem({
+      sourceId: "loser",
+      feedId: "f-old",
+      outlet: "Reuters",
+      url: sharedUrl,
+      minutesAgo: 25,
+      body: ["thin"],
+      byline: "",
+    }),
+    makeItem({
+      sourceId: "winner",
+      feedId: "f-fresh",
+      outlet: "Reuters",
+      url: sharedUrl,
+      minutesAgo: 10,
+      body: ["a longer body wins evidence richness handily"],
+      byline: "Named Reporter",
+    }),
+  ];
+  const cap1 = {};
+  const cap2 = {};
+  const opts1 = {
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(cap1),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  };
+  const opts2 = { ...opts1, clusterFn: captureClusterFn(cap2) };
+  const { payload: run1 } = await runRefreshPipeline(opts1);
+  const { payload: run2 } = await runRefreshPipeline(opts2);
+  assert.equal(cap1.input.length, 1);
+  assert.equal(cap2.input.length, 1);
+  assert.equal(cap1.input[0].sourceId, "winner");
+  assert.equal(cap2.input[0].sourceId, "winner");
+  assert.equal(run1.stories[0].sources[0].id, "winner");
+  assert.equal(run2.stories[0].sources[0].id, "winner");
+});
+
+test("cross-feed dedupe: denominator-driving semantics — sources.length reflects deduped universe", async () => {
+  // 9 distinct articles + 1 cross-feed duplicate of unique-3.  Strict-mode
+  // dedupe must produce exactly 9 unique candidates.  We assert directly on:
+  //   (a) the cluster-input length (== 9)
+  //   (b) the duplicate's sourceId never appearing in clustering or payload
+  //   (c) the dedupe log diagnostic (1 collapse, 9 unique)
+  // and avoid an indirect "≤9" inequality that could false-pass.
+  const items = [];
+  for (let i = 0; i < 9; i++) {
+    items.push(
+      makeItem({
+        sourceId: `unique-${i}`,
+        feedId: `feed-${i}`,
+        outlet: "Reuters",
+        url: `https://example.com/article-${i}`,
+        weight: 85,
+        minutesAgo: 30 + i,
+      })
+    );
+  }
+  // Cross-feed duplicate of unique-3 — same URL, same default headline
+  // ("Test Headline"), minutesAgo within PUBLISH_WINDOW_MINUTES of unique-3.
+  items.push(
+    makeItem({
+      sourceId: "dup-of-3",
+      feedId: "feed-3-mirror",
+      outlet: "Reuters",
+      url: "https://example.com/article-3",
+      weight: 85,
+      minutesAgo: 35,
+    })
+  );
+
+  const capture = {};
+  // Cap clustering output at 5 source_item_ids so we hit the schema bound,
+  // but the assertion of interest is the FULL cluster input length.
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: items,
+    clusterFn: captureClusterFn(capture, 5),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+
+  assert.equal(
+    capture.input.length,
+    9,
+    "clusterFn must see exactly 9 unique candidates (10 raw - 1 collapsed)"
+  );
+  const inputIds = new Set(capture.input.map((i) => i.sourceId));
+  assert.equal(
+    inputIds.has("dup-of-3"),
+    false,
+    "the loser sourceId must not survive into clustering"
+  );
+  assert.ok(inputIds.has("unique-3"), "winner of the dup group must be unique-3 (fresher)");
+  assert.equal(log.dedupe.inputCount, 10);
+  assert.equal(log.dedupe.uniqueCount, 9);
+  assert.equal(log.dedupe.collapsedCount, 1);
+  assert.equal(log.funnel.afterBeatFit, 10);
+  assert.equal(log.funnel.afterDedupe, 9);
+
+  // Payload-level confirmation: the duplicate sourceId is also absent from
+  // the response.  The story took the first 5 deduped items per clusterFn cap.
+  const allSourceIds = new Set(
+    payload.stories.flatMap((s) => s.sources.map((src) => src.id))
+  );
+  assert.equal(allSourceIds.has("dup-of-3"), false);
+  assert.equal(payload.stories[0].sources.length, 5);
+});
+
+test("cross-feed dedupe: response payload never exposes internal _duplicates / _canonicalUrl / _normHeadline", async () => {
+  const sharedUrl = "https://example.com/shared-article";
+  const rawItems = [
+    makeItem({ sourceId: "a", feedId: "f-a", outlet: "Reuters", url: sharedUrl, minutesAgo: 10 }),
+    makeItem({ sourceId: "b", feedId: "f-b", outlet: "Reuters", url: sharedUrl, minutesAgo: 12 }),
+  ];
+  const capture = {};
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  // Sanity: dedupe ran and collapsed the pair (otherwise the no-leak assertion
+  // is trivial because no winner carried provenance to begin with).
+  assert.equal(log.dedupe.collapsedCount, 1);
+  let checked = 0;
+  for (const story of payload.stories) {
+    for (const src of story.sources) {
+      checked++;
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(src, "_duplicates"),
+        false,
+        "_duplicates is internal-only and must never reach the response payload"
+      );
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(src, "_canonicalUrl"),
+        false,
+        "internal _canonicalUrl annotation must never reach the response payload"
+      );
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(src, "_normHeadline"),
+        false,
+        "internal _normHeadline annotation must never reach the response payload"
+      );
+    }
+  }
+  assert.ok(checked > 0, "at least one source must be checked for leakage");
+});
+
+test("cross-feed dedupe: stage runs before clustering — clusterFn sees deduped universe, source_item_ids resolve", async () => {
+  // Defensive check that dedupe sits ahead of clustering AND that the
+  // grounding source-id index is built from the same deduped set, so the
+  // story buildStory step can resolve every id without falling back to
+  // partial-source fallbacks (which would expose a stage-order bug).
+  const sharedUrl = "https://example.com/order-check";
+  const rawItems = [
+    makeItem({
+      sourceId: "dup-loser",
+      feedId: "f-loser",
+      outlet: "Reuters",
+      url: sharedUrl,
+      minutesAgo: 25,
+      body: ["thin"],
+      byline: "",
+    }),
+    makeItem({
+      sourceId: "dup-winner",
+      feedId: "f-winner",
+      outlet: "Reuters",
+      url: sharedUrl,
+      minutesAgo: 10,
+      body: ["a long body that takes the evidence-richness tie-break"],
+      byline: "Reporter",
+    }),
+    makeItem({
+      sourceId: "solo",
+      feedId: "f-solo",
+      outlet: "Reuters",
+      url: "https://example.com/standalone",
+      minutesAgo: 15,
+    }),
+  ];
+  const capture = {};
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  // Cluster saw exactly the two deduped survivors.
+  assert.equal(capture.input.length, 2);
+  const inputIds = capture.input.map((i) => i.sourceId).sort();
+  assert.deepEqual(inputIds, ["dup-winner", "solo"]);
+  // The story carries both ids — meaning the source-id index built downstream
+  // resolved every id from the same deduped universe (no missing-id drops).
+  const storyIds = payload.stories[0].sources.map((s) => s.id).sort();
+  assert.deepEqual(storyIds, ["dup-winner", "solo"]);
+  assert.equal(log.dedupe.collapsedCount, 1);
 });

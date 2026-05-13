@@ -20,6 +20,7 @@ import {
   resolveRecallConfig,
   runEmbeddingRecall,
 } from "../ingestion/embedding-recall.mjs";
+import { dedupeSourceItems } from "../ingestion/source-deduper.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -119,7 +120,10 @@ const FUNNEL_STAGES = Object.freeze([
   ["afterGeoFilter", "geo_filter", "afterSourceSelection"],
   ["afterTopicKeyword", "topic_keyword_recall", "afterGeoFilter"],
   ["afterBeatFit", "beat_fit_precision", "afterTopicKeyword"],
-  ["finalStories", "clustering_and_grounding", "afterBeatFit"],
+  // Cross-feed dedupe collapses same-article items from multiple feeds
+  // before clustering. Drop here = duplicate-article folds, NOT lost data.
+  ["afterDedupe", "cross_feed_dedupe", "afterBeatFit"],
+  ["finalStories", "clustering_and_grounding", "afterDedupe"],
 ]);
 
 /**
@@ -593,6 +597,10 @@ function buildStory(metaStory, sourceItems, settings) {
         .filter((k) => k.length > 0)
     ).size,
     tags: deriveStoryTags(sourceItems, settings),
+    // `_duplicates` provenance from the cross-feed dedupe stage is intentionally
+    // NOT projected onto the response shape — duplicate provenance stays
+    // server-side for integrity/debugging only (product req: no expand UI,
+    // no "also seen in X feeds", no duplicate-source disclosure).
     sources: sourceItems.map((item) => ({
       id: item.sourceId,
       outlet: item.outlet,
@@ -903,11 +911,34 @@ export async function runRefreshPipeline({
     };
   }
 
+  // 5c. Cross-feed source-item dedupe.  Same article surfaced via multiple
+  //     RSS feeds (different feedId) collapses to ONE canonical sourceItem
+  //     before clustering.  Match policy is strict / false-merge-averse:
+  //       - With URL    : canonical URL match AND exact normalized headline
+  //                       match AND |Δ minutesAgo| ≤ PUBLISH_WINDOW_MINUTES.
+  //                       Canonical URL alone is NOT enough to merge.
+  //       - Without URL : exact normalized headline match (no time gate).
+  //       - Cross-publisher / cross-feed merges are permitted whenever the
+  //         rules above pass; outlet identity is not itself a gate.
+  //       - Empty normalized headlines never merge (insufficient signal).
+  //     See ingestion/source-deduper.mjs for tie-break rules and the internal
+  //     `_duplicates` provenance shape (stripped from the response payload
+  //     by buildStory's explicit field whitelist).
+  const dedupeResult = dedupeSourceItems(relevantItems);
+  const dedupedItems = dedupeResult.unique;
+  if (dedupeResult.duplicateCount > 0) {
+    console.log(
+      `[pipeline.dedupe] input=${relevantItems.length} unique=${dedupedItems.length} collapsed=${dedupeResult.duplicateCount}`
+    );
+  }
+
   // 5b. Phase 4: watermark over the actual clustering candidate set.  This is
   //     the "would clustering see the same input as last time?" check — if so
   //     we skip clustering, grounding, lock writes, and rejection writes.
+  //     Computed AFTER dedupe so a duplicate disappearing from one feed (when
+  //     the unique winner is unchanged) does not invalidate the watermark.
   const watermarkInfo = computeWatermark({
-    candidateItems: relevantItems,
+    candidateItems: dedupedItems,
     selectedFeedIds: selectionMeta?.matchedFeedIds ?? [],
   });
   // Trap guard: if the prior persisted snapshot has zero stories AND we have
@@ -924,10 +955,10 @@ export async function runRefreshPipeline({
   const priorWasEmpty =
     typeof priorStoryCount === "number" && priorStoryCount === 0;
   const watermarkSuppressed =
-    watermarkMatched && priorWasEmpty && relevantItems.length > 0;
+    watermarkMatched && priorWasEmpty && dedupedItems.length > 0;
   if (watermarkSuppressed) {
     console.log(
-      `[pipeline.watermark] match suppressed (${watermarkInfo.watermark}) — prior snapshot was empty AND ${relevantItems.length} candidate(s) ready; re-running clustering rather than serving stale empty`
+      `[pipeline.watermark] match suppressed (${watermarkInfo.watermark}) — prior snapshot was empty AND ${dedupedItems.length} candidate(s) ready; re-running clustering rather than serving stale empty`
     );
   }
   if (watermarkMatched && !watermarkSuppressed) {
@@ -944,6 +975,7 @@ export async function runRefreshPipeline({
         afterGeoFilter: geoPassedItems.length,
         afterTopicKeyword: recallItems.length,
         afterBeatFit: relevantItems.length,
+        afterDedupe: dedupedItems.length,
         finalStories: null,
       },
       settings,
@@ -987,25 +1019,32 @@ export async function runRefreshPipeline({
           excludedCount: beatFitResult.summary.excludedCount,
           excludeReasonHistogram: beatFitResult.summary.excludeReasonHistogram,
         },
+        dedupe: {
+          inputCount: relevantItems.length,
+          uniqueCount: dedupedItems.length,
+          collapsedCount: dedupeResult.duplicateCount,
+        },
         recall: recallDiagnostics,
         funnel: skipFunnel,
       },
     };
   }
 
-  // 6. LLM clustering
+  // 6. LLM clustering — operates on the deduped candidate set so each unique
+  //    article shows up at most once, and the meta-story's source_item_ids
+  //    therefore reference unique articles only.
   let rawMetaStories;
   let usedFallbackClustering = false;
-  if (relevantItems.length === 0) {
+  if (dedupedItems.length === 0) {
     rawMetaStories = [];
   } else {
     try {
-      rawMetaStories = await clusterFn(relevantItems, settings, clusterModel);
+      rawMetaStories = await clusterFn(dedupedItems, settings, clusterModel);
     } catch (clusterErr) {
       console.warn(
         `[pipeline] clustering failed (${clusterErr instanceof Error ? clusterErr.message : clusterErr}), using graceful fallback`
       );
-      rawMetaStories = gracefulFallbackClustering(relevantItems, settings);
+      rawMetaStories = gracefulFallbackClustering(dedupedItems, settings);
       usedFallbackClustering = true;
     }
   }
@@ -1026,8 +1065,9 @@ export async function runRefreshPipeline({
   }
   rawMetaStories = reuseOrAssignIds(rawMetaStories, priorStories);
 
-  // 8. Build source index
-  const sourceItemsById = new Map(relevantItems.map((item) => [item.sourceId, item]));
+  // 8. Build source index over the DEDUPED set: clustering only saw these IDs,
+  //    so grounding + buildStory must look up against the same universe.
+  const sourceItemsById = new Map(dedupedItems.map((item) => [item.sourceId, item]));
 
   // 9. Grounding verification (source-level + claim-level + summary/subtitle grounding)
   const { valid: groundedStories, invalid: failedGrounding } = verifyGrounding(
@@ -1105,6 +1145,7 @@ export async function runRefreshPipeline({
       afterGeoFilter: geoPassedItems.length,
       afterTopicKeyword: recallItems.length,
       afterBeatFit: relevantItems.length,
+      afterDedupe: dedupedItems.length,
       finalStories: stories.length,
     },
     settings,
@@ -1147,6 +1188,15 @@ export async function runRefreshPipeline({
       includedCount: beatFitResult.summary.includedCount,
       excludedCount: beatFitResult.summary.excludedCount,
       excludeReasonHistogram: beatFitResult.summary.excludeReasonHistogram,
+    },
+    // Cross-feed dedupe metrics — `inputCount` is the post-beat-fit candidate
+    // pool, `uniqueCount` what clustering actually saw, `collapsedCount` the
+    // number of duplicate-article folds.  Operator-facing only; never
+    // surfaced in the response payload.
+    dedupe: {
+      inputCount: relevantItems.length,
+      uniqueCount: dedupedItems.length,
+      collapsedCount: dedupeResult.duplicateCount,
     },
     // Embedding-aware recall observability — mode, embedded/keyword counts,
     // top-K kept, and any fail-closed `degraded_reason` bubble up here so
