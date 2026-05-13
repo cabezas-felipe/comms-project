@@ -23,6 +23,7 @@ import {
 import { type StoryDto } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
 import { useRefreshContext } from "@/lib/refresh-context";
+import { REFRESH_INTERVAL_MS } from "@/lib/refresh-heartbeat";
 
 function dtoToStory(dto: StoryDto): Story {
   return {
@@ -58,7 +59,15 @@ function dtoToStory(dto: StoryDto): Story {
 }
 
 export default function Dashboard() {
-  const { recordSuccessfulRefresh, heartbeatResult } = useRefreshContext();
+  const {
+    recordSuccessfulRefresh,
+    heartbeatResult,
+    lastRefreshedAt,
+    lastAttemptAt,
+    isRefreshing,
+    recordAttemptStart,
+    recordAttemptFinished,
+  } = useRefreshContext();
   const [searchParams] = useSearchParams();
   const location = useLocation();
   const emptyMode = searchParams.get("empty") === "1";
@@ -130,6 +139,12 @@ export default function Dashboard() {
     let canceled = false;
     setIsLoading(true);
     setLoadError(null);
+    // Flip the in-flight flag only — does NOT stamp `lastAttemptAt` or
+    // reset the 60-minute baseline (only the heartbeat owns that anchor,
+    // so a page load can't push the next-refresh window forward).  Just
+    // drives the footer's "Refreshing now…" copy for the duration of the
+    // fetch.
+    recordAttemptStart();
 
     // Phase 5: bootstrap path runs the (potentially expensive) refresh check
     // server-side and falls back to a fresh snapshot when ≤ 60 min old.  GET
@@ -163,14 +178,28 @@ export default function Dashboard() {
         }
       })
       .finally(() => {
-        if (!canceled) setIsLoading(false);
+        // Always clear the in-flight flag — even on unmount / dep-change /
+        // navigation — otherwise the footer stays stuck on "Refreshing now…"
+        // forever once the cancelled promise settles.  Only the React state
+        // setter (`setIsLoading`) needs the canceled guard since it targets
+        // this component's local state.
+        recordAttemptFinished();
+        if (canceled) return;
+        setIsLoading(false);
       });
     return () => {
       canceled = true;
     };
     // `stories.length` intentionally excluded — only used to gate the toast.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [emptyMode, useBootstrap, reloadCounter, recordSuccessfulRefresh]);
+  }, [
+    emptyMode,
+    useBootstrap,
+    reloadCounter,
+    recordSuccessfulRefresh,
+    recordAttemptStart,
+    recordAttemptFinished,
+  ]);
 
   // App-scope heartbeat (lib/refresh-heartbeat) drives the 60-minute refresh
   // attempt guarantee; here we just overlay its successful result onto the
@@ -186,6 +215,37 @@ export default function Dashboard() {
   const handleRetry = useCallback(() => {
     setReloadCounter((n) => n + 1);
   }, []);
+
+  // Footer countdown — re-evaluates against current client time.  Tick at
+  // 30s granularity so the minute-rounded display stays accurate without
+  // burning a frame every second.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  // Server-side check timestamp drives the baseline so the footer's
+  // countdown stays consistent with the header's "Last refresh HH:MM" badge
+  // (both derive from `lastCheckedAt ?? refreshedAt`).  Client-side
+  // `lastAttemptAt` is only a fallback for the rare window before any
+  // server timestamp is known.
+  const lastRefreshedAtMs = useMemo<number | null>(() => {
+    if (!lastRefreshedAt) return null;
+    const n = Date.parse(lastRefreshedAt);
+    return Number.isFinite(n) ? n : null;
+  }, [lastRefreshedAt]);
+  const footerText = useMemo(() => {
+    if (isRefreshing) return "Refreshing now…";
+    const baselineMs = lastRefreshedAtMs ?? lastAttemptAt;
+    if (baselineMs === null) return "Refreshing now…";
+    const nextAttemptAt = baselineMs + REFRESH_INTERVAL_MS;
+    // Past the boundary but no in-flight tick yet (scheduling jitter,
+    // hidden tab, etc.) — prefer the in-flight copy over a negative
+    // countdown.
+    if (nowMs >= nextAttemptAt) return "Refreshing now…";
+    const remainingMin = Math.ceil((nextAttemptAt - nowMs) / 60_000);
+    return `Next refresh in ~${remainingMin}m`;
+  }, [lastRefreshedAtMs, lastAttemptAt, isRefreshing, nowMs]);
 
   const handleReset = () => {
     setSelectedTopics(new Set());
@@ -339,8 +399,11 @@ export default function Dashboard() {
           })()}
 
           <div className="px-6 py-8 text-center">
-            <p className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-              Next refresh in ~38 min
+            <p
+              data-testid="refresh-footer"
+              className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
+            >
+              {footerText}
             </p>
           </div>
         </section>
