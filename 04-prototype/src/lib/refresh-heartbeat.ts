@@ -56,16 +56,21 @@ export interface RefreshHeartbeatOptions {
   /**
    * Called synchronously when a heartbeat attempt begins — *after* the
    * attempt timestamp is stamped, *before* the network call.  Fires for
-   * every attempt, success or failure.  Used by the provider to drive the
-   * "Refreshing now…" footer and to keep its `lastAttemptAt` in sync.
+   * every attempt, success or failure.  May return an opaque token (e.g.
+   * a slot ID) identifying this attempt; the same token is threaded back
+   * to `onAttemptComplete` so the consumer can settle the exact slot it
+   * started even if attempts complete out of order.  Returning nothing is
+   * supported — the consumer can fall back to its own correlation
+   * strategy (e.g. oldest-slot pop).
    */
-  onAttemptStart?: (timestamp: number) => void;
+  onAttemptStart?: (timestamp: number) => unknown;
   /**
    * Called when a heartbeat attempt settles (success or failure), regardless
-   * of cancellation.  Pairs with `onAttemptStart` so the provider can clear
-   * its in-flight flag.
+   * of cancellation.  Receives whatever token (if any) was returned by the
+   * paired `onAttemptStart`, so the consumer can correlate the settlement
+   * to the exact in-flight slot.
    */
-  onAttemptComplete?: () => void;
+  onAttemptComplete?: (token?: unknown) => void;
   /** Injection seams for tests. */
   fetcher?: () => Promise<DashboardFetchResult>;
   now?: () => number;
@@ -141,7 +146,10 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
       // this — we deliberately want a 60-minute pace even after errors.
       const startedAt = nowRef.current();
       writeLastAttemptAt(startedAt, storageRef.current);
-      onAttemptStartRef.current?.(startedAt);
+      // Capture the token (if any) from onAttemptStart so onAttemptComplete
+      // can settle the exact slot this tick owns — protects against
+      // out-of-order completions when consumers run multiple attempts.
+      const attemptToken = onAttemptStartRef.current?.(startedAt);
 
       try {
         const result = await fetcherRef.current();
@@ -150,7 +158,7 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
         if (!cancelled) onErrorRef.current?.(err);
       } finally {
         inFlightRef.current = false;
-        onAttemptCompleteRef.current?.();
+        onAttemptCompleteRef.current?.(attemptToken);
         if (!cancelled) schedule(intervalMs);
       }
     };

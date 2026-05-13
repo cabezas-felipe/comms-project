@@ -62,7 +62,6 @@ export default function Dashboard() {
   const {
     recordSuccessfulRefresh,
     heartbeatResult,
-    lastRefreshedAt,
     lastAttemptAt,
     isRefreshing,
     recordAttemptStart,
@@ -139,12 +138,12 @@ export default function Dashboard() {
     let canceled = false;
     setIsLoading(true);
     setLoadError(null);
-    // Flip the in-flight flag only — does NOT stamp `lastAttemptAt` or
-    // reset the 60-minute baseline (only the heartbeat owns that anchor,
-    // so a page load can't push the next-refresh window forward).  Just
-    // drives the footer's "Refreshing now…" copy for the duration of the
-    // fetch.
-    recordAttemptStart();
+    // Drives the footer's "Refreshing now…" copy for the duration of the
+    // fetch.  The returned token uniquely identifies this loader run so
+    // the paired `recordAttemptFinished(token)` below settles the exact
+    // slot — concurrent attempts (e.g. a retry firing while a heartbeat
+    // is still in flight) can no longer pop each other's slots.
+    const attemptToken = recordAttemptStart();
 
     // Phase 5: bootstrap path runs the (potentially expensive) refresh check
     // server-side and falls back to a fresh snapshot when ≤ 60 min old.  GET
@@ -180,10 +179,10 @@ export default function Dashboard() {
       .finally(() => {
         // Always clear the in-flight flag — even on unmount / dep-change /
         // navigation — otherwise the footer stays stuck on "Refreshing now…"
-        // forever once the cancelled promise settles.  Only the React state
-        // setter (`setIsLoading`) needs the canceled guard since it targets
-        // this component's local state.
-        recordAttemptFinished();
+        // forever once the cancelled promise settles.  Settling by token
+        // ensures we remove *this* loader's slot, not whichever happens to
+        // be oldest.
+        recordAttemptFinished(attemptToken);
         if (canceled) return;
         setIsLoading(false);
       });
@@ -224,28 +223,19 @@ export default function Dashboard() {
     const id = setInterval(() => setNowMs(Date.now()), 30_000);
     return () => clearInterval(id);
   }, []);
-  // Server-side check timestamp drives the baseline so the footer's
-  // countdown stays consistent with the header's "Last refresh HH:MM" badge
-  // (both derive from `lastCheckedAt ?? refreshedAt`).  Client-side
-  // `lastAttemptAt` is only a fallback for the rare window before any
-  // server timestamp is known.
-  const lastRefreshedAtMs = useMemo<number | null>(() => {
-    if (!lastRefreshedAt) return null;
-    const n = Date.parse(lastRefreshedAt);
-    return Number.isFinite(n) ? n : null;
-  }, [lastRefreshedAt]);
+  // Footer countdown and the AppHeader's "Last refresh" badge derive from
+  // the same anchor (`lastAttemptAt`).  Math is consistent by construction:
+  // both surfaces reflect the most recent attempt settlement (success,
+  // no-op, or failure).
   const footerText = useMemo(() => {
     if (isRefreshing) return "Refreshing now…";
-    const baselineMs = lastRefreshedAtMs ?? lastAttemptAt;
-    if (baselineMs === null) return "Refreshing now…";
-    const nextAttemptAt = baselineMs + REFRESH_INTERVAL_MS;
-    // Past the boundary but no in-flight tick yet (scheduling jitter,
-    // hidden tab, etc.) — prefer the in-flight copy over a negative
-    // countdown.
-    if (nowMs >= nextAttemptAt) return "Refreshing now…";
-    const remainingMin = Math.ceil((nextAttemptAt - nowMs) / 60_000);
+    if (lastAttemptAt === null) return "Refreshing now…";
+    const nextAttemptAt = lastAttemptAt + REFRESH_INTERVAL_MS;
+    // If timers are throttled and we're already due, keep showing a bounded
+    // countdown state until an actual in-flight attempt toggles isRefreshing.
+    const remainingMin = Math.max(1, Math.ceil((nextAttemptAt - nowMs) / 60_000));
     return `Next refresh in ~${remainingMin}m`;
-  }, [lastRefreshedAtMs, lastAttemptAt, isRefreshing, nowMs]);
+  }, [lastAttemptAt, isRefreshing, nowMs]);
 
   const handleReset = () => {
     setSelectedTopics(new Set());

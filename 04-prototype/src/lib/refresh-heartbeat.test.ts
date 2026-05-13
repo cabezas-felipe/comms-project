@@ -343,4 +343,82 @@ describe("useRefreshHeartbeat", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
   });
+
+  it("threads the token returned by onAttemptStart back to onAttemptComplete (success + failure)", async () => {
+    // The hook captures whatever the consumer returns from onAttemptStart
+    // (an opaque token — e.g. a slot ID) and passes it back on settlement
+    // so the consumer can pair start/finish exactly even when attempts
+    // overlap.  Verified across both branches: a successful tick and a
+    // failed tick.
+    const storage = createMemoryStorage();
+    const okFetcher = vi.fn().mockResolvedValue(OK_RESULT);
+    let nowMs = 27_000_000;
+    writeLastAttemptAt(nowMs - 2 * REFRESH_INTERVAL_MS, storage);
+    const onAttemptStart = vi.fn().mockReturnValueOnce("token-success");
+    const onAttemptComplete = vi.fn();
+
+    renderHook(() =>
+      useRefreshHeartbeat({
+        enabled: true,
+        fetcher: okFetcher,
+        now: () => nowMs,
+        storage,
+        onAttemptStart,
+        onAttemptComplete,
+      })
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(onAttemptComplete).toHaveBeenCalledTimes(1);
+    expect(onAttemptComplete).toHaveBeenLastCalledWith("token-success");
+
+    // Same provider, second tick that fails — token threading must also
+    // hold across the failure branch.
+    const failingFetcher = vi.fn().mockRejectedValue(new Error("boom"));
+    onAttemptStart.mockReturnValueOnce("token-fail");
+    const storage2 = createMemoryStorage();
+    writeLastAttemptAt(nowMs - 2 * REFRESH_INTERVAL_MS, storage2);
+    renderHook(() =>
+      useRefreshHeartbeat({
+        enabled: true,
+        fetcher: failingFetcher,
+        now: () => nowMs,
+        storage: storage2,
+        onAttemptStart,
+        onAttemptComplete,
+        onError: vi.fn(),
+      })
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(onAttemptComplete).toHaveBeenCalledTimes(2);
+    expect(onAttemptComplete).toHaveBeenLastCalledWith("token-fail");
+  });
+
+  it("onAttemptComplete receives undefined when onAttemptStart returns nothing (legacy callers)", async () => {
+    // Callers that haven't been threaded for token correlation can still
+    // omit the return.  The hook must pass `undefined` rather than throwing
+    // or substituting a synthetic value.
+    const storage = createMemoryStorage();
+    const fetcher = vi.fn().mockResolvedValue(OK_RESULT);
+    const t0 = 31_000_000;
+    writeLastAttemptAt(t0 - 2 * REFRESH_INTERVAL_MS, storage);
+    const onAttemptStart = vi.fn();
+    const onAttemptComplete = vi.fn();
+
+    renderHook(() =>
+      useRefreshHeartbeat({
+        enabled: true,
+        fetcher,
+        now: () => t0,
+        storage,
+        onAttemptStart,
+        onAttemptComplete,
+      })
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(onAttemptComplete).toHaveBeenCalledTimes(1);
+    expect(onAttemptComplete).toHaveBeenLastCalledWith(undefined);
+  });
 });
