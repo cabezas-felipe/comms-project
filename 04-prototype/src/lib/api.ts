@@ -98,13 +98,7 @@ function parseSelectionMetaSafe(raw: unknown): DashboardSelectionMeta | null {
   return result.success ? result.data : null;
 }
 
-function parseRefreshedAtSafe(raw: unknown): string | null {
-  if (typeof raw !== "string") return null;
-  const parsed = Date.parse(raw);
-  return Number.isFinite(parsed) ? raw : null;
-}
-
-function parseLastCheckedAtSafe(raw: unknown): string | null {
+function parseIsoTimestampSafe(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const parsed = Date.parse(raw);
   return Number.isFinite(parsed) ? raw : null;
@@ -169,8 +163,8 @@ export async function fetchDashboardWithMeta(
       };
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
-      const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
-      const lastCheckedAt = parseLastCheckedAtSafe(raw?._meta?.lastCheckedAt);
+      const refreshedAt = parseIsoTimestampSafe(raw?._meta?.refreshedAt);
+      const lastCheckedAt = parseIsoTimestampSafe(raw?._meta?.lastCheckedAt);
       return { payload, selection, refreshedAt, lastCheckedAt };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
@@ -244,8 +238,8 @@ export async function bootstrapDashboard(
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
       const decision = parseBootstrapDecision(raw?._meta?.bootstrapDecision);
-      const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
-      const lastCheckedAt = parseLastCheckedAtSafe(raw?._meta?.lastCheckedAt);
+      const refreshedAt = parseIsoTimestampSafe(raw?._meta?.refreshedAt);
+      const lastCheckedAt = parseIsoTimestampSafe(raw?._meta?.lastCheckedAt);
       return { payload, selection, decision, refreshedAt, lastCheckedAt };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
@@ -302,8 +296,8 @@ export async function refreshDashboard(
       };
       const payload = dashboardPayloadSchema.parse(raw);
       const selection = parseSelectionMetaSafe(raw?._meta?.selection);
-      const refreshedAt = parseRefreshedAtSafe(raw?._meta?.refreshedAt);
-      const lastCheckedAt = parseLastCheckedAtSafe(raw?._meta?.lastCheckedAt);
+      const refreshedAt = parseIsoTimestampSafe(raw?._meta?.refreshedAt);
+      const lastCheckedAt = parseIsoTimestampSafe(raw?._meta?.lastCheckedAt);
       return { payload, selection, refreshedAt, lastCheckedAt };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
