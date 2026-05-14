@@ -13,6 +13,7 @@ import {
   LAST_REFRESH_ATTEMPT_KEY,
   readLastAttemptAt,
   useRefreshHeartbeat,
+  writeLastAttemptAt,
 } from "./refresh-heartbeat";
 import type { DashboardFetchResult } from "./api";
 import { trackSourceOpenError } from "./analytics";
@@ -23,20 +24,34 @@ import { notifyError } from "./notify";
 // in ~Xm" countdown so they remain mathematically consistent across the
 // app's lifetime.
 //
-// Writers:
-//   1. The heartbeat hook (runs every 60 min of real elapsed time once
-//      authenticated).  Bumps in-flight on attempt start, advances the
-//      anchor on attempt settlement (success OR failure — every settlement
-//      counts as "we checked feeds at this moment").
-//   2. The dashboard loader (bootstrap / GET) — same lifecycle: in-flight
-//      on start, anchor advances on settlement.  On success it prefers the
-//      server's `lastCheckedAt` so the badge reflects the server clock for
-//      the first paint.
+// Who writes the anchor:
+//   1. The heartbeat hook (every 60 min of real elapsed time once
+//      authenticated).  In-flight on attempt start; anchor advances on every
+//      settlement (success or failure).  Heartbeat hits POST /refresh.
+//   2. The Dashboard loader's BOOTSTRAP path (Landing → Dashboard,
+//      Onboarding → Dashboard).  In-flight on attempt start; anchor advances
+//      on settlement UNLESS the server reports `served_fresh_snapshot` (the
+//      bootstrap route didn't actually run the refresh executor — no attempt
+//      was made, so the clock must not move).
+//   3. The Dashboard loader's GET path (in-app navigation, direct URL, retry).
+//      Does NOT toggle in-flight and does NOT advance the anchor.  Its only
+//      anchor interaction is `seedAnchorIfMissing` on success — used to plant
+//      the first-paint timestamp when no anchor exists yet.  When the GET
+//      response carries no parseable `_meta.lastCheckedAt` / `refreshedAt`
+//      the anchor stays null and the header renders "—"; GET never invents
+//      an anchor from client wall-clock.
+//
+// Why the GET path is decoupled: GET serves the persisted snapshot — it is
+// not a refresh attempt.  Mounting the dashboard from Settings → Dashboard
+// must not tick the "Last refresh" badge forward, because nothing fresh
+// happened.  After the very first response seeds the anchor, subsequent GET
+// remounts leave the anchor exactly where the last real refresh attempt put
+// it.
 //
 // Readers:
 //   - <AppHeader> consumes `lastRefreshedAt` (ISO derived from the anchor).
 //   - <Dashboard> consumes `heartbeatResult` to overlay refreshed stories,
-//     and `lastAttemptAt` (number ms) + `isRefreshing` for the footer.
+//     and `lastAttemptAt` + `isRefreshing` for the footer.
 //
 // A provider-level watchdog clamps the in-flight UI flag so a hung fetch
 // (or a runaway promise) cannot strand the footer on "Refreshing now…".  The
@@ -46,6 +61,14 @@ import { notifyError } from "./notify";
 
 function resolveLastCheckDisplayAt(result: DashboardFetchResult): string | null {
   return result.lastCheckedAt ?? result.refreshedAt ?? null;
+}
+
+function parseServerAnchorMs(result: DashboardFetchResult | null | undefined): number | null {
+  if (!result) return null;
+  const iso = resolveLastCheckDisplayAt(result);
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 // Upper bound on how long the footer can sit on "Refreshing now…" before the
@@ -63,6 +86,28 @@ export const REFRESH_WATCHDOG_MS = 90_000;
  */
 export type AttemptToken = number;
 
+/**
+ * Options passed to `recordAttemptFinished` so callers can both pin the
+ * anchor to a server-provided timestamp AND opt out of advancing it when the
+ * backend reports that no refresh actually ran (e.g. bootstrap
+ * `served_fresh_snapshot`).
+ */
+export interface SettleOptions {
+  /**
+   * Server response for this attempt — used to prefer `lastCheckedAt` /
+   * `refreshedAt` over client `Date.now()` when advancing the anchor.
+   */
+  result?: DashboardFetchResult | null;
+  /**
+   * Default `true`.  When `false`, the slot is released but the anchor does
+   * not move.  Use for bootstrap responses that report
+   * `served_fresh_snapshot` — the backend served the persisted snapshot
+   * without running the refresh executor, so this caller did not perform a
+   * refresh attempt.
+   */
+  advanceClock?: boolean;
+}
+
 interface RefreshContextValue {
   /**
    * ISO display value for the header's "Last refresh" badge.  Derived from
@@ -72,15 +117,21 @@ interface RefreshContextValue {
   lastRefreshedAt: string | null;
   /** Latest heartbeat-driven refresh result. Null until the first tick succeeds. */
   heartbeatResult: DashboardFetchResult | null;
-  /** Called by Dashboard's initial loader after a successful bootstrap/GET. */
-  recordSuccessfulRefresh: (result: DashboardFetchResult) => void;
+  /**
+   * First-paint seed.  Used by the GET path (and by bootstrap
+   * `served_fresh_snapshot` responses) so a brand-new session that has no
+   * persisted anchor yet still surfaces a timestamp from the first server
+   * response.  No-op once `lastAttemptAt` has been set — GET remounts after
+   * the seed must never advance the anchor.
+   */
+  seedAnchorIfMissing: (result: DashboardFetchResult) => void;
   /**
    * Single attempt anchor (epoch ms).  Advances on every refresh attempt
    * settlement — success, no-op, or failure — so the footer's countdown and
    * the header's badge are always derived from the same moment in time.
    */
   lastAttemptAt: number | null;
-  /** True while any refresh attempt (heartbeat or dashboard loader) is in flight. */
+  /** True while any refresh attempt (heartbeat or bootstrap) is in flight. */
   isRefreshing: boolean;
   /**
    * Signal that a refresh attempt is starting.  Returns a token that
@@ -92,12 +143,14 @@ interface RefreshContextValue {
   recordAttemptStart: () => AttemptToken;
   /**
    * Mark a refresh attempt as settled (success or failure).  Pass the
-   * token returned by the paired `recordAttemptStart` to remove that
-   * specific slot.  Omitting the token falls back to FIFO settlement
-   * (remove the oldest in-flight slot) — safe for legacy call sites that
-   * predate token threading.
+   * token returned by the paired `recordAttemptStart` so the exact slot is
+   * removed even when attempts complete out of order.  `options.result`
+   * lets the provider prefer the server's `lastCheckedAt` / `refreshedAt`
+   * over client wall-clock.  `options.advanceClock=false` releases the
+   * slot without moving the anchor (used for bootstrap
+   * `served_fresh_snapshot`).
    */
-  recordAttemptFinished: (token?: AttemptToken) => void;
+  recordAttemptFinished: (token?: AttemptToken, options?: SettleOptions) => void;
 }
 
 const RefreshContext = createContext<RefreshContextValue | null>(null);
@@ -120,12 +173,27 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
   // remount / cross-tab return keeps the visible badge stable while the
   // heartbeat re-evaluates due-ness in the background.
   const [lastAttemptAt, setLastAttemptAt] = useState<number | null>(() => readLastAttemptAt());
+  // Live mirror of `lastAttemptAt` for gates that need a synchronous read
+  // (e.g. seedAnchorIfMissing's "already seeded?" check fired from a Promise
+  // .then() callback).  Reading React state from a closure inside a callback
+  // would pin us to the value at the time the callback was created — the ref
+  // is always current.  Seeded eagerly from the same `readLastAttemptAt()`
+  // initializer so the ref is correct on the very first render.
+  const lastAttemptAtRef = useRef<number | null>(lastAttemptAt);
   // Per-attempt slots replace the older `pendingAttempts: number` counter so
   // the watchdog can expire one specific stale attempt without flushing
   // newer overlapping ones.
   const [inFlight, setInFlight] = useState<readonly InFlightSlot[]>([]);
   const nextSlotIdRef = useRef(1);
   const isRefreshing = inFlight.length > 0;
+
+  // Mirror committed state into the ref after every commit.  Lives inside a
+  // post-commit effect (not an updater) so it stays a pure read-after-write
+  // sync — React's concurrent rendering or StrictMode double-invocation
+  // never causes spurious mirror writes.
+  useEffect(() => {
+    lastAttemptAtRef.current = lastAttemptAt;
+  }, [lastAttemptAt]);
 
   // Anchor never moves backward — that would let an out-of-order callback
   // (e.g. a stale storage event after a fresh local settlement) regress the
@@ -156,8 +224,16 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
   }, []);
 
   const settleSlot = useCallback(
-    (token: unknown) => {
-      advanceAnchor(Date.now());
+    (token: unknown, options?: SettleOptions) => {
+      const advanceClock = options?.advanceClock !== false;
+      if (advanceClock) {
+        const serverMs = parseServerAnchorMs(options?.result ?? null);
+        // Prefer the server-stamped time when present so the badge tracks
+        // the server clock; otherwise fall back to client `now()` so a
+        // failed or legacy-API attempt still moves the badge (the
+        // alternative would strand the countdown on a stale anchor).
+        advanceAnchor(serverMs ?? Date.now());
+      }
       if (typeof token === "number") removeSlotById(token);
       else popOldestSlot();
     },
@@ -174,9 +250,11 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
       return pushSlot();
     },
     onAttemptComplete: (token) => {
-      // Every settlement (success, no-op, failure) advances the anchor so
-      // the header + footer move together and "attempt happened" is the
-      // unambiguous signal.
+      // Every heartbeat settlement (success, no-op, failure) advances the
+      // anchor — heartbeats are POST /refresh attempts, so they always
+      // count as "we checked feeds at this moment".  When the success path
+      // already pinned the anchor to the server timestamp via onSuccess,
+      // the monotonic guard inside `advanceAnchor` ensures we don't regress.
       settleSlot(token);
     },
     onSuccess: (result) => {
@@ -185,11 +263,8 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
       // settlement — keeps the display aligned with server clock for
       // successful runs.  advanceAnchor's monotonic guard handles the
       // ordering against the prior onAttemptStart bump.
-      const serverIso = resolveLastCheckDisplayAt(result);
-      if (serverIso) {
-        const ms = Date.parse(serverIso);
-        if (Number.isFinite(ms)) advanceAnchor(ms);
-      }
+      const serverMs = parseServerAnchorMs(result);
+      if (serverMs !== null) advanceAnchor(serverMs);
     },
     onError: (error: unknown) => {
       const message = error instanceof Error ? error.message : "Heartbeat refresh failed";
@@ -234,14 +309,63 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
     return () => clearTimeout(id);
   }, [inFlight, advanceAnchor]);
 
-  const recordSuccessfulRefresh = useCallback((result: DashboardFetchResult) => {
-    // Initial page-load loader: pick the server's check timestamp when
-    // available so the header reflects server clock.  Falls back to "now"
-    // for older API responses that omit `lastCheckedAt` / `refreshedAt`.
-    const serverIso = resolveLastCheckDisplayAt(result);
-    const serverMs = serverIso ? Date.parse(serverIso) : NaN;
-    advanceAnchor(Number.isFinite(serverMs) ? serverMs : Date.now());
-  }, [advanceAnchor]);
+  const seedAnchorIfMissing = useCallback((result: DashboardFetchResult) => {
+    // GET path / served_fresh_snapshot bootstrap path.  Establishes the
+    // anchor on the very first dashboard entry when nothing is persisted
+    // yet; never moves an existing anchor.  If the server omits both
+    // `lastCheckedAt` and `refreshedAt` we leave the anchor as null so the
+    // header renders "—" — the GET path never synthesizes an anchor from
+    // client wall-clock.
+    //
+    // Persistence: when we DO seed (anchor was null AND the response
+    // carried a parseable timestamp), mirror `serverMs` into
+    // `LAST_REFRESH_ATTEMPT_KEY` so a full reload rehydrates from the same
+    // server `lastCheckedAt` the badge is currently showing.  Without this
+    // the heartbeat hook's cold-boot "null → write Date.now()" baseline
+    // would win on reload and the header would silently snap back to the
+    // app-open moment instead of the server clock.
+    //
+    // Concurrency: the "already seeded?" gate reads `lastAttemptAtRef`
+    // (synchronously kept in lockstep with committed state) and updates it
+    // synchronously before any setState / LS write.  This makes the seed
+    // deterministic under React's concurrent rendering and StrictMode's
+    // double-invocation of pure updaters — neither setState updaters nor
+    // post-render effects can re-enter and double-write.  The functional
+    // form of setLastAttemptAt is a belt-and-braces guard against a racing
+    // writer (e.g. a heartbeat storage event handler) committing between
+    // the ref check and the commit; if `prev` is non-null when the updater
+    // finally runs, we keep their value and skip the regression.
+    const serverMs = parseServerAnchorMs(result);
+    if (serverMs === null) return;
+    if (lastAttemptAtRef.current !== null) return;
+    // Synchronous ref bump: a second call in the same tick (StrictMode or a
+    // sibling effect firing the same handler) bails at the top above.
+    //
+    // Intentional ref/state divergence: `lastAttemptAtRef.current` now
+    // leads `lastAttemptAt` by one commit cycle.  The post-commit effect
+    // re-syncs the ref to whatever state actually commits (including the
+    // belt-and-braces functional updater's "keep prev if non-null" guard),
+    // so the divergence closes within the same render pass.  We accept the
+    // brief lead because it's what guarantees single-entry seed side
+    // effects under concurrent rendering and StrictMode — the alternative
+    // (waiting for commit before bumping the ref) reopens the very
+    // double-write race this design exists to close.
+    lastAttemptAtRef.current = serverMs;
+    setLastAttemptAt((prev) => (prev === null ? serverMs : prev));
+    // Monotonic LS write: a cross-tab refresh that landed between this
+    // session's last commit-sync and this call may have stamped a newer
+    // value into storage.  We must not regress it.  Re-reading LS at this
+    // moment is safe because the ref gate above ensures we run at most
+    // once per logical seed; the read happens exactly once and the write
+    // is skipped when the persisted value is already at or beyond
+    // `serverMs`.  The storage event handler will subsequently advance
+    // React state / the ref to the newer value via `advanceAnchor`'s
+    // monotonic guard, so the temporary state lag closes on the next tick.
+    const persistedMs = readLastAttemptAt();
+    if (persistedMs === null || persistedMs < serverMs) {
+      writeLastAttemptAt(serverMs);
+    }
+  }, []);
 
   const recordAttemptStart = useCallback((): AttemptToken => {
     // Mirrors the heartbeat semantics: in-flight flag goes up, anchor only
@@ -252,12 +376,15 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
   }, [pushSlot]);
 
   const recordAttemptFinished = useCallback(
-    (token?: AttemptToken) => {
-      // Always advance on settlement — even when the loader failed and no
-      // server timestamp arrived — so the header and footer remain coupled.
-      // Token-aware settlement removes the exact slot; omitting the token
-      // falls back to oldest-slot pop for legacy call sites.
-      settleSlot(token);
+    (token?: AttemptToken, options?: SettleOptions) => {
+      // Refresh-style attempts (POST /refresh, POST /bootstrap that runs the
+      // refresh executor) advance on settlement — even on failure — so the
+      // header and footer remain coupled.  Token-aware settlement removes
+      // the exact slot; omitting the token falls back to oldest-slot pop.
+      // `options.advanceClock=false` releases the slot without moving the
+      // anchor — bootstrap `served_fresh_snapshot` lands here because the
+      // backend did not actually run a refresh.
+      settleSlot(token, options);
     },
     [settleSlot]
   );
@@ -271,7 +398,7 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
     () => ({
       lastRefreshedAt,
       heartbeatResult,
-      recordSuccessfulRefresh,
+      seedAnchorIfMissing,
       lastAttemptAt,
       isRefreshing,
       recordAttemptStart,
@@ -280,7 +407,7 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
     [
       lastRefreshedAt,
       heartbeatResult,
-      recordSuccessfulRefresh,
+      seedAnchorIfMissing,
       lastAttemptAt,
       isRefreshing,
       recordAttemptStart,

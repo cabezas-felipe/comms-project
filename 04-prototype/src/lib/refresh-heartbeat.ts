@@ -10,6 +10,13 @@ import { refreshDashboard, type DashboardFetchResult } from "./api";
 // timestamp is persisted in localStorage so the invariant survives remounts,
 // soft reloads, and (when the user returns within the window) cross-tab use.
 
+// Known limitation: this key is global to the browser, not scoped to the
+// signed-in user.  Two accounts that use the same browser will share one
+// anchor — switching accounts will surface the previous account's last
+// attempt timestamp until a real attempt overwrites it.  Acceptable for the
+// prototype; revisit by keying the storage entry on `recognizedIdentity.userId`
+// (e.g. `tempo_dashboard_last_refresh_attempt_at:<uid>`) before multi-user
+// production rollout.
 export const LAST_REFRESH_ATTEMPT_KEY = "tempo_dashboard_last_refresh_attempt_at";
 export const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
 
