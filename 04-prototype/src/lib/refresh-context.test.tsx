@@ -7,21 +7,29 @@ import {
   RefreshHeartbeatProvider,
   useRefreshContext,
   type AttemptToken,
+  type SettleOptions,
 } from "@/lib/refresh-context";
 import type { DashboardFetchResult } from "@/lib/api";
 
 const writeLastAttemptAtSpy = vi.fn();
+// `readLastAttemptAt` is a spy too so individual tests can simulate
+// scenarios where storage holds a newer (or older) value than the GET
+// seed — the monotonic LS guard inside `seedAnchorIfMissing` must read the
+// current persisted value before deciding whether to overwrite it.
+// Defaults to null (cold-boot state) so existing tests keep working
+// without per-test wiring.
+const readLastAttemptAtSpy = vi.fn<[], number | null>(() => null);
 
 // The provider mounts `useRefreshHeartbeat` but for unit testing the context
 // itself we replace it with an inert mock — the heartbeat hook has its own
-// dedicated test file.  `recordSuccessfulRefresh` / `recordAttemptStart` /
+// dedicated test file.  `seedAnchorIfMissing` / `recordAttemptStart` /
 // `recordAttemptFinished` are exercised directly via the harness consumer.
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ recognizedIdentity: { email: "u@example.com", userId: "u1" } }),
 }));
 vi.mock("@/lib/refresh-heartbeat", () => ({
   useRefreshHeartbeat: () => {},
-  readLastAttemptAt: () => null,
+  readLastAttemptAt: () => readLastAttemptAtSpy(),
   writeLastAttemptAt: (...args: unknown[]) => writeLastAttemptAtSpy(...args),
   LAST_REFRESH_ATTEMPT_KEY: "tempo_dashboard_last_refresh_attempt_at",
   REFRESH_INTERVAL_MS: 60 * 60 * 1000,
@@ -35,6 +43,11 @@ vi.mock("@/lib/notify", () => ({
 
 afterEach(() => {
   writeLastAttemptAtSpy.mockReset();
+  readLastAttemptAtSpy.mockReset();
+  // Restore the default cold-boot behavior so subsequent tests that don't
+  // care about LS state aren't affected by a `mockReturnValueOnce` left
+  // over from this test.
+  readLastAttemptAtSpy.mockImplementation(() => null);
 });
 
 function HarnessConsumer({
@@ -42,8 +55,8 @@ function HarnessConsumer({
 }: {
   onRecord: (record: (r: DashboardFetchResult) => void, value: string | null) => void;
 }) {
-  const { lastRefreshedAt, recordSuccessfulRefresh } = useRefreshContext();
-  onRecord(recordSuccessfulRefresh, lastRefreshedAt);
+  const { lastRefreshedAt, seedAnchorIfMissing } = useRefreshContext();
+  onRecord(seedAnchorIfMissing, lastRefreshedAt);
   return <div data-testid="ts">{lastRefreshedAt ?? "none"}</div>;
 }
 
@@ -69,8 +82,8 @@ function toCanonicalIso(value: string): string {
   return new Date(value).toISOString();
 }
 
-describe("RefreshHeartbeatProvider — last-check display precedence", () => {
-  it("prefers lastCheckedAt over refreshedAt when both are present", () => {
+describe("RefreshHeartbeatProvider — seedAnchorIfMissing (first paint)", () => {
+  it("prefers lastCheckedAt over refreshedAt when both are present (first seed)", () => {
     let recordFn: ((r: DashboardFetchResult) => void) | null = null;
     renderProvider(
       <HarnessConsumer
@@ -105,10 +118,10 @@ describe("RefreshHeartbeatProvider — last-check display precedence", () => {
     expect(screen.getByTestId("ts").textContent).toBe(toCanonicalIso("2026-05-08T08:00:00Z"));
   });
 
-  it("falls back to 'now' when both timestamps are absent (still produces a valid anchor)", () => {
-    // Older API responses without either timestamp must not strand the
-    // header on "—" forever — the attempt happened, so the anchor advances
-    // to settlement time as a defensive fallback.
+  it("leaves anchor as null when both timestamps are absent (no synthetic anchor from GET)", () => {
+    // GET never invents an anchor from client wall-clock: a response with
+    // no parseable `_meta.lastCheckedAt` / `refreshedAt` leaves the anchor
+    // null and the header on "—" until a POST refresh provides one.
     let recordFn: ((r: DashboardFetchResult) => void) | null = null;
     renderProvider(
       <HarnessConsumer
@@ -117,15 +130,206 @@ describe("RefreshHeartbeatProvider — last-check display precedence", () => {
         }}
       />
     );
-    const beforeMs = Date.now();
     act(() => {
       recordFn!(makeResult({ refreshedAt: null, lastCheckedAt: null }));
     });
-    const after = screen.getByTestId("ts").textContent ?? "";
-    expect(after).not.toBe("none");
-    const afterMs = Date.parse(after);
-    expect(Number.isFinite(afterMs)).toBe(true);
-    expect(afterMs).toBeGreaterThanOrEqual(beforeMs);
+    expect(screen.getByTestId("ts").textContent).toBe("none");
+  });
+
+  it("does not move an anchor that is already set (GET remount after seed is a no-op)", () => {
+    // Once any prior attempt (or earlier GET) has seeded the anchor, a
+    // subsequent GET — e.g. a Settings → Dashboard remount — must not tick
+    // the badge forward, even when the response carries a later server
+    // timestamp.  Only POST refresh-style attempts advance the clock.
+    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
+    renderProvider(
+      <HarnessConsumer
+        onRecord={(record) => {
+          recordFn = record;
+        }}
+      />
+    );
+    const first = "2026-05-08T08:00:00Z";
+    const laterByOneHour = "2026-05-08T09:00:00Z";
+    act(() => { recordFn!(makeResult({ lastCheckedAt: first })); });
+    expect(screen.getByTestId("ts").textContent).toBe(toCanonicalIso(first));
+    // A second GET arriving with a later timestamp must NOT advance the
+    // anchor — only POST refresh-style attempts may do that.
+    act(() => { recordFn!(makeResult({ lastCheckedAt: laterByOneHour })); });
+    expect(screen.getByTestId("ts").textContent).toBe(toCanonicalIso(first));
+  });
+});
+
+// ─── seedAnchorIfMissing → localStorage alignment ────────────────────────────
+// On cold boot the heartbeat hook stamps `LAST_REFRESH_ATTEMPT_KEY` with
+// `Date.now()` so a remount inside the 60-min window can't fire an extra
+// tick.  Without persisting the GET seed, that "app opened" baseline would
+// win on a full reload and the header would silently snap back to the
+// app-open moment instead of the server's `lastCheckedAt`.  `seedAnchorIfMissing`
+// MUST mirror the seeded value into localStorage so reload, cross-tab
+// rehydration, and heartbeat scheduling all share the same baseline as the
+// visible badge.
+
+describe("RefreshHeartbeatProvider — seedAnchorIfMissing persists to localStorage", () => {
+  it("writes the server timestamp to localStorage when seeding a null anchor", () => {
+    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
+    renderProvider(
+      <HarnessConsumer
+        onRecord={(record) => {
+          recordFn = record;
+        }}
+      />
+    );
+    expect(writeLastAttemptAtSpy).not.toHaveBeenCalled();
+
+    const serverIso = "2026-05-08T09:00:00Z";
+    act(() => { recordFn!(makeResult({ lastCheckedAt: serverIso })); });
+
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledTimes(1);
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledWith(Date.parse(serverIso));
+  });
+
+  it("writes refreshedAt when lastCheckedAt is null (older API fallback path)", () => {
+    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
+    renderProvider(
+      <HarnessConsumer
+        onRecord={(record) => {
+          recordFn = record;
+        }}
+      />
+    );
+    const fallbackIso = "2026-05-08T07:30:00Z";
+    act(() => {
+      recordFn!(makeResult({ lastCheckedAt: null, refreshedAt: fallbackIso }));
+    });
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledTimes(1);
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledWith(Date.parse(fallbackIso));
+  });
+
+  it("does NOT touch localStorage when both server timestamps are absent", () => {
+    // Header stays on "—" AND localStorage stays untouched — we never
+    // synthesize a client-time anchor on the GET path, even in storage.
+    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
+    renderProvider(
+      <HarnessConsumer
+        onRecord={(record) => {
+          recordFn = record;
+        }}
+      />
+    );
+    act(() => {
+      recordFn!(makeResult({ lastCheckedAt: null, refreshedAt: null }));
+    });
+    expect(writeLastAttemptAtSpy).not.toHaveBeenCalled();
+  });
+
+  it("two synchronous seed calls in the same tick produce exactly one localStorage write", () => {
+    // Hardening guarantee: under React's concurrent rendering and
+    // StrictMode's double-invocation of pure updaters, a closure-flag
+    // pattern inside `setLastAttemptAt(prev => …)` could fire the LS write
+    // twice.  The provider's ref-gated implementation bails synchronously
+    // on the second call, so the side effect runs once per logical seed.
+    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
+    renderProvider(
+      <HarnessConsumer
+        onRecord={(record) => {
+          recordFn = record;
+        }}
+      />
+    );
+    const serverIso = "2026-05-08T09:00:00Z";
+    act(() => {
+      // Two calls inside one act / one tick — the second must see the ref
+      // already advanced and bail before writing storage.
+      recordFn!(makeResult({ lastCheckedAt: serverIso }));
+      recordFn!(makeResult({ lastCheckedAt: serverIso }));
+    });
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledTimes(1);
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledWith(Date.parse(serverIso));
+  });
+
+  it("does NOT overwrite a persisted value that is already newer than the GET seed (cross-tab race)", () => {
+    // Scenario: another tab POSTed a real refresh after this tab's useState
+    // initialization read storage (so this tab's React anchor is still
+    // null), but BEFORE the storage event handler had a chance to advance
+    // it.  The seed must not regress storage to the older server snapshot
+    // timestamp — the cross-tab write is the authoritative latest attempt.
+    const persistedIso = "2026-05-10T10:00:00Z";
+    const serverIso = "2026-05-08T09:00:00Z";
+    // useState init runs first and must see null (otherwise the seed gate
+    // bails immediately because the React anchor is non-null).  Subsequent
+    // reads — i.e. the one inside seedAnchorIfMissing's monotonic guard —
+    // see the cross-tab value.
+    readLastAttemptAtSpy.mockReturnValueOnce(null);
+    readLastAttemptAtSpy.mockReturnValue(Date.parse(persistedIso));
+
+    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
+    renderProvider(
+      <HarnessConsumer
+        onRecord={(record) => {
+          recordFn = record;
+        }}
+      />
+    );
+    act(() => { recordFn!(makeResult({ lastCheckedAt: serverIso })); });
+
+    expect(writeLastAttemptAtSpy).not.toHaveBeenCalled();
+  });
+
+  it("DOES write when the persisted value is older than the GET seed (cold-boot baseline)", () => {
+    // Typical cold-boot path: the heartbeat hook stamped LS with
+    // `Date.now()` at app open, but that "app opened" baseline is much
+    // older than the server's `lastCheckedAt`.  The seed must overwrite
+    // it so a full reload rehydrates from the server clock, not the
+    // app-open moment.
+    //
+    // (In a real cold boot the persisted "now" is actually NEWER than the
+    // server's lastCheckedAt — the spec's `< serverMs` branch handles the
+    // legitimate "we just learned about a newer server attempt" case;
+    // here we exercise the symmetric path with an explicitly older LS
+    // value to assert the monotonic guard's positive branch.)
+    const persistedIso = "2026-05-05T08:00:00Z";
+    const serverIso = "2026-05-08T09:00:00Z";
+    readLastAttemptAtSpy.mockReturnValueOnce(null);
+    readLastAttemptAtSpy.mockReturnValue(Date.parse(persistedIso));
+
+    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
+    renderProvider(
+      <HarnessConsumer
+        onRecord={(record) => {
+          recordFn = record;
+        }}
+      />
+    );
+    act(() => { recordFn!(makeResult({ lastCheckedAt: serverIso })); });
+
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledTimes(1);
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledWith(Date.parse(serverIso));
+  });
+
+  it("does NOT write to localStorage on a subsequent GET after the anchor is seeded", () => {
+    // Mirrors a Settings → Dashboard remount that returns a newer
+    // lastCheckedAt: React state is already set, the seed is a no-op, and
+    // the storage write must be skipped too — otherwise we'd regress
+    // monotonicity by overwriting a real refresh time with a stale GET
+    // snapshot.
+    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
+    renderProvider(
+      <HarnessConsumer
+        onRecord={(record) => {
+          recordFn = record;
+        }}
+      />
+    );
+    const first = "2026-05-08T08:00:00Z";
+    const laterByOneHour = "2026-05-08T09:00:00Z";
+    act(() => { recordFn!(makeResult({ lastCheckedAt: first })); });
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledTimes(1);
+    expect(writeLastAttemptAtSpy).toHaveBeenLastCalledWith(Date.parse(first));
+
+    // Second GET — anchor is non-null, seed is a no-op, no LS write.
+    act(() => { recordFn!(makeResult({ lastCheckedAt: laterByOneHour })); });
+    expect(writeLastAttemptAtSpy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -143,7 +347,7 @@ interface AttemptHarnessApi {
   lastAttemptAt: number | null;
   lastRefreshedAt: string | null;
   recordAttemptStart: () => AttemptToken;
-  recordAttemptFinished: (token?: AttemptToken) => void;
+  recordAttemptFinished: (token?: AttemptToken, options?: SettleOptions) => void;
 }
 
 function AttemptHarness({ onApi }: { onApi: (api: AttemptHarnessApi) => void }) {
@@ -247,27 +451,104 @@ describe("RefreshHeartbeatProvider — attempt lifecycle", () => {
   });
 
   it("anchor is monotonic — a stale settlement timestamp cannot regress lastAttemptAt", () => {
-    // recordSuccessfulRefresh adopts the server's lastCheckedAt; a stray
-    // older payload (e.g. an out-of-order retry response) must not pull the
-    // visible badge backward.
-    let recordFn: ((r: DashboardFetchResult) => void) | null = null;
-    renderProvider(
-      <HarnessConsumer
-        onRecord={(record) => {
-          recordFn = record;
-        }}
-      />
-    );
+    // recordAttemptFinished({ result }) snaps to the server's lastCheckedAt
+    // when present; a stray older payload (e.g. an out-of-order retry
+    // response) must not pull the visible badge backward.
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
 
     const newer = "2026-05-08T10:00:00Z";
     const older = "2026-05-08T08:00:00Z";
 
-    act(() => { recordFn!(makeResult({ lastCheckedAt: newer })); });
-    expect(screen.getByTestId("ts").textContent).toBe(toCanonicalIso(newer));
+    act(() => { api!.recordAttemptStart(); });
+    act(() => {
+      api!.recordAttemptFinished(undefined, {
+        result: { ...makeResult({ lastCheckedAt: newer }) },
+      });
+    });
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(toCanonicalIso(newer));
 
-    act(() => { recordFn!(makeResult({ lastCheckedAt: older })); });
+    act(() => { api!.recordAttemptStart(); });
+    act(() => {
+      api!.recordAttemptFinished(undefined, {
+        result: { ...makeResult({ lastCheckedAt: older }) },
+      });
+    });
     // Anchor stays at the newer value — monotonic by design.
-    expect(screen.getByTestId("ts").textContent).toBe(toCanonicalIso(newer));
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(toCanonicalIso(newer));
+  });
+
+  it("recordAttemptFinished({ advanceClock: false }) releases the slot without moving the anchor", () => {
+    // Models bootstrap `served_fresh_snapshot`: the backend served the
+    // persisted snapshot without running the refresh executor, so this
+    // caller did NOT perform a refresh attempt.  The in-flight flag must
+    // drop on settle, but the anchor must remain wherever a prior real
+    // attempt left it.
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
+
+    // Seed anchor with a "real" attempt first so we can detect any
+    // subsequent regression.
+    const seededIso = "2026-05-10T10:00:00Z";
+    act(() => { api!.recordAttemptStart(); });
+    act(() => {
+      api!.recordAttemptFinished(undefined, { result: makeResult({ lastCheckedAt: seededIso }) });
+    });
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(toCanonicalIso(seededIso));
+
+    // Now simulate a served_fresh_snapshot bootstrap: response carries a
+    // later timestamp but advanceClock=false says "don't move the clock".
+    const laterIso = "2026-05-10T11:00:00Z";
+    act(() => { api!.recordAttemptStart(); });
+    expect(screen.getByTestId("refreshing").textContent).toBe("true");
+    act(() => {
+      api!.recordAttemptFinished(undefined, {
+        result: makeResult({ lastCheckedAt: laterIso }),
+        advanceClock: false,
+      });
+    });
+    expect(screen.getByTestId("refreshing").textContent).toBe("false");
+    // Anchor stays at the seed time even though the bootstrap response
+    // carried a newer server timestamp.
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(toCanonicalIso(seededIso));
+  });
+
+  it("recordAttemptFinished without a result advances anchor to client now() (failure fallback)", () => {
+    // A refresh attempt that ends without a usable server timestamp (e.g.
+    // the POST /refresh failed) must still move the clock so the next
+    // countdown is bounded — only the GET path tolerates a missing anchor.
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
+
+    const beforeMs = Date.now();
+    act(() => { api!.recordAttemptStart(); });
+    // No `result` — neither lastCheckedAt nor refreshedAt is available.
+    act(() => { api!.recordAttemptFinished(); });
+    const ms = Number(screen.getByTestId("last-attempt").textContent);
+    expect(Number.isFinite(ms)).toBe(true);
+    expect(ms).toBeGreaterThanOrEqual(beforeMs);
+  });
+
+  it("recordAttemptFinished prefers lastCheckedAt > refreshedAt > client now()", () => {
+    // Display anchor prefers server-stamped lastCheckedAt; falls through to
+    // refreshedAt; finally to client now() when neither is present.
+    // Validates the precedence chain on a single attempt.
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
+
+    // lastCheckedAt wins over refreshedAt.
+    act(() => { api!.recordAttemptStart(); });
+    act(() => {
+      api!.recordAttemptFinished(undefined, {
+        result: makeResult({
+          lastCheckedAt: "2026-05-10T12:00:00Z",
+          refreshedAt: "2026-05-10T11:00:00Z",
+        }),
+      });
+    });
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(
+      toCanonicalIso("2026-05-10T12:00:00Z")
+    );
   });
 });
 

@@ -11,7 +11,13 @@ import {
   trackSourceOpened,
   trackStoryExpanded,
 } from "@/lib/analytics";
-import { bootstrapDashboard, fetchDashboardWithMeta } from "@/lib/api";
+import {
+  bootstrapDashboard,
+  fetchDashboardWithMeta,
+  type DashboardBootstrapDecision,
+  type DashboardBootstrapResult,
+  type DashboardFetchResult,
+} from "@/lib/api";
 import { formatKeywordLabel } from "@/lib/format";
 import {
   aggregateTagSections,
@@ -24,6 +30,30 @@ import { type StoryDto } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
 import { useRefreshContext } from "@/lib/refresh-context";
 import { REFRESH_INTERVAL_MS } from "@/lib/refresh-heartbeat";
+
+/**
+ * Whether the refresh clock should advance after a bootstrap call settles.
+ *
+ * The bootstrap route reports its decision in `_meta.bootstrapDecision`:
+ *   - `served_fresh_snapshot` — the server returned the persisted snapshot
+ *     WITHOUT running the refresh executor.  No refresh attempt actually
+ *     happened, so the clock must stay where the last real attempt left it.
+ *   - any other decision (`ran_refresh`, `no_snapshot`, or a null decision
+ *     from an older API) — the server ran (or tried to run) the refresh
+ *     executor.  Settling this counts as a refresh attempt that advances
+ *     the clock per the standard "every attempt moves the badge" semantics.
+ *
+ * Failures advance unconditionally: the client did attempt a refresh, the
+ * server just didn't return useful data.  Treating failure as no-op would
+ * strand the countdown on a stale anchor across a network outage.
+ */
+export function shouldAdvanceClockForBootstrap(args: {
+  failed: boolean;
+  decision: DashboardBootstrapDecision | null;
+}): boolean {
+  if (args.failed) return true;
+  return args.decision !== "served_fresh_snapshot";
+}
 
 function dtoToStory(dto: StoryDto): Story {
   return {
@@ -60,7 +90,7 @@ function dtoToStory(dto: StoryDto): Story {
 
 export default function Dashboard() {
   const {
-    recordSuccessfulRefresh,
+    seedAnchorIfMissing,
     heartbeatResult,
     lastAttemptAt,
     isRefreshing,
@@ -138,35 +168,48 @@ export default function Dashboard() {
     let canceled = false;
     setIsLoading(true);
     setLoadError(null);
-    // Drives the footer's "Refreshing now…" copy for the duration of the
-    // fetch.  The returned token uniquely identifies this loader run so
-    // the paired `recordAttemptFinished(token)` below settles the exact
-    // slot — concurrent attempts (e.g. a retry firing while a heartbeat
-    // is still in flight) can no longer pop each other's slots.
-    const attemptToken = recordAttemptStart();
+    // Only bootstrap counts as a refresh-style attempt: it can delegate to
+    // the server's refresh executor, so the global `isRefreshing` flag must
+    // reflect it.  GET serves the persisted snapshot — it is NOT a refresh
+    // attempt, so it must not toggle the in-flight flag and must not
+    // advance the anchor (GET only seeds when nothing is set yet).  Local
+    // `isLoading` covers the GET path's own loading copy.
+    const attemptToken = useBootstrap ? recordAttemptStart() : null;
+    // Captured inside the promise chain so `.finally` can read the resolved
+    // result without re-awaiting.  `null` on the GET path (where we don't
+    // settle an attempt slot at all) and on the failure path (where the
+    // server gave us nothing usable).
+    let bootstrapResult: DashboardBootstrapResult | null = null;
+    let loaderResult: DashboardFetchResult | null = null;
+    let loaderFailed = false;
 
     // Phase 5: bootstrap path runs the (potentially expensive) refresh check
     // server-side and falls back to a fresh snapshot when ≤ 60 min old.  GET
     // path stays cheap and is used for every other dashboard load.
-    const loader = useBootstrap
-      ? bootstrapDashboard().then(({ payload, selection, refreshedAt }) => ({
-          payload,
-          selection,
-          refreshedAt,
-        }))
+    const loader: Promise<DashboardFetchResult | DashboardBootstrapResult> = useBootstrap
+      ? bootstrapDashboard()
       : fetchDashboardWithMeta();
 
     loader
       .then((result) => {
         if (canceled) return;
+        loaderResult = result;
+        if (useBootstrap) bootstrapResult = result as DashboardBootstrapResult;
         const { payload } = result;
         setStories(payload.stories.map(dtoToStory));
         setLoadError(null);
         setHasLoadedOnce(true);
-        recordSuccessfulRefresh(result);
+        // First-paint seed.  GET responses never advance an existing
+        // anchor (post-seed remounts are no-ops); bootstrap
+        // `served_fresh_snapshot` also lands here so a brand-new session
+        // still gets a timestamp from the first response.  Bootstrap
+        // `ran_refresh` will additionally advance the clock via
+        // `recordAttemptFinished` below.
+        seedAnchorIfMissing(result);
       })
       .catch((error: unknown) => {
         if (canceled) return;
+        loaderFailed = true;
         const message = error instanceof Error ? error.message : "Failed to load dashboard data.";
         setLoadError(message);
         trackSourceOpenError({ message, code: "dashboard_payload_load_failed" });
@@ -177,12 +220,20 @@ export default function Dashboard() {
         }
       })
       .finally(() => {
-        // Always clear the in-flight flag — even on unmount / dep-change /
-        // navigation — otherwise the footer stays stuck on "Refreshing now…"
-        // forever once the cancelled promise settles.  Settling by token
-        // ensures we remove *this* loader's slot, not whichever happens to
-        // be oldest.
-        recordAttemptFinished(attemptToken);
+        if (attemptToken !== null) {
+          // Bootstrap path — settle the in-flight slot.  The result-aware
+          // settle prefers the server-stamped `lastCheckedAt` when present,
+          // falling back to client `now()` for failures and legacy
+          // responses.  The advance/no-op decision is delegated to
+          // `shouldAdvanceClockForBootstrap` (see helper for the matrix).
+          recordAttemptFinished(attemptToken, {
+            result: loaderResult,
+            advanceClock: shouldAdvanceClockForBootstrap({
+              failed: loaderFailed,
+              decision: bootstrapResult?.decision ?? null,
+            }),
+          });
+        }
         if (canceled) return;
         setIsLoading(false);
       });
@@ -195,7 +246,7 @@ export default function Dashboard() {
     emptyMode,
     useBootstrap,
     reloadCounter,
-    recordSuccessfulRefresh,
+    seedAnchorIfMissing,
     recordAttemptStart,
     recordAttemptFinished,
   ]);
@@ -227,15 +278,26 @@ export default function Dashboard() {
   // the same anchor (`lastAttemptAt`).  Math is consistent by construction:
   // both surfaces reflect the most recent attempt settlement (success,
   // no-op, or failure).
+  //
+  // Copy precedence:
+  //   1. `isRefreshing` (a POST refresh-style attempt is in flight) →
+  //      "Refreshing now…".  Bootstrap and heartbeat ticks land here.
+  //   2. `isLoading` (a GET load is in flight) → "Loading stories…".  GET
+  //      is NOT a refresh attempt, so the copy avoids implying a refresh.
+  //   3. `lastAttemptAt` null (no anchor has been established yet) → "—".
+  //      A GET that returned no parseable timestamps must not synthesize a
+  //      countdown from client time alone (GET never invents an anchor).
+  //   4. Otherwise: countdown to `lastAttemptAt + REFRESH_INTERVAL_MS`.
   const footerText = useMemo(() => {
     if (isRefreshing) return "Refreshing now…";
-    if (lastAttemptAt === null) return "Refreshing now…";
+    if (isLoading) return "Loading stories…";
+    if (lastAttemptAt === null) return "—";
     const nextAttemptAt = lastAttemptAt + REFRESH_INTERVAL_MS;
     // If timers are throttled and we're already due, keep showing a bounded
     // countdown state until an actual in-flight attempt toggles isRefreshing.
     const remainingMin = Math.max(1, Math.ceil((nextAttemptAt - nowMs) / 60_000));
     return `Next refresh in ~${remainingMin}m`;
-  }, [lastAttemptAt, isRefreshing, nowMs]);
+  }, [lastAttemptAt, isRefreshing, isLoading, nowMs]);
 
   const handleReset = () => {
     setSelectedTopics(new Set());
@@ -268,7 +330,7 @@ export default function Dashboard() {
             </h1>
             {isLoading && (
               <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-                Refreshing stories…
+                Loading stories…
               </p>
             )}
 

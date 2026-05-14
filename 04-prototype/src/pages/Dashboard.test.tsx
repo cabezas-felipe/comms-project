@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import Dashboard, { buildHeadline } from "@/pages/Dashboard";
+import Dashboard, { buildHeadline, shouldAdvanceClockForBootstrap } from "@/pages/Dashboard";
 import { CONTRACT_VERSION, type StoryDto } from "@tempo/contracts";
 import type { DashboardFetchResult } from "@/lib/api";
 import { REFRESH_INTERVAL_MS } from "@/lib/refresh-heartbeat";
@@ -9,7 +9,7 @@ import { REFRESH_INTERVAL_MS } from "@/lib/refresh-heartbeat";
 const fetchSpy = vi.fn();
 const bootstrapSpy = vi.fn();
 const notifyErrorSpy = vi.fn();
-const recordSpy = vi.fn();
+const seedAnchorIfMissingSpy = vi.fn();
 const recordAttemptStartSpy = vi.fn();
 const recordAttemptFinishedSpy = vi.fn();
 
@@ -56,7 +56,7 @@ vi.mock("@/lib/refresh-context", () => ({
   useRefreshContext: () => ({
     lastRefreshedAt: mockLastRefreshedAt,
     heartbeatResult: mockHeartbeatResult,
-    recordSuccessfulRefresh: recordSpy,
+    seedAnchorIfMissing: seedAnchorIfMissingSpy,
     lastAttemptAt: mockLastAttemptAt,
     isRefreshing: mockIsRefreshing,
     recordAttemptStart: recordAttemptStartSpy,
@@ -70,7 +70,7 @@ afterEach(() => {
   fetchSpy.mockReset();
   bootstrapSpy.mockReset();
   notifyErrorSpy.mockReset();
-  recordSpy.mockReset();
+  seedAnchorIfMissingSpy.mockReset();
   recordAttemptStartSpy.mockReset();
   recordAttemptFinishedSpy.mockReset();
   mockHeartbeatResult = null;
@@ -498,29 +498,66 @@ describe("buildHeadline", () => {
   });
 });
 
+// ─── shouldAdvanceClockForBootstrap (pure decision helper) ───────────────────
+// Owns the "did this bootstrap call count as a refresh attempt?" decision.
+// Extracted from the Dashboard effect so the matrix is easy to read and the
+// rule (served_fresh_snapshot → no-op; everything else → advance) is
+// unit-testable without spinning up the component.
+
+describe("shouldAdvanceClockForBootstrap", () => {
+  it("returns false ONLY for served_fresh_snapshot on a successful response", () => {
+    expect(shouldAdvanceClockForBootstrap({ failed: false, decision: "served_fresh_snapshot" })).toBe(false);
+  });
+
+  it("returns true for ran_refresh", () => {
+    expect(shouldAdvanceClockForBootstrap({ failed: false, decision: "ran_refresh" })).toBe(true);
+  });
+
+  it("returns true for no_snapshot", () => {
+    expect(shouldAdvanceClockForBootstrap({ failed: false, decision: "no_snapshot" })).toBe(true);
+  });
+
+  it("returns true for a null/unknown decision (older API forward-compat)", () => {
+    expect(shouldAdvanceClockForBootstrap({ failed: false, decision: null })).toBe(true);
+  });
+
+  it("returns true on failure even when decision claims served_fresh_snapshot", () => {
+    // A failed call shouldn't have a meaningful decision attached, but if
+    // a caller plumbs through a stale value the failure path must still
+    // win — otherwise a transient error would silently freeze the badge.
+    expect(shouldAdvanceClockForBootstrap({ failed: true, decision: "served_fresh_snapshot" })).toBe(true);
+  });
+
+  it("returns true on failure with a null decision (typical error path)", () => {
+    expect(shouldAdvanceClockForBootstrap({ failed: true, decision: null })).toBe(true);
+  });
+});
+
 // ─── App-scope refresh heartbeat → Dashboard overlay ─────────────────────────
 // The 60-minute attempt scheduler now lives in `lib/refresh-heartbeat` and is
 // mounted by `RefreshHeartbeatProvider` at app scope.  The Dashboard's local
-// responsibility shrinks to two things: (1) call `recordSuccessfulRefresh` on
-// its initial bootstrap/GET loader, and (2) overlay heartbeat-driven payloads
-// onto the on-screen story list so a long-lived dashboard view doesn't show
-// stale content while the header timestamp moves forward.
+// responsibility shrinks to: (1) call `seedAnchorIfMissing` on a successful
+// initial bootstrap/GET load so the very first dashboard entry establishes
+// the header timestamp, (2) drive in-flight ONLY for bootstrap (a real
+// refresh-style attempt), and (3) overlay heartbeat-driven payloads onto the
+// on-screen story list so a long-lived dashboard view doesn't show stale
+// content while the header timestamp moves forward.
 
 describe("Dashboard initial loader integration with refresh context", () => {
-  it("calls recordSuccessfulRefresh with the result of an initial GET", async () => {
+  it("calls seedAnchorIfMissing with the result of an initial GET (first-paint seed)", async () => {
     fetchSpy.mockResolvedValue({
       ...OK_RESULT,
       refreshedAt: "2026-05-11T12:00:00Z",
     });
     renderAt(null);
     await screen.findByTestId("dashboard-empty");
-    expect(recordSpy).toHaveBeenCalledTimes(1);
-    expect(recordSpy.mock.calls[0][0]).toMatchObject({
+    expect(seedAnchorIfMissingSpy).toHaveBeenCalledTimes(1);
+    expect(seedAnchorIfMissingSpy.mock.calls[0][0]).toMatchObject({
       refreshedAt: "2026-05-11T12:00:00Z",
     });
   });
 
-  it("calls recordSuccessfulRefresh with the result of an initial bootstrap", async () => {
+  it("calls seedAnchorIfMissing with the result of an initial bootstrap", async () => {
     bootstrapSpy.mockResolvedValue({
       ...OK_RESULT,
       decision: "served_fresh_snapshot",
@@ -528,17 +565,17 @@ describe("Dashboard initial loader integration with refresh context", () => {
     });
     renderAt({ bootstrap: true });
     await screen.findByTestId("dashboard-empty");
-    expect(recordSpy).toHaveBeenCalledTimes(1);
-    expect(recordSpy.mock.calls[0][0]).toMatchObject({
+    expect(seedAnchorIfMissingSpy).toHaveBeenCalledTimes(1);
+    expect(seedAnchorIfMissingSpy.mock.calls[0][0]).toMatchObject({
       refreshedAt: "2026-05-11T12:30:00Z",
     });
   });
 
-  it("does NOT call recordSuccessfulRefresh when the initial loader fails", async () => {
+  it("does NOT call seedAnchorIfMissing when the initial loader fails", async () => {
     fetchSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
     renderAt(null);
     await screen.findByTestId("dashboard-error");
-    expect(recordSpy).not.toHaveBeenCalled();
+    expect(seedAnchorIfMissingSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -645,7 +682,11 @@ describe("Next refresh footer (2-state)", () => {
     expect(screen.getByTestId("refresh-footer").textContent).toBe("Next refresh in ~1m");
   });
 
-  it("shows 'Refreshing now…' before any attempt timestamp exists (initial-mount fallback)", async () => {
+  it("shows '—' after a GET-only load when no anchor exists (no synthetic anchor from GET)", async () => {
+    // A GET that returns no parseable timestamps must leave the anchor
+    // null and surface a neutral state — never invent a countdown from
+    // client time alone.  Once the GET settles (isLoading=false), with no
+    // anchor and no in-flight POST attempt the footer reads "—".
     mockLastAttemptAt = null;
     mockIsRefreshing = false;
     fetchSpy.mockResolvedValue(OK_RESULT);
@@ -653,75 +694,157 @@ describe("Next refresh footer (2-state)", () => {
     renderAt(null);
     await screen.findByTestId("dashboard-empty");
 
-    expect(screen.getByTestId("refresh-footer").textContent).toBe("Refreshing now…");
+    expect(screen.getByTestId("refresh-footer").textContent).toBe("—");
+  });
+
+  it("shows 'Loading stories…' during an in-flight GET (no implication of refresh)", async () => {
+    // Rule: GET is not a refresh attempt, so the footer must not say
+    // "Refreshing now…" while a GET is in flight.  Local `isLoading` drives
+    // a distinct copy.
+    let resolveFetch: ((v: unknown) => void) | null = null;
+    fetchSpy.mockImplementation(
+      () => new Promise((resolve) => { resolveFetch = resolve; })
+    );
+    mockLastAttemptAt = null;
+    mockIsRefreshing = false;
+
+    renderAt(null);
+    // Loading copy is visible before the fetch resolves.
+    expect(await screen.findByTestId("refresh-footer")).toHaveTextContent("Loading stories…");
+
+    await act(async () => { resolveFetch?.(OK_RESULT); });
+    await screen.findByTestId("dashboard-empty");
   });
 });
 
-describe("Dashboard loader records refresh attempts", () => {
-  it("calls recordAttemptStart synchronously and recordAttemptFinished on a successful GET", async () => {
+describe("Dashboard loader records refresh attempts (bootstrap path only)", () => {
+  // Only POST-style refresh attempts (bootstrap, heartbeat) participate in
+  // the in-flight slot lifecycle.  GET serves the persisted snapshot — it
+  // is not a refresh attempt, so it must not toggle the global isRefreshing
+  // flag and must not advance the anchor.
+
+  it("does NOT call recordAttemptStart / recordAttemptFinished for a GET load", async () => {
     fetchSpy.mockResolvedValue(OK_RESULT);
     renderAt(null);
-    // In-flight state must flip on first render (before the fetch promise
-    // resolves) so the footer transitions to "Refreshing now…" immediately.
+    await screen.findByTestId("dashboard-empty");
+    expect(recordAttemptStartSpy).not.toHaveBeenCalled();
+    expect(recordAttemptFinishedSpy).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call attempt lifecycle for a failed GET either", async () => {
+    fetchSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    renderAt(null);
+    await screen.findByTestId("dashboard-error");
+    expect(recordAttemptStartSpy).not.toHaveBeenCalled();
+    expect(recordAttemptFinishedSpy).not.toHaveBeenCalled();
+  });
+
+  it("calls recordAttemptStart synchronously and recordAttemptFinished on a successful bootstrap", async () => {
+    bootstrapSpy.mockResolvedValue({
+      ...OK_RESULT,
+      decision: "ran_refresh",
+      lastCheckedAt: "2026-05-11T13:00:00Z",
+    });
+    renderAt({ bootstrap: true });
+    // In-flight state must flip on first render so the footer transitions
+    // to "Refreshing now…" immediately while the bootstrap fetch is pending.
     expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
     await screen.findByTestId("dashboard-empty");
     expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("calls recordAttemptStart + recordAttemptFinished even when the loader fails", async () => {
-    fetchSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
-    renderAt(null);
-    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
-    await screen.findByTestId("dashboard-error");
+  it("settles bootstrap served_fresh_snapshot with advanceClock:false (no clock movement)", async () => {
+    // When the backend served the persisted snapshot without running the
+    // refresh executor, this caller did not perform a refresh attempt —
+    // the anchor must NOT advance.
+    bootstrapSpy.mockResolvedValue({
+      ...OK_RESULT,
+      decision: "served_fresh_snapshot",
+      lastCheckedAt: "2026-05-11T13:00:00Z",
+    });
+    renderAt({ bootstrap: true });
+    await screen.findByTestId("dashboard-empty");
     expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1);
+    const [, options] = recordAttemptFinishedSpy.mock.calls[0];
+    expect(options).toMatchObject({ advanceClock: false });
+    expect(options?.result).toMatchObject({ decision: "served_fresh_snapshot" });
   });
 
-  it("retry action counts as a fresh attempt (new start + finish pair)", async () => {
+  it("settles bootstrap ran_refresh by advancing the clock", async () => {
+    bootstrapSpy.mockResolvedValue({
+      ...OK_RESULT,
+      decision: "ran_refresh",
+      lastCheckedAt: "2026-05-11T13:00:00Z",
+    });
+    renderAt({ bootstrap: true });
+    await screen.findByTestId("dashboard-empty");
+    expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1);
+    const [, options] = recordAttemptFinishedSpy.mock.calls[0];
+    // advanceClock left default (true) for any non-served_fresh_snapshot
+    // decision — settlement advances the anchor.
+    expect(options?.advanceClock).not.toBe(false);
+    expect(options?.result).toMatchObject({ decision: "ran_refresh" });
+  });
+
+  it("settles a failed bootstrap by advancing the clock (failures still move clock)", async () => {
+    // A refresh attempt that fails still counts as an attempt — the clock
+    // advances to client now() so the next countdown is bounded; treating
+    // failure as no-op would strand the badge on a stale anchor.
+    bootstrapSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    renderAt({ bootstrap: true });
+    await screen.findByTestId("dashboard-error");
+    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
+    expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1);
+    const [, options] = recordAttemptFinishedSpy.mock.calls[0];
+    // No server result captured on failure — advanceClock stays default
+    // (true), the provider falls back to client now().
+    expect(options?.advanceClock).not.toBe(false);
+  });
+
+  it("retry of a failed GET does NOT engage the attempt lifecycle", async () => {
     fetchSpy
       .mockRejectedValueOnce(new MockDashboardFetchError("network", "boom"))
       .mockResolvedValueOnce(OK_RESULT);
     renderAt(null);
     expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
-    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: /try again/i }));
     await screen.findByTestId("dashboard-empty");
 
-    // Two attempts total — one initial + one retry.
-    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(2);
-    expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(2);
+    // Two GET loads (initial + retry), neither participates in the attempt
+    // lifecycle.
+    expect(recordAttemptStartSpy).not.toHaveBeenCalled();
+    expect(recordAttemptFinishedSpy).not.toHaveBeenCalled();
   });
 
-  it("calls recordAttemptFinished even when the loader is canceled mid-flight (unmount)", async () => {
-    // Repro: user opens the dashboard, fetch is slow, user navigates away
-    // (or auth flips) before it resolves.  The previous implementation
-    // skipped recordAttemptFinished on the canceled path, leaving the
-    // refresh context's in-flight flag stuck true.
+  it("calls recordAttemptFinished even when a bootstrap is canceled mid-flight (unmount)", async () => {
+    // Repro: user opens the dashboard via bootstrap, fetch is slow, user
+    // navigates away before it resolves.  The cleanup must still settle
+    // the in-flight slot so the footer doesn't stay stuck on "Refreshing
+    // now…" after the cancelled promise resolves.
     let resolveFetch: ((v: unknown) => void) | null = null;
-    fetchSpy.mockImplementation(
+    bootstrapSpy.mockImplementation(
       () => new Promise((resolve) => { resolveFetch = resolve; })
     );
-    const view = renderAt(null);
+    const view = renderAt({ bootstrap: true });
     expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
     expect(recordAttemptFinishedSpy).not.toHaveBeenCalled();
 
-    // Tear the component down before the fetch resolves.
     view.unmount();
     expect(recordAttemptFinishedSpy).not.toHaveBeenCalled();
 
-    // Now let the stale fetch settle — finally must still fire the cleanup.
     await act(async () => {
-      resolveFetch?.(OK_RESULT);
+      resolveFetch?.({ ...OK_RESULT, decision: "ran_refresh" });
     });
     expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("calls recordAttemptFinished on the canceled path when the loader rejects", async () => {
+  it("calls recordAttemptFinished on the canceled path when a bootstrap rejects", async () => {
     let rejectFetch: ((e: unknown) => void) | null = null;
-    fetchSpy.mockImplementation(
+    bootstrapSpy.mockImplementation(
       () => new Promise((_resolve, reject) => { rejectFetch = reject; })
     );
-    const view = renderAt(null);
+    const view = renderAt({ bootstrap: true });
     view.unmount();
     await act(async () => {
       rejectFetch?.(new MockDashboardFetchError("network", "boom"));
