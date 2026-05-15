@@ -156,7 +156,7 @@ test("verifyGrounding: empty factual_claims bypasses claim-level check", () => {
   assert.equal(invalid.length, 0);
 });
 
-test("verifyGrounding: replaces summary with concatenated factual_claims (closes ungrounded-prose bypass)", () => {
+test("verifyGrounding: replaces summary with first factual_claim only — J3b (closes ungrounded-prose bypass)", () => {
   const sourceItemsById = new Map([["id-1", makeItem()]]);
   const story = {
     meta_story_id: "x",
@@ -171,7 +171,7 @@ test("verifyGrounding: replaces summary with concatenated factual_claims (closes
   assert.equal(
     valid[0].summary,
     "Grounded claim from source.",
-    "summary must be replaced with verified claim text only"
+    "summary must be replaced with first verified claim only (J3b)"
   );
 });
 
@@ -187,6 +187,11 @@ test("verifyGrounding: replaces subtitle with first factual_claim", () => {
   };
   const { valid } = verifyGrounding([story], sourceItemsById);
   assert.equal(valid[0].subtitle, "First grounded claim.", "subtitle must be replaced with first claim");
+  assert.equal(
+    valid[0].summary,
+    "First grounded claim.",
+    "J3b: summary uses first claim only, not a join of all claims"
+  );
 });
 
 test("verifyGrounding: keeps original summary/subtitle when factual_claims is empty", () => {
