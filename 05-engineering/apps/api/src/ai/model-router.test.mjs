@@ -7,6 +7,10 @@ import {
   providerFor,
   assertAiConfig,
   resolveExtractionChain,
+  getProviderReadiness,
+  assertReadyForRealRun,
+  isDcValidationModeEnabled,
+  CRITICAL_REAL_RUN_CAPABILITIES,
 } from "./model-router.mjs";
 import { withTimeout, heuristicSummary } from "./guardrails.mjs";
 
@@ -309,5 +313,212 @@ test("resolveExtractionChain falls back to defaults on whitespace/empty env", ()
     else delete process.env.TEMPO_AI_CLASSIFIER_MODEL;
     if (prevFallback !== undefined) process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL = prevFallback;
     else delete process.env.TEMPO_AI_CLASSIFIER_FALLBACK_MODEL;
+  }
+});
+
+// ── R2 readiness + DC-validation guard ──────────────────────────────────────
+// Reset env vars that bleed in from the host shell / .env so these tests run
+// from a known-clean baseline.  We restore the captured values in finally.
+
+const READINESS_ENV_VARS = [
+  "TEMPO_AI_CLUSTER_MODEL",
+  "TEMPO_AI_GEO_ASSESS_MODEL",
+  "TEMPO_OPENAI_EMBEDDING_MODEL",
+  "TEMPO_AI_MOCK_ONLY",
+  "TEMPO_DC_VALIDATION_MODE",
+  "TEMPO_ANTHROPIC_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "TEMPO_OPENAI_API_KEY",
+  "OPENAI_API_KEY",
+];
+
+function snapshotEnv() {
+  const out = {};
+  for (const k of READINESS_ENV_VARS) out[k] = process.env[k];
+  return out;
+}
+
+function clearEnv() {
+  for (const k of READINESS_ENV_VARS) delete process.env[k];
+}
+
+function restoreEnv(snap) {
+  for (const k of READINESS_ENV_VARS) {
+    if (snap[k] === undefined) delete process.env[k];
+    else process.env[k] = snap[k];
+  }
+}
+
+test("getProviderReadiness: real Anthropic + OpenAI keys present → readyForRealRun=true", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  process.env.TEMPO_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+  process.env.TEMPO_ANTHROPIC_API_KEY = "sk-ant-test";
+  process.env.TEMPO_OPENAI_API_KEY = "sk-openai-test";
+  try {
+    const r = getProviderReadiness();
+    assert.equal(r.readyForRealRun, true, JSON.stringify(r));
+    assert.equal(r.mockOnly, false);
+    assert.equal(r.capabilities.clustering.provider, "anthropic");
+    assert.equal(r.capabilities.clustering.mock, false);
+    assert.equal(r.capabilities.clustering.keyPresent, true);
+    assert.equal(r.capabilities.clustering.ready, true);
+    assert.equal(r.capabilities.geoAssess.provider, "anthropic");
+    assert.equal(r.capabilities.geoAssess.ready, true);
+    assert.equal(r.capabilities.embedding.provider, "openai-embedding");
+    assert.equal(r.capabilities.embedding.ready, true);
+    assert.deepEqual(r.missingKeys, []);
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("getProviderReadiness: real Anthropic with missing key → not ready, missingKeys lists var", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  process.env.TEMPO_OPENAI_API_KEY = "sk-openai-test";
+  // Intentionally no TEMPO_ANTHROPIC_API_KEY
+  try {
+    const r = getProviderReadiness();
+    assert.equal(r.readyForRealRun, false);
+    assert.equal(r.capabilities.clustering.ready, false);
+    assert.equal(r.capabilities.clustering.keyPresent, false);
+    assert.equal(r.capabilities.geoAssess.ready, false);
+    assert.equal(r.capabilities.embedding.ready, true);
+    assert.ok(r.missingKeys.includes("TEMPO_ANTHROPIC_API_KEY"));
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("getProviderReadiness: TEMPO_AI_MOCK_ONLY=true → all capabilities mock and not ready", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  process.env.TEMPO_ANTHROPIC_API_KEY = "sk-ant-test";
+  process.env.TEMPO_OPENAI_API_KEY = "sk-openai-test";
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  try {
+    const r = getProviderReadiness();
+    assert.equal(r.readyForRealRun, false);
+    assert.equal(r.mockOnly, true);
+    // clustering + geoAssess: mocked via providerFor(); embedding: explicit mock branch.
+    assert.equal(r.capabilities.clustering.mock, true);
+    assert.equal(r.capabilities.geoAssess.mock, true);
+    assert.equal(r.capabilities.embedding.mock, true);
+    assert.equal(r.capabilities.embedding.provider, "mock-openai-embedding");
+    // missingKeys is empty because mocked routes don't require keys.
+    assert.deepEqual(r.missingKeys, []);
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("getProviderReadiness: defaults (no env) → clustering+geoAssess mock, embedding missing key", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  try {
+    const r = getProviderReadiness();
+    assert.equal(r.readyForRealRun, false);
+    assert.equal(r.capabilities.clustering.mock, true);
+    assert.equal(r.capabilities.geoAssess.provider, "anthropic"); // default SKU is anthropic Haiku
+    assert.equal(r.capabilities.geoAssess.keyPresent, false);
+    assert.equal(r.capabilities.embedding.provider, "openai-embedding");
+    assert.equal(r.capabilities.embedding.keyPresent, false);
+    assert.ok(r.missingKeys.includes("TEMPO_ANTHROPIC_API_KEY"));
+    assert.ok(r.missingKeys.includes("TEMPO_OPENAI_API_KEY"));
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("CRITICAL_REAL_RUN_CAPABILITIES lists clustering, geoAssess, embedding", () => {
+  assert.deepEqual([...CRITICAL_REAL_RUN_CAPABILITIES], ["clustering", "geoAssess", "embedding"]);
+});
+
+test("isDcValidationModeEnabled reads TEMPO_DC_VALIDATION_MODE at call time", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  try {
+    assert.equal(isDcValidationModeEnabled(), false);
+    process.env.TEMPO_DC_VALIDATION_MODE = "true";
+    assert.equal(isDcValidationModeEnabled(), true);
+    process.env.TEMPO_DC_VALIDATION_MODE = "false";
+    assert.equal(isDcValidationModeEnabled(), false);
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("assertReadyForRealRun: no-op when validation mode is off (returns readiness)", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  // Mock-only, but validation mode is OFF → must not throw.
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  try {
+    const r = assertReadyForRealRun();
+    assert.equal(r.readyForRealRun, false);
+    assert.equal(r.mockOnly, true);
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("assertReadyForRealRun: validation mode + mock-only → throws DC_VALIDATION_NOT_READY", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  process.env.TEMPO_DC_VALIDATION_MODE = "true";
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  let caught;
+  try {
+    try { assertReadyForRealRun(); } catch (e) { caught = e; }
+    assert.ok(caught instanceof Error, "must throw");
+    assert.equal(caught.code, "DC_VALIDATION_NOT_READY");
+    assert.ok(Array.isArray(caught.reasons) && caught.reasons.length > 0);
+    assert.ok(caught.readiness && caught.readiness.readyForRealRun === false);
+    assert.match(caught.message, /providers not ready/i);
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("assertReadyForRealRun: validation mode + missing anthropic key → throws with missing-key reason", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  process.env.TEMPO_DC_VALIDATION_MODE = "true";
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  process.env.TEMPO_OPENAI_API_KEY = "sk-openai-test"; // embedding ready
+  // Intentionally no TEMPO_ANTHROPIC_API_KEY
+  let caught;
+  try {
+    try { assertReadyForRealRun(); } catch (e) { caught = e; }
+    assert.ok(caught instanceof Error, "must throw");
+    assert.equal(caught.code, "DC_VALIDATION_NOT_READY");
+    assert.ok(caught.reasons.some((r) => r.includes("missing-key")));
+    assert.ok(caught.readiness.missingKeys.includes("TEMPO_ANTHROPIC_API_KEY"));
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("assertReadyForRealRun: validation mode + all real + keys present → returns readiness", () => {
+  const saved = snapshotEnv();
+  clearEnv();
+  process.env.TEMPO_DC_VALIDATION_MODE = "true";
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  process.env.TEMPO_ANTHROPIC_API_KEY = "sk-ant-test";
+  process.env.TEMPO_OPENAI_API_KEY = "sk-openai-test";
+  try {
+    const r = assertReadyForRealRun();
+    assert.equal(r.readyForRealRun, true);
+  } finally {
+    restoreEnv(saved);
   }
 });

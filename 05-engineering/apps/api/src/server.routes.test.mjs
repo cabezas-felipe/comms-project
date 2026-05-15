@@ -3024,3 +3024,221 @@ test("POST /api/dashboard/bootstrap: served_fresh_snapshot returns persisted las
     _refreshPipeline.run = prevRun;
   }
 });
+
+// ─── R2 DC-validation readiness + guard ──────────────────────────────────────
+// Env helpers — keep these tests isolated from any TEMPO_* values leaking in
+// from the host shell or .env.  Each test snapshots the relevant keys, mutates
+// them deterministically, and restores in `finally`.
+
+const R2_ENV_KEYS = [
+  "TEMPO_AI_CLUSTER_MODEL",
+  "TEMPO_AI_GEO_ASSESS_MODEL",
+  "TEMPO_OPENAI_EMBEDDING_MODEL",
+  "TEMPO_AI_MOCK_ONLY",
+  "TEMPO_DC_VALIDATION_MODE",
+  "TEMPO_ANTHROPIC_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "TEMPO_OPENAI_API_KEY",
+  "OPENAI_API_KEY",
+];
+
+function r2SnapshotEnv() {
+  const out = {};
+  for (const k of R2_ENV_KEYS) out[k] = process.env[k];
+  return out;
+}
+function r2ClearEnv() { for (const k of R2_ENV_KEYS) delete process.env[k]; }
+function r2RestoreEnv(snap) {
+  for (const k of R2_ENV_KEYS) {
+    if (snap[k] === undefined) delete process.env[k];
+    else process.env[k] = snap[k];
+  }
+}
+
+test("GET /api/ai/models exposes readiness + dcValidationMode flag (R2)", async () => {
+  const saved = r2SnapshotEnv();
+  r2ClearEnv();
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  process.env.TEMPO_ANTHROPIC_API_KEY = "sk-ant-test";
+  process.env.TEMPO_OPENAI_API_KEY = "sk-openai-test";
+  try {
+    const res = await request(app).get("/api/ai/models");
+    assert.equal(res.status, 200);
+    assert.ok(res.body.capabilityMap, "capabilityMap field still present (backwards-compatible)");
+    assert.equal(res.body.mockOnly, false);
+    assert.equal(res.body.dcValidationMode, false);
+    assert.ok(res.body.readiness, "readiness must be exposed");
+    assert.equal(res.body.readiness.readyForRealRun, true);
+    assert.ok(res.body.readiness.capabilities.clustering);
+    assert.ok(res.body.readiness.capabilities.geoAssess);
+    assert.ok(res.body.readiness.capabilities.embedding);
+  } finally {
+    r2RestoreEnv(saved);
+  }
+});
+
+test("GET /api/ai/models flags mock-only and lists missing keys when keys absent", async () => {
+  const saved = r2SnapshotEnv();
+  r2ClearEnv();
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  try {
+    const res = await request(app).get("/api/ai/models");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.mockOnly, true);
+    assert.equal(res.body.readiness.readyForRealRun, false);
+    assert.equal(res.body.readiness.capabilities.clustering.mock, true);
+    assert.equal(res.body.readiness.capabilities.embedding.mock, true);
+  } finally {
+    r2RestoreEnv(saved);
+  }
+});
+
+test("POST /api/dashboard/refresh: TEMPO_DC_VALIDATION_MODE + mock-only → 503 with DC_VALIDATION_NOT_READY", async () => {
+  const saved = r2SnapshotEnv();
+  r2ClearEnv();
+  process.env.TEMPO_DC_VALIDATION_MODE = "true";
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  // Pipeline must not run — assert via a stub that would throw if invoked.
+  const prevRun = _refreshPipeline.run;
+  _refreshPipeline.run = async () => {
+    throw new Error("pipeline must not run when DC validation gate fails");
+  };
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 503);
+    assert.equal(res.body.code, "DC_VALIDATION_NOT_READY");
+    assert.ok(Array.isArray(res.body.reasons) && res.body.reasons.length > 0);
+    assert.equal(res.body.readiness?.readyForRealRun, false);
+    assert.equal(res.body.readiness?.mockOnly, true);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    r2RestoreEnv(saved);
+  }
+});
+
+test("POST /api/dashboard/refresh: TEMPO_DC_VALIDATION_MODE + missing Anthropic key → 503 with missing-key reason", async () => {
+  const saved = r2SnapshotEnv();
+  r2ClearEnv();
+  process.env.TEMPO_DC_VALIDATION_MODE = "true";
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  process.env.TEMPO_OPENAI_API_KEY = "sk-openai-test"; // embedding ready
+  // Intentionally no Anthropic key
+  const prevRun = _refreshPipeline.run;
+  _refreshPipeline.run = async () => {
+    throw new Error("pipeline must not run when DC validation gate fails");
+  };
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 503);
+    assert.equal(res.body.code, "DC_VALIDATION_NOT_READY");
+    assert.ok(res.body.readiness.missingKeys.includes("TEMPO_ANTHROPIC_API_KEY"));
+    assert.ok(
+      res.body.reasons.some((r) => r.includes("missing-key")),
+      `expected a missing-key reason, got ${JSON.stringify(res.body.reasons)}`
+    );
+  } finally {
+    _refreshPipeline.run = prevRun;
+    r2RestoreEnv(saved);
+  }
+});
+
+test("POST /api/dashboard/refresh: TEMPO_DC_VALIDATION_MODE + ready providers → succeeds and surfaces readiness in _meta", async () => {
+  const saved = r2SnapshotEnv();
+  r2ClearEnv();
+  process.env.TEMPO_DC_VALIDATION_MODE = "true";
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+  process.env.TEMPO_ANTHROPIC_API_KEY = "sk-ant-test";
+  process.env.TEMPO_OPENAI_API_KEY = "sk-openai-test";
+
+  // Stub the pipeline so the route executes the success branch without
+  // touching live providers.  Returns a minimal valid payload + log.
+  const prevRun = _refreshPipeline.run;
+  _refreshPipeline.run = async () => ({
+    payload: {
+      contractVersion: "2026-04-22-slice1",
+      stories: [],
+    },
+    log: {
+      unchanged: false,
+      watermark: "wm-1",
+      candidateCount: 0,
+      selectedFeedCount: 0,
+      poolCount: 0,
+      relevantCount: 0,
+      usedFallbackClustering: false,
+      groundingFailures: 0,
+      droppedUngroundedStoryCount: 0,
+      groundingDropReasons: {},
+      selection: { sourceSelectionMode: "test" },
+    },
+  });
+  // Avoid Supabase writes for lock and snapshot insertion paths.
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevWrite = _snapshotRepo.write;
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _snapshotRepo.write = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(res.body._meta?.readiness, "readiness must be surfaced in refresh _meta when validation passes");
+    assert.equal(res.body._meta.readiness.readyForRealRun, true);
+    assert.equal(res.body._meta.readiness.mockOnly, false);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _snapshotRepo.write = prevWrite;
+    r2RestoreEnv(saved);
+  }
+});
+
+test("POST /api/dashboard/refresh: validation mode OFF + mock-only → does NOT block (existing flow preserved)", async () => {
+  const saved = r2SnapshotEnv();
+  r2ClearEnv();
+  // No TEMPO_DC_VALIDATION_MODE — mock-only must continue to work for tests/dev.
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+
+  let pipelineCalls = 0;
+  const prevRun = _refreshPipeline.run;
+  _refreshPipeline.run = async () => {
+    pipelineCalls += 1;
+    return {
+      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      log: {
+        unchanged: false,
+        watermark: "wm-0",
+        candidateCount: 0,
+        selectedFeedCount: 0,
+        poolCount: 0,
+        relevantCount: 0,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        selection: { sourceSelectionMode: "test" },
+      },
+    };
+  };
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevWrite = _snapshotRepo.write;
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _snapshotRepo.write = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200, "no validation guard means mock-only still flows through");
+    assert.equal(pipelineCalls, 1, "pipeline must run when DC validation mode is off");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _snapshotRepo.write = prevWrite;
+    r2RestoreEnv(saved);
+  }
+});

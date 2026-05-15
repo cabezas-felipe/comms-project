@@ -4,7 +4,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
-import { getAiCapabilityMap, getAiMetrics, assertAiConfig, resolveExtractionChain } from "./ai/model-router.mjs";
+import {
+  getAiCapabilityMap,
+  getAiMetrics,
+  assertAiConfig,
+  resolveExtractionChain,
+  getProviderReadiness,
+  isDcValidationModeEnabled,
+  assertReadyForRealRun,
+} from "./ai/model-router.mjs";
 import { extractOnboarding, resolveTimeoutMs as resolveExtractionTimeoutMs } from "./ai/onboarding-extractor.mjs";
 import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
@@ -664,6 +672,38 @@ async function executeRefreshFlow(identity) {
   // story list stays put.
   const lastCheckedAt = new Date().toISOString();
 
+  // R2 DC-validation guard: when TEMPO_DC_VALIDATION_MODE=true, refuse to run
+  // a "validation" refresh that would silently traverse mock routes or hit a
+  // missing key.  Fails closed with a machine-readable diagnostic before any
+  // pipeline I/O so a misconfigured validation run can't be mistaken for a
+  // green real-model run.  Outside validation mode this is a no-op.
+  const readinessSnapshot = getProviderReadiness();
+  if (isDcValidationModeEnabled() && !readinessSnapshot.readyForRealRun) {
+    try {
+      assertReadyForRealRun({ readiness: readinessSnapshot });
+    } catch (guardErr) {
+      console.error(
+        `[dashboard.refresh] DC_VALIDATION_NOT_READY user=${identity.userId} reasons=${(guardErr.reasons ?? []).join("|")} missingKeys=${readinessSnapshot.missingKeys.join(",")}`
+      );
+      trackServerEvent("dashboard_refresh_skipped", {
+        reason: "dc_validation_not_ready",
+        identitySource: identity.source,
+        missingKeys: readinessSnapshot.missingKeys,
+        mockOnly: readinessSnapshot.mockOnly,
+      });
+      return {
+        kind: "validation_not_ready",
+        httpStatus: 503,
+        body: {
+          message: "Dashboard refresh blocked: DC validation mode requires real-model providers.",
+          code: "DC_VALIDATION_NOT_READY",
+          reasons: guardErr.reasons ?? [],
+          readiness: readinessSnapshot,
+        },
+      };
+    }
+  }
+
   // Phase 4: per-user in-flight guard.  See refresh-guard.mjs for scope notes.
   if (!tryAcquireRefresh(identity.userId)) {
     console.log(
@@ -909,6 +949,9 @@ async function executeRefreshFlow(identity) {
           // snapshot storage is deferred to M3b.
           clusterModel,
           embeddingModel,
+          // R2: readiness snapshot at run time — additive, lets operators
+          // confirm a passing DC validation run actually ran on real models.
+          readiness: readinessSnapshot,
         },
       },
     };
@@ -1052,7 +1095,9 @@ app.post("/api/dashboard/bootstrap", async (req, res) => {
   //   "error_500"       — pipeline threw with no fallback snapshot available
   const hasSnapshotFlag = body?._meta?.hasSnapshot === true;
   let decision;
-  if (kind === "error_500") {
+  if (kind === "error_500" || kind === "validation_not_ready") {
+    // R2: validation_not_ready short-circuits with 503 + diagnostic body; do
+    // not classify it as a successful refresh attempt for bootstrap purposes.
     decision = "no_snapshot";
   } else if (kind === "in_flight") {
     decision = hasSnapshotFlag ? "ran_refresh" : "no_snapshot";
@@ -1088,9 +1133,16 @@ app.post("/api/dashboard/bootstrap", async (req, res) => {
 });
 
 app.get("/api/ai/models", (_req, res) => {
+  // R2: surface readiness diagnostics so operators can verify DC validation
+  // mode pre-conditions (real providers + keys present) without running
+  // refresh.  Additive: existing `capabilityMap` / `mockOnly` fields are
+  // unchanged for backwards compatibility.
+  const readiness = getProviderReadiness();
   res.json({
     capabilityMap: getAiCapabilityMap(),
-    mockOnly: process.env.TEMPO_AI_MOCK_ONLY === "true",
+    mockOnly: readiness.mockOnly,
+    dcValidationMode: isDcValidationModeEnabled(),
+    readiness,
   });
 });
 

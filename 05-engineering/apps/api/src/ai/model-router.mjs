@@ -15,6 +15,20 @@ function getCapabilityDefaults() {
   };
 }
 
+// Default SKUs for the story-pool critical capabilities, kept here so the
+// readiness helper has one source of truth for "what model would actually
+// run" without each consumer reading env directly.
+const DEFAULT_GEO_ASSESS_MODEL = "anthropic:claude-haiku-4-5-20251001";
+const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
+
+// Capabilities the DC validation guard treats as required for a real-model
+// run.  Listed here (not inline in route code) so additions are one edit.
+export const CRITICAL_REAL_RUN_CAPABILITIES = Object.freeze([
+  "clustering",
+  "geoAssess",
+  "embedding",
+]);
+
 // Defaults for the onboarding extraction chain.  The route handler reads these
 // via `resolveExtractionChain()` and never hardcodes the literals — so a
 // model deprecation or A/B swap requires only an env flip, not a redeploy of
@@ -78,6 +92,190 @@ function estimateCostUsd(modelName, promptTokens, outputTokens) {
 
 export function getAiCapabilityMap() {
   return getCapabilityDefaults();
+}
+
+// ─── Critical-capability readiness (R2) ──────────────────────────────────────
+// Reports, for each capability that story-pool real-mode validation depends on,
+// the effective model id, the routed provider, whether the route is mock, and
+// whether the required key is present.  `readyForRealRun` is the conjunction:
+// all critical capabilities resolved to a real provider AND have their key.
+//
+// Pure / deterministic given process.env — no I/O, no provider calls — so the
+// guard surface (`/api/ai/models`, refresh-time gate) and tests can rely on it.
+
+function anthropicKeyPresent() {
+  return Boolean(process.env.TEMPO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY);
+}
+
+function openAiKeyPresent() {
+  return Boolean(process.env.TEMPO_OPENAI_API_KEY || process.env.OPENAI_API_KEY);
+}
+
+// Embedding routing isn't part of `providerFor()` because the embedding path
+// only speaks OpenAI today (no "openai:" prefix is required to opt in).
+// `TEMPO_AI_MOCK_ONLY=true` forces the mock branch in `embeddings.mjs`; we
+// mirror that decision here so readiness matches actual runtime behavior.
+function resolveEmbeddingReadiness() {
+  const model = process.env.TEMPO_OPENAI_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL;
+  if (process.env.TEMPO_AI_MOCK_ONLY === "true") {
+    return {
+      capability: "embedding",
+      model,
+      provider: "mock-openai-embedding",
+      mock: true,
+      keyRequired: false,
+      keyPresent: false,
+      ready: false,
+    };
+  }
+  const keyPresent = openAiKeyPresent();
+  return {
+    capability: "embedding",
+    model,
+    provider: "openai-embedding",
+    mock: false,
+    keyRequired: true,
+    keyPresent,
+    ready: keyPresent,
+  };
+}
+
+// Readiness for a capability whose model id is resolved through `providerFor`
+// (clustering, geoAssess).  Centralized so both clustering and geoAssess share
+// the same shape and the same "real provider needs key" rule.
+function resolveProviderCapabilityReadiness(capability, model) {
+  const provider = providerFor(model);
+  if (provider === "anthropic") {
+    const keyPresent = anthropicKeyPresent();
+    return {
+      capability,
+      model,
+      provider,
+      mock: false,
+      keyRequired: true,
+      keyPresent,
+      ready: keyPresent,
+    };
+  }
+  if (provider === "openai-compatible") {
+    const keyPresent = openAiKeyPresent();
+    return {
+      capability,
+      model,
+      provider,
+      mock: false,
+      keyRequired: true,
+      keyPresent,
+      ready: keyPresent,
+    };
+  }
+  // mock-anthropic / mock-openai / unknown → mock route
+  return {
+    capability,
+    model,
+    provider,
+    mock: true,
+    keyRequired: false,
+    keyPresent: false,
+    ready: false,
+  };
+}
+
+/**
+ * Report readiness for the capabilities story-pool DC validation depends on.
+ * Reads env at call time — no caching — so flipping `TEMPO_AI_MOCK_ONLY` or
+ * unsetting a key in a test is immediately reflected.
+ *
+ * Shape:
+ *   {
+ *     readyForRealRun: boolean,           // AND across all capabilities
+ *     mockOnly: boolean,                  // TEMPO_AI_MOCK_ONLY === "true"
+ *     capabilities: {
+ *       clustering: { capability, model, provider, mock, keyRequired, keyPresent, ready },
+ *       geoAssess:  { ... },
+ *       embedding:  { ... },
+ *     },
+ *     missingKeys: string[],              // env var names that would unblock a real run
+ *   }
+ */
+export function getProviderReadiness() {
+  const capabilityMap = getCapabilityDefaults();
+  const clusteringModel = capabilityMap.clustering;
+  const geoAssessModel = process.env.TEMPO_AI_GEO_ASSESS_MODEL || DEFAULT_GEO_ASSESS_MODEL;
+
+  const clustering = resolveProviderCapabilityReadiness("clustering", clusteringModel);
+  const geoAssess = resolveProviderCapabilityReadiness("geoAssess", geoAssessModel);
+  const embedding = resolveEmbeddingReadiness();
+
+  const capabilities = { clustering, geoAssess, embedding };
+  const missingKeys = new Set();
+  for (const cap of Object.values(capabilities)) {
+    if (cap.mock) continue;
+    if (cap.keyRequired && !cap.keyPresent) {
+      if (cap.provider === "anthropic") missingKeys.add("TEMPO_ANTHROPIC_API_KEY");
+      else if (cap.provider === "openai-compatible" || cap.provider === "openai-embedding") {
+        missingKeys.add("TEMPO_OPENAI_API_KEY");
+      }
+    }
+  }
+
+  const readyForRealRun = Object.values(capabilities).every((c) => c.ready);
+  return {
+    readyForRealRun,
+    mockOnly: process.env.TEMPO_AI_MOCK_ONLY === "true",
+    capabilities,
+    missingKeys: [...missingKeys].sort(),
+  };
+}
+
+// ─── DC validation-mode guard (R2) ───────────────────────────────────────────
+// `TEMPO_DC_VALIDATION_MODE=true` declares the operator's intent: this run
+// must execute against real providers.  When the flag is set, callers should
+// invoke `assertReadyForRealRun()` before doing any work that would otherwise
+// silently route through mocks.  The guard does NOT touch behavior outside
+// validation mode — local dev / test runs continue exactly as before.
+
+export const DC_VALIDATION_MODE_ENV = "TEMPO_DC_VALIDATION_MODE";
+
+export function isDcValidationModeEnabled() {
+  return process.env[DC_VALIDATION_MODE_ENV] === "true";
+}
+
+/**
+ * Throw with a machine-readable diagnostic when DC validation mode is on but
+ * a critical capability is mocked or missing a key.  No-op when validation
+ * mode is off, so existing flows are unchanged.  Returns the readiness
+ * snapshot in both branches so callers can also surface it on success.
+ *
+ * The thrown Error carries:
+ *   - .code = "DC_VALIDATION_NOT_READY"   (stable for clients)
+ *   - .readiness = { ... full snapshot ... }
+ *   - .reasons = ["capability=clustering provider=mock-anthropic", ...]
+ */
+export function assertReadyForRealRun({ readiness = getProviderReadiness() } = {}) {
+  if (!isDcValidationModeEnabled()) return readiness;
+  if (readiness.readyForRealRun) return readiness;
+
+  const reasons = [];
+  for (const cap of Object.values(readiness.capabilities)) {
+    if (cap.ready) continue;
+    if (cap.mock) {
+      reasons.push(`capability=${cap.capability} provider=${cap.provider} (mock route)`);
+    } else if (cap.keyRequired && !cap.keyPresent) {
+      reasons.push(`capability=${cap.capability} provider=${cap.provider} missing-key`);
+    } else {
+      reasons.push(`capability=${cap.capability} provider=${cap.provider} not-ready`);
+    }
+  }
+
+  const err = new Error(
+    `[ai.dc-validation] real-model run required but providers not ready: ${reasons.join("; ")}` +
+      (readiness.missingKeys.length > 0 ? ` (missing keys: ${readiness.missingKeys.join(", ")})` : "")
+  );
+  err.code = "DC_VALIDATION_NOT_READY";
+  err.readiness = readiness;
+  err.reasons = reasons;
+  throw err;
 }
 
 const aiMetrics = {
