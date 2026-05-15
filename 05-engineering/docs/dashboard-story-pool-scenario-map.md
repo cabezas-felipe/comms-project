@@ -4,7 +4,7 @@
 
 **Spec:** [Dashboard story pool spec](dashboard-story-pool-spec.md) · **Design:** [Walkthrough](dashboard-story-pool-walkthrough.md) (chunks **J5a**, **L2a**).
 
-**Eval runners today:** [Onboarding extraction](../apps/api/src/ai/evals/README.md) only. Pool stages rely on **unit tests** until repeat failures justify new gold files.
+**Eval runners today:** [Onboarding extraction and cluster smoke](../apps/api/src/ai/evals/README.md). Pool stages still rely primarily on **unit tests** until repeat failures justify new gold files.
 
 ---
 
@@ -58,10 +58,11 @@ This run re-checked the post-M6b gate after aligning docs, env, and model routin
 | Authenticated `GET /api/dashboard` | **PASS** | HTTP 200; `_meta` includes persisted `funnel`, `recall`, `beatFit`, `clusterModel`, `embeddingModel` |
 | T1 runtime check (`story.sources[]`) | **PASS** | First story source order satisfied (weight desc, freshness asc tie-break) |
 | R1 runtime check (`stories[]`) | **PARTIAL** | Live payload had one story only; multi-story rank path not exercised in runtime output |
-| `npm run test:api` | **PASS** | `754` pass, `0` fail, `1` skipped |
-| `npm run eval:onboarding-extraction` | **FAIL** | Exact-match `10.0%` (`2/20`) vs target `70.0%` |
+| `npm run test:api` | **PASS** | `778` pass, `0` fail, `1` skipped (post-M8) |
+| `npm run eval:onboarding-extraction` | **PASS** | Exact-match `70.0%` (`14/20`) meets target |
+| `npm run eval:cluster-smoke` | **PASS** | Contract-shape smoke passes in both real-model and forced-mock checks |
 
 ### M8 gate status
 
-- **M8 optional clustering smoke remains blocked** until onboarding extraction quality is brought back to target (or target policy is explicitly revised).
-- R1/R2/R3 runtime readiness checks are otherwise green for story-pool paths.
+- **M8 completed:** durable cluster-shape smoke harness is in place (`eval:cluster-smoke`) with side-effect-free core + guarded CLI runner.
+- R1/R2/R3 runtime readiness checks remain green for story-pool paths.

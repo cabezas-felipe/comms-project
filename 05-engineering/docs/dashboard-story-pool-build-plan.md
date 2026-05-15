@@ -58,7 +58,7 @@ flowchart LR
 | M6 | ✅ Done | Zero configured sources fail-closed per C2 |
 | M6b | ✅ Done | T1/R1 ordering implemented and tested |
 | M7 | ✅ Done | Scenario map extended with real-mode verification evidence |
-| M8 | ⛔ Blocked (optional) | Blocked by onboarding extraction eval at 10% vs 70% target |
+| M8 | ✅ Done (optional) | Durable cluster shape smoke added (`eval:cluster-smoke`), side-effect-safe architecture, tests green |
 
 ### M1 — DC prototype env (docs)
 
@@ -235,3 +235,4 @@ Run once real keys and feeds are healthy:
 |------|--------|
 | 2026-05-15 | Initial blueprint: M1b, T1, R1, P1, A1/B1/C1, M1–M8 |
 | 2026-05-15 | Execution snapshot added: M1–M7 complete, M8 optional and currently blocked by onboarding eval quality gate |
+| 2026-05-15 | Final status updated: onboarding eval recovered to threshold (`14/20`, `70.0%`), M8 completed with durable cluster smoke harness |

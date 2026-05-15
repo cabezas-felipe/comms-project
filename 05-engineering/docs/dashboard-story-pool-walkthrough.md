@@ -699,7 +699,7 @@ Canonical targets for **staging / DC prototype** (env vars still override). **Su
 | **M7** | `docs: extend L2a scenario map (initial rows)` | Expand [dashboard-story-pool-scenario-map.md](dashboard-story-pool-scenario-map.md): funnel drops, new failure modes from DC — **living doc**, not blocking ship | **L2a**, **J5a**, **B1** |
 | **M8** | *(optional)* `api: cluster-engine eval smoke` | Minimal script or test fixture for **Sonnet** clustering JSON shape — only if needed before DC sessions; **N3a** does not require for **N** lock | **N3a**, **I** |
 
-**Execution snapshot (2026-05-15):** **M1–M7 complete**. **M8 optional is currently blocked** by onboarding extraction eval quality (`2/20`, `10%`) vs target (`70%`).
+**Execution snapshot (2026-05-15):** **M1–M8 complete**. Onboarding extraction eval recovered to threshold (`14/20`, `70.0%`), and M8 shipped as a durable cluster-shape smoke harness (`eval:cluster-smoke`).
 
 **After M1–M6 (minimum):** Run refresh against **real feeds** with Anthropic + OpenAI keys; confirm **`_meta`** shows Sonnet + embedding model; verify geo holds/pass; re-run **`npm run test:api`** and **`eval:onboarding-extraction`** if extraction prompts touched. During **M** build verification: ingestion/manifest smoke (feed health, source match) per Slice 16 — not a separate design chunk.
 
