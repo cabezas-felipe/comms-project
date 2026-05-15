@@ -43,3 +43,25 @@
 - A prompt/SKU change regresses a row marked **model-sensitive** above.
 
 Onboarding pattern: [`onboarding-extraction.gold.json`](../apps/api/src/ai/evals/onboarding-extraction.gold.json).
+
+---
+
+## M7 real-mode verification run (2026-05-15)
+
+This run re-checked the post-M6b gate after aligning docs, env, and model routing for real providers.
+
+| Gate item | Result | Evidence |
+|---|---|---|
+| `GET /api/ingestion/sources` | **PASS** | HTTP 200 with declared feed catalog returned |
+| `GET /api/ai/models` | **PASS** | HTTP 200; `mockOnly: false`; clustering routed to `anthropic:claude-sonnet-4-6` |
+| Authenticated `POST /api/dashboard/refresh` | **PASS** | HTTP 200; `_meta` includes `funnel`, `clusterModel`, `embeddingModel` |
+| Authenticated `GET /api/dashboard` | **PASS** | HTTP 200; `_meta` includes persisted `funnel`, `recall`, `beatFit`, `clusterModel`, `embeddingModel` |
+| T1 runtime check (`story.sources[]`) | **PASS** | First story source order satisfied (weight desc, freshness asc tie-break) |
+| R1 runtime check (`stories[]`) | **PARTIAL** | Live payload had one story only; multi-story rank path not exercised in runtime output |
+| `npm run test:api` | **PASS** | `754` pass, `0` fail, `1` skipped |
+| `npm run eval:onboarding-extraction` | **FAIL** | Exact-match `10.0%` (`2/20`) vs target `70.0%` |
+
+### M8 gate status
+
+- **M8 optional clustering smoke remains blocked** until onboarding extraction quality is brought back to target (or target policy is explicitly revised).
+- R1/R2/R3 runtime readiness checks are otherwise green for story-pool paths.
