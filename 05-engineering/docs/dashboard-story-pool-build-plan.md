@@ -45,6 +45,21 @@ flowchart LR
 
 ## Commit checklist
 
+### Execution status snapshot (2026-05-15)
+
+| Step | Status | Notes |
+|------|--------|-------|
+| M1 | ✅ Done | Slice 15/16 updated for real-model DC/staging policy and key hygiene |
+| M2 | ✅ Done | Clustering routing/tests aligned to Sonnet env path |
+| M3 | ✅ Done | Refresh `_meta` exposes `clusterModel` and `embeddingModel` |
+| M3b | ✅ Done | Snapshot persistence includes last-run funnel/recall/beat-fit/model ids |
+| M4 | ✅ Done | Geo assessor switched to Anthropic-backed runtime path |
+| M5 | ✅ Done | Empty-profile embedding path now lexical-only per E3b |
+| M6 | ✅ Done | Zero configured sources fail-closed per C2 |
+| M6b | ✅ Done | T1/R1 ordering implemented and tested |
+| M7 | ✅ Done | Scenario map extended with real-mode verification evidence |
+| M8 | ⛔ Blocked (optional) | Blocked by onboarding extraction eval at 10% vs 70% target |
+
 ### M1 — DC prototype env (docs)
 
 **Delivers:** Slice **15** + **16** sections for pool SKUs, keys, smoke steps.  
@@ -219,3 +234,4 @@ Run once real keys and feeds are healthy:
 | Date | Change |
 |------|--------|
 | 2026-05-15 | Initial blueprint: M1b, T1, R1, P1, A1/B1/C1, M1–M8 |
+| 2026-05-15 | Execution snapshot added: M1–M7 complete, M8 optional and currently blocked by onboarding eval quality gate |
