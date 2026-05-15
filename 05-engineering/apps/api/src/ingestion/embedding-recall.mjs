@@ -167,22 +167,21 @@ export async function runEmbeddingRecall(opts) {
 
   // Hybrid_strict from here on.
   //
-  // Strict fail-closed policy (Option A): every condition that prevents us
-  // from running a real semantic comparison returns an empty candidate set,
-  // never the keyword baseline.  Comms users are the audience; surfacing the
-  // legacy keyword recall under degraded conditions risks delivering content
-  // that *looks* like the normal product but is materially weaker.  Empty
-  // state with a clear `degraded_reason` is the safer signal.
+  // Degrade contract:
+  //   - Provider/runtime failures (embedFn missing, throw, timeout, invalid
+  //     response) keep their strict posture: lexical-fallback when keyword
+  //     recall has hits, else strict-empty.  `keywordFallbackAfterEmbeddingFailure`
+  //     is set so operators see the cliff.
+  //   - Empty profile text (E3b / M5) is NOT an operational error — it just
+  //     means the user has no beat signal to embed against.  We pass the
+  //     lexical hits through (no semantic widen) and emit
+  //     `degraded_reason: "empty_profile_text_lexical_only"`.  Without the
+  //     flag, an empty-profile run with zero keyword hits would look
+  //     identical to a fail-closed provider error.
   //
-  // The four fail-closed conditions are:
-  //   1. embedFn missing            → embedding_unavailable_fail_closed
-  //   2. empty profile text         → empty_profile_text_fail_closed
-  //   3. provider timeout / error   → embedding_(timeout|error)_fail_closed
-  //   4. invalid response shape     → embedding_invalid_response_fail_closed
-  //
-  // The route handler ALWAYS supplies embedFn in production, so case 1 is
-  // reached only by tests that bypass injection deliberately — but the
-  // contract is uniform across all callers regardless.
+  // The route handler ALWAYS supplies embedFn in production, so the
+  // embedding-unavailable branch is reached only by tests that bypass
+  // injection deliberately — but the contract is uniform across all callers.
   const failClosedDiagnostics = (reason) => ({
     ...baseDiagnostics,
     embeddedCount: 0,
@@ -267,17 +266,28 @@ export async function runEmbeddingRecall(opts) {
 
   const profileText = buildProfileText(settings);
   if (!profileText) {
-    // No profile means we can't compute meaningful similarity.  Under strict
-    // fail-closed we treat this as an operational gap, not a soft fallback —
-    // an empty profile typically means onboarding hasn't completed yet, and
-    // serving keyword-only output without explicit user beat context risks
-    // surfacing items the user wouldn't recognize as relevant.
+    // E3b (M5): no profile signal → skip semantic widen, pass lexical hits
+    // through.  This is distinct from the provider-failure path: there's no
+    // operational error to flag with `keywordFallbackAfterEmbeddingFailure`;
+    // the user simply hasn't given us anything to embed against.  When
+    // keyword recall is also empty we surface strict-empty with the same
+    // diagnostic so operators can tell empty-profile apart from a real cliff.
+    const n = keywordRecallItems.length;
     console.warn(
-      `[recall.embedding] FAIL-CLOSED reason=empty_profile_text_fail_closed (settings + narrative produced no profile signal)`
+      `[recall.embedding] LEXICAL-ONLY reason=empty_profile_text_lexical_only keywordRecall=${n} (no profile signal to embed)`
     );
     return {
-      items: [],
-      diagnostics: failClosedDiagnostics("empty_profile_text_fail_closed"),
+      items: keywordRecallItems,
+      diagnostics: {
+        ...baseDiagnostics,
+        embeddedCount: 0,
+        similarityKept: 0,
+        keywordRecallCount: n,
+        unionCount: n,
+        finalRelevant: n,
+        degraded: true,
+        degraded_reason: "empty_profile_text_lexical_only",
+      },
     };
   }
 

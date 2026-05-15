@@ -2143,11 +2143,12 @@ test("runRefreshPipeline: hybrid_strict + missing embedFn WITH no lexical hits �
   assert.notEqual(log.recall.keywordFallbackAfterEmbeddingFailure, true);
 });
 
-test("runRefreshPipeline: hybrid_strict + empty profile text → strict fail-closed (no keyword pass-through)", async () => {
-  // A user with no topics/keywords/geos/sources/narrative produces an empty
-  // profile.  Under strict policy this is treated as an operational gap, not
-  // a soft fallback.  Empty + diagnostic prevents recommending items the
-  // user never expressed a beat for.
+test("runRefreshPipeline: hybrid_strict + empty profile text → lexical-only diagnostic (E3b)", async () => {
+  // E3b (M5): a user with no topics/keywords/geos/sources/narrative produces
+  // an empty profile.  Under the locked spec this is NOT an operational gap —
+  // the pipeline passes lexical hits through (here zero, since the keyword
+  // filter has no tokens to match) and emits the `empty_profile_text_lexical_only`
+  // diagnostic so operators can tell empty-profile apart from a real cliff.
   const item = makeItem({
     sourceId: "kw-only",
     outlet: "Reuters",
@@ -2175,7 +2176,9 @@ test("runRefreshPipeline: hybrid_strict + empty profile text → strict fail-clo
   assert.equal(embedCalled, false, "embedFn must not be invoked when profile is empty");
   assert.equal(payload.stories.length, 0);
   assert.equal(log.recall.degraded, true);
-  assert.equal(log.recall.degraded_reason, "empty_profile_text_fail_closed");
+  assert.equal(log.recall.degraded_reason, "empty_profile_text_lexical_only");
+  // E3b is not a provider failure — the cliff flag must stay off.
+  assert.notEqual(log.recall.keywordFallbackAfterEmbeddingFailure, true);
 });
 
 // ─── Topic/keyword stage breakdown (false-empty diagnostics) ────────────────
