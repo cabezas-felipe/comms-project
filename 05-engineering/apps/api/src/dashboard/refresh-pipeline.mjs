@@ -5,7 +5,12 @@ import {
   generateMetaStoryId,
 } from "../ai/cluster-engine.mjs";
 import { applyGeoFilter, mockAssessGeoConfidence } from "./geo-filter.mjs";
-import { normalizeTopicLabel, normalizeSourceIdentity } from "@tempo/contracts";
+import {
+  normalizeTopicLabel,
+  normalizeSourceIdentity,
+  geographySchema,
+  topicSchema,
+} from "@tempo/contracts";
 import {
   resolveSelectedSources,
   buildMatchedOutletSet,
@@ -217,13 +222,10 @@ export function summarizeFunnel(funnel, settings = {}, opts = {}) {
   };
 }
 
-// Valid schema-enum values (must match packages/contracts schemas.ts)
-const VALID_GEOGRAPHIES = new Set(["US", "Colombia"]);
-const VALID_TOPICS = new Set([
-  "Diplomatic relations",
-  "Migration policy",
-  "Security cooperation",
-]);
+// Sourced directly from the canonical zod enums so the pipeline never drifts
+// from the contract schema.
+const VALID_GEOGRAPHIES = new Set(geographySchema.options);
+const VALID_TOPICS = new Set(topicSchema.options);
 
 // ─── Settings-only + evidence-backed tag governance ──────────────────────────
 //
@@ -759,13 +761,13 @@ export async function runRefreshPipeline({
   //    C2 in the pipeline (not the matcher) keeps the matcher a pure utility
   //    while binding the product gate to the funnel.
   let selectionMeta;
-  let selectedItems;
+  let recentItems;
   const selectedNames = [
     ...(settings.traditionalSources ?? []),
     ...(settings.socialSources ?? []),
   ];
   if (selectedNames.length === 0) {
-    selectedItems = [];
+    recentItems = [];
     selectionMeta = {
       sourceSelectionMode: SELECTION_MODE.STRICT,
       sourceFallbackUsed: false,
@@ -799,12 +801,12 @@ export async function runRefreshPipeline({
       feedIds: buildMatchedFeedIdSet(selection.matchedFeeds),
       outlets: buildMatchedOutletSet(selection.matchedFeeds),
     };
-    selectedItems = filterItemsToMatchedFeeds(recentNormalizedItems, matchedKeys);
+    recentItems = filterItemsToMatchedFeeds(recentNormalizedItems, matchedKeys);
     // Low-noise diagnostic: when source-selection collapses a non-empty
     // input pool to zero despite matched feeds, log a small sample so
     // operators can see the mismatch shape without grepping per-item logs.
     if (
-      selectedItems.length === 0 &&
+      recentItems.length === 0 &&
       recentNormalizedItems.length > 0 &&
       selection.matchedFeeds.length > 0
     ) {
@@ -831,7 +833,7 @@ export async function runRefreshPipeline({
       `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${selection.matchedSourceCount}/${selection.selectedSourceCount} unmatched=${selection.unmatchedSelectedSources.length} unavailable=${selection.unavailableConnectorCount}`
     );
   } else {
-    selectedItems = selectSourcePool(recentNormalizedItems, settings);
+    recentItems = selectSourcePool(recentNormalizedItems, settings);
     selectionMeta = {
       sourceSelectionMode: SELECTION_MODE.STRICT,
       sourceFallbackUsed: false,
@@ -845,11 +847,9 @@ export async function runRefreshPipeline({
     };
   }
 
-  // Variable name kept (`recentItems`) for backward compat with subsequent
-  // pipeline steps.  Semantics unchanged: items that have passed time window
-  // AND source selection.
-  const recentItems = selectedItems;
-  const poolItems = recentItems; // kept for log compatibility
+  // `recentItems` here = items that passed both the 24h time window AND source
+  // selection.  The log surfaces both `poolCount` and `recentCount` as
+  // historical aliases — they are equal by construction.
 
   // 4a. Merge with previous hold bucket — re-evaluate held items this refresh
   let previouslyHeld = [];
@@ -1074,7 +1074,7 @@ export async function runRefreshPipeline({
         candidateCount: watermarkInfo.candidateCount,
         selectedFeedCount: watermarkInfo.selectedFeedCount,
         totalItems: normalizedItems.length,
-        poolCount: poolItems.length,
+        poolCount: recentItems.length,
         recentCount: recentItems.length,
         geoHeldCount: geoHeldItems.length,
         relevantCount: relevantItems.length,
@@ -1266,7 +1266,7 @@ export async function runRefreshPipeline({
 
   const log = {
     totalItems: normalizedItems.length,
-    poolCount: poolItems.length,
+    poolCount: recentItems.length,
     recentCount: recentItems.length,
     geoHeldCount: geoHeldItems.length,
     relevantCount: relevantItems.length,

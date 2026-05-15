@@ -516,23 +516,16 @@ export function buildHeadline(counts: {
   steady: number;
   falling: number;
 }): string {
-  const total = counts.rising + counts.steady + counts.falling;
-  if (total === 0) return "Quiet for this view.";
-
   const order = ["rising", "steady", "falling"] as const;
-  const parts: string[] = [];
-  let isFirst = true;
-  for (const state of order) {
-    const n = counts[state];
-    if (n === 0) continue;
-    if (isFirst) {
-      parts.push(`${n} ${n === 1 ? "narrative" : "narratives"} ${state}`);
-      isFirst = false;
-    } else {
-      parts.push(`${n} ${state}`);
-    }
-  }
-  return parts.join(" · ");
+  const present = order.filter((state) => counts[state] > 0);
+  if (present.length === 0) return "Quiet for this view.";
+  return present
+    .map((state, idx) => {
+      const n = counts[state];
+      if (idx === 0) return `${n} ${n === 1 ? "narrative" : "narratives"} ${state}`;
+      return `${n} ${state}`;
+    })
+    .join(" · ");
 }
 
 function Pill({

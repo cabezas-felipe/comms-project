@@ -129,6 +129,73 @@ async function buildIdentityHeaders(): Promise<Record<string, string>> {
   return {};
 }
 
+/**
+ * Shared retry/backoff loop used by every dashboard endpoint helper.  Each
+ * caller differs only by HTTP method, endpoint, label (for error messages),
+ * and whether they need to lift extra fields off `_meta` (e.g. bootstrap's
+ * `decision`).  `parseExtras` runs after contract validation succeeds and is
+ * spread into the returned object.
+ */
+async function requestDashboard<TExtras extends object>({
+  method,
+  options,
+  label,
+  defaultEndpoint,
+  parseExtras,
+}: {
+  method: "GET" | "POST";
+  options: FetchDashboardOptions;
+  label: string;
+  defaultEndpoint: string;
+  parseExtras?: (raw: { _meta?: Record<string, unknown> }) => TExtras;
+}): Promise<DashboardFetchResult & TExtras> {
+  const endpoint = options.endpoint ?? defaultEndpoint;
+  const retries = options.retries ?? DEFAULT_RETRIES;
+  const fetcher = options.fetcher ?? fetch;
+  const sleep = options.sleep ?? wait;
+
+  const identityHeaders = await buildIdentityHeaders();
+
+  let lastError: DashboardFetchError | null = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetcher(endpoint, {
+        method,
+        headers: {
+          Accept: "application/json",
+          ...identityHeaders,
+        },
+      });
+      if (!response.ok) {
+        throw new DashboardFetchError(
+          "http",
+          `${label} API returned HTTP ${response.status}`,
+          response.status
+        );
+      }
+      const raw = (await response.json()) as { _meta?: Record<string, unknown> };
+      const payload = dashboardPayloadSchema.parse(raw);
+      const meta = raw?._meta;
+      const selection = parseSelectionMetaSafe(meta?.selection);
+      const refreshedAt = parseIsoTimestampSafe(meta?.refreshedAt);
+      const lastCheckedAt = parseIsoTimestampSafe(meta?.lastCheckedAt);
+      const extras = parseExtras ? parseExtras(raw) : ({} as TExtras);
+      return { payload, selection, refreshedAt, lastCheckedAt, ...extras };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw error;
+      }
+      const dfe = normalizeFetchError(error, `Unknown ${label.toLowerCase()} error`);
+      lastError = dfe;
+      if (attempt === retries) throw dfe;
+      await sleep(RETRY_BACKOFF_MS * (attempt + 1));
+    }
+  }
+
+  // unreachable — the loop either returns or throws on the final attempt
+  throw lastError ?? new DashboardFetchError("network", `${label} fetch failed`);
+}
+
 export async function fetchDashboardPayload(
   options: FetchDashboardOptions = {}
 ): Promise<DashboardPayload> {
@@ -145,51 +212,12 @@ export async function fetchDashboardPayload(
 export async function fetchDashboardWithMeta(
   options: FetchDashboardOptions = {}
 ): Promise<DashboardFetchResult> {
-  const endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
-  const retries = options.retries ?? DEFAULT_RETRIES;
-  const fetcher = options.fetcher ?? fetch;
-  const sleep = options.sleep ?? wait;
-
-  const identityHeaders = await buildIdentityHeaders();
-
-  let lastError: DashboardFetchError | null = null;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      const response = await fetcher(endpoint, {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          ...identityHeaders,
-        },
-      });
-      if (!response.ok) {
-        throw new DashboardFetchError(
-          "http",
-          `Dashboard API returned HTTP ${response.status}`,
-          response.status
-        );
-      }
-      const raw = (await response.json()) as {
-        _meta?: { selection?: unknown; refreshedAt?: unknown; lastCheckedAt?: unknown };
-      };
-      const payload = dashboardPayloadSchema.parse(raw);
-      const selection = parseSelectionMetaSafe(raw?._meta?.selection);
-      const refreshedAt = parseIsoTimestampSafe(raw?._meta?.refreshedAt);
-      const lastCheckedAt = parseIsoTimestampSafe(raw?._meta?.lastCheckedAt);
-      return { payload, selection, refreshedAt, lastCheckedAt };
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw error;
-      }
-      const dfe = normalizeFetchError(error, "Unknown dashboard fetch error");
-      lastError = dfe;
-      if (attempt === retries) throw dfe;
-      await sleep(RETRY_BACKOFF_MS * (attempt + 1));
-    }
-  }
-
-  // unreachable — the loop either returns or throws on the final attempt
-  throw lastError ?? new DashboardFetchError("network", "Dashboard fetch failed");
+  return requestDashboard({
+    method: "GET",
+    options,
+    label: "Dashboard",
+    defaultEndpoint: DEFAULT_ENDPOINT,
+  });
 }
 
 const VALID_BOOTSTRAP_DECISIONS: ReadonlySet<DashboardBootstrapDecision> = new Set([
@@ -219,51 +247,15 @@ function parseBootstrapDecision(raw: unknown): DashboardBootstrapDecision | null
 export async function bootstrapDashboard(
   options: FetchDashboardOptions = {}
 ): Promise<DashboardBootstrapResult> {
-  const endpoint = options.endpoint ?? DEFAULT_BOOTSTRAP_ENDPOINT;
-  const retries = options.retries ?? DEFAULT_RETRIES;
-  const fetcher = options.fetcher ?? fetch;
-  const sleep = options.sleep ?? wait;
-
-  const identityHeaders = await buildIdentityHeaders();
-
-  let lastError: DashboardFetchError | null = null;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      const response = await fetcher(endpoint, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          ...identityHeaders,
-        },
-      });
-      if (!response.ok) {
-        throw new DashboardFetchError(
-          "http",
-          `Bootstrap API returned HTTP ${response.status}`,
-          response.status
-        );
-      }
-      const raw = (await response.json()) as {
-        _meta?: { selection?: unknown; bootstrapDecision?: unknown; refreshedAt?: unknown; lastCheckedAt?: unknown };
-      };
-      const payload = dashboardPayloadSchema.parse(raw);
-      const selection = parseSelectionMetaSafe(raw?._meta?.selection);
-      const decision = parseBootstrapDecision(raw?._meta?.bootstrapDecision);
-      const refreshedAt = parseIsoTimestampSafe(raw?._meta?.refreshedAt);
-      const lastCheckedAt = parseIsoTimestampSafe(raw?._meta?.lastCheckedAt);
-      return { payload, selection, decision, refreshedAt, lastCheckedAt };
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw error;
-      }
-      const dfe = normalizeFetchError(error, "Unknown bootstrap error");
-      lastError = dfe;
-      if (attempt === retries) throw dfe;
-      await sleep(RETRY_BACKOFF_MS * (attempt + 1));
-    }
-  }
-
-  throw lastError ?? new DashboardFetchError("network", "Bootstrap failed");
+  return requestDashboard<{ decision: DashboardBootstrapDecision | null }>({
+    method: "POST",
+    options,
+    label: "Bootstrap",
+    defaultEndpoint: DEFAULT_BOOTSTRAP_ENDPOINT,
+    parseExtras: (raw) => ({
+      decision: parseBootstrapDecision(raw?._meta?.bootstrapDecision),
+    }),
+  });
 }
 
 /**
@@ -278,48 +270,10 @@ export async function bootstrapDashboard(
 export async function refreshDashboard(
   options: FetchDashboardOptions = {}
 ): Promise<DashboardFetchResult> {
-  const endpoint = options.endpoint ?? DEFAULT_REFRESH_ENDPOINT;
-  const retries = options.retries ?? DEFAULT_RETRIES;
-  const fetcher = options.fetcher ?? fetch;
-  const sleep = options.sleep ?? wait;
-
-  const identityHeaders = await buildIdentityHeaders();
-
-  let lastError: DashboardFetchError | null = null;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      const response = await fetcher(endpoint, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          ...identityHeaders,
-        },
-      });
-      if (!response.ok) {
-        throw new DashboardFetchError(
-          "http",
-          `Refresh API returned HTTP ${response.status}`,
-          response.status
-        );
-      }
-      const raw = (await response.json()) as {
-        _meta?: { selection?: unknown; refreshedAt?: unknown; lastCheckedAt?: unknown };
-      };
-      const payload = dashboardPayloadSchema.parse(raw);
-      const selection = parseSelectionMetaSafe(raw?._meta?.selection);
-      const refreshedAt = parseIsoTimestampSafe(raw?._meta?.refreshedAt);
-      const lastCheckedAt = parseIsoTimestampSafe(raw?._meta?.lastCheckedAt);
-      return { payload, selection, refreshedAt, lastCheckedAt };
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        throw error;
-      }
-      const dfe = normalizeFetchError(error, "Unknown refresh error");
-      lastError = dfe;
-      if (attempt === retries) throw dfe;
-      await sleep(RETRY_BACKOFF_MS * (attempt + 1));
-    }
-  }
-
-  throw lastError ?? new DashboardFetchError("network", "Refresh failed");
+  return requestDashboard({
+    method: "POST",
+    options,
+    label: "Refresh",
+    defaultEndpoint: DEFAULT_REFRESH_ENDPOINT,
+  });
 }
