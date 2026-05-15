@@ -6,7 +6,9 @@ import {
   gracefulFallbackClustering,
   extractiveSummary,
   clusterItems,
+  metaStoryOutputSchema,
 } from "./cluster-engine.mjs";
+import { validateSmokeOutput, runClusterSmoke } from "./evals/cluster-smoke-core.mjs";
 
 function makeItem(overrides = {}) {
   return {
@@ -360,4 +362,178 @@ test("clusterItems: TEMPO_AI_MOCK_ONLY=true forces mock even for Sonnet env (CI 
     if (savedMock !== undefined) process.env.TEMPO_AI_MOCK_ONLY = savedMock;
     else delete process.env.TEMPO_AI_MOCK_ONLY;
   }
+});
+
+// ─── M8: cluster shape smoke — schema lock + diagnostic helper ───────────────
+// Locks the contract the M8 smoke runner depends on, exercised on the mock
+// path so the test suite can run without an Anthropic key.
+
+test("M8 shape lock: mock clusterItems output passes metaStoryOutputSchema", async () => {
+  const items = [
+    makeItem({ sourceId: "lock-a", topic: "Diplomatic relations" }),
+    makeItem({ sourceId: "lock-b", topic: "Migration policy" }),
+  ];
+  const stories = await clusterItems(items, BASE_SETTINGS, "mock-anthropic-haiku");
+  assert.ok(stories.length >= 1, "mock must produce at least one story for two-topic input");
+  for (const story of stories) {
+    const parsed = metaStoryOutputSchema.safeParse(story);
+    assert.ok(
+      parsed.success,
+      `meta-story must validate against metaStoryOutputSchema — got ${JSON.stringify(parsed.error?.errors)}`
+    );
+  }
+});
+
+test("M8 shape lock: validateSmokeOutput passes on mock clusterItems output", async () => {
+  const items = [
+    makeItem({ sourceId: "vs-a", topic: "Diplomatic relations" }),
+    makeItem({ sourceId: "vs-b", topic: "Migration policy" }),
+  ];
+  const stories = await clusterItems(items, BASE_SETTINGS, "mock-anthropic-haiku");
+  const known = new Set(items.map((i) => i.sourceId));
+  const { ok, failures } = validateSmokeOutput(stories, known);
+  assert.equal(ok, true, `validateSmokeOutput must pass on healthy mock output: ${failures.join("; ")}`);
+  assert.deepEqual(failures, []);
+});
+
+test("M8 shape lock: validateSmokeOutput flags hallucinated source_item_ids", () => {
+  const stories = [
+    {
+      meta_story_id: "abc123",
+      title: "T",
+      subtitle: "S",
+      summary: "Sm",
+      source_item_ids: ["known-1", "ghost-id"],
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: [] },
+      factual_claims: ["claim 0"],
+      claim_evidence_map: { "0": ["known-1"] },
+    },
+  ];
+  const { ok, failures } = validateSmokeOutput(stories, new Set(["known-1"]));
+  assert.equal(ok, false);
+  assert.ok(
+    failures.some((f) => f.includes("ghost-id")),
+    `expected failure to name 'ghost-id', got ${JSON.stringify(failures)}`
+  );
+});
+
+test("M8 shape lock: validateSmokeOutput flags empty arrays and missing meta_story_id", () => {
+  const empty = validateSmokeOutput([], new Set(["known-1"]));
+  assert.equal(empty.ok, false);
+  assert.ok(empty.failures[0].includes("0 meta-stories"));
+
+  const missingId = validateSmokeOutput(
+    [
+      {
+        title: "T",
+        subtitle: "S",
+        summary: "Sm",
+        source_item_ids: ["known-1"],
+        tags: { topics: [], keywords: [], geographies: [] },
+        factual_claims: ["c"],
+        claim_evidence_map: { "0": ["known-1"] },
+        // no meta_story_id
+      },
+    ],
+    new Set(["known-1"])
+  );
+  assert.equal(missingId.ok, false);
+  assert.ok(missingId.failures.some((f) => f.includes("meta_story_id")));
+});
+
+test("M8 shape lock: validateSmokeOutput flags schema violations (empty title)", () => {
+  const stories = [
+    {
+      meta_story_id: "id-1",
+      title: "", // schema requires min(1)
+      subtitle: "S",
+      summary: "Sm",
+      source_item_ids: ["known-1"],
+      tags: { topics: [], keywords: [], geographies: [] },
+      factual_claims: ["c"],
+      claim_evidence_map: { "0": ["known-1"] },
+    },
+  ];
+  const { ok, failures } = validateSmokeOutput(stories, new Set(["known-1"]));
+  assert.equal(ok, false);
+  assert.ok(failures.some((f) => f.includes("title")));
+});
+
+// ─── M8 architecture: pure orchestrator + no-side-effects-on-import lock ────
+// Locks the contract that smoke logic is testable without firing CLI side
+// effects.  If a future refactor reintroduces top-level `main()` in the
+// runner, or removes the direct-execution guard, the import-side test below
+// will surface it (the test's own console output stays clean).
+
+test("M8 architecture: runClusterSmoke returns structured result on healthy clusterFn", async () => {
+  const fakeStories = [
+    {
+      meta_story_id: "fake-1",
+      title: "Fake title",
+      subtitle: "Fake subtitle",
+      summary: "Fake summary",
+      source_item_ids: ["smoke-src-1", "smoke-src-2"],
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      factual_claims: ["claim 0"],
+      claim_evidence_map: { "0": ["smoke-src-1"] },
+    },
+  ];
+  const calls = [];
+  const clusterFn = async (items, settings, model) => {
+    calls.push({ itemCount: items.length, model });
+    return fakeStories;
+  };
+  const result = await runClusterSmoke({ clusterFn, model: "fake-model" });
+  assert.equal(result.ok, true, `failures: ${result.failures.join("; ")}`);
+  assert.equal(result.error, null);
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.stories.length, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].model, "fake-model");
+  assert.equal(calls[0].itemCount, 3, "runClusterSmoke must pass the canonical 3-item fixture");
+});
+
+test("M8 architecture: runClusterSmoke captures clusterFn throws as structured error (no rethrow)", async () => {
+  const clusterFn = async () => {
+    throw new Error("simulated provider failure");
+  };
+  const result = await runClusterSmoke({ clusterFn, model: "fake-model" });
+  assert.equal(result.ok, false);
+  assert.ok(result.error instanceof Error);
+  assert.match(result.error.message, /simulated provider failure/);
+  assert.equal(result.stories, null);
+  assert.deepEqual(result.failures, []);
+});
+
+test("M8 architecture: importing run-cluster-smoke.mjs does not invoke main()", async () => {
+  // Capture console.log/error to detect any banner/PASS/FAIL chatter that
+  // would indicate main() fired on import.  Also assert that env wasn't
+  // mutated by dotenv (the runner now loads .env only inside main()).
+  const originalLog = console.log;
+  const originalError = console.error;
+  const logged = [];
+  console.log = (...args) => logged.push({ stream: "log", args });
+  console.error = (...args) => logged.push({ stream: "error", args });
+  const envBefore = process.env.TEMPO_AI_CLUSTER_MODEL;
+  try {
+    // Cache-bust so node's ESM loader doesn't return a previously-imported
+    // copy whose side effects (if any) already fired during a prior test run.
+    await import(`./evals/run-cluster-smoke.mjs?nosideeffects=${Date.now()}`);
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+  assert.deepEqual(
+    logged,
+    [],
+    `importing the runner must not log; observed: ${JSON.stringify(logged)}`
+  );
+  // dotenv would set TEMPO_AI_CLUSTER_MODEL from .env if it ran; the runner
+  // defers dotenv.config() into main(), so the env value is whatever the
+  // test process started with.
+  assert.equal(
+    process.env.TEMPO_AI_CLUSTER_MODEL,
+    envBefore,
+    "importing the runner must not mutate process.env via dotenv"
+  );
 });

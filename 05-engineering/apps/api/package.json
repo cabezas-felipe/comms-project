@@ -15,6 +15,7 @@
     "db:scope:restore:dry": "node scripts/source-scope-phase1.mjs restore --dry-run",
     "db:scope:verify": "node scripts/source-scope-phase1.mjs verify",
     "eval:onboarding-extraction": "node src/ai/evals/run-onboarding-extraction-eval.mjs",
+    "eval:cluster-smoke": "node src/ai/evals/run-cluster-smoke.mjs",
     "source-catalog:generate": "node src/ops/source-registry-catalog-generate.mjs"
   },
   "dependencies": {

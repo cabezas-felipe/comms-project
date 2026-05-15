@@ -8,8 +8,11 @@ import { buildClusteringPrompt } from "./prompts.mjs";
 export const CLUSTER_ENGINE_VERSION = "cluster-v1";
 
 // ─── Zod schema for LLM clustering output ────────────────────────────────────
+// Exported so the M8 cluster-smoke runner (and any future contract-shape
+// checks) can validate against the same source of truth the real-provider
+// parser already uses — no duplicated contract.
 
-const metaStoryOutputSchema = z.object({
+export const metaStoryOutputSchema = z.object({
   title: z.string().min(1),
   subtitle: z.string().min(1),
   source_item_ids: z.array(z.string().min(1)).min(1).max(5),
@@ -23,7 +26,7 @@ const metaStoryOutputSchema = z.object({
   claim_evidence_map: z.record(z.string(), z.array(z.string())),
 });
 
-const clusteringOutputSchema = z.object({
+export const clusteringOutputSchema = z.object({
   meta_stories: z.array(metaStoryOutputSchema).max(5),
 });
 
