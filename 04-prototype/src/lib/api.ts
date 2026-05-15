@@ -109,8 +109,19 @@ function parseIsoTimestampSafe(raw: unknown): string | null {
 async function buildIdentityHeaders(): Promise<Record<string, string>> {
   try {
     const { data } = await supabase.auth.getSession();
-    if (data.session?.access_token) {
-      return { Authorization: `Bearer ${data.session.access_token}` };
+    const token = data.session?.access_token;
+    if (token) {
+      // Guard against stale persisted sessions in dev: only send Bearer when
+      // Supabase still recognizes the token as a valid user session.
+      if (typeof supabase.auth.getUser === "function") {
+        const { data: userData, error } = await supabase.auth.getUser(token);
+        if (!error && userData?.user) {
+          return { Authorization: `Bearer ${token}` };
+        }
+      } else {
+        // Fallback for auth stubs/older clients where getUser is unavailable.
+        return { Authorization: `Bearer ${token}` };
+      }
     }
   } catch { /* supabase not configured */ }
   const proto = getProtoSession();
