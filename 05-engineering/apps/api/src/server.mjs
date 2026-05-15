@@ -16,6 +16,7 @@ import { appendRejections as appendStoryRejections } from "./db/story-rejection-
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
 import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
+import { resolveRecallConfig } from "./ingestion/embedding-recall.mjs";
 import {
   tryAcquire as tryAcquireRefresh,
   release as releaseRefresh,
@@ -728,6 +729,10 @@ async function executeRefreshFlow(identity) {
         : settings;
 
     const clusterModel = getAiCapabilityMap().clustering;
+    // M3 / L1a: surface model identity on refresh _meta so DC demo debugging
+    // and incident replay don't depend on log scrapes.  Both ids are env-derived
+    // at call time, mirroring the SKU the run will actually use.
+    const embeddingModel = resolveRecallConfig().embeddingModel;
     const { payload, log } = await _refreshPipeline.run({
       userId: identity.userId,
       settings: settingsWithNarrative,
@@ -775,6 +780,11 @@ async function executeRefreshFlow(identity) {
         candidateCount: log.candidateCount,
         selectedFeedCount: log.selectedFeedCount,
         lastCheckedAt,
+        // M3: model identity surfaces on the skip branch too, so an operator
+        // diagnosing a stable empty snapshot can confirm the SKU without
+        // forcing a full refresh.
+        clusterModel,
+        embeddingModel,
       };
       if (log.recall) skipMeta.recall = log.recall;
       if (log.funnel) skipMeta.funnel = log.funnel;
@@ -883,6 +893,10 @@ async function executeRefreshFlow(identity) {
           beatFit: log.beatFit,
           recall: log.recall,
           funnel: log.funnel,
+          // M3 / L1a: SKU identity on the refresh response.  Persistence to
+          // snapshot storage is deferred to M3b.
+          clusterModel,
+          embeddingModel,
         },
       },
     };

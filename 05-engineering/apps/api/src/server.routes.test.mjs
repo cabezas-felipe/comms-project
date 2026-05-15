@@ -1071,6 +1071,121 @@ test("POST /api/dashboard/refresh: watermark unchanged → log fields without re
   }
 });
 
+// ─── M3 / L1a: model identity on refresh _meta ───────────────────────────────
+//
+// Surfaces `_meta.clusterModel` and `_meta.embeddingModel` on both the
+// full-run and watermark-skip branches so DC demo debugging / incident
+// replay don't depend on log scrapes.  Persistence to snapshot storage is
+// deferred to M3b — these assertions cover response shape only.
+
+test("M3: POST /api/dashboard/refresh full run returns _meta.clusterModel + _meta.embeddingModel from env", async () => {
+  const savedCluster = process.env.TEMPO_AI_CLUSTER_MODEL;
+  const savedEmbed = process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta?.hasSnapshot, true, "full run sets hasSnapshot=true");
+    assert.equal(res.body._meta?.clusterModel, "anthropic:claude-sonnet-4-6");
+    assert.equal(res.body._meta?.embeddingModel, "text-embedding-3-small");
+  } finally {
+    if (savedCluster !== undefined) process.env.TEMPO_AI_CLUSTER_MODEL = savedCluster;
+    else delete process.env.TEMPO_AI_CLUSTER_MODEL;
+    if (savedEmbed !== undefined) process.env.TEMPO_OPENAI_EMBEDDING_MODEL = savedEmbed;
+    else delete process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("M3: POST /api/dashboard/refresh watermark-skip returns _meta.clusterModel + _meta.embeddingModel (with prior snapshot)", async () => {
+  const savedCluster = process.env.TEMPO_AI_CLUSTER_MODEL;
+  const savedEmbed = process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_OPENAI_EMBEDDING_MODEL = "text-embedding-3-large";
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _watermark: "wm-m3",
+    _selectionMeta: null,
+  });
+  _snapshotRepo.write = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-m3",
+      candidateCount: 0,
+      selectedFeedCount: 1,
+    },
+  });
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta?.unchanged, true);
+    assert.equal(res.body._meta?.clusterModel, "anthropic:claude-sonnet-4-6");
+    assert.equal(res.body._meta?.embeddingModel, "text-embedding-3-large");
+  } finally {
+    if (savedCluster !== undefined) process.env.TEMPO_AI_CLUSTER_MODEL = savedCluster;
+    else delete process.env.TEMPO_AI_CLUSTER_MODEL;
+    if (savedEmbed !== undefined) process.env.TEMPO_OPENAI_EMBEDDING_MODEL = savedEmbed;
+    else delete process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+  }
+});
+
+test("M3: POST /api/dashboard/refresh watermark-skip with NO prior snapshot still returns clusterModel + embeddingModel", async () => {
+  const savedCluster = process.env.TEMPO_AI_CLUSTER_MODEL;
+  const savedEmbed = process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-m3-bare",
+      candidateCount: 0,
+      selectedFeedCount: 0,
+    },
+  });
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta?.hasSnapshot, false);
+    assert.equal(res.body._meta?.unchanged, true);
+    assert.equal(res.body._meta?.clusterModel, "anthropic:claude-sonnet-4-6");
+    assert.equal(res.body._meta?.embeddingModel, "text-embedding-3-small");
+  } finally {
+    if (savedCluster !== undefined) process.env.TEMPO_AI_CLUSTER_MODEL = savedCluster;
+    else delete process.env.TEMPO_AI_CLUSTER_MODEL;
+    if (savedEmbed !== undefined) process.env.TEMPO_OPENAI_EMBEDDING_MODEL = savedEmbed;
+    else delete process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+  }
+});
+
 test("POST /api/dashboard/refresh: route forwards priorStoryCount from prior snapshot to pipeline (trap-guard wiring)", async () => {
   // The empty-snapshot trap-guard lives in the pipeline; the route's job is
   // to read the prior snapshot and forward `priorStoryCount` as the input
