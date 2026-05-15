@@ -24,6 +24,8 @@ import {
   summarizeFunnel,
   constrainTagsToSettings,
   deriveStoryTags,
+  compareSourcesT1,
+  compareStoriesR1,
 } from "./refresh-pipeline.mjs";
 import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
 
@@ -3811,4 +3813,220 @@ test("cross-feed dedupe: stage runs before clustering — clusterFn sees deduped
   const storyIds = payload.stories[0].sources.map((s) => s.id).sort();
   assert.deepEqual(storyIds, ["dup-winner", "solo"]);
   assert.equal(log.dedupe.collapsedCount, 1);
+});
+
+// ─── M6b: T1 + R1 ordering ────────────────────────────────────────────────────
+//
+// Server-canonical ordering for the response payload.  Both comparators are
+// pure functions over plain values so callers can sort either the raw source
+// items (T1, pre-projection) or pre-computed sort keys (R1).  Tests pin every
+// tie level so a future re-implementation can't quietly drop a tie-breaker.
+
+// T1: comparator over source items (weight DESC, minutesAgo ASC, sourceId ASC)
+test("compareSourcesT1: orders by weight DESC first", () => {
+  const items = [
+    { sourceId: "a", weight: 50, minutesAgo: 30 },
+    { sourceId: "b", weight: 90, minutesAgo: 30 },
+    { sourceId: "c", weight: 70, minutesAgo: 30 },
+  ];
+  const sorted = items.slice().sort(compareSourcesT1);
+  assert.deepEqual(sorted.map((i) => i.sourceId), ["b", "c", "a"]);
+});
+
+test("compareSourcesT1: breaks weight ties by minutesAgo ASC (freshest wins)", () => {
+  const items = [
+    { sourceId: "a", weight: 80, minutesAgo: 120 },
+    { sourceId: "b", weight: 80, minutesAgo: 10 },
+    { sourceId: "c", weight: 80, minutesAgo: 60 },
+  ];
+  const sorted = items.slice().sort(compareSourcesT1);
+  assert.deepEqual(sorted.map((i) => i.sourceId), ["b", "c", "a"]);
+});
+
+test("compareSourcesT1: breaks weight+minutesAgo ties by sourceId ASC (stable)", () => {
+  const items = [
+    { sourceId: "src-c", weight: 80, minutesAgo: 30 },
+    { sourceId: "src-a", weight: 80, minutesAgo: 30 },
+    { sourceId: "src-b", weight: 80, minutesAgo: 30 },
+  ];
+  const sorted = items.slice().sort(compareSourcesT1);
+  assert.deepEqual(sorted.map((i) => i.sourceId), ["src-a", "src-b", "src-c"]);
+});
+
+test("compareSourcesT1: missing weight/minutesAgo coerce to safe defaults (0 / +Inf)", () => {
+  const items = [
+    { sourceId: "no-weight", minutesAgo: 30 },           // weight defaulted to 0
+    { sourceId: "no-min", weight: 80 },                  // minutesAgo defaulted to +Inf
+    { sourceId: "fresh", weight: 80, minutesAgo: 10 },
+  ];
+  const sorted = items.slice().sort(compareSourcesT1);
+  // weight 80 wins; among weight-80, fresh (10) < no-min (+Inf); no-weight (0) sinks last.
+  assert.deepEqual(sorted.map((i) => i.sourceId), ["fresh", "no-min", "no-weight"]);
+});
+
+test("runRefreshPipeline: T1 applied — story.sources[] sorted by weight/minutesAgo/sourceId", async () => {
+  // All four source items reach the same meta-story; the pipeline must emit
+  // them in T1 order in the response.  Weights chosen to make the canonical
+  // order non-trivially different from input order, with two pairs sharing
+  // weight to exercise the minutesAgo tie-breaker, and one fully-equal pair
+  // to exercise the sourceId tie-breaker.
+  const rawItems = [
+    makeItem({ sourceId: "src-z", outlet: "Reuters", weight: 80, minutesAgo: 40, headline: "OFAC update one" }),
+    makeItem({ sourceId: "src-a", outlet: "Reuters", weight: 80, minutesAgo: 40, headline: "OFAC update two" }),
+    makeItem({ sourceId: "src-b", outlet: "Reuters", weight: 95, minutesAgo: 60, headline: "OFAC update three" }),
+    makeItem({ sourceId: "src-c", outlet: "Reuters", weight: 80, minutesAgo: 10, headline: "OFAC update four" }),
+  ];
+  const metaStory = {
+    meta_story_id: "ms-t1",
+    title: "T1 sort coverage",
+    subtitle: "Sub.",
+    source_item_ids: ["src-z", "src-a", "src-b", "src-c"],
+    summary: "Summary.",
+    tags: { topics: ["Diplomatic relations"], keywords: ["OFAC"], geographies: ["US"] },
+    factual_claims: ["Reuters reports OFAC."],
+    claim_evidence_map: { "0": ["src-z", "src-a", "src-b", "src-c"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const ids = payload.stories[0].sources.map((s) => s.id);
+  // Expected order:
+  //   1. src-b (weight 95)
+  //   2. src-c (weight 80, minutesAgo 10 — freshest)
+  //   3. src-a (weight 80, minutesAgo 40; ties src-z on minutesAgo → ASC sourceId)
+  //   4. src-z (weight 80, minutesAgo 40; loses sourceId tie-break)
+  assert.deepEqual(ids, ["src-b", "src-c", "src-a", "src-z"]);
+});
+
+// R1: comparator over sort keys (maxBeatFitScore DESC, minMinutesAgo ASC, metaStoryId ASC)
+test("compareStoriesR1: orders by maxBeatFitScore DESC first", () => {
+  const keys = [
+    { maxBeatFitScore: 0.4, minMinutesAgo: 10, metaStoryId: "ms-a" },
+    { maxBeatFitScore: 0.9, minMinutesAgo: 10, metaStoryId: "ms-b" },
+    { maxBeatFitScore: 0.7, minMinutesAgo: 10, metaStoryId: "ms-c" },
+  ];
+  const sorted = keys.slice().sort(compareStoriesR1);
+  assert.deepEqual(sorted.map((k) => k.metaStoryId), ["ms-b", "ms-c", "ms-a"]);
+});
+
+test("compareStoriesR1: breaks beat-fit ties by minMinutesAgo ASC (freshest wins)", () => {
+  const keys = [
+    { maxBeatFitScore: 0.8, minMinutesAgo: 120, metaStoryId: "ms-a" },
+    { maxBeatFitScore: 0.8, minMinutesAgo: 5, metaStoryId: "ms-b" },
+    { maxBeatFitScore: 0.8, minMinutesAgo: 60, metaStoryId: "ms-c" },
+  ];
+  const sorted = keys.slice().sort(compareStoriesR1);
+  assert.deepEqual(sorted.map((k) => k.metaStoryId), ["ms-b", "ms-c", "ms-a"]);
+});
+
+test("compareStoriesR1: breaks beat-fit+freshness ties by metaStoryId ASC (stable)", () => {
+  const keys = [
+    { maxBeatFitScore: 0.8, minMinutesAgo: 30, metaStoryId: "ms-c" },
+    { maxBeatFitScore: 0.8, minMinutesAgo: 30, metaStoryId: "ms-a" },
+    { maxBeatFitScore: 0.8, minMinutesAgo: 30, metaStoryId: "ms-b" },
+  ];
+  const sorted = keys.slice().sort(compareStoriesR1);
+  assert.deepEqual(sorted.map((k) => k.metaStoryId), ["ms-a", "ms-b", "ms-c"]);
+});
+
+test("runRefreshPipeline: R1 applied — stories[] sorted by max beatFitScore / min minutesAgo / metaStoryId", async () => {
+  // Construct three meta-stories whose member items have known beatFitScores
+  // (assigned via the real beat-fit scorer by tuning topic/keyword overlap).
+  // Goal: assert R1 ordering at the payload boundary.  We pin a permissive
+  // beat-fit threshold via opts so the strict-empty branch doesn't fire when
+  // a fixture item lands below the production cut-off.
+  //
+  // Simpler approach: bypass the score plumbing and inject beatFitScore via
+  // a custom clusterFn that ALSO mutates the input items.  But the canonical
+  // pipeline path doesn't expose that knob — instead, exercise R1 by
+  // crafting items whose real beat-fit scores happen to land in the order
+  // we want.  We rely on `compareStoriesR1` unit coverage above to pin the
+  // comparator's tie-break behavior; this pipeline-level test pins the wiring.
+  const settings = {
+    ...BASE_SETTINGS,
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+    geographies: ["US"],
+  };
+  const rawItems = [
+    // ms-low: cold beat-fit (different topic, no keyword)
+    makeItem({ sourceId: "low-1", outlet: "Reuters", weight: 70, minutesAgo: 5, topic: "Migration policy", headline: "Migration update", body: ["Body."] }),
+    // ms-mid: matches topic only
+    makeItem({ sourceId: "mid-1", outlet: "Reuters", weight: 70, minutesAgo: 60, topic: "Diplomatic relations", headline: "Talks resume", body: ["Body."] }),
+    // ms-hi: matches topic AND keyword AND geo — best fit
+    makeItem({ sourceId: "hi-1", outlet: "Reuters", weight: 70, minutesAgo: 120, topic: "Diplomatic relations", geographies: ["US"], headline: "OFAC ruling tightens", body: ["OFAC sanctions update."] }),
+  ];
+  const clusterFn = async (items) => {
+    // Echo each item back as its own meta-story so the R1 sort has real
+    // beat-fit scores from the production scorer to rank.
+    return items.map((item, idx) => ({
+      meta_story_id: `ms-${item.sourceId}`,
+      title: `Story for ${item.sourceId}`,
+      subtitle: "Sub.",
+      source_item_ids: [item.sourceId],
+      summary: "Summary.",
+      tags: { topics: [item.topic], keywords: [], geographies: item.geographies },
+      factual_claims: [`${item.outlet} reports: ${item.headline}`],
+      claim_evidence_map: { "0": [item.sourceId] },
+    }));
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  // `hi-1` has the strongest topic+keyword+geo match → highest beat-fit;
+  // it must lead even though it's the OLDEST (R1 prioritizes beat-fit over
+  // freshness).  `mid-1` and `low-1` may or may not survive beat-fit
+  // depending on threshold — assert only that `hi-1` is first if present.
+  assert.ok(payload.stories.length >= 1);
+  assert.equal(payload.stories[0].metaStoryId, "ms-hi-1",
+    `expected ms-hi-1 first (best beat-fit), got order: ${payload.stories.map((s) => s.metaStoryId).join(", ")}`);
+});
+
+test("runRefreshPipeline: R1 stable tie-break by metaStoryId when beat-fit + freshness tie", async () => {
+  // Three items with identical topic/keyword/geo profiles + identical
+  // minutesAgo → same beat-fit score, same freshness.  R1 must order by
+  // metaStoryId ASC ("ms-a" < "ms-b" < "ms-c").  Input order is shuffled so
+  // a stable-but-non-deterministic implementation would fail this test.
+  const settings = {
+    ...BASE_SETTINGS,
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+    geographies: ["US"],
+  };
+  const rawItems = [
+    makeItem({ sourceId: "src-c", outlet: "Reuters", weight: 70, minutesAgo: 30, topic: "Diplomatic relations", geographies: ["US"], headline: "OFAC update C", body: ["OFAC."] }),
+    makeItem({ sourceId: "src-a", outlet: "Reuters", weight: 70, minutesAgo: 30, topic: "Diplomatic relations", geographies: ["US"], headline: "OFAC update A", body: ["OFAC."] }),
+    makeItem({ sourceId: "src-b", outlet: "Reuters", weight: 70, minutesAgo: 30, topic: "Diplomatic relations", geographies: ["US"], headline: "OFAC update B", body: ["OFAC."] }),
+  ];
+  const clusterFn = async (items) => items.map((item) => ({
+    meta_story_id: `ms-${item.sourceId.slice(-1)}`, // "ms-a" / "ms-b" / "ms-c"
+    title: `Story ${item.sourceId}`,
+    subtitle: "Sub.",
+    source_item_ids: [item.sourceId],
+    summary: "Summary.",
+    tags: { topics: [item.topic], keywords: ["OFAC"], geographies: item.geographies },
+    factual_claims: [`${item.outlet} reports: ${item.headline}`],
+    claim_evidence_map: { "0": [item.sourceId] },
+  }));
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  // Each item is identical for beat-fit/freshness purposes; expect lexicographic
+  // metaStoryId order regardless of input order.
+  assert.deepEqual(
+    payload.stories.map((s) => s.metaStoryId),
+    ["ms-a", "ms-b", "ms-c"]
+  );
 });

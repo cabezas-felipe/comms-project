@@ -562,6 +562,50 @@ export function analyzeTopicKeywordStage(items, settings) {
 // ─── Build response story shape ───────────────────────────────────────────────
 
 /**
+ * T1 (M6b): comparator for `sources[]` ordering inside a story.
+ *   1. `weight` DESC          — higher-weight outlets surface first
+ *   2. `minutesAgo` ASC       — freshest item next when weight ties
+ *   3. `sourceId` ASC         — stable tie-break for fully equal pairs
+ * Pure function; sort is applied via `.slice().sort(...)` so callers can keep
+ * their input array untouched.
+ */
+export function compareSourcesT1(a, b) {
+  const aw = typeof a?.weight === "number" ? a.weight : 0;
+  const bw = typeof b?.weight === "number" ? b.weight : 0;
+  if (aw !== bw) return bw - aw;
+  const am = typeof a?.minutesAgo === "number" ? a.minutesAgo : Number.POSITIVE_INFINITY;
+  const bm = typeof b?.minutesAgo === "number" ? b.minutesAgo : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm;
+  const aid = a?.sourceId ?? a?.id ?? "";
+  const bid = b?.sourceId ?? b?.id ?? "";
+  if (aid < bid) return -1;
+  if (aid > bid) return 1;
+  return 0;
+}
+
+/**
+ * R1 (M6b): comparator for top-level `stories[]` ordering at the payload
+ * boundary.  Accepts pre-computed sort keys (so the comparator stays a pure
+ * function over plain values, not the story object).
+ *   1. `maxBeatFitScore` DESC  — best-fitting story first
+ *   2. `minMinutesAgo` ASC     — freshest tie-breaker
+ *   3. `metaStoryId` ASC       — stable tie-break
+ */
+export function compareStoriesR1(a, b) {
+  const ab = typeof a?.maxBeatFitScore === "number" ? a.maxBeatFitScore : 0;
+  const bb = typeof b?.maxBeatFitScore === "number" ? b.maxBeatFitScore : 0;
+  if (ab !== bb) return bb - ab;
+  const am = typeof a?.minMinutesAgo === "number" ? a.minMinutesAgo : Number.POSITIVE_INFINITY;
+  const bm = typeof b?.minMinutesAgo === "number" ? b.minMinutesAgo : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm;
+  const aid = a?.metaStoryId ?? "";
+  const bid = b?.metaStoryId ?? "";
+  if (aid < bid) return -1;
+  if (aid > bid) return 1;
+  return 0;
+}
+
+/**
  * Converts a meta-story + its resolved source items into the response story shape
  * expected by dashboardPayloadSchema.  Derives schema-constrained fields (topic,
  * geographies, priority) from the source items so they stay within enum bounds.
@@ -608,17 +652,23 @@ function buildStory(metaStory, sourceItems, settings) {
     // NOT projected onto the response shape — duplicate provenance stays
     // server-side for integrity/debugging only (product req: no expand UI,
     // no "also seen in X feeds", no duplicate-source disclosure).
-    sources: sourceItems.map((item) => ({
-      id: item.sourceId,
-      outlet: item.outlet,
-      byline: item.byline,
-      kind: item.kind,
-      weight: item.weight,
-      url: item.url,
-      minutesAgo: item.minutesAgo,
-      headline: item.headline,
-      body: item.body,
-    })),
+    // T1 (M6b): server-canonical ordering for the chips/expanded view.
+    // Sort BEFORE the response projection so input arrays stay untouched
+    // and the comparator can rely on the canonical `sourceId` field.
+    sources: sourceItems
+      .slice()
+      .sort(compareSourcesT1)
+      .map((item) => ({
+        id: item.sourceId,
+        outlet: item.outlet,
+        byline: item.byline,
+        kind: item.kind,
+        weight: item.weight,
+        url: item.url,
+        minutesAgo: item.minutesAgo,
+        headline: item.headline,
+        body: item.body,
+      })),
   };
 }
 
@@ -1151,12 +1201,35 @@ export async function runRefreshPipeline({
 
   // 10. Build response stories (resolve source items, shape to schema).
   //     Only `groundedStories` (passed all grounding gates) reach this step.
-  const stories = groundedStories.map((ms) => {
+  //
+  //     R1 (M6b): server-canonical story ordering.  Compute the sort keys
+  //     (max beat-fit, min minutesAgo) from the SOURCE ITEMS — they carry
+  //     `beatFitScore` from the recall stage — not from the response shape
+  //     (which intentionally doesn't surface beatFitScore).  Stories with no
+  //     resolvable source items use 0 / +Infinity so they sink to the bottom
+  //     and break ties on `metaStoryId` rather than crashing on `Math.min`.
+  const storiesWithSortKeys = groundedStories.map((ms) => {
     const sourceItems = ms.source_item_ids
       .map((id) => sourceItemsById.get(id))
       .filter(Boolean);
-    return buildStory(ms, sourceItems, settings);
+    const maxBeatFitScore = sourceItems.reduce(
+      (acc, item) => Math.max(acc, typeof item?.beatFitScore === "number" ? item.beatFitScore : 0),
+      0
+    );
+    const minMinutesAgo = sourceItems.length === 0
+      ? Number.POSITIVE_INFINITY
+      : sourceItems.reduce(
+          (acc, item) =>
+            Math.min(acc, typeof item?.minutesAgo === "number" ? item.minutesAgo : Number.POSITIVE_INFINITY),
+          Number.POSITIVE_INFINITY
+        );
+    return {
+      story: buildStory(ms, sourceItems, settings),
+      sortKey: { maxBeatFitScore, minMinutesAgo, metaStoryId: ms.meta_story_id },
+    };
   });
+  storiesWithSortKeys.sort((a, b) => compareStoriesR1(a.sortKey, b.sortKey));
+  const stories = storiesWithSortKeys.map(({ story }) => story);
 
   const payload = {
     contractVersion,
