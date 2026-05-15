@@ -90,10 +90,10 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 | Onboarding extraction | Anthropic | `TEMPO_AI_CLASSIFIER_MODEL`, fallback | Opus 4.7 → Sonnet 4.6 |
 | Embedding recall | **OpenAI** | `TEMPO_OPENAI_EMBEDDING_MODEL`, `TEMPO_EMBED_TOP_K`, `TEMPO_EMBED_MAX_ITEMS`, `TEMPO_RECALL_MODE` | `text-embedding-3-small`, **80**, **250**, **`hybrid_strict`** |
 | Clustering | Anthropic | `TEMPO_AI_CLUSTER_MODEL` | `anthropic:claude-sonnet-4-6` |
-| Geo assessor | Anthropic | injected `geoAssessFn` | `anthropic:claude-haiku-4-5-20251001` |
+| Geo assessor | Anthropic | injected `geoAssessFn`; optional `TEMPO_AI_GEO_ASSESS_MODEL` override | `anthropic:claude-haiku-4-5-20251001` |
 | Grounding / beat-fit / tags | — | — | **No LLM** |
 
-**Keys:** `TEMPO_ANTHROPIC_API_KEY` (or `ANTHROPIC_API_KEY`) — Anthropic stages. `TEMPO_OPENAI_API_KEY` — embeddings only.
+**Keys:** `TEMPO_ANTHROPIC_API_KEY` (or `ANTHROPIC_API_KEY`) — Anthropic stages. `TEMPO_OPENAI_API_KEY` (or `OPENAI_API_KEY`) — embeddings only.
 
 **DC prototype:** Do **not** set `TEMPO_AI_MOCK_ONLY=true` on paths you hand-test. CI may keep mocks via env in tests.
 

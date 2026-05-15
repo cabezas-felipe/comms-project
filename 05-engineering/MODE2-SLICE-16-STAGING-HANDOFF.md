@@ -41,10 +41,17 @@ Staging assumptions:
 
 For **external / DC-facing** dashboard testing (not the “first staging run” mock-only pass above). Canonical SKUs: [dashboard-story-pool-spec.md](docs/dashboard-story-pool-spec.md) · [walkthrough Chunk N](docs/dashboard-story-pool-walkthrough.md).
 
+**Key handling policy (required):**
+
+- Keep real keys only in env/secret manager; never commit or paste raw secret values into docs.
+- Docs should reference variable names only (`TEMPO_ANTHROPIC_API_KEY`, `TEMPO_OPENAI_API_KEY`, etc.).
+- Supported provider aliases (runtime fallback): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+
 **Cutover policy (locked):**
 
 1. Optional one-time safety smoke with `TEMPO_AI_MOCK_ONLY=true` to validate deploy plumbing.
 2. **Before DC handoff, unset or set `TEMPO_AI_MOCK_ONLY=false` and run all smoke checks in real-model mode.**
+3. **Pre-DC hard gate:** `/api/ai/models` must show `mockOnly: false` and story-pool capability routing must resolve to real models (no accidental `mock-*` on clustering/classification for validation runs).
 
 | Variable | DC prototype value | Notes |
 |---|---|---|
@@ -58,9 +65,10 @@ For **external / DC-facing** dashboard testing (not the “first staging run” 
 | `TEMPO_EMBED_MAX_ITEMS` | `250` | Optional override |
 | `TEMPO_AI_CLASSIFIER_MODEL` | `anthropic:claude-opus-4-7` | Onboarding extraction |
 | `TEMPO_AI_CLASSIFIER_FALLBACK_MODEL` | `anthropic:claude-sonnet-4-6` | Onboarding fallback |
+| `TEMPO_AI_GEO_ASSESS_MODEL` | `anthropic:claude-haiku-4-5-20251001` | Optional override; defaults to Haiku geo assessor |
 | `TEMPO_AI_TIMEOUT_MS` | `2000`–`5000` | Raise if cluster/geo time out on staging network |
 
-**Smoke (after deploy):** `GET /api/ai/models` → `mockOnly: false`; run one dashboard refresh; confirm `_meta` includes model ids after implementation **M3**; `npm run test:api` before promote.
+**Smoke (after deploy):** `GET /api/ai/models` → `mockOnly: false` plus real capability map for story-pool checks; run one dashboard refresh; confirm `_meta` includes model ids after implementation **M3**; `npm run test:api` before promote.
 
 ### Frontend (`04-prototype/.env.local` — baked into the static build)
 

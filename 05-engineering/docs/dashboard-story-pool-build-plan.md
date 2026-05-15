@@ -164,6 +164,10 @@ flowchart LR
 
 Run once real keys and feeds are healthy:
 
+0. **Pre-M7 hard gate (required):** story-pool validation must run in **real-model mode**.
+   - `GET /api/ai/models` must show `mockOnly: false` **and** real capability routing for story-pool paths (no accidental `mock-*` for clustering/classification in DC validation mode).
+   - Keys must be configured via env/secret manager (`TEMPO_ANTHROPIC_API_KEY`, `TEMPO_OPENAI_API_KEY` as applicable).  
+   - Documentation must include key **variable names only** (never raw secret values).
 1. **Ingestion:** `GET /api/ingestion/sources` — feeds present, manifest sane.
 2. **Models:** `GET /api/ai/models` → `mockOnly: false`.
 3. **Refresh:** `POST /api/dashboard/refresh` — stories or strict-empty with funnel in `_meta`.
@@ -196,6 +200,7 @@ Run once real keys and feeds are healthy:
 - **Commits:** One row in the table above per PR when possible.
 - **Do not re-open** chunks A–N for M work; log product changes as spec amendments to [pool spec](dashboard-story-pool-spec.md).
 - **Golden pool evals:** Incremental per **B1** after M4+; not blocking M1.
+- **Key hygiene:** Never commit or document raw API keys in Markdown/docs; keep secrets only in env files or secret managers.
 
 ---
 
