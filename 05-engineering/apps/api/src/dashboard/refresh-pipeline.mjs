@@ -12,6 +12,7 @@ import {
   buildMatchedFeedIdSet,
   filterItemsToMatchedFeeds,
   SELECTION_MODE,
+  FALLBACK_REASON,
 } from "../ingestion/source-matcher.mjs";
 import { computeWatermark, watermarksMatch } from "./refresh-watermark.mjs";
 import { applyBeatFitFilter, BEAT_FIT_THRESHOLD, BEAT_FIT_VERSION } from "./beat-fit-scorer.mjs";
@@ -381,14 +382,20 @@ export function deriveStoryTags(sourceItems, settings) {
 
 /**
  * Select items whose outlet matches any configured traditionalSource or socialSource.
- * Comparison is case-insensitive. If no sources are configured, all items pass.
+ * Comparison is case-insensitive.
+ *
+ * C2 (M6): when **both** source lists are empty, return `[]` — not "all items".
+ * Zero configured sources is the user telling us "I haven't picked a beat
+ * yet"; surfacing the entire fixture pool under that state risks recommending
+ * outlets the user never opted into.  The manifest path in the refresh
+ * pipeline enforces the same gate; both produce a clean strict-empty.
  */
 export function selectSourcePool(items, settings) {
   const sources = new Set([
     ...(settings.traditionalSources ?? []).map((s) => s.toLowerCase()),
     ...(settings.socialSources ?? []).map((s) => s.toLowerCase()),
   ]);
-  if (sources.size === 0) return items;
+  if (sources.size === 0) return [];
   return items.filter((item) => sources.has(item.outlet.toLowerCase()));
 }
 
@@ -694,13 +701,36 @@ export async function runRefreshPipeline({
   //    manifest with alias map + connector availability.  When manifestFeeds
   //    is provided (production path), use the matcher.  When absent (legacy
   //    tests), fall back to the simple outlet-set selectSourcePool below.
+  //
+  //    C2 (M6): zero configured sources → strict-empty BEFORE we hit the
+  //    matcher.  The matcher's `NO_SELECTED_SOURCES` fallback would otherwise
+  //    return the configured fallback feeds — defeating the product rule that
+  //    says "the user hasn't picked a beat, so we serve nothing".  Enforcing
+  //    C2 in the pipeline (not the matcher) keeps the matcher a pure utility
+  //    while binding the product gate to the funnel.
   let selectionMeta;
   let selectedItems;
-  if (manifestFeeds) {
-    const selectedNames = [
-      ...(settings.traditionalSources ?? []),
-      ...(settings.socialSources ?? []),
-    ];
+  const selectedNames = [
+    ...(settings.traditionalSources ?? []),
+    ...(settings.socialSources ?? []),
+  ];
+  if (selectedNames.length === 0) {
+    selectedItems = [];
+    selectionMeta = {
+      sourceSelectionMode: SELECTION_MODE.STRICT,
+      sourceFallbackUsed: false,
+      sourceFallbackReason: FALLBACK_REASON.NO_SELECTED_SOURCES,
+      matchedSourceCount: 0,
+      selectedSourceCount: 0,
+      unmatchedSelectedSources: [],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: [],
+    };
+    console.log(
+      `[pipeline.selection] C2 fail-closed: zero configured sources → strict-empty`
+    );
+  } else if (manifestFeeds) {
     const selection = resolveSelectedSources({
       selectedSources: selectedNames,
       manifestFeeds,

@@ -93,11 +93,14 @@ test("selectSourcePool: includes items matching socialSources", () => {
   assert.equal(result[0].sourceId, "a");
 });
 
-test("selectSourcePool: returns all items when both source lists are empty", () => {
+test("selectSourcePool: fail-closes to [] when both source lists are empty (C2 / M6)", () => {
+  // C2: zero configured sources means the user hasn't opted into any outlets.
+  // Surfacing the whole pool under that state would recommend content the
+  // user never chose to monitor — the legacy "all items" semantics are gone.
   const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
   const items = [makeItem({ sourceId: "a" }), makeItem({ sourceId: "b" })];
   const result = selectSourcePool(items, settings);
-  assert.equal(result.length, 2);
+  assert.deepEqual(result, []);
 });
 
 // ─── apply24hFilter ───────────────────────────────────────────────────────────
@@ -2143,12 +2146,14 @@ test("runRefreshPipeline: hybrid_strict + missing embedFn WITH no lexical hits �
   assert.notEqual(log.recall.keywordFallbackAfterEmbeddingFailure, true);
 });
 
-test("runRefreshPipeline: hybrid_strict + empty profile text → lexical-only diagnostic (E3b)", async () => {
-  // E3b (M5): a user with no topics/keywords/geos/sources/narrative produces
-  // an empty profile.  Under the locked spec this is NOT an operational gap —
-  // the pipeline passes lexical hits through (here zero, since the keyword
-  // filter has no tokens to match) and emits the `empty_profile_text_lexical_only`
-  // diagnostic so operators can tell empty-profile apart from a real cliff.
+test("runRefreshPipeline: zero configured sources → C2 fail-closed at source-selection (M6)", async () => {
+  // C2 (M6): a user with no topics/keywords/geos/sources/narrative trips the
+  // source-selection gate BEFORE recall.  The pipeline emits zero stories and
+  // surfaces `sourceFallbackReason="no_selected_sources"` on selection meta
+  // so operators can tell empty-settings apart from a recall cliff.  Recall
+  // never runs with profile data here because the candidate pool is empty
+  // upstream — E3b's empty-profile path is exercised at the unit level in
+  // embedding-recall.test.mjs.
   const item = makeItem({
     sourceId: "kw-only",
     outlet: "Reuters",
@@ -2173,12 +2178,15 @@ test("runRefreshPipeline: hybrid_strict + empty profile text → lexical-only di
     embedFn: async () => { embedCalled = true; return []; },
     recallConfig: HYBRID_RECALL_CONFIG,
   });
-  assert.equal(embedCalled, false, "embedFn must not be invoked when profile is empty");
   assert.equal(payload.stories.length, 0);
-  assert.equal(log.recall.degraded, true);
-  assert.equal(log.recall.degraded_reason, "empty_profile_text_lexical_only");
-  // E3b is not a provider failure — the cliff flag must stay off.
-  assert.notEqual(log.recall.keywordFallbackAfterEmbeddingFailure, true);
+  assert.equal(log.selection.sourceSelectionMode, "strict");
+  assert.equal(log.selection.sourceFallbackUsed, false);
+  assert.equal(log.selection.sourceFallbackReason, "no_selected_sources");
+  assert.equal(log.selection.selectedSourceCount, 0);
+  // Recall runs with an empty candidate pool — it shouldn't report a degrade
+  // (the upstream gate explains the empty), and embedFn must not be called.
+  assert.equal(embedCalled, false);
+  assert.equal(log.recall.degraded, false);
 });
 
 // ─── Topic/keyword stage breakdown (false-empty diagnostics) ────────────────
@@ -3053,10 +3061,16 @@ test("runRefreshPipeline: outletCount collapses casing/whitespace variants of th
   // Same outlet emitted three ways ("Reuters", "reuters ", "REUTERS") plus one
   // legitimately distinct outlet — pipeline should report outletCount=2.
   //
-  // `traditionalSources: []` is used so `selectSourcePool` doesn't drop the
-  // whitespace/case variants on the way in — this test is about the unique
-  // count emitted by buildStory, not about source-selection matching.
-  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  // C2 (M6) forbids the older trick of bypassing source filtering with empty
+  // source lists.  Each unique item-outlet string is enumerated in
+  // `traditionalSources` so all four variants survive source-selection and
+  // reach buildStory — this test is about the unique count emitted by
+  // buildStory, not about source-selection matching.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["Reuters", "reuters ", "REUTERS", "El Tiempo"],
+    socialSources: [],
+  };
   const rawItems = [
     makeItem({
       sourceId: "src-a",
@@ -3134,7 +3148,17 @@ test("runRefreshPipeline: outletCount excludes blank/whitespace-only outlets", a
   // Defensive hardening: if upstream emits a row with an empty or whitespace-
   // only outlet, the normalized identity is "" — that must NOT count as a
   // source identity (otherwise missing-data rows would inflate the chip count).
-  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  //
+  // C2 (M6): each unique outlet string (including "" and "   ") is enumerated
+  // in `traditionalSources` so all four rows survive source-selection.  The
+  // test still pins buildStory's behavior on bad-outlet rows; in production
+  // those rows would also fail at source-selection, which is fine — the
+  // defense is layered.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["Reuters", "", "   ", "El Tiempo"],
+    socialSources: [],
+  };
   const rawItems = [
     makeItem({
       sourceId: "src-a",
@@ -3209,7 +3233,15 @@ test("runRefreshPipeline: outletCount is 0 when every outlet is blank", async ()
   // Edge case: a meta-story whose source items all lack outlet data should
   // emit outletCount=0 rather than 1 (one "" key).  Sources list is preserved
   // so the expanded view can still render rows with empty outlet strings.
-  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  //
+  // C2 (M6): the blank/whitespace strings are enumerated in `traditionalSources`
+  // so the rows survive source-selection and reach buildStory.  In production
+  // these items would be filtered upstream too — defense is layered.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["", "   "],
+    socialSources: [],
+  };
   const rawItems = [
     makeItem({
       sourceId: "src-a",
