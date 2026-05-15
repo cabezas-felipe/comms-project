@@ -215,6 +215,52 @@ test("provider error increments providerErrors and summarizationFallbacks", asyn
   }
 });
 
+// ── M2: clustering SKU env wiring (N2) ───────────────────────────────────────
+//
+// Locks the refresh-path contract: the capability map exposes
+// `clustering` from `TEMPO_AI_CLUSTER_MODEL` at call time, so flipping the
+// env to the N2 production SKU (anthropic:claude-sonnet-4-6) is sufficient
+// to take the real Anthropic provider path on refresh.  No code redeploy
+// needed; CI/test-mode safety (TEMPO_AI_MOCK_ONLY=true) still wins.
+
+test("capability map clustering defaults to mock-anthropic-haiku when env unset (CI safety)", () => {
+  const prev = process.env.TEMPO_AI_CLUSTER_MODEL;
+  delete process.env.TEMPO_AI_CLUSTER_MODEL;
+  try {
+    assert.equal(getAiCapabilityMap().clustering, "mock-anthropic-haiku");
+  } finally {
+    if (prev !== undefined) process.env.TEMPO_AI_CLUSTER_MODEL = prev;
+  }
+});
+
+test("capability map clustering reads TEMPO_AI_CLUSTER_MODEL at call time (N2 Sonnet)", () => {
+  const prev = process.env.TEMPO_AI_CLUSTER_MODEL;
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  try {
+    assert.equal(getAiCapabilityMap().clustering, "anthropic:claude-sonnet-4-6");
+    assert.equal(providerFor(getAiCapabilityMap().clustering), "anthropic");
+  } finally {
+    if (prev !== undefined) process.env.TEMPO_AI_CLUSTER_MODEL = prev;
+    else delete process.env.TEMPO_AI_CLUSTER_MODEL;
+  }
+});
+
+test("TEMPO_AI_MOCK_ONLY=true forces mock for Sonnet clustering env (CI safety)", () => {
+  const prevModel = process.env.TEMPO_AI_CLUSTER_MODEL;
+  const prevMock = process.env.TEMPO_AI_MOCK_ONLY;
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  try {
+    assert.equal(getAiCapabilityMap().clustering, "anthropic:claude-sonnet-4-6");
+    assert.notEqual(providerFor(getAiCapabilityMap().clustering), "anthropic");
+  } finally {
+    if (prevModel !== undefined) process.env.TEMPO_AI_CLUSTER_MODEL = prevModel;
+    else delete process.env.TEMPO_AI_CLUSTER_MODEL;
+    if (prevMock !== undefined) process.env.TEMPO_AI_MOCK_ONLY = prevMock;
+    else delete process.env.TEMPO_AI_MOCK_ONLY;
+  }
+});
+
 // ── resolveExtractionChain ──────────────────────────────────────────────────
 
 test("resolveExtractionChain returns shipping defaults when env is unset", () => {

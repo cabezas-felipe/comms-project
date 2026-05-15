@@ -310,3 +310,49 @@ test("clusterItems: throws when anthropic model requested but API key absent", a
     if (savedAlt !== undefined) process.env.ANTHROPIC_API_KEY = savedAlt;
   }
 });
+
+// ─── M2: N2 Sonnet routing on refresh path ───────────────────────────────────
+//
+// The mock branch swallows missing keys silently; only the real Anthropic
+// branch surfaces `TEMPO_ANTHROPIC_API_KEY`.  Asserting that error with the
+// N2 SKU is the contract proof that refresh would invoke the real cluster
+// path when the env is set in staging/prototype.
+
+test("clusterItems: N2 Sonnet env takes real Anthropic path (proven via missing-key error)", async () => {
+  const savedKey = process.env.TEMPO_ANTHROPIC_API_KEY;
+  const savedAlt = process.env.ANTHROPIC_API_KEY;
+  delete process.env.TEMPO_ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    await assert.rejects(
+      () => clusterItems([makeItem()], BASE_SETTINGS, "anthropic:claude-sonnet-4-6"),
+      /TEMPO_ANTHROPIC_API_KEY/
+    );
+  } finally {
+    if (savedKey !== undefined) process.env.TEMPO_ANTHROPIC_API_KEY = savedKey;
+    if (savedAlt !== undefined) process.env.ANTHROPIC_API_KEY = savedAlt;
+  }
+});
+
+test("clusterItems: TEMPO_AI_MOCK_ONLY=true forces mock even for Sonnet env (CI safety)", async () => {
+  const savedKey = process.env.TEMPO_ANTHROPIC_API_KEY;
+  const savedAlt = process.env.ANTHROPIC_API_KEY;
+  const savedMock = process.env.TEMPO_AI_MOCK_ONLY;
+  delete process.env.TEMPO_ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  process.env.TEMPO_AI_MOCK_ONLY = "true";
+  try {
+    // No key set; if this hit the real path it would reject — mock branch must absorb it.
+    const stories = await clusterItems(
+      [makeItem({ sourceId: "m1" })],
+      BASE_SETTINGS,
+      "anthropic:claude-sonnet-4-6"
+    );
+    assert.ok(Array.isArray(stories) && stories.length >= 1);
+  } finally {
+    if (savedKey !== undefined) process.env.TEMPO_ANTHROPIC_API_KEY = savedKey;
+    if (savedAlt !== undefined) process.env.ANTHROPIC_API_KEY = savedAlt;
+    if (savedMock !== undefined) process.env.TEMPO_AI_MOCK_ONLY = savedMock;
+    else delete process.env.TEMPO_AI_MOCK_ONLY;
+  }
+});
