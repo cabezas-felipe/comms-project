@@ -4,7 +4,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
-import { getAiCapabilityMap, getAiMetrics, assertAiConfig, resolveExtractionChain } from "./ai/model-router.mjs";
+import {
+  getAiCapabilityMap,
+  getAiMetrics,
+  assertAiConfig,
+  resolveExtractionChain,
+  getProviderReadiness,
+  isDcValidationModeEnabled,
+  assertReadyForRealRun,
+} from "./ai/model-router.mjs";
 import { extractOnboarding, resolveTimeoutMs as resolveExtractionTimeoutMs } from "./ai/onboarding-extractor.mjs";
 import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
@@ -16,12 +24,13 @@ import { appendRejections as appendStoryRejections } from "./db/story-rejection-
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
 import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
+import { resolveRecallConfig } from "./ingestion/embedding-recall.mjs";
 import {
   tryAcquire as tryAcquireRefresh,
   release as releaseRefresh,
   REFRESH_GUARD_SCOPE,
 } from "./dashboard/refresh-guard.mjs";
-import { mockAssessGeoConfidence } from "./dashboard/geo-filter.mjs";
+import { assessGeoConfidence } from "./dashboard/geo-filter.mjs";
 import { parseFallbackFeedIdsEnv, parseFallbackEnabledEnv } from "./ingestion/source-matcher.mjs";
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
 import { appendOnboardingNarrative, readCurrentOnboardingNarrative } from "./db/narrative-repo.mjs";
@@ -264,10 +273,13 @@ export const _refreshPipeline = {
 export const _rejectionLog = { write: appendStoryRejections };
 
 /**
- * Mutable geo-confidence assessor hook. Tests override assess to inject
- * deterministic confidence scores without AI provider calls.
+ * Mutable geo-confidence assessor hook.  Default is the Anthropic-backed
+ * `assessGeoConfidence` (M4 / F3b) — Haiku 4.5 structured `{ confidence }`.
+ * Reads env at call time, fails safe to `{ confidence: 0 }` (held) when the
+ * key is absent or the SDK errors, and honors `TEMPO_AI_MOCK_ONLY=true` for
+ * CI.  Tests override `_geoFilter.assess` directly with a deterministic stub.
  */
-export const _geoFilter = { assess: mockAssessGeoConfidence };
+export const _geoFilter = { assess: assessGeoConfidence };
 
 /**
  * Enforces recognized identity on a route. Sends 401 and returns null when identity cannot be resolved.
@@ -660,6 +672,38 @@ async function executeRefreshFlow(identity) {
   // story list stays put.
   const lastCheckedAt = new Date().toISOString();
 
+  // R2 DC-validation guard: when TEMPO_DC_VALIDATION_MODE=true, refuse to run
+  // a "validation" refresh that would silently traverse mock routes or hit a
+  // missing key.  Fails closed with a machine-readable diagnostic before any
+  // pipeline I/O so a misconfigured validation run can't be mistaken for a
+  // green real-model run.  Outside validation mode this is a no-op.
+  const readinessSnapshot = getProviderReadiness();
+  if (isDcValidationModeEnabled() && !readinessSnapshot.readyForRealRun) {
+    try {
+      assertReadyForRealRun({ readiness: readinessSnapshot });
+    } catch (guardErr) {
+      console.error(
+        `[dashboard.refresh] DC_VALIDATION_NOT_READY user=${identity.userId} reasons=${(guardErr.reasons ?? []).join("|")} missingKeys=${readinessSnapshot.missingKeys.join(",")}`
+      );
+      trackServerEvent("dashboard_refresh_skipped", {
+        reason: "dc_validation_not_ready",
+        identitySource: identity.source,
+        missingKeys: readinessSnapshot.missingKeys,
+        mockOnly: readinessSnapshot.mockOnly,
+      });
+      return {
+        kind: "validation_not_ready",
+        httpStatus: 503,
+        body: {
+          message: "Dashboard refresh blocked: DC validation mode requires real-model providers.",
+          code: "DC_VALIDATION_NOT_READY",
+          reasons: guardErr.reasons ?? [],
+          readiness: readinessSnapshot,
+        },
+      };
+    }
+  }
+
   // Phase 4: per-user in-flight guard.  See refresh-guard.mjs for scope notes.
   if (!tryAcquireRefresh(identity.userId)) {
     console.log(
@@ -728,6 +772,10 @@ async function executeRefreshFlow(identity) {
         : settings;
 
     const clusterModel = getAiCapabilityMap().clustering;
+    // M3 / L1a: surface model identity on refresh _meta so DC demo debugging
+    // and incident replay don't depend on log scrapes.  Both ids are env-derived
+    // at call time, mirroring the SKU the run will actually use.
+    const embeddingModel = resolveRecallConfig().embeddingModel;
     const { payload, log } = await _refreshPipeline.run({
       userId: identity.userId,
       settings: settingsWithNarrative,
@@ -775,6 +823,11 @@ async function executeRefreshFlow(identity) {
         candidateCount: log.candidateCount,
         selectedFeedCount: log.selectedFeedCount,
         lastCheckedAt,
+        // M3: model identity surfaces on the skip branch too, so an operator
+        // diagnosing a stable empty snapshot can confirm the SKU without
+        // forcing a full refresh.
+        clusterModel,
+        embeddingModel,
       };
       if (log.recall) skipMeta.recall = log.recall;
       if (log.funnel) skipMeta.funnel = log.funnel;
@@ -829,6 +882,15 @@ async function executeRefreshFlow(identity) {
     // /api/dashboard, bootstrap served_fresh_snapshot) surface the same value
     // the refresh response carries.  On a full run, this equals refreshedAt.
     finalPayload._lastCheckedAt = lastCheckedAt;
+    // M3b / P1: persist last-run diagnostics so GET /api/dashboard can explain
+    // funnel/recall/beatFit/model identity without re-running refresh.  Keys
+    // are individually optional — older pipeline returns that lack one of
+    // them won't emit an `undefined` placeholder on readback.
+    const lastRunMeta = { clusterModel, embeddingModel };
+    if (log.funnel !== undefined) lastRunMeta.funnel = log.funnel;
+    if (log.recall !== undefined) lastRunMeta.recall = log.recall;
+    if (log.beatFit !== undefined) lastRunMeta.beatFit = log.beatFit;
+    finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
 
@@ -883,6 +945,13 @@ async function executeRefreshFlow(identity) {
           beatFit: log.beatFit,
           recall: log.recall,
           funnel: log.funnel,
+          // M3 / L1a: SKU identity on the refresh response.  Persistence to
+          // snapshot storage is deferred to M3b.
+          clusterModel,
+          embeddingModel,
+          // R2: readiness snapshot at run time — additive, lets operators
+          // confirm a passing DC validation run actually ran on real models.
+          readiness: readinessSnapshot,
         },
       },
     };
@@ -1026,7 +1095,9 @@ app.post("/api/dashboard/bootstrap", async (req, res) => {
   //   "error_500"       — pipeline threw with no fallback snapshot available
   const hasSnapshotFlag = body?._meta?.hasSnapshot === true;
   let decision;
-  if (kind === "error_500") {
+  if (kind === "error_500" || kind === "validation_not_ready") {
+    // R2: validation_not_ready short-circuits with 503 + diagnostic body; do
+    // not classify it as a successful refresh attempt for bootstrap purposes.
     decision = "no_snapshot";
   } else if (kind === "in_flight") {
     decision = hasSnapshotFlag ? "ran_refresh" : "no_snapshot";
@@ -1062,9 +1133,16 @@ app.post("/api/dashboard/bootstrap", async (req, res) => {
 });
 
 app.get("/api/ai/models", (_req, res) => {
+  // R2: surface readiness diagnostics so operators can verify DC validation
+  // mode pre-conditions (real providers + keys present) without running
+  // refresh.  Additive: existing `capabilityMap` / `mockOnly` fields are
+  // unchanged for backwards compatibility.
+  const readiness = getProviderReadiness();
   res.json({
     capabilityMap: getAiCapabilityMap(),
-    mockOnly: process.env.TEMPO_AI_MOCK_ONLY === "true",
+    mockOnly: readiness.mockOnly,
+    dcValidationMode: isDcValidationModeEnabled(),
+    readiness,
   });
 });
 

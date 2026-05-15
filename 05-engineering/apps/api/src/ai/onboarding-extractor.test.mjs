@@ -97,9 +97,9 @@ test("extractOnboarding returns all five fields with mock-anthropic-haiku", asyn
   assert.ok(Array.isArray(result.socialSources));
 });
 
-test("extractOnboarding mock detects Diplomatic relations topic", async () => {
+test("extractOnboarding mock stays conservative on diplomacy-only phrasing", async () => {
   const result = await extractOnboarding("bilateral diplomacy talks", "mock-anthropic-haiku");
-  assert.ok(result.topics.includes("Diplomatic relations"));
+  assert.ok(!result.topics.includes("Diplomatic relations"));
 });
 
 test("extractOnboarding mock detects Migration policy topic", async () => {
@@ -119,7 +119,7 @@ test("extractOnboarding mock detects Reuters as traditionalSource", async () => 
 
 test("extractOnboarding mock detects NYT and El Tiempo as traditionalSources", async () => {
   const result = await extractOnboarding("Read NYT and El Tiempo.", "mock-openai-mini");
-  assert.ok(result.traditionalSources.includes("NYT"));
+  assert.ok(result.traditionalSources.includes("New York Times"));
   assert.ok(result.traditionalSources.includes("El Tiempo"));
 });
 

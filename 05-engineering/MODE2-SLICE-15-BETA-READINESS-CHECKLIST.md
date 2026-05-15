@@ -77,6 +77,44 @@ TEMPO_AI_SUMMARY_MODEL=anthropic:claude-haiku-4-5
 TEMPO_ANTHROPIC_API_KEY=sk-ant-your-key
 ```
 
+### Dashboard story pool — DC prototype (local)
+
+Use when hand-testing the **hourly refresh / story pool** with real models ([pool spec](docs/dashboard-story-pool-spec.md), Chunk **N2**). Do **not** set `TEMPO_AI_MOCK_ONLY=true` on this path.
+
+**Key handling policy (required):**
+
+- Document only env **variable names** in Markdown; never paste real key values.
+- Store real secrets only in local env or an approved secret manager.
+- Required vars for real-model story-pool validation: `TEMPO_ANTHROPIC_API_KEY` and `TEMPO_OPENAI_API_KEY`.
+- Supported provider aliases (runtime fallback): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+- Set `TEMPO_AI_MOCK_ONLY=false` (or leave unset) for real-model validation runs.
+
+```bash
+# apps/api/.env — Anthropic (onboarding, clustering, geo when wired)
+TEMPO_ANTHROPIC_API_KEY=sk-ant-your-key
+TEMPO_AI_CLASSIFIER_MODEL=anthropic:claude-opus-4-7
+TEMPO_AI_CLASSIFIER_FALLBACK_MODEL=anthropic:claude-sonnet-4-6
+TEMPO_AI_CLUSTER_MODEL=anthropic:claude-sonnet-4-6
+TEMPO_AI_GEO_ASSESS_MODEL=anthropic:claude-haiku-4-5-20251001
+
+# OpenAI — embedding recall only
+TEMPO_OPENAI_API_KEY=sk-your-openai-key
+TEMPO_OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+TEMPO_RECALL_MODE=hybrid_strict
+TEMPO_EMBED_TOP_K=80
+TEMPO_EMBED_MAX_ITEMS=250
+```
+
+**Smoke (models operational):**
+
+```bash
+cd 05-engineering/apps/api
+curl -s http://localhost:8787/api/ai/models | jq .   # mockOnly=false and capabilityMap routes to real models for DC checks
+# Trigger a dashboard refresh; after M3, check response _meta.clusterModel / embedding id
+npm run eval:onboarding-extraction   # when touching onboarding extraction
+npm run test:api                     # from 05-engineering root
+```
+
 **With Supabase (optional):**
 
 ```bash

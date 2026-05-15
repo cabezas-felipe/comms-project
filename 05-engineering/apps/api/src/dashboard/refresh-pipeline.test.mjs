@@ -24,6 +24,8 @@ import {
   summarizeFunnel,
   constrainTagsToSettings,
   deriveStoryTags,
+  compareSourcesT1,
+  compareStoriesR1,
 } from "./refresh-pipeline.mjs";
 import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
 
@@ -93,11 +95,14 @@ test("selectSourcePool: includes items matching socialSources", () => {
   assert.equal(result[0].sourceId, "a");
 });
 
-test("selectSourcePool: returns all items when both source lists are empty", () => {
+test("selectSourcePool: fail-closes to [] when both source lists are empty (C2 / M6)", () => {
+  // C2: zero configured sources means the user hasn't opted into any outlets.
+  // Surfacing the whole pool under that state would recommend content the
+  // user never chose to monitor — the legacy "all items" semantics are gone.
   const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
   const items = [makeItem({ sourceId: "a" }), makeItem({ sourceId: "b" })];
   const result = selectSourcePool(items, settings);
-  assert.equal(result.length, 2);
+  assert.deepEqual(result, []);
 });
 
 // ─── apply24hFilter ───────────────────────────────────────────────────────────
@@ -2143,11 +2148,14 @@ test("runRefreshPipeline: hybrid_strict + missing embedFn WITH no lexical hits �
   assert.notEqual(log.recall.keywordFallbackAfterEmbeddingFailure, true);
 });
 
-test("runRefreshPipeline: hybrid_strict + empty profile text → strict fail-closed (no keyword pass-through)", async () => {
-  // A user with no topics/keywords/geos/sources/narrative produces an empty
-  // profile.  Under strict policy this is treated as an operational gap, not
-  // a soft fallback.  Empty + diagnostic prevents recommending items the
-  // user never expressed a beat for.
+test("runRefreshPipeline: zero configured sources → C2 fail-closed at source-selection (M6)", async () => {
+  // C2 (M6): a user with no topics/keywords/geos/sources/narrative trips the
+  // source-selection gate BEFORE recall.  The pipeline emits zero stories and
+  // surfaces `sourceFallbackReason="no_selected_sources"` on selection meta
+  // so operators can tell empty-settings apart from a recall cliff.  Recall
+  // never runs with profile data here because the candidate pool is empty
+  // upstream — E3b's empty-profile path is exercised at the unit level in
+  // embedding-recall.test.mjs.
   const item = makeItem({
     sourceId: "kw-only",
     outlet: "Reuters",
@@ -2172,10 +2180,15 @@ test("runRefreshPipeline: hybrid_strict + empty profile text → strict fail-clo
     embedFn: async () => { embedCalled = true; return []; },
     recallConfig: HYBRID_RECALL_CONFIG,
   });
-  assert.equal(embedCalled, false, "embedFn must not be invoked when profile is empty");
   assert.equal(payload.stories.length, 0);
-  assert.equal(log.recall.degraded, true);
-  assert.equal(log.recall.degraded_reason, "empty_profile_text_fail_closed");
+  assert.equal(log.selection.sourceSelectionMode, "strict");
+  assert.equal(log.selection.sourceFallbackUsed, false);
+  assert.equal(log.selection.sourceFallbackReason, "no_selected_sources");
+  assert.equal(log.selection.selectedSourceCount, 0);
+  // Recall runs with an empty candidate pool — it shouldn't report a degrade
+  // (the upstream gate explains the empty), and embedFn must not be called.
+  assert.equal(embedCalled, false);
+  assert.equal(log.recall.degraded, false);
 });
 
 // ─── Topic/keyword stage breakdown (false-empty diagnostics) ────────────────
@@ -3050,10 +3063,16 @@ test("runRefreshPipeline: outletCount collapses casing/whitespace variants of th
   // Same outlet emitted three ways ("Reuters", "reuters ", "REUTERS") plus one
   // legitimately distinct outlet — pipeline should report outletCount=2.
   //
-  // `traditionalSources: []` is used so `selectSourcePool` doesn't drop the
-  // whitespace/case variants on the way in — this test is about the unique
-  // count emitted by buildStory, not about source-selection matching.
-  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  // C2 (M6) forbids the older trick of bypassing source filtering with empty
+  // source lists.  Each unique item-outlet string is enumerated in
+  // `traditionalSources` so all four variants survive source-selection and
+  // reach buildStory — this test is about the unique count emitted by
+  // buildStory, not about source-selection matching.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["Reuters", "reuters ", "REUTERS", "El Tiempo"],
+    socialSources: [],
+  };
   const rawItems = [
     makeItem({
       sourceId: "src-a",
@@ -3131,7 +3150,17 @@ test("runRefreshPipeline: outletCount excludes blank/whitespace-only outlets", a
   // Defensive hardening: if upstream emits a row with an empty or whitespace-
   // only outlet, the normalized identity is "" — that must NOT count as a
   // source identity (otherwise missing-data rows would inflate the chip count).
-  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  //
+  // C2 (M6): each unique outlet string (including "" and "   ") is enumerated
+  // in `traditionalSources` so all four rows survive source-selection.  The
+  // test still pins buildStory's behavior on bad-outlet rows; in production
+  // those rows would also fail at source-selection, which is fine — the
+  // defense is layered.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["Reuters", "", "   ", "El Tiempo"],
+    socialSources: [],
+  };
   const rawItems = [
     makeItem({
       sourceId: "src-a",
@@ -3206,7 +3235,15 @@ test("runRefreshPipeline: outletCount is 0 when every outlet is blank", async ()
   // Edge case: a meta-story whose source items all lack outlet data should
   // emit outletCount=0 rather than 1 (one "" key).  Sources list is preserved
   // so the expanded view can still render rows with empty outlet strings.
-  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: [] };
+  //
+  // C2 (M6): the blank/whitespace strings are enumerated in `traditionalSources`
+  // so the rows survive source-selection and reach buildStory.  In production
+  // these items would be filtered upstream too — defense is layered.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["", "   "],
+    socialSources: [],
+  };
   const rawItems = [
     makeItem({
       sourceId: "src-a",
@@ -3776,4 +3813,220 @@ test("cross-feed dedupe: stage runs before clustering — clusterFn sees deduped
   const storyIds = payload.stories[0].sources.map((s) => s.id).sort();
   assert.deepEqual(storyIds, ["dup-winner", "solo"]);
   assert.equal(log.dedupe.collapsedCount, 1);
+});
+
+// ─── M6b: T1 + R1 ordering ────────────────────────────────────────────────────
+//
+// Server-canonical ordering for the response payload.  Both comparators are
+// pure functions over plain values so callers can sort either the raw source
+// items (T1, pre-projection) or pre-computed sort keys (R1).  Tests pin every
+// tie level so a future re-implementation can't quietly drop a tie-breaker.
+
+// T1: comparator over source items (weight DESC, minutesAgo ASC, sourceId ASC)
+test("compareSourcesT1: orders by weight DESC first", () => {
+  const items = [
+    { sourceId: "a", weight: 50, minutesAgo: 30 },
+    { sourceId: "b", weight: 90, minutesAgo: 30 },
+    { sourceId: "c", weight: 70, minutesAgo: 30 },
+  ];
+  const sorted = items.slice().sort(compareSourcesT1);
+  assert.deepEqual(sorted.map((i) => i.sourceId), ["b", "c", "a"]);
+});
+
+test("compareSourcesT1: breaks weight ties by minutesAgo ASC (freshest wins)", () => {
+  const items = [
+    { sourceId: "a", weight: 80, minutesAgo: 120 },
+    { sourceId: "b", weight: 80, minutesAgo: 10 },
+    { sourceId: "c", weight: 80, minutesAgo: 60 },
+  ];
+  const sorted = items.slice().sort(compareSourcesT1);
+  assert.deepEqual(sorted.map((i) => i.sourceId), ["b", "c", "a"]);
+});
+
+test("compareSourcesT1: breaks weight+minutesAgo ties by sourceId ASC (stable)", () => {
+  const items = [
+    { sourceId: "src-c", weight: 80, minutesAgo: 30 },
+    { sourceId: "src-a", weight: 80, minutesAgo: 30 },
+    { sourceId: "src-b", weight: 80, minutesAgo: 30 },
+  ];
+  const sorted = items.slice().sort(compareSourcesT1);
+  assert.deepEqual(sorted.map((i) => i.sourceId), ["src-a", "src-b", "src-c"]);
+});
+
+test("compareSourcesT1: missing weight/minutesAgo coerce to safe defaults (0 / +Inf)", () => {
+  const items = [
+    { sourceId: "no-weight", minutesAgo: 30 },           // weight defaulted to 0
+    { sourceId: "no-min", weight: 80 },                  // minutesAgo defaulted to +Inf
+    { sourceId: "fresh", weight: 80, minutesAgo: 10 },
+  ];
+  const sorted = items.slice().sort(compareSourcesT1);
+  // weight 80 wins; among weight-80, fresh (10) < no-min (+Inf); no-weight (0) sinks last.
+  assert.deepEqual(sorted.map((i) => i.sourceId), ["fresh", "no-min", "no-weight"]);
+});
+
+test("runRefreshPipeline: T1 applied — story.sources[] sorted by weight/minutesAgo/sourceId", async () => {
+  // All four source items reach the same meta-story; the pipeline must emit
+  // them in T1 order in the response.  Weights chosen to make the canonical
+  // order non-trivially different from input order, with two pairs sharing
+  // weight to exercise the minutesAgo tie-breaker, and one fully-equal pair
+  // to exercise the sourceId tie-breaker.
+  const rawItems = [
+    makeItem({ sourceId: "src-z", outlet: "Reuters", weight: 80, minutesAgo: 40, headline: "OFAC update one" }),
+    makeItem({ sourceId: "src-a", outlet: "Reuters", weight: 80, minutesAgo: 40, headline: "OFAC update two" }),
+    makeItem({ sourceId: "src-b", outlet: "Reuters", weight: 95, minutesAgo: 60, headline: "OFAC update three" }),
+    makeItem({ sourceId: "src-c", outlet: "Reuters", weight: 80, minutesAgo: 10, headline: "OFAC update four" }),
+  ];
+  const metaStory = {
+    meta_story_id: "ms-t1",
+    title: "T1 sort coverage",
+    subtitle: "Sub.",
+    source_item_ids: ["src-z", "src-a", "src-b", "src-c"],
+    summary: "Summary.",
+    tags: { topics: ["Diplomatic relations"], keywords: ["OFAC"], geographies: ["US"] },
+    factual_claims: ["Reuters reports OFAC."],
+    claim_evidence_map: { "0": ["src-z", "src-a", "src-b", "src-c"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const ids = payload.stories[0].sources.map((s) => s.id);
+  // Expected order:
+  //   1. src-b (weight 95)
+  //   2. src-c (weight 80, minutesAgo 10 — freshest)
+  //   3. src-a (weight 80, minutesAgo 40; ties src-z on minutesAgo → ASC sourceId)
+  //   4. src-z (weight 80, minutesAgo 40; loses sourceId tie-break)
+  assert.deepEqual(ids, ["src-b", "src-c", "src-a", "src-z"]);
+});
+
+// R1: comparator over sort keys (maxBeatFitScore DESC, minMinutesAgo ASC, metaStoryId ASC)
+test("compareStoriesR1: orders by maxBeatFitScore DESC first", () => {
+  const keys = [
+    { maxBeatFitScore: 0.4, minMinutesAgo: 10, metaStoryId: "ms-a" },
+    { maxBeatFitScore: 0.9, minMinutesAgo: 10, metaStoryId: "ms-b" },
+    { maxBeatFitScore: 0.7, minMinutesAgo: 10, metaStoryId: "ms-c" },
+  ];
+  const sorted = keys.slice().sort(compareStoriesR1);
+  assert.deepEqual(sorted.map((k) => k.metaStoryId), ["ms-b", "ms-c", "ms-a"]);
+});
+
+test("compareStoriesR1: breaks beat-fit ties by minMinutesAgo ASC (freshest wins)", () => {
+  const keys = [
+    { maxBeatFitScore: 0.8, minMinutesAgo: 120, metaStoryId: "ms-a" },
+    { maxBeatFitScore: 0.8, minMinutesAgo: 5, metaStoryId: "ms-b" },
+    { maxBeatFitScore: 0.8, minMinutesAgo: 60, metaStoryId: "ms-c" },
+  ];
+  const sorted = keys.slice().sort(compareStoriesR1);
+  assert.deepEqual(sorted.map((k) => k.metaStoryId), ["ms-b", "ms-c", "ms-a"]);
+});
+
+test("compareStoriesR1: breaks beat-fit+freshness ties by metaStoryId ASC (stable)", () => {
+  const keys = [
+    { maxBeatFitScore: 0.8, minMinutesAgo: 30, metaStoryId: "ms-c" },
+    { maxBeatFitScore: 0.8, minMinutesAgo: 30, metaStoryId: "ms-a" },
+    { maxBeatFitScore: 0.8, minMinutesAgo: 30, metaStoryId: "ms-b" },
+  ];
+  const sorted = keys.slice().sort(compareStoriesR1);
+  assert.deepEqual(sorted.map((k) => k.metaStoryId), ["ms-a", "ms-b", "ms-c"]);
+});
+
+test("runRefreshPipeline: R1 applied — stories[] sorted by max beatFitScore / min minutesAgo / metaStoryId", async () => {
+  // Construct three meta-stories whose member items have known beatFitScores
+  // (assigned via the real beat-fit scorer by tuning topic/keyword overlap).
+  // Goal: assert R1 ordering at the payload boundary.  We pin a permissive
+  // beat-fit threshold via opts so the strict-empty branch doesn't fire when
+  // a fixture item lands below the production cut-off.
+  //
+  // Simpler approach: bypass the score plumbing and inject beatFitScore via
+  // a custom clusterFn that ALSO mutates the input items.  But the canonical
+  // pipeline path doesn't expose that knob — instead, exercise R1 by
+  // crafting items whose real beat-fit scores happen to land in the order
+  // we want.  We rely on `compareStoriesR1` unit coverage above to pin the
+  // comparator's tie-break behavior; this pipeline-level test pins the wiring.
+  const settings = {
+    ...BASE_SETTINGS,
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+    geographies: ["US"],
+  };
+  const rawItems = [
+    // ms-low: cold beat-fit (different topic, no keyword)
+    makeItem({ sourceId: "low-1", outlet: "Reuters", weight: 70, minutesAgo: 5, topic: "Migration policy", headline: "Migration update", body: ["Body."] }),
+    // ms-mid: matches topic only
+    makeItem({ sourceId: "mid-1", outlet: "Reuters", weight: 70, minutesAgo: 60, topic: "Diplomatic relations", headline: "Talks resume", body: ["Body."] }),
+    // ms-hi: matches topic AND keyword AND geo — best fit
+    makeItem({ sourceId: "hi-1", outlet: "Reuters", weight: 70, minutesAgo: 120, topic: "Diplomatic relations", geographies: ["US"], headline: "OFAC ruling tightens", body: ["OFAC sanctions update."] }),
+  ];
+  const clusterFn = async (items) => {
+    // Echo each item back as its own meta-story so the R1 sort has real
+    // beat-fit scores from the production scorer to rank.
+    return items.map((item, idx) => ({
+      meta_story_id: `ms-${item.sourceId}`,
+      title: `Story for ${item.sourceId}`,
+      subtitle: "Sub.",
+      source_item_ids: [item.sourceId],
+      summary: "Summary.",
+      tags: { topics: [item.topic], keywords: [], geographies: item.geographies },
+      factual_claims: [`${item.outlet} reports: ${item.headline}`],
+      claim_evidence_map: { "0": [item.sourceId] },
+    }));
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  // `hi-1` has the strongest topic+keyword+geo match → highest beat-fit;
+  // it must lead even though it's the OLDEST (R1 prioritizes beat-fit over
+  // freshness).  `mid-1` and `low-1` may or may not survive beat-fit
+  // depending on threshold — assert only that `hi-1` is first if present.
+  assert.ok(payload.stories.length >= 1);
+  assert.equal(payload.stories[0].metaStoryId, "ms-hi-1",
+    `expected ms-hi-1 first (best beat-fit), got order: ${payload.stories.map((s) => s.metaStoryId).join(", ")}`);
+});
+
+test("runRefreshPipeline: R1 stable tie-break by metaStoryId when beat-fit + freshness tie", async () => {
+  // Three items with identical topic/keyword/geo profiles + identical
+  // minutesAgo → same beat-fit score, same freshness.  R1 must order by
+  // metaStoryId ASC ("ms-a" < "ms-b" < "ms-c").  Input order is shuffled so
+  // a stable-but-non-deterministic implementation would fail this test.
+  const settings = {
+    ...BASE_SETTINGS,
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+    geographies: ["US"],
+  };
+  const rawItems = [
+    makeItem({ sourceId: "src-c", outlet: "Reuters", weight: 70, minutesAgo: 30, topic: "Diplomatic relations", geographies: ["US"], headline: "OFAC update C", body: ["OFAC."] }),
+    makeItem({ sourceId: "src-a", outlet: "Reuters", weight: 70, minutesAgo: 30, topic: "Diplomatic relations", geographies: ["US"], headline: "OFAC update A", body: ["OFAC."] }),
+    makeItem({ sourceId: "src-b", outlet: "Reuters", weight: 70, minutesAgo: 30, topic: "Diplomatic relations", geographies: ["US"], headline: "OFAC update B", body: ["OFAC."] }),
+  ];
+  const clusterFn = async (items) => items.map((item) => ({
+    meta_story_id: `ms-${item.sourceId.slice(-1)}`, // "ms-a" / "ms-b" / "ms-c"
+    title: `Story ${item.sourceId}`,
+    subtitle: "Sub.",
+    source_item_ids: [item.sourceId],
+    summary: "Summary.",
+    tags: { topics: [item.topic], keywords: ["OFAC"], geographies: item.geographies },
+    factual_claims: [`${item.outlet} reports: ${item.headline}`],
+    claim_evidence_map: { "0": [item.sourceId] },
+  }));
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  // Each item is identical for beat-fit/freshness purposes; expect lexicographic
+  // metaStoryId order regardless of input order.
+  assert.deepEqual(
+    payload.stories.map((s) => s.metaStoryId),
+    ["ms-a", "ms-b", "ms-c"]
+  );
 });

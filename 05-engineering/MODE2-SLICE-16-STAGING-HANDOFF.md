@@ -31,11 +31,44 @@ Staging assumptions:
 | `SUPABASE_SERVICE_ROLE_KEY` | From Supabase → Settings → API | Required if `SUPABASE_URL` is set |
 | `SUPABASE_ANON_KEY` | From Supabase → Settings → API | Alternative to service-role key |
 | `TEMPO_AI_SUMMARY_MODEL` | `mock-openai-mini` (safe default) | Change to `anthropic:<model>` only after cost review |
-| `TEMPO_AI_MOCK_ONLY` | `true` (recommended for first staging run) | Prevents accidental AI spend during validation |
+| `TEMPO_AI_MOCK_ONLY` | `true` for one-time safety smoke, then unset/`false` | Use only for initial staging bring-up; DC/prototype validation requires real providers |
 | `TEMPO_ANTHROPIC_API_KEY` | From Anthropic console | Required only if using real Anthropic models |
 | `TEMPO_AI_TIMEOUT_MS` | `2000` | Increase slightly over local default for network latency |
 | `POSTHOG_API_KEY` | From PostHog → Project Settings | Set to capture staging usage; EU key if required |
 | `POSTHOG_HOST` | `https://eu.i.posthog.com` if EU required | Defaults to US cloud |
+
+### Dashboard story pool — DC prototype (real models)
+
+For **external / DC-facing** dashboard testing (not the “first staging run” mock-only pass above). Canonical SKUs: [dashboard-story-pool-spec.md](docs/dashboard-story-pool-spec.md) · [walkthrough Chunk N](docs/dashboard-story-pool-walkthrough.md).
+
+**Key handling policy (required):**
+
+- Keep real keys only in env/secret manager; never commit or paste raw secret values into docs.
+- Docs should reference variable names only (`TEMPO_ANTHROPIC_API_KEY`, `TEMPO_OPENAI_API_KEY`, etc.).
+- Supported provider aliases (runtime fallback): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+
+**Cutover policy (locked):**
+
+1. Optional one-time safety smoke with `TEMPO_AI_MOCK_ONLY=true` to validate deploy plumbing.
+2. **Before DC handoff, unset or set `TEMPO_AI_MOCK_ONLY=false` and run all smoke checks in real-model mode.**
+3. **Pre-DC hard gate:** `/api/ai/models` must show `mockOnly: false` and story-pool capability routing must resolve to real models (no accidental `mock-*` on clustering/classification for validation runs).
+
+| Variable | DC prototype value | Notes |
+|---|---|---|
+| `TEMPO_AI_MOCK_ONLY` | **Unset** or `false` | Required for real clustering/embed/geo |
+| `TEMPO_ANTHROPIC_API_KEY` | From Anthropic console | Onboarding, clustering, geo assessor |
+| `TEMPO_OPENAI_API_KEY` | From OpenAI console | **Embeddings only** |
+| `TEMPO_AI_CLUSTER_MODEL` | `anthropic:claude-sonnet-4-6` | Refresh clustering |
+| `TEMPO_OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | Semantic recall |
+| `TEMPO_RECALL_MODE` | `hybrid_strict` | Lexical ∪ embed; fail-closed on embed errors |
+| `TEMPO_EMBED_TOP_K` | `80` | Optional override |
+| `TEMPO_EMBED_MAX_ITEMS` | `250` | Optional override |
+| `TEMPO_AI_CLASSIFIER_MODEL` | `anthropic:claude-opus-4-7` | Onboarding extraction |
+| `TEMPO_AI_CLASSIFIER_FALLBACK_MODEL` | `anthropic:claude-sonnet-4-6` | Onboarding fallback |
+| `TEMPO_AI_GEO_ASSESS_MODEL` | `anthropic:claude-haiku-4-5-20251001` | Optional override; defaults to Haiku geo assessor |
+| `TEMPO_AI_TIMEOUT_MS` | `2000`–`5000` | Raise if cluster/geo time out on staging network |
+
+**Smoke (after deploy):** `GET /api/ai/models` → `mockOnly: false` plus real capability map for story-pool checks; run one dashboard refresh; confirm `_meta` includes model ids after implementation **M3**; `npm run test:api` before promote.
 
 ### Frontend (`04-prototype/.env.local` — baked into the static build)
 
@@ -122,7 +155,8 @@ Run these from outside the staging host (i.e., from a browser or `curl` on a sep
 
 - [ ] `curl https://your-staging-host.example.com/health` (or `http://` if no TLS yet) → `{"ok":true,"service":"@tempo/api"}`
 - [ ] `curl https://your-staging-host.example.com/api/settings` → 200, valid JSON with `contractVersion`
-- [ ] `GET /api/ai/models` → `mockOnly: true` (confirms `TEMPO_AI_MOCK_ONLY=true` is set and no real AI spend possible)
+- [ ] (Optional first pass) `GET /api/ai/models` → `mockOnly: true` with `TEMPO_AI_MOCK_ONLY=true` for safety smoke
+- [ ] (Required for DC handoff) `GET /api/ai/models` → `mockOnly: false` after cutover to real providers
 - [ ] Static build loads: `https://your-staging-host.example.com/` returns the React app without a 404
 
 ### Auth flow (simulating the external user)
@@ -186,7 +220,7 @@ Complete this checklist on the staging host before granting the external user ac
 |---|---|---|---|
 | T1 | All validation commands pass | `test:api` 0 failures, `test:packages` 0 failures, `test:prototype` 0 failures, `build` exits 0 | |
 | T2 | API health endpoint reachable externally | `GET /health` returns 200 from outside the host | |
-| T3 | Mock-only mode confirmed | `GET /api/ai/models` shows `"mockOnly": true` (or real AI cost limit is accepted) | |
+| T3 | Real-model cutover confirmed | `GET /api/ai/models` shows `"mockOnly": false` for DC handoff; optional earlier safety smoke may use `"mockOnly": true` | |
 | T4 | Auth guard active | Unauthenticated `/dashboard` redirects to `/onboarding` from a clean browser | |
 | T5 | Settings persist across API restart | Verified per §3 persistence check | |
 | T6 | No 500 errors in log | API stdout/log shows no `500` or unhandled exception after full smoke test | |
@@ -208,7 +242,7 @@ Complete this checklist on the staging host before granting the external user ac
 |---|---|---|
 | Auth is localStorage-only; session bypass via DevTools | High | Acceptable for single known external user; do not use with untrusted parties |
 | `source-items.json` is static fixture data | Medium | User must be informed content does not update automatically |
-| Real AI costs unbounded if key is set | Medium | Mitigated by `TEMPO_AI_MOCK_ONLY=true` during staging |
+| Real AI costs unbounded if key is set | Medium | Optional early safety smoke may use `TEMPO_AI_MOCK_ONLY=true`; DC handoff requires cutover to `mockOnly: false` and active monitoring |
 | Supabase anon-key RLS policies not defined | Medium | Mitigated by using service-role key server-side only |
 | PostHog events fire-and-forget (silent drop on failure) | Low | Acceptable |
 

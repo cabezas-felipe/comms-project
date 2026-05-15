@@ -12,6 +12,7 @@ import {
   buildMatchedFeedIdSet,
   filterItemsToMatchedFeeds,
   SELECTION_MODE,
+  FALLBACK_REASON,
 } from "../ingestion/source-matcher.mjs";
 import { computeWatermark, watermarksMatch } from "./refresh-watermark.mjs";
 import { applyBeatFitFilter, BEAT_FIT_THRESHOLD, BEAT_FIT_VERSION } from "./beat-fit-scorer.mjs";
@@ -381,14 +382,20 @@ export function deriveStoryTags(sourceItems, settings) {
 
 /**
  * Select items whose outlet matches any configured traditionalSource or socialSource.
- * Comparison is case-insensitive. If no sources are configured, all items pass.
+ * Comparison is case-insensitive.
+ *
+ * C2 (M6): when **both** source lists are empty, return `[]` — not "all items".
+ * Zero configured sources is the user telling us "I haven't picked a beat
+ * yet"; surfacing the entire fixture pool under that state risks recommending
+ * outlets the user never opted into.  The manifest path in the refresh
+ * pipeline enforces the same gate; both produce a clean strict-empty.
  */
 export function selectSourcePool(items, settings) {
   const sources = new Set([
     ...(settings.traditionalSources ?? []).map((s) => s.toLowerCase()),
     ...(settings.socialSources ?? []).map((s) => s.toLowerCase()),
   ]);
-  if (sources.size === 0) return items;
+  if (sources.size === 0) return [];
   return items.filter((item) => sources.has(item.outlet.toLowerCase()));
 }
 
@@ -555,6 +562,50 @@ export function analyzeTopicKeywordStage(items, settings) {
 // ─── Build response story shape ───────────────────────────────────────────────
 
 /**
+ * T1 (M6b): comparator for `sources[]` ordering inside a story.
+ *   1. `weight` DESC          — higher-weight outlets surface first
+ *   2. `minutesAgo` ASC       — freshest item next when weight ties
+ *   3. `sourceId` ASC         — stable tie-break for fully equal pairs
+ * Pure function; sort is applied via `.slice().sort(...)` so callers can keep
+ * their input array untouched.
+ */
+export function compareSourcesT1(a, b) {
+  const aw = typeof a?.weight === "number" ? a.weight : 0;
+  const bw = typeof b?.weight === "number" ? b.weight : 0;
+  if (aw !== bw) return bw - aw;
+  const am = typeof a?.minutesAgo === "number" ? a.minutesAgo : Number.POSITIVE_INFINITY;
+  const bm = typeof b?.minutesAgo === "number" ? b.minutesAgo : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm;
+  const aid = a?.sourceId ?? a?.id ?? "";
+  const bid = b?.sourceId ?? b?.id ?? "";
+  if (aid < bid) return -1;
+  if (aid > bid) return 1;
+  return 0;
+}
+
+/**
+ * R1 (M6b): comparator for top-level `stories[]` ordering at the payload
+ * boundary.  Accepts pre-computed sort keys (so the comparator stays a pure
+ * function over plain values, not the story object).
+ *   1. `maxBeatFitScore` DESC  — best-fitting story first
+ *   2. `minMinutesAgo` ASC     — freshest tie-breaker
+ *   3. `metaStoryId` ASC       — stable tie-break
+ */
+export function compareStoriesR1(a, b) {
+  const ab = typeof a?.maxBeatFitScore === "number" ? a.maxBeatFitScore : 0;
+  const bb = typeof b?.maxBeatFitScore === "number" ? b.maxBeatFitScore : 0;
+  if (ab !== bb) return bb - ab;
+  const am = typeof a?.minMinutesAgo === "number" ? a.minMinutesAgo : Number.POSITIVE_INFINITY;
+  const bm = typeof b?.minMinutesAgo === "number" ? b.minMinutesAgo : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm;
+  const aid = a?.metaStoryId ?? "";
+  const bid = b?.metaStoryId ?? "";
+  if (aid < bid) return -1;
+  if (aid > bid) return 1;
+  return 0;
+}
+
+/**
  * Converts a meta-story + its resolved source items into the response story shape
  * expected by dashboardPayloadSchema.  Derives schema-constrained fields (topic,
  * geographies, priority) from the source items so they stay within enum bounds.
@@ -601,17 +652,23 @@ function buildStory(metaStory, sourceItems, settings) {
     // NOT projected onto the response shape — duplicate provenance stays
     // server-side for integrity/debugging only (product req: no expand UI,
     // no "also seen in X feeds", no duplicate-source disclosure).
-    sources: sourceItems.map((item) => ({
-      id: item.sourceId,
-      outlet: item.outlet,
-      byline: item.byline,
-      kind: item.kind,
-      weight: item.weight,
-      url: item.url,
-      minutesAgo: item.minutesAgo,
-      headline: item.headline,
-      body: item.body,
-    })),
+    // T1 (M6b): server-canonical ordering for the chips/expanded view.
+    // Sort BEFORE the response projection so input arrays stay untouched
+    // and the comparator can rely on the canonical `sourceId` field.
+    sources: sourceItems
+      .slice()
+      .sort(compareSourcesT1)
+      .map((item) => ({
+        id: item.sourceId,
+        outlet: item.outlet,
+        byline: item.byline,
+        kind: item.kind,
+        weight: item.weight,
+        url: item.url,
+        minutesAgo: item.minutesAgo,
+        headline: item.headline,
+        body: item.body,
+      })),
   };
 }
 
@@ -694,13 +751,36 @@ export async function runRefreshPipeline({
   //    manifest with alias map + connector availability.  When manifestFeeds
   //    is provided (production path), use the matcher.  When absent (legacy
   //    tests), fall back to the simple outlet-set selectSourcePool below.
+  //
+  //    C2 (M6): zero configured sources → strict-empty BEFORE we hit the
+  //    matcher.  The matcher's `NO_SELECTED_SOURCES` fallback would otherwise
+  //    return the configured fallback feeds — defeating the product rule that
+  //    says "the user hasn't picked a beat, so we serve nothing".  Enforcing
+  //    C2 in the pipeline (not the matcher) keeps the matcher a pure utility
+  //    while binding the product gate to the funnel.
   let selectionMeta;
   let selectedItems;
-  if (manifestFeeds) {
-    const selectedNames = [
-      ...(settings.traditionalSources ?? []),
-      ...(settings.socialSources ?? []),
-    ];
+  const selectedNames = [
+    ...(settings.traditionalSources ?? []),
+    ...(settings.socialSources ?? []),
+  ];
+  if (selectedNames.length === 0) {
+    selectedItems = [];
+    selectionMeta = {
+      sourceSelectionMode: SELECTION_MODE.STRICT,
+      sourceFallbackUsed: false,
+      sourceFallbackReason: FALLBACK_REASON.NO_SELECTED_SOURCES,
+      matchedSourceCount: 0,
+      selectedSourceCount: 0,
+      unmatchedSelectedSources: [],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: [],
+    };
+    console.log(
+      `[pipeline.selection] C2 fail-closed: zero configured sources → strict-empty`
+    );
+  } else if (manifestFeeds) {
     const selection = resolveSelectedSources({
       selectedSources: selectedNames,
       manifestFeeds,
@@ -1121,12 +1201,35 @@ export async function runRefreshPipeline({
 
   // 10. Build response stories (resolve source items, shape to schema).
   //     Only `groundedStories` (passed all grounding gates) reach this step.
-  const stories = groundedStories.map((ms) => {
+  //
+  //     R1 (M6b): server-canonical story ordering.  Compute the sort keys
+  //     (max beat-fit, min minutesAgo) from the SOURCE ITEMS — they carry
+  //     `beatFitScore` from the recall stage — not from the response shape
+  //     (which intentionally doesn't surface beatFitScore).  Stories with no
+  //     resolvable source items use 0 / +Infinity so they sink to the bottom
+  //     and break ties on `metaStoryId` rather than crashing on `Math.min`.
+  const storiesWithSortKeys = groundedStories.map((ms) => {
     const sourceItems = ms.source_item_ids
       .map((id) => sourceItemsById.get(id))
       .filter(Boolean);
-    return buildStory(ms, sourceItems, settings);
+    const maxBeatFitScore = sourceItems.reduce(
+      (acc, item) => Math.max(acc, typeof item?.beatFitScore === "number" ? item.beatFitScore : 0),
+      0
+    );
+    const minMinutesAgo = sourceItems.length === 0
+      ? Number.POSITIVE_INFINITY
+      : sourceItems.reduce(
+          (acc, item) =>
+            Math.min(acc, typeof item?.minutesAgo === "number" ? item.minutesAgo : Number.POSITIVE_INFINITY),
+          Number.POSITIVE_INFINITY
+        );
+    return {
+      story: buildStory(ms, sourceItems, settings),
+      sortKey: { maxBeatFitScore, minMinutesAgo, metaStoryId: ms.meta_story_id },
+    };
   });
+  storiesWithSortKeys.sort((a, b) => compareStoriesR1(a.sortKey, b.sortKey));
+  const stories = storiesWithSortKeys.map(({ story }) => story);
 
   const payload = {
     contractVersion,

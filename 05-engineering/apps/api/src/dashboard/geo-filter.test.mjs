@@ -4,9 +4,13 @@ import {
   GEO_CATEGORY,
   CONFLICT_THRESHOLD,
   IMPLICIT_THRESHOLD,
+  DEFAULT_GEO_ASSESS_MODEL,
   categorizeItem,
   mockAssessGeoConfidence,
   applyGeoFilter,
+  assessGeoConfidence,
+  parseGeoAssessResponse,
+  _geoAssessClient,
 } from "./geo-filter.mjs";
 
 function makeItem(overrides = {}) {
@@ -160,4 +164,226 @@ test("applyGeoFilter: held items preserve original item fields", async () => {
   const { held } = await applyGeoFilter([item], CONFIGURED_GEOS, async () => ({ confidence: 0.0 }));
   assert.equal(held[0].sourceId, "held-item");
   assert.equal(held[0].headline, "Original headline");
+});
+
+// ─── M4 / F3b: real Anthropic assessGeoConfidence ────────────────────────────
+//
+// The production geo assessor is `assessGeoConfidence`, defaulting to Haiku 4.5
+// (`anthropic:claude-haiku-4-5-20251001`).  These tests pin:
+//   1. Parser semantics (clamp, malformed input → 0).
+//   2. Fail-safe envelopes (missing key, SDK throw, timeout, empty body → 0).
+//   3. Happy path via stubbed Anthropic client.
+//   4. `TEMPO_AI_MOCK_ONLY=true` routes through `mockAssessGeoConfidence`.
+//
+// Tests never hit the live Anthropic API — they swap `_geoAssessClient.create`
+// for a deterministic stub OR rely on the missing-key fail-safe.
+
+function withGeoAssessEnv(setup, run) {
+  const saved = {
+    model: process.env.TEMPO_AI_GEO_ASSESS_MODEL,
+    timeout: process.env.TEMPO_AI_GEO_ASSESS_TIMEOUT_MS,
+    apiKey: process.env.TEMPO_ANTHROPIC_API_KEY,
+    altKey: process.env.ANTHROPIC_API_KEY,
+    mockOnly: process.env.TEMPO_AI_MOCK_ONLY,
+  };
+  const prevCreate = _geoAssessClient.create;
+  delete process.env.TEMPO_AI_GEO_ASSESS_MODEL;
+  delete process.env.TEMPO_AI_GEO_ASSESS_TIMEOUT_MS;
+  delete process.env.TEMPO_ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.TEMPO_AI_MOCK_ONLY;
+  setup();
+  return run().finally(() => {
+    _geoAssessClient.create = prevCreate;
+    if (saved.model !== undefined) process.env.TEMPO_AI_GEO_ASSESS_MODEL = saved.model;
+    if (saved.timeout !== undefined) process.env.TEMPO_AI_GEO_ASSESS_TIMEOUT_MS = saved.timeout;
+    if (saved.apiKey !== undefined) process.env.TEMPO_ANTHROPIC_API_KEY = saved.apiKey;
+    if (saved.altKey !== undefined) process.env.ANTHROPIC_API_KEY = saved.altKey;
+    if (saved.mockOnly !== undefined) process.env.TEMPO_AI_MOCK_ONLY = saved.mockOnly;
+  });
+}
+
+test("DEFAULT_GEO_ASSESS_MODEL is Haiku 4.5 (N2 SKU lock)", () => {
+  assert.equal(DEFAULT_GEO_ASSESS_MODEL, "anthropic:claude-haiku-4-5-20251001");
+});
+
+test("parseGeoAssessResponse: extracts confidence from plain JSON", () => {
+  assert.equal(parseGeoAssessResponse('{"confidence": 0.73}'), 0.73);
+});
+
+test("parseGeoAssessResponse: tolerates ```json``` code-fence wrapping", () => {
+  assert.equal(parseGeoAssessResponse('```json\n{"confidence": 0.5}\n```'), 0.5);
+});
+
+test("parseGeoAssessResponse: clamps confidence above 1 down to 1", () => {
+  assert.equal(parseGeoAssessResponse('{"confidence": 1.7}'), 1);
+});
+
+test("parseGeoAssessResponse: clamps negative confidence up to 0", () => {
+  assert.equal(parseGeoAssessResponse('{"confidence": -0.4}'), 0);
+});
+
+test("parseGeoAssessResponse: returns 0 when confidence is non-numeric", () => {
+  assert.equal(parseGeoAssessResponse('{"confidence": "maybe"}'), 0);
+});
+
+test("parseGeoAssessResponse: throws on malformed JSON (caller handles fail-safe)", () => {
+  assert.throws(() => parseGeoAssessResponse("not json at all"));
+});
+
+test("assessGeoConfidence: fails safe with confidence=0 when ANTHROPIC_API_KEY is absent", async () => {
+  await withGeoAssessEnv(() => {}, async () => {
+    const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS);
+    assert.deepEqual(result, { confidence: 0 });
+  });
+});
+
+test("assessGeoConfidence: TEMPO_AI_MOCK_ONLY=true routes through mockAssessGeoConfidence (CI safety)", async () => {
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_AI_MOCK_ONLY = "true";
+      // Even without a key, mock branch must return 0.85.
+    },
+    async () => {
+      const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS);
+      assert.equal(result.confidence, 0.85);
+    }
+  );
+});
+
+test("assessGeoConfidence: happy path parses stubbed Anthropic response", async () => {
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => ({
+            content: [{ type: "text", text: '{"confidence": 0.92}' }],
+          }),
+        },
+      });
+    },
+    async () => {
+      const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS);
+      assert.equal(result.confidence, 0.92);
+    }
+  );
+});
+
+test("assessGeoConfidence: passes resolved model name (no `anthropic:` prefix) to client", async () => {
+  let seenModel = null;
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async ({ model }) => {
+            seenModel = model;
+            return { content: [{ type: "text", text: '{"confidence": 0.6}' }] };
+          },
+        },
+      });
+    },
+    async () => {
+      await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS);
+      assert.equal(seenModel, "claude-haiku-4-5-20251001");
+    }
+  );
+});
+
+test("assessGeoConfidence: honors TEMPO_AI_GEO_ASSESS_MODEL env override", async () => {
+  let seenModel = null;
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      process.env.TEMPO_AI_GEO_ASSESS_MODEL = "anthropic:claude-sonnet-4-6";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async ({ model }) => {
+            seenModel = model;
+            return { content: [{ type: "text", text: '{"confidence": 0.4}' }] };
+          },
+        },
+      });
+    },
+    async () => {
+      await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS);
+      assert.equal(seenModel, "claude-sonnet-4-6");
+    }
+  );
+});
+
+test("assessGeoConfidence: fails safe with confidence=0 on SDK throw", async () => {
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => { throw new Error("provider 503"); },
+        },
+      });
+    },
+    async () => {
+      const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS);
+      assert.deepEqual(result, { confidence: 0 });
+    }
+  );
+});
+
+test("assessGeoConfidence: fails safe with confidence=0 on empty text block", async () => {
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => ({ content: [{ type: "text", text: "" }] }),
+        },
+      });
+    },
+    async () => {
+      const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS);
+      assert.deepEqual(result, { confidence: 0 });
+    }
+  );
+});
+
+test("assessGeoConfidence: fails safe with confidence=0 on malformed JSON body", async () => {
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => ({ content: [{ type: "text", text: "I think yes" }] }),
+        },
+      });
+    },
+    async () => {
+      const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS);
+      assert.deepEqual(result, { confidence: 0 });
+    }
+  );
+});
+
+test("assessGeoConfidence: integrates with applyGeoFilter — held when stubbed confidence below threshold", async () => {
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => ({ content: [{ type: "text", text: '{"confidence": 0.5}' }] }),
+        },
+      });
+    },
+    async () => {
+      // implicit_geo needs >= 0.80 — 0.5 → held.
+      const { included, held } = await applyGeoFilter(
+        [makeItem({ sourceId: "x", geographies: [] })],
+        CONFIGURED_GEOS,
+        assessGeoConfidence
+      );
+      assert.equal(included.length, 0);
+      assert.equal(held.length, 1);
+      assert.equal(held[0].geoConfidence, 0.5);
+    }
+  );
 });

@@ -8,8 +8,11 @@ import { buildClusteringPrompt } from "./prompts.mjs";
 export const CLUSTER_ENGINE_VERSION = "cluster-v1";
 
 // ─── Zod schema for LLM clustering output ────────────────────────────────────
+// Exported so the M8 cluster-smoke runner (and any future contract-shape
+// checks) can validate against the same source of truth the real-provider
+// parser already uses — no duplicated contract.
 
-const metaStoryOutputSchema = z.object({
+export const metaStoryOutputSchema = z.object({
   title: z.string().min(1),
   subtitle: z.string().min(1),
   source_item_ids: z.array(z.string().min(1)).min(1).max(5),
@@ -23,7 +26,7 @@ const metaStoryOutputSchema = z.object({
   claim_evidence_map: z.record(z.string(), z.array(z.string())),
 });
 
-const clusteringOutputSchema = z.object({
+export const clusteringOutputSchema = z.object({
   meta_stories: z.array(metaStoryOutputSchema).max(5),
 });
 
@@ -170,9 +173,9 @@ export function extractiveSummary(title, sourceItems) {
 }
 
 /**
- * Deterministic grounded subtitle derived only from surviving source items.
- * Used when partial_source_ids fallback runs so model-supplied subtitle text
- * (which may carry ungrounded claims) cannot reach the publish path.
+ * Deterministic subtitle text from source headlines only (no model prose).
+ * Callers may use this for safe copy paths; the refresh pipeline does **not**
+ * ship `partial_source_ids` stories (**J1a** — they are invalid / dropped).
  */
 export function extractiveSubtitle(sourceItems) {
   const headlines = (sourceItems ?? []).map((i) => i?.headline).filter(Boolean);
@@ -187,12 +190,16 @@ export function extractiveSubtitle(sourceItems) {
  *
  * Gate 1 (source-level): source_item_ids must reference real pool items.
  *   - All hallucinated → invalid "no_valid_source_ids" (discard)
- *   - Partial hallucinated → invalid "partial_source_ids" (extractive fallback)
+ *   - Partial hallucinated → invalid "partial_source_ids" (trimmed ids on
+ *     the returned object; pipeline **drops** these under **J1a** — no salvage)
  *
  * Gate 2 (claim-level): each factual_claims[i] must have ≥1 valid source in
  *   claim_evidence_map["i"]. A single claim with no valid backing rejects the
  *   entire story ("ungrounded_claims").  Stories with empty factual_claims pass.
  *
+ * Gate 3 (valid path): when factual_claims is non-empty, summary and subtitle are
+ *   set to the **first** claim only (**J3b** — shorter card; additional claims
+ *   remain for evidence / future copy stages but are not concatenated into summary).
  * @param {Array} metaStories
  * @param {Map<string, object>} sourceItemsById — keyed by sourceId
  * @returns {{ valid: Array, invalid: Array }}
@@ -233,11 +240,11 @@ export function verifyGrounding(metaStories, sourceItemsById) {
       continue;
     }
 
-    // Gate 1 (partial): source_item_ids trimmed, extractive fallback applied
+    // Gate 1 (partial): hallucinated ids trimmed; story is invalid — pipeline drops (J1a)
     if (existingIds.length < ms.source_item_ids.length) {
       const hallucinated = ms.source_item_ids.filter((id) => !sourceItemsById.has(id));
       console.warn(
-        `[grounding] meta_story="${ms.meta_story_id}" partial: hallucinated ids=[${hallucinated.join(",")}] — using extractive fallback`
+        `[grounding] meta_story="${ms.meta_story_id}" partial: hallucinated ids=[${hallucinated.join(",")}] — invalid (strict drop)`
       );
       invalid.push({
         ...ms,
@@ -249,10 +256,9 @@ export function verifyGrounding(metaStories, sourceItemsById) {
 
     // Gate 3 (summary/subtitle): replace model-prose with verified-claim text so
     // ungrounded sentences in summary/subtitle cannot reach the publish path.
-    const groundedSummary =
-      claims.length > 0 ? claims.join(" ") : ms.summary;
-    const groundedSubtitle =
-      claims.length > 0 ? claims[0] : ms.subtitle;
+    // J3b: first claim only for both fields (shorter card; not join of all claims).
+    const groundedSummary = claims.length > 0 ? claims[0] : ms.summary;
+    const groundedSubtitle = claims.length > 0 ? claims[0] : ms.subtitle;
 
     valid.push({ ...ms, summary: groundedSummary, subtitle: groundedSubtitle });
   }

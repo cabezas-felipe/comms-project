@@ -325,14 +325,18 @@ test("runEmbeddingRecall: empty candidate pool propagates empty (no embedFn invo
   assert.equal(result.diagnostics.embeddedCount, 0);
 });
 
-test("runEmbeddingRecall: empty profile text → strict fail-closed (no keyword pass-through)", async () => {
-  // Option A strictest: an empty profile (typically pre-onboarding) means we
-  // have no signal to compare against.  Returning the keyword recall under
-  // these conditions risks delivering items the user wouldn't recognize as
-  // their beat.  Empty + diagnostic is the safer surface.
+// E3b (M5): an empty profile is no longer a fail-closed event.  Without a
+// profile vector we can't run semantic widen, but the lexical hits already
+// passed real topic/keyword/geo gates — passing them through is the legacy
+// product on a profile-less run, not speculation.  The diagnostic
+// `empty_profile_text_lexical_only` keeps the cliff visible without
+// conflating it with embedding provider failure (which still sets
+// `keywordFallbackAfterEmbeddingFailure`).
+
+test("runEmbeddingRecall: empty profile text → lexical-only pass-through (E3b)", async () => {
   let calls = 0;
   const embedFn = async () => { calls++; return []; };
-  const items = [makeItem({ sourceId: "a" })];
+  const items = [makeItem({ sourceId: "a" }), makeItem({ sourceId: "b" })];
   const result = await runEmbeddingRecall({
     candidateItems: items,
     settings: {}, // no topics/keywords/geos/sources/narrative
@@ -341,13 +345,42 @@ test("runEmbeddingRecall: empty profile text → strict fail-closed (no keyword 
     config: HYBRID_CONFIG,
   });
   assert.equal(calls, 0, "embedFn must not be invoked when profile text is empty");
-  assert.deepEqual(result.items, []);
+  // Lexical hits pass through unchanged (no semantic widen).
+  assert.deepEqual(result.items.map((i) => i.sourceId), ["a", "b"]);
   assert.equal(result.diagnostics.degraded, true);
-  assert.equal(result.diagnostics.degraded_reason, "empty_profile_text_fail_closed");
+  assert.equal(result.diagnostics.degraded_reason, "empty_profile_text_lexical_only");
   assert.equal(result.diagnostics.embeddedCount, 0);
   assert.equal(result.diagnostics.similarityKept, 0);
+  assert.equal(result.diagnostics.keywordRecallCount, 2);
+  assert.equal(result.diagnostics.unionCount, 2);
+  assert.equal(result.diagnostics.finalRelevant, 2);
+  // E3b is NOT an embedding failure — the embedding-failure flag must stay off
+  // so operators can distinguish "no profile" from "embedding cliff".
+  assert.notEqual(
+    result.diagnostics.keywordFallbackAfterEmbeddingFailure,
+    true,
+    "empty profile is not an embedding failure — flag must not be set"
+  );
+});
+
+test("runEmbeddingRecall: empty profile + empty keyword recall → strict empty with lexical-only diagnostic (E3b)", async () => {
+  let calls = 0;
+  const embedFn = async () => { calls++; return []; };
+  const result = await runEmbeddingRecall({
+    candidateItems: [makeItem({ sourceId: "a" })],
+    settings: {},
+    keywordRecallItems: [],
+    embedFn,
+    config: HYBRID_CONFIG,
+  });
+  assert.equal(calls, 0);
+  assert.deepEqual(result.items, []);
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "empty_profile_text_lexical_only");
+  assert.equal(result.diagnostics.keywordRecallCount, 0);
   assert.equal(result.diagnostics.unionCount, 0);
   assert.equal(result.diagnostics.finalRelevant, 0);
+  assert.notEqual(result.diagnostics.keywordFallbackAfterEmbeddingFailure, true);
 });
 
 test("runEmbeddingRecall: caps candidate pool at embedMaxItems before embedding", async () => {

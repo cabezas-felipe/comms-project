@@ -1,7 +1,15 @@
-# Onboarding Extraction Evals
+# AI Evals
 
-Lightweight, local eval harness for onboarding narrative extraction quality.
-Version-controlled gold dataset. No Supabase. No network dependencies beyond the AI providers.
+Lightweight, local eval harnesses for AI pipeline components. Version-controlled gold dataset. No Supabase. No network dependencies beyond the AI providers.
+
+| Harness | What it measures | Run |
+|---|---|---|
+| Onboarding extraction | Per-field precision / recall / F1 / exact-match across 20 gold examples | `npm run eval:onboarding-extraction` |
+| Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` |
+
+---
+
+## Onboarding Extraction Evals
 
 ## What it measures
 
@@ -86,3 +94,33 @@ Gold labels should reflect what a well-calibrated model *should* extract — not
 ## Note
 
 This is an **eval harness**, not model training. Results inform prompt and model selection decisions. They do not feed back into the model weights.
+
+---
+
+## Cluster Shape Smoke (M8)
+
+Risk-reduction guard for the clustering path used by the dashboard refresh pipeline. **Not a quality benchmark** — verifies only that `clusterItems(...)` returns output conforming to the contract downstream stages depend on.
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:cluster-smoke
+```
+
+The smoke reads the clustering model via the same `getAiCapabilityMap().clustering` resolution the refresh pipeline uses:
+
+- Default (`TEMPO_AI_CLUSTER_MODEL` unset, or `TEMPO_AI_MOCK_ONLY=true`) → exercises the mock path deterministically; no key required.
+- Set `TEMPO_AI_CLUSTER_MODEL=anthropic:claude-sonnet-4-6` with `TEMPO_ANTHROPIC_API_KEY` → exercises the real Anthropic clustering call.
+
+### Checks
+
+1. `clusterItems(...)` returns a non-empty array.
+2. Each meta-story validates against `metaStoryOutputSchema` (exported from `cluster-engine.mjs`).
+3. Each meta-story carries a non-empty `meta_story_id`.
+4. `source_item_ids` references only the fixture sourceIds (no hallucinated ids leak through).
+
+### Exit codes
+
+- `0` — all checks pass.
+- `1` — schema violation, missing `meta_story_id`, hallucinated source ids, or a thrown error inside `clusterItems`. Diagnostics print the offending payload.
+
+When to run: before DC validation sessions on real-model config, or after touching `cluster-engine.mjs` / clustering prompts.

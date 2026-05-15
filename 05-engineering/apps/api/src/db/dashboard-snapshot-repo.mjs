@@ -30,11 +30,23 @@ function holdBucketFile(userId) {
 // payload and into `_meta.lastCheckedAt` so callers see the same shape regardless
 // of storage backend.  Persisted blobs from before this field existed simply
 // omit it — clients fall back to `refreshedAt` for display.
+//
+// `_lastRunMeta` (M3b / P1) carries last-run diagnostics (funnel, recall,
+// beatFit, clusterModel, embeddingModel) so `GET /api/dashboard` can explain
+// what happened without re-running the pipeline.  Lifted into `_meta.*` on
+// read.  Older snapshots without it simply omit those keys.
 
 function liftSnapshotMeta(payload, refreshed_at) {
-  const { _lastCheckedAt, ...rest } = payload ?? {};
+  const { _lastCheckedAt, _lastRunMeta, ...rest } = payload ?? {};
   const meta = { refreshedAt: refreshed_at, hasSnapshot: true };
   if (typeof _lastCheckedAt === "string") meta.lastCheckedAt = _lastCheckedAt;
+  if (_lastRunMeta && typeof _lastRunMeta === "object") {
+    if (_lastRunMeta.funnel !== undefined) meta.funnel = _lastRunMeta.funnel;
+    if (_lastRunMeta.recall !== undefined) meta.recall = _lastRunMeta.recall;
+    if (_lastRunMeta.beatFit !== undefined) meta.beatFit = _lastRunMeta.beatFit;
+    if (_lastRunMeta.clusterModel !== undefined) meta.clusterModel = _lastRunMeta.clusterModel;
+    if (_lastRunMeta.embeddingModel !== undefined) meta.embeddingModel = _lastRunMeta.embeddingModel;
+  }
   return { ...rest, _meta: meta };
 }
 
