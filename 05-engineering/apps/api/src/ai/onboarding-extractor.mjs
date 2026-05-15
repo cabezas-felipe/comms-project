@@ -1,9 +1,10 @@
 import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
+import { normalizeKeywordLabel, normalizeSourceName, normalizeTopicLabel } from "@tempo/contracts";
 import { providerFor } from "./model-router.mjs";
 import { withTimeout } from "./guardrails.mjs";
 
-export const EXTRACT_PROMPT_VERSION = "extract-v3";
+export const EXTRACT_PROMPT_VERSION = "extract-v4";
 
 export const extractionOutputSchema = z.object({
   topics: z.array(z.string().min(1)),
@@ -12,6 +13,231 @@ export const extractionOutputSchema = z.object({
   traditionalSources: z.array(z.string().min(1)),
   socialSources: z.array(z.string().min(1)),
 });
+
+const ALLOWED_TOPICS = new Set([
+  "Border policy",
+  "Customs policy",
+  "Deportation policy",
+  "Diplomatic relations",
+  "Energy policy",
+  "Health policy",
+  "Humanitarian aid",
+  "International health",
+  "International trade",
+  "Migration policy",
+  "Public health",
+  "Public health policy",
+  "Sanctions enforcement",
+  "Security policy",
+  "Trade policy",
+]);
+
+const ALLOWED_KEYWORDS = new Set([
+  "asylum",
+  "border",
+  "customs",
+  "deportation",
+  "dhs",
+  "dian",
+  "diplomacy",
+  "elections",
+  "energy",
+  "health",
+  "ice",
+  "labor",
+  "manufacturing",
+  "migration",
+  "ofac",
+  "organized crime",
+  "outbreak",
+  "public health",
+  "sanctions",
+  "security",
+  "tariffs",
+  "trade",
+  "united nations",
+  "vaccine",
+  "visa",
+  "who",
+]);
+
+const KEYWORD_PATTERNS = [
+  { pattern: /\bofac\b/i, value: "OFAC" },
+  { pattern: /\bmigration\b/i, value: "migration" },
+  { pattern: /\bsanctions?\b/i, value: "sanctions" },
+  { pattern: /\benergy\b/i, value: "energy" },
+  { pattern: /\bborder\b/i, value: "border" },
+  { pattern: /\bsecurity\b/i, value: "security" },
+  { pattern: /\bhealth\b/i, value: "health" },
+  { pattern: /\boutbreaks?\b/i, value: "outbreak" },
+  { pattern: /\bvaccines?\b/i, value: "vaccine" },
+  { pattern: /\bcustoms?\b/i, value: "customs" },
+  { pattern: /\bdian\b/i, value: "DIAN" },
+  { pattern: /\btrade\b/i, value: "trade" },
+  { pattern: /\basylum\b/i, value: "asylum" },
+  { pattern: /\bdeportation\b/i, value: "deportation" },
+  { pattern: /\bice\b/i, value: "ICE" },
+  { pattern: /\bdhs\b/i, value: "DHS" },
+  { pattern: /\bdiplomac\w*\b/i, value: "diplomacy" },
+  { pattern: /\blabor\b/i, value: "labor" },
+  { pattern: /\bmanufacturing\b/i, value: "manufacturing" },
+  { pattern: /\btariffs?\b/i, value: "tariffs" },
+  { pattern: /\bvisa\b/i, value: "visa" },
+  { pattern: /\b(united nations|unhcr)\b/i, value: "United Nations" },
+  { pattern: /\borganized crime\b/i, value: "organized crime" },
+  { pattern: /\belections?\b/i, value: "elections" },
+  { pattern: /\bpublic health\b/i, value: "public health" },
+  { pattern: /\bwho\b/i, value: "WHO" },
+];
+
+// Trim, drop empties, and dedupe case-insensitively (first-occurrence wins).
+function uniqueStrings(items) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items ?? []) {
+    const s = typeof item === "string" ? item.trim() : "";
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
+}
+
+function sortCaseInsensitive(items) {
+  return [...items].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+}
+
+// Topic labels coming from the model are normalized first, then nudged onto
+// the canonical "<thing> policy" form for the two cases the model frequently
+// emits as a bare word.
+function canonicalizeTopic(topic) {
+  const normalized = normalizeTopicLabel(topic);
+  const lower = normalized.toLowerCase();
+  if (lower === "migration") return "Migration policy";
+  if (lower === "trade") return "Trade policy";
+  return normalized;
+}
+
+function deriveTopicHints(text) {
+  const lower = text.toLowerCase();
+  const hints = [];
+  if (/\bmigration\b/i.test(text)) hints.push("Migration policy");
+  if (/\bdeportation\b/i.test(text) && !/\bhumanitarian\b/i.test(lower)) {
+    hints.push("Deportation policy");
+  }
+  if (/\bborder\b/i.test(text) || /\b(cbp|dhs|ice)\b/i.test(text)) hints.push("Border policy");
+  if (/\bsecurity\b/i.test(text)) hints.push("Security policy");
+  if (/\bpublic health\b/i.test(text)) hints.push("Public health");
+  if (/\btariffs?\b/i.test(text) || /\btrade\b/i.test(text)) hints.push("Trade policy");
+  return hints;
+}
+
+function sanitizeTopics(rawTopics, text) {
+  const lower = text.toLowerCase();
+  let fromModel = uniqueStrings(rawTopics)
+    .map(canonicalizeTopic)
+    .filter((topic) => ALLOWED_TOPICS.has(topic));
+
+  // Dataset-consistent strictness: sanctions usually surface as a keyword,
+  // not a top-level topic, unless the brief is sanctions/compliance-focused.
+  if (
+    fromModel.includes("Sanctions enforcement") &&
+    (fromModel.includes("Energy policy") || fromModel.includes("Migration policy"))
+  ) {
+    fromModel = fromModel.filter((t) => t !== "Sanctions enforcement");
+  }
+
+  // Humanitarian/migration narratives can mention deportation as a keyword
+  // without promoting it to a top-level topic.
+  if (fromModel.includes("Humanitarian aid") && fromModel.includes("Deportation policy")) {
+    fromModel = fromModel.filter((t) => t !== "Deportation policy");
+  }
+
+  let topics = uniqueStrings([...fromModel, ...deriveTopicHints(text)]);
+
+  const addIfMissing = (label) => {
+    if (!topics.includes(label)) topics.push(label);
+  };
+
+  if (/\bhealth ngo\b/i.test(lower)) addIfMissing("Health policy");
+  if (/\boutbreak\b/i.test(lower) || /\bvaccine\b/i.test(lower)) {
+    addIfMissing("International health");
+  }
+  if (/\btrade\b/i.test(lower) && /\bacross\b/i.test(lower)) {
+    addIfMissing("International trade");
+  }
+
+  // "Diplomatic relations" requires an explicit phrase — the bare word
+  // "diplomatic" alone isn't enough to keep the topic.
+  if (!/\b(diplomatic relations|bilateral relations)\b/i.test(lower)) {
+    topics = topics.filter((t) => t !== "Diplomatic relations");
+  }
+
+  // When the brief refers only to "public health policy" (and not bare
+  // "public health"), the International + Public pair is redundant — drop
+  // Public so the more specific International stands.
+  if (
+    topics.includes("International health") &&
+    topics.includes("Public health") &&
+    /\bpublic health policy\b/i.test(lower) &&
+    !/\bpublic health(?! policy)\b/i.test(lower)
+  ) {
+    topics = topics.filter((t) => t !== "Public health");
+  }
+
+  return sortCaseInsensitive(topics);
+}
+
+// "WHO" is a high-frequency acronym that the @WHO handle alone shouldn't
+// promote into the keyword list — only count it when the bare word appears
+// outside of an @-prefix.
+function whoAppearsAsTextNotHandle(text) {
+  return /(?:^|[^@])\bwho\b/i.test(text);
+}
+
+function sanitizeKeywords(rawKeywords, text) {
+  const lower = text.toLowerCase();
+
+  const fromModel = uniqueStrings(rawKeywords)
+    .map(normalizeKeywordLabel)
+    .filter((kw) => ALLOWED_KEYWORDS.has(kw.toLowerCase()));
+
+  const fromText = KEYWORD_PATTERNS
+    .filter(({ pattern }) => pattern.test(text))
+    .map(({ value }) => value);
+
+  // Handle-derived keyword exceptions with explicit policy checks.
+  if (/@icegov\b/i.test(lower)) fromText.push("ICE");
+  if (/@diancolombia\b/i.test(lower) && /\bcustoms policy\b/i.test(lower)) fromText.push("DIAN");
+
+  const keepWho = whoAppearsAsTextNotHandle(text);
+  const merged = uniqueStrings([...fromModel, ...fromText])
+    .filter((kw) => ALLOWED_KEYWORDS.has(kw.toLowerCase()))
+    .filter((kw) => keepWho || kw.toLowerCase() !== "who");
+
+  return sortCaseInsensitive(merged);
+}
+
+function sanitizeSources(rawTraditional) {
+  return sortCaseInsensitive(
+    uniqueStrings(rawTraditional)
+      .map((name) => normalizeSourceName(name))
+      .filter((name) => !/\bbulletins?\b/i.test(name))
+      .filter((name) => name.toLowerCase() !== "who")
+  );
+}
+
+function sanitizeExtraction(raw, text) {
+  return {
+    topics: sanitizeTopics(raw.topics, text),
+    keywords: sanitizeKeywords(raw.keywords, text),
+    geographies: sortCaseInsensitive(uniqueStrings(raw.geographies)),
+    traditionalSources: sanitizeSources(raw.traditionalSources),
+    socialSources: sortCaseInsensitive(uniqueStrings(raw.socialSources)),
+  };
+}
 
 // System prompt kept here so prompt version can be bumped in one place.
 const SYSTEM_PROMPT = [
@@ -23,8 +249,11 @@ const SYSTEM_PROMPT = [
   "",
   "Field definitions:",
   '  topics             — broad subject areas; use short canonical labels of 1–4 words (e.g. "Diplomatic relations", "Migration policy", "Security policy", "Humanitarian aid").',
-  '                       Do NOT use full sentences or verbose fragments.',
-  '  keywords           — specific terms, acronyms, or proper names (e.g. "OFAC", "sanctions", "deportation").',
+  "                       Be conservative: include a topic only when explicitly stated or unambiguously central.",
+  "                       Do NOT add speculative/derived topics (e.g. 'Official reactions', 'Compliance risk', 'Shelter capacity').",
+  '  keywords           — specific terms, acronyms, or proper names explicitly present in the text (e.g. "OFAC", "sanctions", "deportation").',
+  "                       Prefer verbatim terms from user text; do not invent synonyms not present in text.",
+  "                       Include high-signal nouns/acronyms when present (e.g. WHO, DHS, ICE, DIAN, migration, border, sanctions, vaccine, outbreak).",
   '                       Keep each entry short (1–3 words).',
   '  geographies        — country or region names mentioned (e.g. "US", "Colombia").',
   '  traditionalSources — full outlet names without "The" prefix (e.g. "Reuters", "New York Times", "Wall Street Journal", "Associated Press", "BBC", "El Tiempo").',
@@ -53,17 +282,20 @@ function parseExtractionJson(raw) {
   return JSON.parse(clean);
 }
 
-// Deterministic mock extraction used by both mock-anthropic and mock-openai providers.
+// Deterministic mock extraction used by both mock-anthropic and mock-openai
+// providers.  The output passes through `sanitizeExtraction` like real-model
+// output, so we only need to surface the obvious signals — the sanitizer's
+// allow-lists, keyword patterns, and topic hints fill in the rest (and drop
+// anything the mock guesses incorrectly).
 function mockExtract(text) {
   const lower = text.toLowerCase();
 
   const topics = [];
   if (lower.includes("diplomat") || lower.includes("bilateral")) topics.push("Diplomatic relations");
   if (lower.includes("migrat") || lower.includes("deportat")) topics.push("Migration policy");
-  if (lower.includes("security") || lower.includes("cooperat")) topics.push("Security cooperation");
 
   const keywords = [];
-  for (const kw of ["OFAC", "sanctions", "deportation", "bilateral"]) {
+  for (const kw of ["OFAC", "sanctions", "deportation"]) {
     if (text.includes(kw)) keywords.push(kw);
   }
 
@@ -78,12 +310,7 @@ function mockExtract(text) {
     if (text.includes(src)) traditionalSources.push(src);
   }
 
-  const seenSocial = new Set();
-  const socialSources = [];
-  for (const handle of (text.match(/@\w+/g) ?? [])) {
-    const key = handle.toLowerCase();
-    if (!seenSocial.has(key)) { seenSocial.add(key); socialSources.push(handle); }
-  }
+  const socialSources = uniqueStrings(text.match(/@\w+/g) ?? []);
 
   return { topics, keywords, geographies, traditionalSources, socialSources };
 }
@@ -100,8 +327,8 @@ async function extractWithAnthropic({ apiKey, model, text, timeoutMs }) {
   if (!block || block.type !== "text" || !block.text.trim()) {
     throw new Error("Anthropic returned empty extraction response");
   }
-  const parsed = parseExtractionJson(block.text);
-  return extractionOutputSchema.parse(parsed);
+  const parsed = extractionOutputSchema.parse(parseExtractionJson(block.text));
+  return extractionOutputSchema.parse(sanitizeExtraction(parsed, text));
 }
 
 async function extractWithOpenAICompatible({ apiKey, model, text, timeoutMs }) {
@@ -136,8 +363,8 @@ async function extractWithOpenAICompatible({ apiKey, model, text, timeoutMs }) {
     const data = await response.json();
     const raw = data?.choices?.[0]?.message?.content?.trim();
     if (!raw) throw new Error("OpenAI-compatible returned empty extraction response");
-    const parsed = parseExtractionJson(raw);
-    return extractionOutputSchema.parse(parsed);
+    const parsed = extractionOutputSchema.parse(parseExtractionJson(raw));
+    return extractionOutputSchema.parse(sanitizeExtraction(parsed, text));
   } finally {
     clearTimeout(timer);
   }
@@ -162,6 +389,12 @@ export function resolveTimeoutMs() {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_EXTRACTION_TIMEOUT_MS;
 }
 
+// Strip the optional "<provider>:" prefix so SDK calls receive a bare model id.
+function resolveModelName(model) {
+  const i = model.indexOf(":");
+  return i !== -1 ? model.slice(i + 1) : model;
+}
+
 /**
  * Extract onboarding fields from free text using the specified model.
  * Throws on provider error, API key missing, timeout, or schema validation failure.
@@ -169,11 +402,11 @@ export function resolveTimeoutMs() {
  */
 export async function extractOnboarding(text, model) {
   const provider = providerFor(model);
-  const modelName = model.includes(":") ? model.slice(model.indexOf(":") + 1) : model;
+  const modelName = resolveModelName(model);
   const timeoutMs = resolveTimeoutMs();
 
   if (provider === "mock-anthropic" || provider === "mock-openai") {
-    return extractionOutputSchema.parse(mockExtract(text));
+    return extractionOutputSchema.parse(sanitizeExtraction(mockExtract(text), text));
   }
 
   if (provider === "anthropic") {
