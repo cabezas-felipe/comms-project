@@ -22,7 +22,7 @@ import {
   release as releaseRefresh,
   REFRESH_GUARD_SCOPE,
 } from "./dashboard/refresh-guard.mjs";
-import { mockAssessGeoConfidence } from "./dashboard/geo-filter.mjs";
+import { assessGeoConfidence } from "./dashboard/geo-filter.mjs";
 import { parseFallbackFeedIdsEnv, parseFallbackEnabledEnv } from "./ingestion/source-matcher.mjs";
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
 import { appendOnboardingNarrative, readCurrentOnboardingNarrative } from "./db/narrative-repo.mjs";
@@ -265,10 +265,13 @@ export const _refreshPipeline = {
 export const _rejectionLog = { write: appendStoryRejections };
 
 /**
- * Mutable geo-confidence assessor hook. Tests override assess to inject
- * deterministic confidence scores without AI provider calls.
+ * Mutable geo-confidence assessor hook.  Default is the Anthropic-backed
+ * `assessGeoConfidence` (M4 / F3b) — Haiku 4.5 structured `{ confidence }`.
+ * Reads env at call time, fails safe to `{ confidence: 0 }` (held) when the
+ * key is absent or the SDK errors, and honors `TEMPO_AI_MOCK_ONLY=true` for
+ * CI.  Tests override `_geoFilter.assess` directly with a deterministic stub.
  */
-export const _geoFilter = { assess: mockAssessGeoConfidence };
+export const _geoFilter = { assess: assessGeoConfidence };
 
 /**
  * Enforces recognized identity on a route. Sends 401 and returns null when identity cannot be resolved.
