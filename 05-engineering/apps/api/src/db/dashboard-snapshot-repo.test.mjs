@@ -160,3 +160,67 @@ test("writeSnapshotMeta: no-op when no snapshot exists for user", async () => {
   const result = await readSnapshot("ghost-user");
   assert.equal(result, null);
 });
+
+// ─── M3b / P1: _lastRunMeta round-trip ────────────────────────────────────────
+//
+// Last-run diagnostics (funnel, recall, beatFit, clusterModel, embeddingModel)
+// persist inside the payload as `_lastRunMeta` and surface under `_meta.*` on
+// read, so `GET /api/dashboard` can explain what happened without re-running
+// the pipeline.  Each sub-field is independently optional for backward compat
+// with snapshots written before this addition.
+
+test("writeSnapshot + readSnapshot: _lastRunMeta round-trips into _meta.{funnel,recall,beatFit,clusterModel,embeddingModel}", async () => {
+  const userId = "lastrun-meta-user";
+  const FUNNEL = { executionMode: "full_run", primaryDropStage: "beat_fit", stages: { recall: { in: 10, out: 5 } } };
+  const RECALL = { degraded: false, embeddingModel: "text-embedding-3-small" };
+  const BEAT_FIT = { version: "v1", enabled: true, threshold: 0.5, recallCount: 5, includedCount: 3, excludedCount: 2, excludeReasonHistogram: {} };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: {
+      funnel: FUNNEL,
+      recall: RECALL,
+      beatFit: BEAT_FIT,
+      clusterModel: "anthropic:claude-sonnet-4-6",
+      embeddingModel: "text-embedding-3-small",
+    },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta.funnel, FUNNEL);
+  assert.deepEqual(result._meta.recall, RECALL);
+  assert.deepEqual(result._meta.beatFit, BEAT_FIT);
+  assert.equal(result._meta.clusterModel, "anthropic:claude-sonnet-4-6");
+  assert.equal(result._meta.embeddingModel, "text-embedding-3-small");
+  // Internal storage key must not leak at the top level — lifted into _meta.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot: snapshots without _lastRunMeta omit funnel/recall/beatFit/clusterModel/embeddingModel (backward compat)", async () => {
+  const userId = "lastrun-meta-legacy";
+  await writeSnapshot(userId, SAMPLE_PAYLOAD);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "funnel"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "recall"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "beatFit"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusterModel"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "embeddingModel"), false);
+});
+
+test("readSnapshot: partial _lastRunMeta lifts only the present keys (no undefined placeholders)", async () => {
+  const userId = "lastrun-meta-partial";
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: {
+      clusterModel: "anthropic:claude-sonnet-4-6",
+      embeddingModel: "text-embedding-3-small",
+    },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta.clusterModel, "anthropic:claude-sonnet-4-6");
+  assert.equal(result._meta.embeddingModel, "text-embedding-3-small");
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "funnel"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "recall"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "beatFit"), false);
+});

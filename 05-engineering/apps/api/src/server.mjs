@@ -839,6 +839,15 @@ async function executeRefreshFlow(identity) {
     // /api/dashboard, bootstrap served_fresh_snapshot) surface the same value
     // the refresh response carries.  On a full run, this equals refreshedAt.
     finalPayload._lastCheckedAt = lastCheckedAt;
+    // M3b / P1: persist last-run diagnostics so GET /api/dashboard can explain
+    // funnel/recall/beatFit/model identity without re-running refresh.  Keys
+    // are individually optional — older pipeline returns that lack one of
+    // them won't emit an `undefined` placeholder on readback.
+    const lastRunMeta = { clusterModel, embeddingModel };
+    if (log.funnel !== undefined) lastRunMeta.funnel = log.funnel;
+    if (log.recall !== undefined) lastRunMeta.recall = log.recall;
+    if (log.beatFit !== undefined) lastRunMeta.beatFit = log.beatFit;
+    finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
 

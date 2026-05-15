@@ -1186,6 +1186,126 @@ test("M3: POST /api/dashboard/refresh watermark-skip with NO prior snapshot stil
   }
 });
 
+// ─── M3b / P1: persist last-run diagnostics on snapshot ──────────────────────
+//
+// `_lastRunMeta` (funnel, recall, beatFit, clusterModel, embeddingModel) is
+// written into the persisted snapshot on a successful refresh run.  GET
+// /api/dashboard surfaces those fields under `_meta.*` so an operator can
+// explain a stable snapshot without re-running the pipeline.
+
+test("M3b: POST /api/dashboard/refresh full run persists _lastRunMeta with funnel/recall/beatFit + model ids", async () => {
+  const savedCluster = process.env.TEMPO_AI_CLUSTER_MODEL;
+  const savedEmbed = process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+  process.env.TEMPO_AI_CLUSTER_MODEL = "anthropic:claude-sonnet-4-6";
+  process.env.TEMPO_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+
+  const FUNNEL_DIAG = {
+    executionMode: "full_run",
+    primaryDropStage: "beat_fit",
+    stages: { recall: { in: 10, out: 5 } },
+  };
+  const RECALL_DIAG = {
+    degraded: false,
+    embeddingModel: "text-embedding-3-small",
+    keywordFallbackAfterEmbeddingFailure: false,
+  };
+  const BEAT_FIT_DIAG = {
+    version: "v1", enabled: true, threshold: 0.5,
+    recallCount: 5, includedCount: 3, excludedCount: 2,
+    excludeReasonHistogram: {},
+  };
+  const PAYLOAD = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+  };
+
+  let writtenPayload = null;
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _refreshPipeline.run = async () => ({
+    payload: PAYLOAD,
+    log: {
+      poolCount: 0, relevantCount: 0, usedFallbackClustering: false, groundingFailures: 0,
+      watermark: "wm-m3b", candidateCount: 1, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict" },
+      funnel: FUNNEL_DIAG,
+      recall: RECALL_DIAG,
+      beatFit: BEAT_FIT_DIAG,
+    },
+  });
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    // Refresh response shape unchanged (M3 contract preserved).
+    assert.deepEqual(res.body._meta.funnel, FUNNEL_DIAG);
+    assert.deepEqual(res.body._meta.recall, RECALL_DIAG);
+    assert.deepEqual(res.body._meta.beatFit, BEAT_FIT_DIAG);
+    assert.equal(res.body._meta.clusterModel, "anthropic:claude-sonnet-4-6");
+    assert.equal(res.body._meta.embeddingModel, "text-embedding-3-small");
+    // Persistence: _lastRunMeta carries the same diagnostics for later reads.
+    assert.ok(writtenPayload, "snapshot write must have been called");
+    assert.ok(writtenPayload._lastRunMeta, "persisted snapshot must carry _lastRunMeta");
+    assert.deepEqual(writtenPayload._lastRunMeta.funnel, FUNNEL_DIAG);
+    assert.deepEqual(writtenPayload._lastRunMeta.recall, RECALL_DIAG);
+    assert.deepEqual(writtenPayload._lastRunMeta.beatFit, BEAT_FIT_DIAG);
+    assert.equal(writtenPayload._lastRunMeta.clusterModel, "anthropic:claude-sonnet-4-6");
+    assert.equal(writtenPayload._lastRunMeta.embeddingModel, "text-embedding-3-small");
+  } finally {
+    if (savedCluster !== undefined) process.env.TEMPO_AI_CLUSTER_MODEL = savedCluster;
+    else delete process.env.TEMPO_AI_CLUSTER_MODEL;
+    if (savedEmbed !== undefined) process.env.TEMPO_OPENAI_EMBEDDING_MODEL = savedEmbed;
+    else delete process.env.TEMPO_OPENAI_EMBEDDING_MODEL;
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("M3b: GET /api/dashboard surfaces persisted _meta.funnel/recall/beatFit/clusterModel/embeddingModel from prior run", async () => {
+  // The repo lifts `_lastRunMeta` into `_meta.*` on read; here we provide an
+  // already-lifted snapshot (matching the shape `_snapshotRepo.read` returns)
+  // and assert GET propagates each diagnostic field unchanged.
+  const FUNNEL_DIAG = { executionMode: "full_run", primaryDropStage: "beat_fit", stages: {} };
+  const RECALL_DIAG = { degraded: false, embeddingModel: "text-embedding-3-small" };
+  const BEAT_FIT_DIAG = {
+    version: "v1", enabled: true, threshold: 0.5,
+    recallCount: 4, includedCount: 2, excludedCount: 2,
+    excludeReasonHistogram: { below_threshold: 2 },
+  };
+  const SNAPSHOT = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [],
+    _meta: {
+      hasSnapshot: true,
+      refreshedAt: "2026-05-14T10:00:00.000Z",
+      funnel: FUNNEL_DIAG,
+      recall: RECALL_DIAG,
+      beatFit: BEAT_FIT_DIAG,
+      clusterModel: "anthropic:claude-sonnet-4-6",
+      embeddingModel: "text-embedding-3-small",
+    },
+  };
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => SNAPSHOT;
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body._meta.funnel, FUNNEL_DIAG);
+    assert.deepEqual(res.body._meta.recall, RECALL_DIAG);
+    assert.deepEqual(res.body._meta.beatFit, BEAT_FIT_DIAG);
+    assert.equal(res.body._meta.clusterModel, "anthropic:claude-sonnet-4-6");
+    assert.equal(res.body._meta.embeddingModel, "text-embedding-3-small");
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
 test("POST /api/dashboard/refresh: route forwards priorStoryCount from prior snapshot to pipeline (trap-guard wiring)", async () => {
   // The empty-snapshot trap-guard lives in the pipeline; the route's job is
   // to read the prior snapshot and forward `priorStoryCount` as the input
