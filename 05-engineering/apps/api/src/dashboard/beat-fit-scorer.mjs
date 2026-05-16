@@ -29,6 +29,23 @@ export const BEAT_FIT_VERSION = "beat-fit-v1";
 // Asia farmers food supply) calibrates this number.
 export const BEAT_FIT_THRESHOLD = 0.40;
 
+// Phase 1 borderline-rescue guardrail. Items that fall just below the main
+// threshold can still pass when they show strong multi-signal evidence and
+// carry no major penalty. The band is [rescueLowerBound, BEAT_FIT_THRESHOLD).
+// Default lower bound is 0.35. The bound is configurable via env, with
+// precedence:
+//   1. TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND  (repo-convention primary)
+//   2. BEAT_FIT_RESCUE_LOWER_BOUND        (legacy fallback, kept for back-compat)
+//   3. DEFAULT_RESCUE_LOWER_BOUND
+// Rescue rule is intentionally strict (FP-first posture): require at least
+// RESCUE_MIN_STRONG_SIGNALS distinct CORE positive signals (topic / actor /
+// keyword / geo — recency is excluded) AND zero penalties, so global
+// precision stays intact while a narrow slice of borderline-but-well-
+// corroborated items survive.
+export const DEFAULT_RESCUE_LOWER_BOUND = 0.35;
+export const RESCUE_MIN_STRONG_SIGNALS = 3;
+export const BEAT_FIT_RESCUE_REASON = "rescue_borderline_multisignal";
+
 // Component weights (sum > threshold so no single signal can carry alone, but
 // strong combinations clear comfortably).
 const W = Object.freeze({
@@ -281,35 +298,159 @@ export function scoreBeatFit(item, settings) {
   return { score, breakdown, reasonCodes };
 }
 
+// Read the configurable rescue band lower bound from the environment, with
+// a safe fallback. Precedence:
+//   1. TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND  (current repo convention)
+//   2. BEAT_FIT_RESCUE_LOWER_BOUND        (legacy name, kept for back-compat)
+//   3. DEFAULT_RESCUE_LOWER_BOUND
+// Each candidate is independently validated (finite number, strictly inside
+// (0, BEAT_FIT_THRESHOLD)); invalid values are skipped rather than aborting,
+// so a typo in the new var doesn't silently shadow a working legacy value.
+// Equal-to-threshold collapses the band to empty, so it's rejected.
+export function readRescueLowerBound() {
+  const candidates = [
+    process.env.TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND,
+    process.env.BEAT_FIT_RESCUE_LOWER_BOUND,
+  ];
+  for (const raw of candidates) {
+    if (raw === undefined || raw === "") continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) continue;
+    if (n <= 0 || n >= BEAT_FIT_THRESHOLD) continue;
+    return n;
+  }
+  return DEFAULT_RESCUE_LOWER_BOUND;
+}
+
+// Strong positive signals are derived from existing scorer outputs — no new
+// scoring logic, just a count of distinct evidence dimensions that fired.
+// Only the four core alignment signals (topic / actor / keyword / geo) count
+// here. Recency still contributes to the score itself, but freshness alone is
+// not evidence that an item is on the beat — letting recency_fresh count
+// toward the rescue tally would let a thinly-aligned breaking story slip
+// through the FP-first gate.
+function countStrongSignals(breakdown) {
+  let count = 0;
+  if ((breakdown?.topic ?? 0) > 0) count++;
+  if ((breakdown?.actor ?? 0) > 0) count++;
+  if ((breakdown?.keyword ?? 0) > 0) count++;
+  if ((breakdown?.geoMatch ?? 0) > 0) count++;
+  return count;
+}
+
+// Any of the three penalty buckets disqualifies rescue. Penalties represent
+// structural misalignment (off-beat region, pure commodity framing, no
+// configured signal at all) — letting a penalized item through the rescue
+// path would directly undo what the penalty was designed to catch.
+function hasMajorPenalty(breakdown) {
+  return (
+    (breakdown?.offBeatGeo ?? 0) < 0 ||
+    (breakdown?.pureCommodity ?? 0) < 0 ||
+    (breakdown?.noConfiguredSignal ?? 0) < 0
+  );
+}
+
 /**
- * Filter a candidate item pool down to those that meet the beat-fit threshold.
+ * Decide whether a below-threshold item qualifies for the borderline rescue.
  *
  * Returns:
  *   {
- *     included: items[] (each carries { ...item, beatFitScore, beatFitReasonCodes })
+ *     rescued:       boolean — true only if in band, no penalty, ≥ N signals
+ *     inBand:        boolean — score is in [lowerBound, threshold)
+ *     strongSignals: number  — count of distinct positive signals
+ *     blockedBy:     null | "major_penalty" | "insufficient_signals"
+ *   }
+ *
+ * Operates purely on existing scoreBeatFit outputs, so unit tests can drive
+ * it with synthetic breakdown/reasonCodes without battling the scorer math.
+ */
+export function evaluateRescue(score, breakdown, reasonCodes, opts = {}) {
+  const threshold = opts.threshold ?? BEAT_FIT_THRESHOLD;
+  const lowerBound = opts.rescueLowerBound ?? readRescueLowerBound();
+  const inBand = score >= lowerBound && score < threshold;
+  if (!inBand) {
+    return { rescued: false, inBand: false, strongSignals: 0, blockedBy: null };
+  }
+  const strongSignals = countStrongSignals(breakdown);
+  if (hasMajorPenalty(breakdown)) {
+    return { rescued: false, inBand: true, strongSignals, blockedBy: "major_penalty" };
+  }
+  if (strongSignals < RESCUE_MIN_STRONG_SIGNALS) {
+    return { rescued: false, inBand: true, strongSignals, blockedBy: "insufficient_signals" };
+  }
+  return { rescued: true, inBand: true, strongSignals, blockedBy: null };
+}
+
+/**
+ * Filter a candidate item pool down to those that meet the beat-fit threshold,
+ * with a borderline-rescue path for items just below threshold that show
+ * strong multi-signal evidence.
+ *
+ * Returns:
+ *   {
+ *     included: items[] — normal passes plus rescues. Rescued items carry
+ *                         `beatFitRescued: true` and an extra
+ *                         `rescue_borderline_multisignal` reason code so
+ *                         downstream observers can distinguish them.
  *     excluded: { item, score, reasonCodes, excludeReason }[]
- *     summary:  { threshold, includedCount, excludedCount, excludeReasonHistogram }
+ *                 — excluded items in the rescue band get an extra
+ *                   `rescue_blocked_*` annotation in reasonCodes.
+ *     summary:  { threshold, rescueLowerBound, includedCount, rescuedCount,
+ *                 excludedCount, excludeReasonHistogram }
  *   }
  */
 export function applyBeatFitFilter(items, settings, opts = {}) {
   const threshold = opts.threshold ?? BEAT_FIT_THRESHOLD;
+  const rescueLowerBound = opts.rescueLowerBound ?? readRescueLowerBound();
   const included = [];
   const excluded = [];
   const histogram = {};
+  let rescuedCount = 0;
+  let rescueBlockedPenaltyCount = 0;
+  let rescueBlockedInsufficientSignalsCount = 0;
 
   for (const item of items ?? []) {
     const { score, breakdown, reasonCodes } = scoreBeatFit(item, settings);
-    if (score >= threshold) {
+    const normalPass = score >= threshold;
+
+    if (normalPass) {
       included.push({
         ...item,
         beatFitScore: score,
         beatFitReasonCodes: reasonCodes,
       });
-    } else {
-      const excludeReason = pickPrimaryExcludeReason(reasonCodes, breakdown);
-      histogram[excludeReason] = (histogram[excludeReason] ?? 0) + 1;
-      excluded.push({ item, score, reasonCodes, excludeReason });
+      continue;
     }
+
+    const rescue = evaluateRescue(score, breakdown, reasonCodes, {
+      threshold,
+      rescueLowerBound,
+    });
+
+    if (rescue.rescued) {
+      rescuedCount++;
+      included.push({
+        ...item,
+        beatFitScore: score,
+        beatFitReasonCodes: [...reasonCodes, BEAT_FIT_RESCUE_REASON],
+        beatFitRescued: true,
+      });
+      continue;
+    }
+
+    const annotatedCodes = [...reasonCodes];
+    if (rescue.inBand) {
+      if (rescue.blockedBy === "major_penalty") {
+        annotatedCodes.push("rescue_blocked_penalty");
+        rescueBlockedPenaltyCount++;
+      } else if (rescue.blockedBy === "insufficient_signals") {
+        annotatedCodes.push("rescue_blocked_insufficient_signals");
+        rescueBlockedInsufficientSignalsCount++;
+      }
+    }
+    const excludeReason = pickPrimaryExcludeReason(annotatedCodes, breakdown);
+    histogram[excludeReason] = (histogram[excludeReason] ?? 0) + 1;
+    excluded.push({ item, score, reasonCodes: annotatedCodes, excludeReason });
   }
 
   return {
@@ -317,9 +458,13 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
     excluded,
     summary: {
       threshold,
+      rescueLowerBound,
       includedCount: included.length,
+      rescuedCount,
       excludedCount: excluded.length,
       excludeReasonHistogram: histogram,
+      rescueBlockedPenaltyCount,
+      rescueBlockedInsufficientSignalsCount,
     },
   };
 }
