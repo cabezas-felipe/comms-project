@@ -4648,3 +4648,190 @@ test("trace invariants: cap, key-whitelist, and counter consistency hold on a mi
     "included + excluded must equal the post-recall candidate count"
   );
 });
+
+// ─── Phase 3: meta-story-level tag assignment (pipeline integration) ─────────
+//
+// These tests pin the *pipeline-level* contract for Phase 3 — they verify
+// what shows up in `payload.stories[i].tags` once `buildStory` calls the new
+// `assignMetaStoryTags` module.  Module-level invariants are covered in
+// [`meta-story-tags.test.mjs`](./meta-story-tags.test.mjs); the cases here
+// guard the wiring and the Phase 4 boundary.
+
+test("Phase 3 wiring: topic tag derived from meta-story summary even when source.topic is weak", async () => {
+  // Source `topic` is intentionally an out-of-settings label ("General") —
+  // legacy/source-only `deriveStoryTags` would have dropped it as not-in-
+  // settings and produced no topic tag.  Recall still passes the item via the
+  // OFAC keyword in the headline.  The meta-story summary mentions
+  // "Diplomatic relations" verbatim; the Phase 3 assigner must pick it up
+  // off the evidence bundle even though the structural `source.topic` field
+  // contributes nothing.
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "General", // not in BASE_SETTINGS.topics — structural path yields []
+      geographies: ["US"],
+      headline: "OFAC briefing in the capital",
+      body: ["No canonical topic phrase on the structural field."],
+    }),
+  ];
+  // Note: `verifyGrounding` replaces `summary`/`subtitle` with the first
+  // `factual_claims[0]` when claims are non-empty — so the claim text itself
+  // is what reaches the evidence bundle, not the model summary.  We place the
+  // canonical topic phrase in the title (untouched by grounding) AND in the
+  // grounded claim so the assertion is robust across either path.
+  const metaStory = {
+    meta_story_id: "phase3-topic-bundle",
+    title: "Diplomatic relations roundup",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Routine narrative summary.",
+    tags: { topics: [], keywords: [], geographies: [] },
+    factual_claims: ["Reuters reports: Diplomatic relations briefing in the capital"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.ok(
+    payload.stories[0].tags.topics.includes("Diplomatic relations"),
+    "Phase 3: topic surfaced from meta-story evidence bundle, not source.topic"
+  );
+});
+
+test("Phase 3 wiring: 'Beijing' in evidence with 'China' added to settings emits China tag", async () => {
+  const settings = {
+    ...BASE_SETTINGS,
+    // Opt into China for this test only — BASE_SETTINGS doesn't include it.
+    geographies: [...BASE_SETTINGS.geographies, "China"],
+  };
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "Officials in Beijing issued a statement",
+      body: ["The remarks land amid diplomatic friction."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "phase3-beijing-alias",
+    title: "Diplomatic friction widens",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Beijing pushed back on the new measures.",
+    tags: { topics: [], keywords: [], geographies: [] },
+    factual_claims: ["Reuters reports: Officials in Beijing issued a statement"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.ok(
+    payload.stories[0].tags.geographies.includes("China"),
+    "Phase 3 alias map: Beijing → China when China is in settings.geographies"
+  );
+  assert.ok(
+    !payload.stories[0].tags.geographies.includes("Beijing"),
+    "alias surface form must NEVER be emitted into the payload"
+  );
+});
+
+test("Phase 3 wiring: alias hit is silently dropped when canonical target is NOT in settings", async () => {
+  // Same evidence as the previous test, but settings drops "China".  No
+  // alias-derived tag may appear, and the alias token itself must not leak.
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "Officials in Beijing issued a statement",
+      body: ["The remarks land amid diplomatic friction."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "phase3-alias-gated",
+    title: "Diplomatic friction widens",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Beijing pushed back on the new measures.",
+    tags: { topics: [], keywords: [], geographies: [] },
+    factual_claims: ["Reuters reports: Officials in Beijing issued a statement"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS, // does NOT include "China"
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.ok(
+    !payload.stories[0].tags.geographies.includes("China"),
+    "alias must NOT fabricate China when settings haven't opted in"
+  );
+  assert.ok(
+    !payload.stories[0].tags.geographies.includes("Beijing"),
+    "alias surface form must NEVER leak into the payload"
+  );
+});
+
+test("Phase 3 wiring: 'petroleum' in text + 'oil' in settings emits NO keyword tag (Phase 4 deferred)", async () => {
+  // Phase 3 keyword matching is deterministic whole-word only.  This pipeline
+  // regression locks the boundary between Phase 3 and Phase 4 (semantic
+  // keyword aliasing).  If a future change accidentally widens "petroleum"
+  // to the "oil" tag, this test fails and the boundary is reaffirmed.
+  const settings = {
+    ...BASE_SETTINGS,
+    keywords: [...BASE_SETTINGS.keywords, "oil"], // settings now includes 'oil'
+  };
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "Petroleum prices climb again",
+      body: ["Crude refining capacity strained across the region."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "phase3-petroleum-oil-boundary",
+    title: "Energy market roundup",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Markets shift on supply concerns.",
+    tags: { topics: [], keywords: [], geographies: [] },
+    factual_claims: ["Reuters reports: Petroleum prices climb again"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.ok(
+    !payload.stories[0].tags.keywords.includes("oil"),
+    "Phase 3 must NOT widen 'petroleum' evidence to the 'oil' keyword — that's Phase 4"
+  );
+});

@@ -2,6 +2,56 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-16 - D-048 - Trust cleanup Phase 3: deterministic meta-story tag assignment + geography alias map
+
+#### Context
+
+Phase 1/2 ([D-047](#2026-05-16---d-047---trust-cleanup-phase-1--2-tags-only-labels-no-fabricated-topic-required-tags-on-the-wire)) closed the leak paths that let fabricated labels reach the UI, made `story.tags` required on the wire, and tightened the snapshot loader. The remaining gap is *evidence*: production tag derivation still went through source-only [`deriveStoryTags(sourceItems, settings)`](apps/api/src/dashboard/refresh-pipeline.mjs), which meant a narrative whose **meta-story summary** clearly mentioned a canonical topic but whose **source `topic` fields** were thin/empty produced no topic tag — even though the evidence was right there. Geographies had the analogous gap: text like `"Officials in Beijing issued a statement"` produced no `China` tag because Beijing wasn't in `source.geographies`, and the matcher only did exact string-set intersection.
+
+#### Decision
+
+Implement **Phase 3 trust cleanup**: deterministic meta-story-level tag assignment + deterministic geography aliasing. Chunk K is still locked to **K1a**; the new mechanism enriches evidence-to-tags, not the one-way posture.
+
+**New API surface — [`meta-story-tags.mjs`](apps/api/src/dashboard/meta-story-tags.mjs):**
+
+- `buildMetaStoryEvidenceText(metaStory, sourceItems)` → text bundle (`title` + `subtitle` + `summary` + each source's `headline` + `body`), defensively tolerant of missing fields and non-object entries.
+- `assignMetaStoryTags({ metaStory, sourceItems, settings })` → strict three-axis tags object, deduped + locale-sorted. Combines (a) phrase match against the evidence bundle, (b) source structural fields (`source.topic` with synonym normalization, `source.geographies` intersected with settings), and (c) the geography alias map.
+
+**Geography alias map — [`geography-aliases.ts`](packages/contracts/src/geography-aliases.ts):**
+
+- `GEOGRAPHY_ALIASES` maps lowercase evidence tokens to canonical labels (`Beijing → China`, `Montevideo → Latin America`, `Tokyo → Japan`, etc.).
+- `resolveGeographyAlias(token, settingsGeographies)` returns the **settings-cased** canonical when both the alias hit and the settings gate fire; returns `null` otherwise. Alias surface forms are **never** emitted into the payload.
+
+**Wiring — [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs):**
+
+- [`buildStory`](apps/api/src/dashboard/refresh-pipeline.mjs) calls `assignMetaStoryTags({ metaStory, sourceItems, settings })` instead of `deriveStoryTags(sourceItems, settings)`. The legacy helper stays exported as a back-compat utility.
+
+**Phase 4 boundary held — keywords stay deterministic:**
+
+- Whole-word phrase match against `settings.keywords` only. Semantic widening (`petroleum` evidence → `oil` tag when `oil` is in settings) is **explicitly Phase 4**. A regression test (*"Phase 3 wiring: 'petroleum' in text + 'oil' in settings emits NO keyword tag"*) locks this boundary; an analogous module-level test makes the deferral obvious to a future reader.
+
+#### Why
+
+- **Trust matches what the narrative actually says.** "Beijing" is China-evidence; with the alias map the UI surfaces the canonical `China` tag (when the user has opted into China), without inventing it for users who haven't. "Diplomatic relations" mentioned in the meta-story summary surfaces as a topic tag even when the source structural `topic` is weak.
+- **Deterministic posture stays.** No model lookup, no embedding probe, no synonym lexicon for keywords — every match is a regex hit against a string the operator can read in the source data. Auditable and reproducible across runs.
+- **Single source of truth for the alias map.** Putting it in `@tempo/contracts` colocates it with the existing label-normalization vocabulary and lets eval/scoring code consume the same map if/when that comes up.
+- **Phase 4 left clean.** Locking the `petroleum`/`oil` boundary in regression now means the semantic mapper can land later without anyone having to guess what Phase 3 *meant*.
+
+#### Tradeoffs
+
+- The evidence bundle grew: phrase matching now scans the meta-story narrative text, not just source headlines/body. Per-story cost is still O(text length × |settings|) per axis — well within budget for the per-story tag step, and the assigner sits **after** clustering so the cost is paid once per shipped story, not per candidate.
+- The alias map is curated by hand (low tens of entries in v1). When the product surfaces a missed alias that's causing real label drops, we add it; we do not over-author the map preemptively because every entry is a chance to leak the wrong canonical.
+- Source-only [`deriveStoryTags`](apps/api/src/dashboard/refresh-pipeline.mjs) still exists. We could drop it, but keeping it preserves the existing test surface and gives us a clean rollback target if Phase 3 ever needs to be reverted.
+- [`storySchema.tags`](packages/contracts/src/schemas.ts) being required (Phase 2) caught a stale Phase 2 issue: the prototype's [`STORIES`](../04-prototype/src/data/stories.ts) demo fixture was missing `tags` on its five entries, which surfaced as 26 failures in [`api.test.ts`](../04-prototype/src/lib/api.test.ts). Fixed in-flight (added an explicit `tags` object to each demo story); no other consumers needed to change.
+
+#### Consequences
+
+- Phase 4 (deferred): a semantic keyword mapper — constrained synonym lexicon or embedding-backed proximity check, still settings-gated. The Phase 3 regression test will need to be amended or replaced when that lands. Chunk K stays at K1a; semantic widening must not bleed into recall/clustering.
+- The alias map is small in v1 and will grow on a per-evidence basis. New entries follow the authoring convention in [`geography-aliases.ts`](packages/contracts/src/geography-aliases.ts) (lowercase keys, Title Case canonicals).
+- Existing pipeline tests that asserted source-only tag derivation continue to pass — the new assigner consults source structural fields as well as the evidence bundle, so backward-compatible behavior is preserved on fixtures whose source `topic`/`geographies` already encoded the canonical evidence.
+
+---
+
 ### 2026-05-16 - D-047 - Trust cleanup Phase 1 + 2: tags-only labels, no fabricated topic, required `tags` on the wire
 
 #### Context

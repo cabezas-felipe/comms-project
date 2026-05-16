@@ -55,6 +55,11 @@ export const STORIES: Story[] = [
     title: "OFAC scrutiny expands around Colombia leadership narrative",
     geographies: ["US", "Colombia"],
     topic: "Diplomatic relations",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: ["OFAC", "sanctions"],
+      geographies: ["US", "Colombia"],
+    },
     takeaway:
       "Story is moving from policy reporting into political reaction — response cycle likely within the day.",
     summary:
@@ -158,6 +163,11 @@ export const STORIES: Story[] = [
     title: "US deportation-routing discussion involving Rwanda resurfaces",
     geographies: ["US", "Colombia"],
     topic: "Migration policy",
+    tags: {
+      topics: ["Migration policy"],
+      keywords: ["deportation routing"],
+      geographies: ["US", "Colombia"],
+    },
     takeaway:
       "Bilateral framing is back; expect inbound press questions for Colombia-adjacent statements within 24h.",
     summary:
@@ -244,6 +254,11 @@ export const STORIES: Story[] = [
     title: "Regional security coordination debate grows after congressional comments",
     geographies: ["US"],
     topic: "Security cooperation",
+    tags: {
+      topics: ["Security cooperation"],
+      keywords: ["bilateral"],
+      geographies: ["US"],
+    },
     takeaway:
       "Debate framing — not policy framing — typically precedes opinion-page cycles. Worth tracking.",
     summary:
@@ -301,6 +316,11 @@ export const STORIES: Story[] = [
     title: "Pacific trade corridor talks gain quiet traction in regional press",
     geographies: ["Colombia"],
     topic: "Diplomatic relations",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: [],
+      geographies: ["Colombia"],
+    },
     takeaway:
       "Procedural framing now means political framing later. Establish a baseline summary before the cycle turns.",
     summary:
@@ -358,6 +378,11 @@ export const STORIES: Story[] = [
     title: "Border coordination figures cited in two unrelated US opinion pieces",
     geographies: ["US"],
     topic: "Migration policy",
+    tags: {
+      topics: ["Migration policy"],
+      keywords: ["bilateral"],
+      geographies: ["US"],
+    },
     takeaway:
       "Cross-spectrum citation usually predicts the dataset becoming a fixture in next-cycle coverage.",
     summary:

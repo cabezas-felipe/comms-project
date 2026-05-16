@@ -79,7 +79,7 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 
 ### Tags (**K1a**)
 
-`tags` = **settings ∩ source evidence** only. Tags **do not** widen pool, recall, or clustering.
+`tags` = **settings ∩ evidence** only. Tags **do not** widen pool, recall, or clustering.
 
 **Trust posture (Phase 1 + 2 — 2026-05-16):**
 
@@ -88,9 +88,17 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 - **No fabricated defaults.** The legacy `?? "Diplomatic relations"` fallback in [`buildStory`](../apps/api/src/dashboard/refresh-pipeline.mjs) is gone — when no source item carries a recognized canonical topic, `story.topic` is omitted entirely (the field is `optional` on the wire). Default settings are fully empty (no seed taxonomy / no seed sources).
 - **Legacy snapshots normalize at load.** The snapshot loader ([`dashboard-snapshot-repo.mjs`](../apps/api/src/db/dashboard-snapshot-repo.mjs)) coerces missing or partial `tags` to the three-axis empty shape before validation. No destructive write-time migration; this is a read-time guard so the strict display schema can assume the field.
 
-**Phase 3 (deferred, not in this slice):**
+**Phase 3 — meta-story-level tag assignment + deterministic geo aliasing (shipped — 2026-05-16):**
 
-- Move from **source-only evidence** (`deriveStoryTags(sourceItems, settings)`) to **meta-story-level tag assignment** that lets the clustering output (or a dedicated tagger) propose canonical tags subject to settings ∩ evidence checks. Will include the geography alias map (e.g. `Beijing → China`) and a meta-story tag-assignment engine. **Not implemented yet** — Chunk K still locked to **K1a** in v1.
+- Production tag emission moved from source-only [`deriveStoryTags`](../apps/api/src/dashboard/refresh-pipeline.mjs) to **meta-story-level** [`assignMetaStoryTags`](../apps/api/src/dashboard/meta-story-tags.mjs), wired into [`buildStory`](../apps/api/src/dashboard/refresh-pipeline.mjs). The new assigner reads the **evidence bundle text** ([`buildMetaStoryEvidenceText`](../apps/api/src/dashboard/meta-story-tags.mjs)) — meta-story title + subtitle + summary + source headlines/body — and combines it with the source structural fields (`source.topic`, `source.geographies`).
+- **Settings vocabulary stays the only output vocabulary.** Every emitted axis is a subset of the matching `settings.*` list; emission uses the user's settings casing.
+- **Deterministic geography alias map** ([`geography-aliases.ts`](../packages/contracts/src/geography-aliases.ts) — `resolveGeographyAlias`): tokens like `Beijing`, `Montevideo`, `Tokyo` map to canonical labels (`China`, `Latin America`, `Japan`) and are emitted **only** when the canonical label is present in `settings.geographies`. The alias surface form itself is never emitted.
+- **Keywords remain deterministic only in Phase 3.** Whole-word phrase match against `settings.keywords` in the evidence bundle. Semantic synonym widening (e.g. `petroleum` evidence → `oil` tag when "oil" is in settings) is **explicitly Phase 4** — a regression test in [`refresh-pipeline.test.mjs`](../apps/api/src/dashboard/refresh-pipeline.test.mjs) (*"Phase 3 wiring: 'petroleum' in text + 'oil' in settings emits NO keyword tag"*) locks this boundary so a future change cannot accidentally light up semantic matching here.
+- **K1a still holds.** The new assigner is a richer *evidence-to-tags* step; the one-way invariant (tags never widen pool/recall/clustering/dedupe) is unchanged. Source-only [`deriveStoryTags`](../apps/api/src/dashboard/refresh-pipeline.mjs) remains exported as a back-compat helper.
+
+**Phase 4 (deferred, not in this slice):**
+
+- **Semantic keyword aliasing** — a constrained mapper (synonym lexicon or embedding-backed proximity check) that lets evidence like `petroleum` light up a `settings.keywords` entry of `oil`. Must stay settings-gated and emit canonical settings strings; **no out-of-settings keywords ever**. Phase 3's deterministic regression case will be amended/replaced when this lands. Recall and clustering stay untouched (K1a one-way).
 
 ---
 

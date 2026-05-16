@@ -27,6 +27,7 @@ import {
   runEmbeddingRecall,
 } from "../ingestion/embedding-recall.mjs";
 import { dedupeSourceItems } from "../ingestion/source-deduper.mjs";
+import { assignMetaStoryTags } from "./meta-story-tags.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -741,7 +742,17 @@ function buildStory(metaStory, sourceItems, settings) {
         .map((i) => normalizeSourceIdentity(i.outlet))
         .filter((k) => k.length > 0)
     ).size,
-    tags: deriveStoryTags(sourceItems, settings),
+    // Phase 3: meta-story-level tag assignment (`assignMetaStoryTags`).
+    // Drives shipped `tags` from the meta-story evidence bundle (title +
+    // subtitle + summary + source headlines/body) plus source structural
+    // fields (`source.topic`, `source.geographies`), gated on settings
+    // vocabulary and extended with a deterministic geography alias map
+    // (Beijing → China, etc.).  Keyword matching stays deterministic
+    // whole-word in this phase — semantic synonym widening (e.g.
+    // "petroleum" → "oil") is explicitly deferred to Phase 4.  K1a still
+    // holds: tags are label-only; they never widen pool/recall/clustering.
+    // `deriveStoryTags` remains exported as a back-compat helper.
+    tags: assignMetaStoryTags({ metaStory, sourceItems, settings }),
     // `_duplicates` provenance from the cross-feed dedupe stage is intentionally
     // NOT projected onto the response shape — duplicate provenance stays
     // server-side for integrity/debugging only (product req: no expand UI,

@@ -553,13 +553,29 @@ These are **expected drops** or **safe transforms**; **Chunk L** maps each to **
 
 **Why this is still K1a, not a new decision:** Source authority (`deriveStoryTags(sourceItems, settings)`), one-way direction (tags don't widen pool/recall/clustering), and `settings ∩ evidence` semantics are unchanged. Phase 1/2 closes leaks where the *absence* of evidence was being papered over with a fabricated topic or a root-field fallback — bringing the on-the-wire and on-the-screen shapes in line with what K1a always said about evidence-only labels.
 
-### Phase 3 (deferred — not in this slice)
+### Phase 3 amendment — deterministic meta-story tagging + geo aliasing (2026-05-16)
 
-> Captured here so the next pass picks up cleanly; this is **forward-look only**, not yet locked.
+**Status:** Shipped on `feat/meta-story-tags-phase1`; **Chunk K is still locked to K1a** — Phase 3 enriches *evidence-to-tags*, not the one-way posture.
 
-- **Geography alias map** (e.g. `Beijing → China`, `Pacific Northwest → US`). Currently `deriveStoryTags` does string-set intersection only; out-of-settings geo strings drop on the floor instead of folding into the closest configured value.
-- **Meta-story-level tag assignment.** Move from source-only evidence to a tagging step that can consult the clustering model's `metaStory.tags` (subject to `constrainTagsToSettings`) as an additional signal, so a narrative whose source items carry weak topic strings but whose meta-story summary clearly maps to a canonical topic can still surface a tag. Existing test *“deriveStoryTags: does not consult model tags at all”* will need to be amended or replaced when this lands.
-- **Broader ingestion/recall rewiring** — tags-driven recall expansion is explicitly out of scope; K1a's one-way posture continues to hold even in Phase 3.
+**What changed:**
+
+- **Tag emission moved to meta-story scope.** [`buildStory`](../apps/api/src/dashboard/refresh-pipeline.mjs) now calls [`assignMetaStoryTags({ metaStory, sourceItems, settings })`](../apps/api/src/dashboard/meta-story-tags.mjs) instead of [`deriveStoryTags(sourceItems, settings)`](../apps/api/src/dashboard/refresh-pipeline.mjs). The legacy helper stays exported as a back-compat utility — production tag emission goes through the new module.
+- **Evidence bundle = meta-story text + source text.** [`buildMetaStoryEvidenceText`](../apps/api/src/dashboard/meta-story-tags.mjs) concatenates the meta-story `title`/`subtitle`/`summary` with each source's `headline` + `body`. Missing fields silently skip; non-string entries are filtered. Source structural fields (`source.topic`, `source.geographies`) are consulted separately as canonical evidence — not folded into the text bundle.
+- **Topics:** union of (a) phrase match of each `settings.topics` value against the bundle and (b) `source.topic` normalized via [`normalizeTopicLabel`](../packages/contracts/src/label-normalization.ts) → settings vocabulary. This means a meta-story whose source `topic` is `"General"` (out of settings) but whose summary mentions `"Diplomatic relations"` still surfaces a topic tag — covered by the regression *"Phase 3 wiring: topic tag derived from meta-story summary even when source.topic is weak"*.
+- **Keywords (deterministic only):** whole-word phrase match against `settings.keywords` in the bundle. **Semantic widening is explicitly Phase 4.**
+- **Geographies:** union of (a) direct phrase match of `settings.geographies` in the bundle, (b) `source.geographies` arrays intersected with settings, and (c) **deterministic alias hits** via [`resolveGeographyAlias`](../packages/contracts/src/geography-aliases.ts). The alias map ([`GEOGRAPHY_ALIASES`](../packages/contracts/src/geography-aliases.ts)) covers `Beijing → China`, `Montevideo → Latin America`, `Tokyo → Japan`, etc.; emission is **gated on `settings.geographies`** — the canonical target must be opted in, and the alias surface form is never emitted.
+- **Settings vocabulary is the only output vocabulary.** Every axis is a subset of the matching `settings.*` list; emission uses the user's spelling.
+- **Tests added:** [`meta-story-tags.test.mjs`](../apps/api/src/dashboard/meta-story-tags.test.mjs) (18 cases — bundle building, topic/keyword/geo matching, alias gating, dedupe + ordering, no-mutation, deferred Phase 4 boundary); plus [`refresh-pipeline.test.mjs`](../apps/api/src/dashboard/refresh-pipeline.test.mjs) wiring regressions covering the four acceptance assertions (meta-story topic surfacing, Beijing → China, alias drop when ungated, `petroleum` not widening to `oil`).
+- **Alias map lives in contracts:** [`geography-aliases.ts`](../packages/contracts/src/geography-aliases.ts) — colocated with [`label-normalization.ts`](../packages/contracts/src/label-normalization.ts) so the alias vocabulary is shared with eval/scoring code if/when those want it.
+
+**Why this is still K1a:** Settings-as-vocabulary, settings ∩ evidence semantics, and one-way direction (tags never feed candidates, recall, clustering, or dedupe) are all preserved. Phase 3 deepens evidence ("evidence bundle" instead of "structural source fields only") and adds a deterministic alias layer; both stay strictly inside the existing contract.
+
+### Phase 4 (deferred — not in this slice)
+
+> Forward-look only — captured so the next pass picks up cleanly. Not yet locked.
+
+- **Semantic keyword aliasing** — a constrained mapper (synonym lexicon, or embedding-backed proximity check with a fixed threshold) that lets evidence like `petroleum` light up a `settings.keywords` entry of `oil`. Must stay settings-gated: only emit canonical settings strings; **never** an out-of-settings keyword. The Phase 3 regression *"'petroleum' in text + 'oil' in settings emits NO keyword tag"* will need to be amended or replaced when this lands.
+- **No widening of recall/clustering** — K1a's one-way posture must continue to hold even after Phase 4. Semantic widening only affects shipped `tags`; the pool, recall, and clustering layers remain on their existing inputs.
 
 ---
 

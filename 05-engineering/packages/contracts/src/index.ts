@@ -36,3 +36,7 @@ export {
   KEYWORD_SYNONYMS,
   SOURCE_NAME_ALIASES,
 } from "./label-normalization.js";
+export {
+  GEOGRAPHY_ALIASES,
+  resolveGeographyAlias,
+} from "./geography-aliases.js";
