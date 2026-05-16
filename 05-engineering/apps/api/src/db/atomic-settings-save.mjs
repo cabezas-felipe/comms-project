@@ -1,5 +1,5 @@
 import { getSupabaseClient } from "./client.mjs";
-import { CONTRACT_VERSION } from "../contracts/settings-schema.mjs";
+import { CONTRACT_VERSION } from "../contracts-runtime/index.mjs";
 
 /**
  * Atomically upserts a settings row and appends an onboarding narrative row inside

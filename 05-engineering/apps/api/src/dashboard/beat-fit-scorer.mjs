@@ -20,7 +20,7 @@
 //     boundaries used elsewhere in the pipeline so lexical behavior stays
 //     consistent across stages.
 
-import { normalizeTopicLabel } from "@tempo/contracts";
+import { normalizeTopicLabel } from "../contracts-runtime/index.mjs";
 
 export const BEAT_FIT_VERSION = "beat-fit-v1";
 

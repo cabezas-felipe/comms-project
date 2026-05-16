@@ -10,7 +10,7 @@ import {
   normalizeSourceIdentity,
   geographySchema,
   topicSchema,
-} from "@tempo/contracts";
+} from "../contracts-runtime/index.mjs";
 import {
   resolveSelectedSources,
   buildMatchedOutletSet,

@@ -48,7 +48,7 @@ await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_S
 
 const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings } = await import("./server.mjs");
 const { default: request } = await import("supertest");
-const { settingsPayloadSchema, dashboardPayloadSchema } = await import("@tempo/contracts");
+const { settingsPayloadSchema, dashboardPayloadSchema } = await import("./contracts-runtime/index.mjs");
 
 // Inject a deterministic test identity so protected routes authenticate without a live Supabase instance.
 const TEST_USER_ID = "test-user-id";
