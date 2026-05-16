@@ -20,6 +20,16 @@ const writeLastAttemptAtSpy = vi.fn();
 // without per-test wiring.
 const readLastAttemptAtSpy = vi.fn<[], number | null>(() => null);
 
+// `refreshDashboard` is the API helper invoked by `triggerDashboardRefresh`.
+// Each test wires up `mockResolvedValueOnce` / `mockRejectedValueOnce` to
+// drive the success or failure path.  Defaults to a never-resolving promise
+// so a test that forgets to wire it up doesn't accidentally settle the
+// manual slot via the real network.
+const refreshDashboardSpy = vi.fn<[], Promise<DashboardFetchResult>>(() => new Promise(() => {}));
+vi.mock("@/lib/api", () => ({
+  refreshDashboard: () => refreshDashboardSpy(),
+}));
+
 // The provider mounts `useRefreshHeartbeat` but for unit testing the context
 // itself we replace it with an inert mock — the heartbeat hook has its own
 // dedicated test file.  `seedAnchorIfMissing` / `recordAttemptStart` /
@@ -48,6 +58,8 @@ afterEach(() => {
   // care about LS state aren't affected by a `mockReturnValueOnce` left
   // over from this test.
   readLastAttemptAtSpy.mockImplementation(() => null);
+  refreshDashboardSpy.mockReset();
+  refreshDashboardSpy.mockImplementation(() => new Promise(() => {}));
 });
 
 function HarnessConsumer({
@@ -346,8 +358,10 @@ interface AttemptHarnessApi {
   isRefreshing: boolean;
   lastAttemptAt: number | null;
   lastRefreshedAt: string | null;
+  heartbeatResult: DashboardFetchResult | null;
   recordAttemptStart: () => AttemptToken;
   recordAttemptFinished: (token?: AttemptToken, options?: SettleOptions) => void;
+  triggerDashboardRefresh: () => Promise<DashboardFetchResult | null>;
 }
 
 function AttemptHarness({ onApi }: { onApi: (api: AttemptHarnessApi) => void }) {
@@ -356,14 +370,19 @@ function AttemptHarness({ onApi }: { onApi: (api: AttemptHarnessApi) => void }) 
     isRefreshing: ctx.isRefreshing,
     lastAttemptAt: ctx.lastAttemptAt,
     lastRefreshedAt: ctx.lastRefreshedAt,
+    heartbeatResult: ctx.heartbeatResult,
     recordAttemptStart: ctx.recordAttemptStart,
     recordAttemptFinished: ctx.recordAttemptFinished,
+    triggerDashboardRefresh: ctx.triggerDashboardRefresh,
   });
   return (
     <div>
       <span data-testid="refreshing">{String(ctx.isRefreshing)}</span>
       <span data-testid="last-attempt">{String(ctx.lastAttemptAt)}</span>
       <span data-testid="last-refreshed">{ctx.lastRefreshedAt ?? "none"}</span>
+      <span data-testid="heartbeat-iso">
+        {ctx.heartbeatResult?.lastCheckedAt ?? ctx.heartbeatResult?.refreshedAt ?? "none"}
+      </span>
     </div>
   );
 }
@@ -867,5 +886,147 @@ describe("RefreshHeartbeatProvider — watchdog", () => {
     // Fresh token settles cleanly.
     act(() => { api!.recordAttemptFinished(freshToken); });
     expect(screen.getByTestId("refreshing").textContent).toBe("false");
+  });
+});
+
+// ─── triggerDashboardRefresh: manual entrypoint (Phase 2) ─────────────────────
+// Settings save success calls into the context to force a fresh dashboard
+// fetch.  The method must mirror the heartbeat lifecycle: flip `isRefreshing`
+// on start, publish `heartbeatResult` on success, advance the anchor from
+// server timestamps, surface the heartbeat error toast on failure, and always
+// settle its own per-attempt slot regardless of outcome.
+
+describe("RefreshHeartbeatProvider — triggerDashboardRefresh", () => {
+  it("flips isRefreshing while the request is in flight and clears it on success", async () => {
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
+
+    // Controllable promise — lets us assert in-flight state before settlement.
+    let resolve!: (r: DashboardFetchResult) => void;
+    refreshDashboardSpy.mockImplementationOnce(
+      () => new Promise<DashboardFetchResult>((res) => { resolve = res; })
+    );
+
+    expect(screen.getByTestId("refreshing").textContent).toBe("false");
+
+    let pending!: Promise<DashboardFetchResult | null>;
+    act(() => { pending = api!.triggerDashboardRefresh(); });
+    expect(screen.getByTestId("refreshing").textContent).toBe("true");
+
+    const settledIso = "2026-05-12T10:00:00Z";
+    await act(async () => {
+      resolve(makeResult({ lastCheckedAt: settledIso }));
+      await pending;
+    });
+
+    expect(screen.getByTestId("refreshing").textContent).toBe("false");
+    // Anchor advanced to the server-provided lastCheckedAt (not client now).
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(toCanonicalIso(settledIso));
+    // heartbeatResult published so Dashboard re-renders against the fresh
+    // payload without waiting for the next hourly tick.
+    expect(screen.getByTestId("heartbeat-iso").textContent).toBe(settledIso);
+  });
+
+  it("returns the fetched result on success", async () => {
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
+
+    const settledIso = "2026-05-12T11:00:00Z";
+    refreshDashboardSpy.mockResolvedValueOnce(makeResult({ lastCheckedAt: settledIso }));
+
+    let returned: DashboardFetchResult | null = null;
+    await act(async () => {
+      returned = await api!.triggerDashboardRefresh();
+    });
+    expect(returned).not.toBeNull();
+    expect(returned!.lastCheckedAt).toBe(settledIso);
+  });
+
+  it("on failure: settles the slot, advances anchor to client now(), returns null", async () => {
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
+
+    refreshDashboardSpy.mockRejectedValueOnce(new Error("network down"));
+
+    const beforeMs = Date.now();
+    let returned: DashboardFetchResult | null = null;
+    await act(async () => {
+      returned = await api!.triggerDashboardRefresh();
+    });
+
+    // Error path does NOT throw — callers can ignore the null return.
+    expect(returned).toBeNull();
+    // Slot drained.
+    expect(screen.getByTestId("refreshing").textContent).toBe("false");
+    // Anchor moved forward (no server timestamp available, falls back to
+    // client now() — same fallback the heartbeat error path uses).
+    const ms = Number(screen.getByTestId("last-attempt").textContent);
+    expect(Number.isFinite(ms)).toBe(true);
+    expect(ms).toBeGreaterThanOrEqual(beforeMs);
+    // heartbeatResult is NOT clobbered by failure — Dashboard keeps showing
+    // the previous successful run (matches the toast copy).
+    expect(screen.getByTestId("heartbeat-iso").textContent).toBe("none");
+  });
+
+  it("does not regress the anchor when an older server timestamp arrives", async () => {
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
+
+    // First attempt seeds a newer anchor.
+    refreshDashboardSpy.mockResolvedValueOnce(
+      makeResult({ lastCheckedAt: "2026-05-12T12:00:00Z" })
+    );
+    await act(async () => { await api!.triggerDashboardRefresh(); });
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(
+      toCanonicalIso("2026-05-12T12:00:00Z")
+    );
+
+    // Second attempt resolves with an older lastCheckedAt — anchor stays put.
+    refreshDashboardSpy.mockResolvedValueOnce(
+      makeResult({ lastCheckedAt: "2026-05-12T10:00:00Z" })
+    );
+    await act(async () => { await api!.triggerDashboardRefresh(); });
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(
+      toCanonicalIso("2026-05-12T12:00:00Z")
+    );
+  });
+
+  it("overlapping triggers each get their own slot and settle independently", async () => {
+    // Burst protection: two manual refreshes back-to-back (e.g. a save burst
+    // that escapes the upstream debounce) must hold isRefreshing true while
+    // either is in flight, then drop it once both settle — no leaked slots,
+    // no premature drop.
+    let api: AttemptHarnessApi | null = null;
+    renderProvider(<AttemptHarness onApi={(a) => { api = a; }} />);
+
+    let resolveA!: (r: DashboardFetchResult) => void;
+    let resolveB!: (r: DashboardFetchResult) => void;
+    refreshDashboardSpy
+      .mockImplementationOnce(() => new Promise<DashboardFetchResult>((r) => { resolveA = r; }))
+      .mockImplementationOnce(() => new Promise<DashboardFetchResult>((r) => { resolveB = r; }));
+
+    let pendingA!: Promise<DashboardFetchResult | null>;
+    let pendingB!: Promise<DashboardFetchResult | null>;
+    act(() => { pendingA = api!.triggerDashboardRefresh(); });
+    act(() => { pendingB = api!.triggerDashboardRefresh(); });
+    expect(screen.getByTestId("refreshing").textContent).toBe("true");
+
+    // A settles — B still in flight, flag stays true.
+    await act(async () => {
+      resolveA(makeResult({ lastCheckedAt: "2026-05-12T13:00:00Z" }));
+      await pendingA;
+    });
+    expect(screen.getByTestId("refreshing").textContent).toBe("true");
+
+    // B settles — flag drops.
+    await act(async () => {
+      resolveB(makeResult({ lastCheckedAt: "2026-05-12T14:00:00Z" }));
+      await pendingB;
+    });
+    expect(screen.getByTestId("refreshing").textContent).toBe("false");
+    // Anchor reflects the latest server timestamp.
+    expect(screen.getByTestId("last-refreshed").textContent).toBe(
+      toCanonicalIso("2026-05-12T14:00:00Z")
+    );
   });
 });
