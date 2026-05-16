@@ -130,6 +130,18 @@ export default function Dashboard() {
   );
   const allActive = isEmptySelection(tagSelection);
 
+  // Phase 6: trust-first signal for the "stories exist but every tag axis is
+  // empty" state.  The pill row already suppresses empty sections (and their
+  // separators) — this caption surfaces what's happening to the reader so
+  // the missing pills don't read as a glitch.  Suppressed entirely when at
+  // least one pill section is non-empty OR when the dashboard hasn't loaded
+  // any stories yet (the empty-stories state has its own copy below).
+  const hasAnyTagSection =
+    tagSections.topics.length > 0 ||
+    tagSections.keywords.length > 0 ||
+    tagSections.geographies.length > 0;
+  const showNoTagsCaption = stories.length > 0 && !hasAnyTagSection;
+
   const filtered = useMemo(
     () =>
       stories
@@ -337,14 +349,28 @@ export default function Dashboard() {
             {/* Pill row — Phase 6: dynamic sections derived from current
                 payload's stories.  Order: All → Topics → Keywords → Geographies.
                 Sections with zero tags are hidden entirely; separators only
-                appear between non-empty sections. */}
+                appear between non-empty sections.  When EVERY section is
+                empty (stories exist but no tags surface), a quiet
+                trust-first caption surfaces alongside the lone "All" pill
+                so the missing pills don't read as a glitch. */}
             <div
               className="mt-5 flex flex-wrap items-center gap-1.5"
               data-testid="header-pill-row"
+              role="group"
+              aria-label="Filter stories by tag"
             >
               <Pill active={allActive} onClick={handleReset} testId="pill-all">
                 All
               </Pill>
+              {showNoTagsCaption && (
+                <span
+                  className="ml-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground"
+                  data-testid="pill-row-empty-caption"
+                  role="status"
+                >
+                  No tag groups yet
+                </span>
+              )}
               {tagSections.topics.length > 0 && (
                 <>
                   <span className="mx-1 text-rule" aria-hidden="true">·</span>
@@ -541,10 +567,11 @@ function Pill({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       data-testid={testId}
       aria-pressed={active}
-      className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
+      className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground ${
         active
           ? "bg-foreground text-background"
           : "text-muted-foreground hover:bg-secondary hover:text-foreground"

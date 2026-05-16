@@ -2,6 +2,46 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-16 - D-051 - Trust cleanup Phase 6: UI polish + trust-first empty states (front-of-house only)
+
+#### Context
+
+Phase 1 ([D-047](#2026-05-16---d-047---trust-cleanup-phase-1--2-tags-only-labels-no-fabricated-topic-required-tags-on-the-wire)) locked the "tags-only labels" decision and removed the dashboard-pills / scan-row fallbacks to root `story.topic` / `story.geographies`. But three UI surfaces still consumed the root fields: (a) the story-detail chip row, (b) the [`Tags.tsx`](../04-prototype/src/components/Tags.tsx) component signatures (legacy enum types), and (c) the `recommendedAction` analyst copy in [`derive.ts`](../04-prototype/src/lib/derive.ts) (equality checks on `story.topic`). The empty-tag state — stories exist but no tags surface — also rendered as a lone "All" pill with no narrative cue, which read as a glitch rather than a trust posture.
+
+Phases 4 + 5 ([D-049](#2026-05-16---d-049---trust-cleanup-phase-4-constrained-semantic-mapping-for-topics--keywords-default-off) / [D-050](#2026-05-16---d-050---trust-cleanup-phase-5-production-scorer-wiring--fail-closed-semantics--calibration-harness-default-off)) added rich operator-only diagnostics (`_meta.tags.{topics,keywords}.{runtimeState, scorerLatencyMs, fallbackReasonCounts}`); Phase 6 also pins as test invariants that none of those leak into user-facing UI.
+
+#### Decision
+
+Land Phase 6 trust cleanup as a **front-of-house-only slice** — no server behavior, semantic logic, or env-flag changes. Chunk K stays locked to K1a.
+
+**Changes:**
+
+- [`StoryDetail.tsx`](../04-prototype/src/components/StoryDetail.tsx) — chip row sources from `story.tags.topics[0]` + `story.tags.geographies`. Divider `|` only renders when both axes are present; whole chip row hidden when both empty.
+- [`Tags.tsx`](../04-prototype/src/components/Tags.tsx) — `TopicTag` / `GeoTag` / `GeoStrip` accept `string` / `string[]` instead of legacy `Topic` / `Geography` enums so Phase 3 alias canonicals (`China`, `Latin America`) render. `GeoTag` keeps the `US` / `CO` monogram for the original canonical pair and uppercases any other settings label.
+- [`derive.ts`](../04-prototype/src/lib/derive.ts) — `recommendedAction` reads `story.tags?.topics` (with `Set.prototype.has`) instead of `story.topic === …`. Survives Phase 2's optional-`topic` contract and aligns with the tags-only posture.
+- [`Dashboard.tsx`](../04-prototype/src/pages/Dashboard.tsx) — `showNoTagsCaption` flag + `pill-row-empty-caption` slot ("No tag groups yet") surfaces alongside the lone "All" pill when every section is empty. Pill row carries `role="group"` + `aria-label="Filter stories by tag"`; caption carries `role="status"`; Pill button uses `type="button"` + `focus-visible:outline`.
+- **Test coverage:** 5 new Dashboard cases, 3 new StoryCard cases, 7 new StoryDetail cases (file is new). All four diagnostic-leak strings (`runtimeState`, `scorerLatencyMs`, `belowThresholdCount`, `semanticApplied`, `fallbackReasonCounts`) are asserted as never appearing in rendered output.
+
+#### Why
+
+- **Single locked decision, finally implemented everywhere.** Phase 1's "tags-only" decision was correct; Phase 6 just closes the remaining inconsistencies.
+- **Trust posture surfaces at the empty edge.** "No tag groups yet" is the smallest possible cue that the dashboard is being honest about missing evidence. It doesn't lecture or warn — operators just see what's there.
+- **A11y is cheap when it's part of the polish slice.** `role="group"` / `aria-label` / `role="status"` are 4 attributes that materially improve assistive-tech usability and cost nothing.
+- **Operator-only diagnostics get their own audit lock.** Phase 6 is the natural place to assert "this UI is for users" — even though Phase 4 / 5 always intended diagnostics to be operator-only, a regression test pinning the absence of those strings catches a future leak class.
+
+#### Tradeoffs
+
+- **Open-string typing on `Tags.tsx`** loses some compile-time validation against the legacy `Topic` / `Geography` enum. That's fine for v1 — the production source (`story.tags`) is settings vocabulary (open string), so the runtime contract is already open; tightening the component type would have forced a translation layer for every Phase 3 geo alias.
+- **"No tag groups yet" is opinionated copy.** Different product directions might prefer "All stories" / "Showing all" / silence. Picked the explicit version because the missing pills look like a glitch otherwise; copy is easy to tune.
+- **No in-app debug surface for `_meta.tags`.** Operators still grep logs + persisted snapshots. Phase 7 territory.
+
+#### Consequences
+
+- Phase 7 (deferred): `AbortController` plumbing, adaptive threshold tuning, optional dev/staging-only debug panel surfacing `_meta.tags`. Semantic geographies stay out of scope.
+- Anyone touching the chip row / scan row / analyst copy needs to keep reading from `story.tags`. The 15 new Phase 6 tests are the canary.
+
+---
+
 ### 2026-05-16 - D-050 - Trust cleanup Phase 5: production scorer wiring + fail-closed semantics + calibration harness (default OFF)
 
 #### Context

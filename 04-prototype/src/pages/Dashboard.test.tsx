@@ -297,6 +297,72 @@ describe("Phase 6: dynamic header pills", () => {
     expect(screen.queryByTestId(/pill-geo-/)).toBeNull();
   });
 
+  // ─── Phase 6: UI polish + trust-first empty states ────────────────────────
+  //
+  // The following tests cover the new Phase 6 behavior on the pill row:
+  //   1. Empty-tag caption appears when stories exist but no tag axis has
+  //      values; suppressed when ANY axis has values.
+  //   2. The row carries assistive-tech semantics (role="group" + label).
+  //   3. Semantic diagnostics never leak into the rendered output.
+  //   4. Section separators only render between non-empty sections — no
+  //      orphan "· ·" double-dot regression.
+
+  it("shows the trust-first 'No tag groups yet' caption when stories exist but no tags surface", async () => {
+    renderWithStories([
+      makeStoryDto({ id: "x", title: "Story X" }), // no `tags` field
+    ]);
+    await waitFor(() => expect(screen.getByText("Story X")).toBeInTheDocument());
+    expect(screen.getByTestId("pill-row-empty-caption").textContent).toMatch(
+      /No tag groups yet/i
+    );
+    // Only the "All" pill is present alongside the caption — no fake pills.
+    expect(screen.queryByTestId(/pill-topic-/)).toBeNull();
+    expect(screen.queryByTestId(/pill-keyword-/)).toBeNull();
+    expect(screen.queryByTestId(/pill-geo-/)).toBeNull();
+    expect(screen.getByTestId("pill-all")).toBeInTheDocument();
+  });
+
+  it("hides the empty caption when at least one tag section has values", async () => {
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    expect(screen.queryByTestId("pill-row-empty-caption")).toBeNull();
+  });
+
+  it("renders the pill row with assistive-tech semantics (role='group' + aria-label)", async () => {
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    const row = screen.getByTestId("header-pill-row");
+    expect(row.getAttribute("role")).toBe("group");
+    expect(row.getAttribute("aria-label")).toMatch(/filter stories by tag/i);
+  });
+
+  it("does not render any operator-only diagnostic strings (runtimeState, latency, fallback reasons)", async () => {
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    expect(screen.queryByText(/runtimeState/i)).toBeNull();
+    expect(screen.queryByText(/scorerLatencyMs/i)).toBeNull();
+    expect(screen.queryByText(/belowThresholdCount/i)).toBeNull();
+    expect(screen.queryByText(/semanticApplied/i)).toBeNull();
+    expect(screen.queryByText(/fallbackReasonCounts/i)).toBeNull();
+  });
+
+  it("does NOT render a section separator before the first non-empty section (no leading dot)", async () => {
+    // Single story with ONLY keywords — the row should be "All [·] keyword-pills",
+    // never "All · · keyword-pills" with an orphan separator.
+    renderWithStories([
+      makeStoryDto({
+        id: "kw-only",
+        title: "Keywords Only",
+        tags: { topics: [], keywords: ["OFAC"], geographies: [] },
+      }),
+    ]);
+    await waitFor(() => expect(screen.getByText("Keywords Only")).toBeInTheDocument());
+    const row = screen.getByTestId("header-pill-row");
+    const text = row.textContent ?? "";
+    // No double-dot regression — the row should never contain "· ·".
+    expect(text).not.toMatch(/·\s*·/);
+  });
+
   it("All clears active filters and returns full feed", async () => {
     renderWithStories(PHASE6_STORIES);
     await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());

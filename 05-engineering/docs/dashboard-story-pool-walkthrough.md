@@ -636,12 +636,34 @@ These are **expected drops** or **safe transforms**; **Chunk L** maps each to **
 - One-way preserved: semantic overlay still runs strictly post-clustering / post-grounding; admission inputs are untouched. Regression test pins ON-with-failure ≡ OFF on funnel counts.
 - Geographies preserved: no semantic geo path; `_meta.tags.geographies.semanticApplied` is the on-the-wire tripwire.
 
-### Phase 6 (deferred — not in this slice)
+### Phase 6 amendment — UI polish + trust-first empty states (2026-05-16)
+
+**Status:** Shipped on `feat/meta-story-tags-phase1`; **Chunk K is still locked to K1a**. Phase 6 is a *front-of-house* slice — no server behavior changes, no semantic logic changes, no env flags. It closes the loop on Phase 1's "tags-only labels" decision by making sure every UI surface that renders a topic / geo label sources it from `story.tags`, surfaces a clear caption when stories arrive without tags, and never leaks operator-only diagnostics into the rendered output.
+
+**What changed:**
+
+- **Story detail chip row reads from `story.tags` only.** [`StoryDetail.tsx`](../../04-prototype/src/components/StoryDetail.tsx) used to render `<TopicTag topic={story.topic} />` and `<GeoStrip geographies={story.geographies} />` — the last UI surface still consuming the root fields. Now the topic chip comes from `story.tags.topics[0]` (settings spelling), the geo strip comes from `story.tags.geographies`, and the divider `|` is suppressed unless **both** axes are non-empty. The whole chip row is hidden entirely when both axes are empty — no orphan divider, no empty box.
+- **`Tags.tsx` accepts open settings vocabulary.** [`TopicTag`](../../04-prototype/src/components/Tags.tsx) and [`GeoStrip`](../../04-prototype/src/components/Tags.tsx) used to require the legacy `Topic` / `Geography` enum types. They now accept arbitrary strings — necessary so Phase 3 geography aliases (`China`, `Latin America`, …) render correctly. `GeoTag` still emits the `US` / `CO` monogram for the original canonical pair; any other settings label is uppercased verbatim. Empty / whitespace-only entries render `null` so callers don't have to filter.
+- **`derive.ts` analyst copy is tag-driven.** The `recommendedAction` copy in [`derive.ts`](../../04-prototype/src/lib/derive.ts) used `story.topic === "Diplomatic relations"` equality checks against the legacy root field. Switched to `story.tags?.topics?.includes(...)` so the analyst copy survives Phase 2's `topic`-is-optional contract and stays aligned with the UI's tags-only posture.
+- **Trust-first empty-pill caption — [`Dashboard.tsx`](../../04-prototype/src/pages/Dashboard.tsx).** When stories exist but `aggregateTagSections` returns empty for every axis, a quiet caption ("No tag groups yet") surfaces next to the lone "All" pill so the missing pills don't read as a glitch. Suppressed entirely when any section has values, and never shown on the empty-dashboard / loading / error states (those have their own copy via [`EmptyState`](../../04-prototype/src/components/EmptyState.tsx) / [`LoadingState`](../../04-prototype/src/components/LoadingState.tsx) / [`ErrorState`](../../04-prototype/src/components/ErrorState.tsx)).
+- **Pill row a11y.** `role="group"` + `aria-label="Filter stories by tag"` on the row. Empty caption carries `role="status"` so assistive tech announces the trust-first signal. Pills already had `aria-pressed`; added `type="button"` (defensive against future form-nesting) and `focus-visible:outline` for clearer keyboard focus.
+- **Semantic diagnostics stay operator-only.** Audit confirms no UI surface reads `_meta.tags` (the operator-facing aggregate that carries `runtimeState`, `scorerLatencyMs`, `fallbackReasonCounts`, `semanticApplied`). Regression tests in [`Dashboard.test.tsx`](../../04-prototype/src/pages/Dashboard.test.tsx) and [`StoryDetail.test.tsx`](../../04-prototype/src/components/StoryDetail.test.tsx) assert those strings never appear in the rendered output.
+
+**Tests added/updated:**
+
+- 3 new cases in [`StoryCard.test.tsx`](../../04-prototype/src/components/StoryCard.test.tsx) under "Phase 6: scan-row is tags-only" — pin that the scan row reads exclusively from `story.tags`, never from root `story.topic` / `story.geographies`, even when the root fields are populated (defensive against Phase 1 fallback re-introduction).
+- 7 new cases in a new [`StoryDetail.test.tsx`](../../04-prototype/src/components/StoryDetail.test.tsx) — topic chip sources from tags; geo strip sources from tags; alias-driven geos (`China`) render with the new open-string typing; chip row + divider hidden when both axes empty; divider suppressed when only one axis has tags; divider only renders when both are present; no semantic diagnostic strings appear in the rendered detail.
+- 5 new cases in [`Dashboard.test.tsx`](../../04-prototype/src/pages/Dashboard.test.tsx) — empty-tag caption visibility on/off, pill-row a11y semantics, no diagnostics leak, no orphan section separators.
+
+**Why this is still K1a:** Same closed-vocabulary contract, same one-way invariant, same settings-only output. Phase 6 changes how the UI *renders* tags — not what tags get emitted, gated, or scored. The Phase 1 "tags-only labels" decision is now consistently implemented across every label-bearing surface (header pills, scan row, story detail, analyst copy).
+
+### Phase 7 (deferred — not in this slice)
 
 > Forward-look. Not yet locked.
 
 - **AbortController plumbing.** Phase 5 timeout races the Promise but does NOT signal cancellation to the embedding provider — the underlying HTTP call continues until it returns. If provider quotas or cost-per-call become a concern, plumb an `AbortSignal` end-to-end.
 - **Adaptive threshold tuning.** Hands-off adjustment of `TEMPO_TAG_SEMANTIC_*_THRESHOLD` based on observed `belowThresholdCount / acceptedCount` ratios.
+- **Optional in-app debug surface.** The Phase 4/5 `_meta.tags` payload is rich; an internal-only debug panel (gated by dev/staging build, not the standard route) could let operators inspect `runtimeState` / `fallbackReasonCounts` without grepping logs. Phase 6 leaves this unimplemented; the rollout posture is "logs + persisted snapshots are enough for now".
 - **Semantic geography aliasing** — still deliberately out of scope.
 
 ---

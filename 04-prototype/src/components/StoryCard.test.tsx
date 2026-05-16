@@ -179,3 +179,53 @@ describe("StoryCard expanded header", () => {
     expect(screen.queryByText(/Key sources/i)).not.toBeInTheDocument();
   });
 });
+
+// ─── Phase 6: scan-row + chip behavior is tags-only ────────────────────────
+//
+// The status row above the headline ("rising · {scan labels}") must source
+// labels from `story.tags` only.  Root `story.topic` / `story.geographies`
+// are no longer authoritative for UI; Phase 1 already removed the
+// fallback inside `storyScanLabels`, and these tests pin that semantics
+// stay tag-only at the rendered-component level.
+
+describe("Phase 6: scan-row is tags-only", () => {
+  it("renders no scan-row labels when story has tags but they are all empty (no fallback to root topic)", () => {
+    const story = makeStory({
+      topic: "Diplomatic relations", // root field — must NOT light up the scan row
+      geographies: ["US"],
+      tags: { topics: [], keywords: [], geographies: [] },
+    });
+    renderCard(story);
+    // The trend label always renders; the optional scan-row labels appear
+    // after a "·" separator.  Asserting no separator after the trend label
+    // is the cleanest way to verify nothing from root fields leaked.
+    expect(screen.queryByText("Diplomatic relations")).not.toBeInTheDocument();
+  });
+
+  it("renders no scan-row labels when story has no tags object (legacy/missing — defensive)", () => {
+    const story = makeStory({
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      tags: undefined,
+    });
+    renderCard(story);
+    expect(screen.queryByText("Diplomatic relations")).not.toBeInTheDocument();
+  });
+
+  it("renders scan-row labels exclusively from story.tags when present", () => {
+    const story = makeStory({
+      topic: "Diplomatic relations", // root — must be IGNORED
+      tags: {
+        topics: ["Migration policy"], // tag-source winner
+        keywords: ["OFAC"],
+        geographies: ["US"],
+      },
+    });
+    renderCard(story);
+    // Scan-row priority is "1 topic + 1 keyword" → [topic, keyword].
+    expect(screen.getByText(/Migration policy/)).toBeInTheDocument();
+    expect(screen.getByText(/OFAC/)).toBeInTheDocument();
+    // The root topic must not appear on the card.
+    expect(screen.queryByText("Diplomatic relations")).not.toBeInTheDocument();
+  });
+});

@@ -130,10 +130,19 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 4. **Staging — keywords axis on.** Same monitor, with extra attention to precision (a bad chip on the scan row is more visible than a missed one).
 5. **Production — staged.** Flip the global flag in prod; leave per-axis flags off; verify wiring. Then enable topics, then keywords, one at a time. Roll back by toggling the per-axis flag to false — no code deploy needed.
 
-**Phase 6 (deferred — not in this slice):**
+**Phase 6 — UI polish + trust-first empty states (shipped — 2026-05-16):**
 
-- **AbortController plumbing.** Phase 5 timeout cancels the Promise race but does NOT signal cancellation to the embedding provider — the underlying request continues running. Phase 6 should plumb an `AbortSignal` end-to-end if provider quotas/cost matter.
+- Front-of-house slice; no server behavior, semantic logic, or env-flag changes.
+- **Every label-bearing UI surface is tags-only.** [`StoryDetail.tsx`](../../04-prototype/src/components/StoryDetail.tsx) chip row sources from `story.tags.topics[0]` + `story.tags.geographies` (no root-field reads); [`Tags.tsx`](../../04-prototype/src/components/Tags.tsx) accepts open settings strings so Phase 3 geo aliases render; [`derive.ts`](../../04-prototype/src/lib/derive.ts) analyst copy reads `story.tags.topics` (no `story.topic` equality).
+- **Empty-tag caption** on the pill row ("No tag groups yet") surfaces when stories exist but every tag axis is empty — quiet trust-first signal, suppressed when any section has values.
+- **A11y polish.** `role="group"` + `aria-label` on the pill row; `role="status"` on the caption; `type="button"` and `focus-visible:outline` on Pill.
+- **No diagnostics leak.** Regression tests in [`Dashboard.test.tsx`](../../04-prototype/src/pages/Dashboard.test.tsx) + [`StoryDetail.test.tsx`](../../04-prototype/src/components/StoryDetail.test.tsx) assert operator-only strings (`runtimeState`, `scorerLatencyMs`, `semanticApplied`, …) never appear in the rendered output.
+
+**Phase 7 (deferred — not in this slice):**
+
+- **AbortController plumbing.** Phase 5 timeout cancels the Promise race but does NOT signal cancellation to the embedding provider — the underlying request continues running. Phase 7 should plumb an `AbortSignal` end-to-end if provider quotas/cost matter.
 - **Adaptive threshold tuning.** Hands-off threshold adjustment based on observed `belowThresholdCount` / `acceptedCount` ratios.
+- **Internal-only debug panel.** A staging/dev-gated surface that lets operators inspect `_meta.tags` directly. Out of scope for Phase 6; current rollout posture is "logs + persisted snapshots are enough".
 - **Semantic geography aliasing** — still deliberately out of scope. The deterministic alias map in [`geography-aliases.ts`](../packages/contracts/src/geography-aliases.ts) remains the only geo widening path.
 
 ---
