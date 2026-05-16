@@ -2,6 +2,64 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-16 - D-050 - Trust cleanup Phase 5: production scorer wiring + fail-closed semantics + calibration harness (default OFF)
+
+#### Context
+
+Phase 4 ([D-049](#2026-05-16---d-049---trust-cleanup-phase-4-constrained-semantic-mapping-for-topics--keywords-default-off)) shipped the closed-vocabulary semantic mapping surface, the env flags, and the per-axis diagnostics — but no production scorer. The brief explicitly called out that flipping the env flags ON in Phase 4 would produce no uplift because `_refreshPipeline.run` never built a scorer. Phase 5 closes that gap with operational guardrails so the rollout is safe to stage.
+
+#### Decision
+
+Wire a production embedding-similarity scorer behind the Phase 4 surface, add fail-closed semantics with operator-readable runtime state, and ship a threshold calibration tool. **Chunk K is still locked to K1a** — Phase 5 doesn't change scope (closed vocabulary, topics + keywords only, geographies deterministic).
+
+**Mapper extensions — [`meta-story-semantic-mapper.mjs`](apps/api/src/dashboard/meta-story-semantic-mapper.mjs):**
+
+- `SemanticScorerTimeoutError` (exported sentinel) so timeout vs generic error are distinguishable.
+- `createEmbeddingSemanticScorer({embedFn, timeoutMs, maxEvidenceChars})` — wraps the recall-stage `embedFn` in cosine similarity (rescaled `[-1,1]` → `[0,1]`), per-call wall-clock timeout, evidence-text truncation, and a per-instance evidence + label vector cache.
+- `resolveSemanticScorerRuntimeConfig(env, overrides)` — `TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS` (default `1500`), `TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS` (default `4000`).
+- `RUNTIME_STATE` enum + per-axis `runtimeState` ∈ `{disabled, enabled_no_scorer, enabled_scorer_ready, scorer_error_fallback, scorer_timeout_fallback}`. Aggregate uses worst-observed precedence (timeout > error > ready > no_scorer > disabled).
+- `scorerLatencyMs` + `fallbackReasonCounts: {timeout, error}` per axis; aggregated across stories.
+
+**Server wiring — [`server.mjs`](apps/api/src/server.mjs):**
+
+- When `resolveSemanticTagConfig()` reports any axis enabled AND no test scorer is injected, `_refreshPipeline.run` builds a production scorer from `_embeddings.embed` + `resolveSemanticScorerRuntimeConfig()`. Tests inject their own scorer; both paths share the mapper.
+
+**Pipeline observability — [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs):**
+
+- `[pipeline.tags]` log line carries `runtime_state / accepted / rejected / below_threshold / latency_ms / timeouts / errors` per axis.
+- `log.tags` → `_lastRunMeta.tags` → `_meta.tags` carries the same fields + `geographies.semanticApplied: false` (tripwire for scope drift).
+
+**Calibration harness — [`semantic-tag-calibration.mjs`](apps/api/scripts/semantic-tag-calibration.mjs) + [fixtures](apps/api/scripts/semantic-tag-calibration-fixtures.json):**
+
+- Operator tool, NOT in CI. Reads curated fixtures (`{axis, evidence, expectedAccept, expectedReject}`); runs the mapper at candidate thresholds; prints precision / recall / F1 + confusion summary; recommends the highest threshold within 5pp of best recall (conservative bias toward precision). Supports `--provider=mock|embeddings`.
+
+**Test coverage:**
+
+- 19 new mapper tests: runtime-state derivation (disabled / no_scorer / ready / error / timeout), timeout-wins-over-error precedence, latency aggregation, aggregator runtime-state precedence, scorer factory cosine math, truncation, memoization, timeout, malformed-response handling, runtime-config env parsing.
+- 6 new pipeline-level Phase 5 regressions: scorer-ready accept + latency recorded, timeout fallback (deterministic ships), error fallback, enabled-no-scorer state, K1a invariant under scorer failure (funnel stages identical to OFF), geographies locked under aggressive scorer.
+
+#### Why
+
+- **Wiring without a guardrail is worse than no wiring.** Phase 5 ships both the production scorer AND the fail-closed contract that protects the dashboard from a flaky / slow provider. The deterministic baseline ALWAYS ships; the worst the scorer can do is no uplift.
+- **The state enum is the operator's primary diagnostic.** A single string in `_meta.tags.{topics,keywords}.runtimeState` answers "is rollout healthy?" without reasoning about flag combinations.
+- **Calibration belongs to operators, not the model.** The harness reduces threshold tuning to running one script + reading a table. We picked a conservative "recall within 5pp" recommendation so the first stable threshold biases toward precision.
+- **Default OFF preserved.** The brief explicitly said "Safe rollout first: default OFF remains, rollout staged". We didn't flip any flag.
+
+#### Tradeoffs
+
+- **No AbortController on the scorer.** Timeout races the Promise but the embedding HTTP request keeps running until it completes. Provider cost-per-failed-call is the operational risk; fix in Phase 6 if it matters.
+- **Per-instance cache, not cross-run.** The factory's evidence/label cache lives inside the scorer closure for the duration of one `runRefreshPipeline` call. Cross-run cache would save provider calls for stable labels (`settings.keywords` rarely change) but adds eviction/memory-pressure semantics we don't need yet.
+- **`semantic-tag-calibration-fixtures.json` is small and curated.** It's a starting set; ops should extend it as new precision/recall failure modes surface. The harness asserts the closed-vocabulary lock on every case, so even a sloppy fixture file can't accidentally widen the contract.
+- **`enabled_no_scorer` exists for defensive reasons.** If `_embeddings.embed` is ever overridden to undefined in a future server refactor, the mapper now surfaces this explicitly instead of silently skipping semantic uplift.
+
+#### Consequences
+
+- Phase 6 (deferred): `AbortController` plumbing, adaptive threshold tuning, optional cross-run cache. Semantic geographies stay out of scope.
+- The recommended staged rollout is in [the spec](docs/dashboard-story-pool-spec.md#tags-k1a) and [the walkthrough](docs/dashboard-story-pool-walkthrough.md#phase-5-amendment--production-scorer-wiring--fail-closed--calibration-harness-2026-05-16-default-off). TL;DR: enable global flag in staging with both axes OFF first (verify wiring via `runtimeState=disabled`); calibrate; enable topics; enable keywords; promote to prod the same way.
+- The pipeline regression *"funnel counts identical for scorer-OFF vs scorer-FAIL"* is the canary that K1a hasn't drifted under fallback — it MUST stay green for any future Phase 6+ work.
+
+---
+
 ### 2026-05-16 - D-049 - Trust cleanup Phase 4: constrained semantic mapping for topics + keywords (default OFF)
 
 #### Context

@@ -600,13 +600,49 @@ These are **expected drops** or **safe transforms**; **Chunk L** maps each to **
 
 **Why this is still K1a:** Settings-as-vocabulary, settings ∩ evidence semantics, and one-way direction (semantic uplift only affects shipped `tags`, never pool/recall/clustering/dedupe) are all preserved. The change is a richer *evidence-to-tags* step; admission inputs are untouched, and the closed-vocabulary mapper cannot fabricate.
 
-### Phase 5 (deferred — not in this slice)
+### Phase 5 amendment — production scorer wiring + fail-closed + calibration harness (2026-05-16; default OFF)
+
+**Status:** Shipped on `feat/meta-story-tags-phase1`; **Chunk K is still locked to K1a**. Phase 5 wires a real scorer behind the Phase 4 surface, adds fail-closed semantics with operator-readable runtime state, and ships a calibration tool. The scope (closed vocabulary, topics + keywords only, geographies deterministic) is unchanged.
+
+**What changed:**
+
+- **Production scorer — [`createEmbeddingSemanticScorer`](../apps/api/src/dashboard/meta-story-semantic-mapper.mjs):** wraps an `embedFn(texts) → number[][]` (the production wiring uses [`embedTexts`](../apps/api/src/ai/embeddings.mjs), same provider as recall) in: (a) per-call wall-clock timeout via `Promise.race` (throws `SemanticScorerTimeoutError`), (b) evidence text truncation to `maxEvidenceChars`, (c) internal evidence + label vector caches so repeated probes within the same run don't re-embed, (d) cosine similarity rescaled from `[-1, 1]` to `[0, 1]` so thresholds keep their range. The factory **throws on construction** when `embedFn` is missing — production wiring must explicitly opt in.
+- **Server-side opt-in — [`server.mjs`](../apps/api/src/server.mjs) `_refreshPipeline.run`:** when (a) `resolveSemanticTagConfig()` reports any axis enabled AND (b) `opts.semanticTagScorer` is not injected by a test, the route handler builds a production scorer from `_embeddings.embed` + the runtime config. Tests continue to inject deterministic scorers; both paths share the mapper.
+- **Fail-closed pipeline behavior:** scorer timeout or generic error never breaks refresh. The mapper:
+  - records `fallbackReasonCounts: {timeout, error}` per axis;
+  - derives `runtimeState ∈ {disabled, enabled_no_scorer, enabled_scorer_ready, scorer_error_fallback, scorer_timeout_fallback}` (worst-observed across stories);
+  - accumulates `scorerLatencyMs` (including the latency of failing calls — slow failures stay visible).
+  Deterministic baseline always ships. Pipeline regression *"funnel counts identical for scorer-OFF vs scorer-FAIL"* asserts the K1a invariant under fallback.
+- **New env vars (defaults conservative):** `TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS` (default `1500`) and `TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS` (default `4000`). Both parsed via [`resolveSemanticScorerRuntimeConfig`](../apps/api/src/dashboard/meta-story-semantic-mapper.mjs).
+- **Operator observability:**
+  - `[pipeline.tags]` log line per refresh: `semantic_topics=<runtimeState> accepted=N rejected=M below_threshold=K latency_ms=L timeouts=T errors=E  semantic_keywords=… semantic_geographies=off(locked)`.
+  - `_meta.tags.{topics,keywords}` carries `{runtimeState, scorerLatencyMs, fallbackReasonCounts}` on top of the Phase 4 counts.
+  - `_meta.tags.geographies.semanticApplied` is `false` on every run (tripwire for scope drift).
+- **Calibration harness — [`semantic-tag-calibration.mjs`](../apps/api/scripts/semantic-tag-calibration.mjs):** operator tool (not exercised in CI). Reads a curated fixture file ([`semantic-tag-calibration-fixtures.json`](../apps/api/scripts/semantic-tag-calibration-fixtures.json)) of `{axis, evidence, expectedAccept, expectedReject}` triples; runs the mapper across candidate thresholds (default `0.55 / 0.65 / 0.75 / 0.85`); prints precision / recall / F1 + a confusion summary per axis; recommends the highest threshold whose recall is within 5pp of the best observed (conservative bias toward precision). Supports `--provider=mock|embeddings`, `--fixtures=<path>`, `--thresholds=0.6,0.7,…`.
+
+**Runtime-state matrix (operator cheat sheet):**
+
+| State | Meaning | Action |
+|-------|---------|--------|
+| `disabled` | Per-axis or global flag is OFF | Default — no action |
+| `enabled_no_scorer` | Flag ON but no scorer wired (server bug or unintended config) | Investigate `_embeddings.embed` availability + `_refreshPipeline.run` wiring |
+| `enabled_scorer_ready` | Flag ON, scorer succeeded for every probe | Healthy — monitor `acceptedCount / belowThresholdCount` ratios |
+| `scorer_error_fallback` | At least one probe threw a non-timeout error | Check provider logs / SDK version; deterministic baseline still shipping |
+| `scorer_timeout_fallback` | At least one probe exceeded `TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS` | Bump timeout OR open provider capacity ticket; deterministic baseline still shipping |
+
+**Why this is still K1a:**
+
+- Closed-vocabulary preserved: mapper only inspects `allowedLabels`; production scorer is just the score function, not a label generator.
+- One-way preserved: semantic overlay still runs strictly post-clustering / post-grounding; admission inputs are untouched. Regression test pins ON-with-failure ≡ OFF on funnel counts.
+- Geographies preserved: no semantic geo path; `_meta.tags.geographies.semanticApplied` is the on-the-wire tripwire.
+
+### Phase 6 (deferred — not in this slice)
 
 > Forward-look. Not yet locked.
 
-- **Production scorer wiring.** Phase 4 ships the surface; a production scorer (embedding-similarity probe via `TEMPO_OPENAI_EMBEDDING_MODEL`, or a small constrained-classifier prompt) needs to be wired into `server.mjs` and exercised against the [scenario map](dashboard-story-pool-scenario-map.md) goldens before the env flags flip on outside staging.
-- **Threshold calibration.** Defaults (`0.75`) are conservative; per-axis calibration should be tuned against a curated set of "should match" / "should not match" pairs.
-- **Semantic geography aliasing** — still deliberately out of scope. The deterministic alias map in [`geography-aliases.ts`](../packages/contracts/src/geography-aliases.ts) remains the only geo widening path.
+- **AbortController plumbing.** Phase 5 timeout races the Promise but does NOT signal cancellation to the embedding provider — the underlying HTTP call continues until it returns. If provider quotas or cost-per-call become a concern, plumb an `AbortSignal` end-to-end.
+- **Adaptive threshold tuning.** Hands-off adjustment of `TEMPO_TAG_SEMANTIC_*_THRESHOLD` based on observed `belowThresholdCount / acceptedCount` ratios.
+- **Semantic geography aliasing** — still deliberately out of scope.
 
 ---
 

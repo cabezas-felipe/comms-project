@@ -109,9 +109,31 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 - **Diagnostics aggregated per run.** [`runRefreshPipeline`](../apps/api/src/dashboard/refresh-pipeline.mjs) collects per-axis aggregates (`candidateCount`, `acceptedCount`, `rejectedCount`, `belowThresholdCount`, `enabled`, `threshold`) and surfaces them via `log.tags` → `_lastRunMeta.tags` → `_meta.tags`. The pipeline also emits a `[pipeline.tags]` log line per refresh.
 - **K1a one-way invariant unchanged.** Semantic uplift runs **after** clustering / grounding inside the per-story tag overlay — it cannot change funnel counts or admission. A regression case in [`refresh-pipeline.test.mjs`](../apps/api/src/dashboard/refresh-pipeline.test.mjs) (*"Phase 4 wiring: semantic uplift does NOT change funnel / admission counts"*) locks this.
 
-**Phase 5 (deferred — not in this slice):**
+**Phase 5 — production scorer wired + fail-closed + calibration harness (shipped — 2026-05-16, default OFF):**
 
-- **Production scorer wiring.** Phase 4 ships the module + flags + diagnostics; a production scorer (embedding similarity probe against `TEMPO_OPENAI_EMBEDDING_MODEL`, or a constrained classifier) is intentionally not wired into `server.mjs` yet. Rollout will (a) prove the scorer in staging behind the OFF default, (b) calibrate per-axis thresholds against the golden set, (c) flip flags incrementally with the diagnostics dashboard as the canary.
+- **Production scorer (embedding cosine similarity).** [`createEmbeddingSemanticScorer`](../apps/api/src/dashboard/meta-story-semantic-mapper.mjs) wraps the existing [`embedTexts`](../apps/api/src/ai/embeddings.mjs) (same provider used by recall) in: per-call timeout (`SemanticScorerTimeoutError`), evidence text truncation (`maxEvidenceChars`), and an internal vector cache for evidence + label so repeated probes within a run don't re-embed. Cosine `[-1,1]` is rescaled to `[0,1]` so thresholds keep their existing scale.
+- **Server wiring — [`server.mjs`](../apps/api/src/server.mjs).** When `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` AND any per-axis flag are truthy AND no test scorer is injected, the route handler attaches a production `semanticTagScorer` automatically. Tests continue to inject deterministic scorers; both paths share the mapper.
+- **Fail-closed semantics.** Scorer timeout / error never breaks refresh. The mapper categorizes each failure (`fallbackReasonCounts: {timeout, error}`) and derives a per-axis `runtimeState` ∈ `{disabled, enabled_no_scorer, enabled_scorer_ready, scorer_error_fallback, scorer_timeout_fallback}`. Worst-observed state across the run is what surfaces in `_meta.tags`. **Deterministic baseline always ships** — pipeline regression *"funnel counts identical for scorer-OFF vs scorer-FAIL"* locks this.
+- **New env vars** (defaults conservative; document at-call-time semantics):
+  - `TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS` — per-scorer-call timeout (default `1500`).
+  - `TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS` — evidence text cap before embedding (default `4000`).
+- **Operator observability.** `[pipeline.tags]` log line now carries `runtime_state / accepted / rejected / below_threshold / latency_ms / timeouts / errors` per axis. `_meta.tags` carries the same shape + `geographies.semanticApplied: false`.
+- **Calibration harness — [`semantic-tag-calibration.mjs`](../apps/api/scripts/semantic-tag-calibration.mjs).** Operator tool (NOT exercised in CI). Runs the mapper against a curated fixture set ([`semantic-tag-calibration-fixtures.json`](../apps/api/scripts/semantic-tag-calibration-fixtures.json)) across candidate thresholds, prints a confusion-style summary, and recommends the highest threshold whose recall is within 5pp of the best observed. Supports `--provider=mock|embeddings`.
+- **K1a one-way invariant unchanged.** Semantic overlay still runs strictly post-clustering. Regression *"funnel counts identical for scorer-OFF vs scorer-FAIL"* compares ON-with-failure vs OFF baseline and asserts identical funnel stages + `metaStoryCount`.
+- **Geographies remain deterministic-only.** No Phase 5 scope drift; the `geographies.semanticApplied: false` stamp is asserted in pipeline tests for both successful-scorer and aggressive-scorer paths.
+
+**Recommended rollout sequence (operator runbook):**
+
+1. **Staging — scorer wiring smoke.** Set `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED=true` but leave both per-axis flags OFF. Pipeline still produces deterministic tags; `_meta.tags.{topics,keywords}.runtimeState=disabled` confirms wiring without any uplift.
+2. **Staging — calibration.** Run [`semantic-tag-calibration.mjs --provider=embeddings`](../apps/api/scripts/semantic-tag-calibration.mjs) against the curated fixtures (extend the fixture set with real product evidence). Use the recommended-threshold output as the starting point for `TEMPO_TAG_SEMANTIC_*_THRESHOLD`.
+3. **Staging — topics axis on.** `TEMPO_TAG_SEMANTIC_TOPICS_ENABLED=true`. Monitor `_meta.tags.topics.{acceptedCount, belowThresholdCount, fallbackReasonCounts, runtimeState}`. Watch for `scorer_timeout_fallback` — if observed, bump timeout or open a provider ticket.
+4. **Staging — keywords axis on.** Same monitor, with extra attention to precision (a bad chip on the scan row is more visible than a missed one).
+5. **Production — staged.** Flip the global flag in prod; leave per-axis flags off; verify wiring. Then enable topics, then keywords, one at a time. Roll back by toggling the per-axis flag to false — no code deploy needed.
+
+**Phase 6 (deferred — not in this slice):**
+
+- **AbortController plumbing.** Phase 5 timeout cancels the Promise race but does NOT signal cancellation to the embedding provider — the underlying request continues running. Phase 6 should plumb an `AbortSignal` end-to-end if provider quotas/cost matter.
+- **Adaptive threshold tuning.** Hands-off threshold adjustment based on observed `belowThresholdCount` / `acceptedCount` ratios.
 - **Semantic geography aliasing** — still deliberately out of scope. The deterministic alias map in [`geography-aliases.ts`](../packages/contracts/src/geography-aliases.ts) remains the only geo widening path.
 
 ---

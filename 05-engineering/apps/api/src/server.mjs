@@ -24,6 +24,11 @@ import { appendRejections as appendStoryRejections } from "./db/story-rejection-
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
 import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
+import {
+  createEmbeddingSemanticScorer,
+  resolveSemanticTagConfig,
+  resolveSemanticScorerRuntimeConfig,
+} from "./dashboard/meta-story-semantic-mapper.mjs";
 import { resolveRecallConfig } from "./ingestion/embedding-recall.mjs";
 import {
   tryAcquire as tryAcquireRefresh,
@@ -243,8 +248,28 @@ export const _embeddings = { embed: embedTexts };
  * pipeline.
  */
 export const _refreshPipeline = {
-  run: (opts) =>
-    runRefreshPipeline({
+  run: (opts) => {
+    // Phase 5: wire a production semantic-tag scorer when env enables Phase 4
+    // semantic mapping AND no test scorer has been injected.  The scorer
+    // wraps `_embeddings.embed` in cosine similarity + per-call timeout +
+    // evidence truncation.  When the env flag is OFF (default), no scorer is
+    // attached and `assignMetaStoryTagsDetailed` falls into its
+    // `enabled_no_scorer` / `disabled` runtime states — semantic uplift
+    // produces no additions and the deterministic baseline ships.  Tests
+    // override `semanticTagScorer` in `opts` to inject deterministic
+    // fixtures; that path takes precedence over the production scorer here.
+    const semanticConfig = opts.semanticTagConfig ?? resolveSemanticTagConfig();
+    const semanticAnyAxisOn = semanticConfig.topicsEnabled || semanticConfig.keywordsEnabled;
+    let semanticTagScorer = opts.semanticTagScorer ?? null;
+    if (!semanticTagScorer && semanticAnyAxisOn) {
+      const runtime = resolveSemanticScorerRuntimeConfig();
+      semanticTagScorer = createEmbeddingSemanticScorer({
+        embedFn: (texts) => _embeddings.embed(texts),
+        timeoutMs: runtime.timeoutMs,
+        maxEvidenceChars: runtime.maxEvidenceChars,
+      });
+    }
+    return runRefreshPipeline({
       ...opts,
       clusterFn: _clusterEngine.cluster,
       geoAssessFn: _geoFilter.assess,
@@ -262,7 +287,13 @@ export const _refreshPipeline = {
       // Embedding-aware recall: in `hybrid_strict` mode the pipeline calls
       // this fn with [profileText, ...itemTexts]; absent/throwing → fail-closed.
       embedFn: (texts) => _embeddings.embed(texts),
-    }),
+      // Phase 5 semantic-tag scorer (config + scorer).  Both may be null /
+      // disabled; the pipeline degrades cleanly to the Phase 3 deterministic
+      // baseline.  Diagnostics surface the runtime state on every run.
+      semanticTagConfig: semanticConfig,
+      semanticTagScorer,
+    });
+  },
 };
 
 /**

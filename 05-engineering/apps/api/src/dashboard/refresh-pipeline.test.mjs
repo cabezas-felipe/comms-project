@@ -5081,3 +5081,197 @@ test("Phase 4 wiring: semantic uplift does NOT change funnel / admission counts 
   assert.equal(off.log.tags.topics.enabled, false);
   assert.equal(on.log.tags.topics.enabled, true);
 });
+
+// ─── Phase 5: production-scorer fail-closed + runtime state (pipeline) ──────
+//
+// These tests verify the pipeline-level guarantees that the rollout posture
+// depends on:
+//   - scorer timeout / error never breaks refresh (deterministic baseline
+//     still ships);
+//   - per-axis runtime state is surfaced through `log.tags.{topics,keywords}`
+//     so the operator can read rollout posture;
+//   - funnel counts are identical with semantic ON vs OFF, even when the
+//     scorer fails (K1a one-way invariant — semantic is post-clustering).
+
+const PHASE5_SEMANTIC_ON = Object.freeze({
+  enabled: true,
+  topicsEnabled: true,
+  keywordsEnabled: true,
+  topicsThreshold: 0.75,
+  keywordsThreshold: 0.75,
+});
+
+function makePhase5Fixture() {
+  return {
+    settings: { ...BASE_SETTINGS, keywords: [...BASE_SETTINGS.keywords, "oil"] },
+    rawItems: [
+      makeItem({
+        sourceId: "src-1",
+        outlet: "Reuters",
+        minutesAgo: 30,
+        topic: "Diplomatic relations",
+        geographies: ["US"],
+        headline: "Petroleum prices climb — sanctions context",
+        body: ["Crude refining capacity strained."],
+      }),
+    ],
+    metaStory: {
+      meta_story_id: "phase5-fixture",
+      title: "Energy roundup",
+      subtitle: "Sub.",
+      source_item_ids: ["src-1"],
+      summary: "Markets shift on supply concerns.",
+      tags: { topics: [], keywords: [], geographies: [] },
+      factual_claims: ["Reuters reports: Petroleum prices climb"],
+      claim_evidence_map: { "0": ["src-1"] },
+    },
+  };
+}
+
+test("Phase 5 wiring: scorer timeout degrades gracefully — deterministic tags still ship; runtimeState = scorer_timeout_fallback", async () => {
+  const fixture = makePhase5Fixture();
+  const { default: assertModule } = await import("node:assert/strict");
+  const { SemanticScorerTimeoutError } = await import("./meta-story-semantic-mapper.mjs");
+
+  const timeoutScorer = async () => {
+    throw new SemanticScorerTimeoutError("simulated timeout");
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: PHASE5_SEMANTIC_ON,
+    semanticTagScorer: timeoutScorer,
+  });
+  // Refresh did NOT throw — pipeline survived the scorer failure.
+  assertModule.equal(payload.stories.length, 1);
+  // Deterministic baseline still ships: source body has "sanctions" + "OFAC"
+  // -ish text would clear the Phase 3 keyword path.  Semantic uplift (oil)
+  // does NOT appear because the scorer never returned.
+  assertModule.ok(!payload.stories[0].tags.keywords.includes("oil"));
+  assertModule.equal(log.tags.keywords.runtimeState, "scorer_timeout_fallback");
+  assertModule.ok(log.tags.keywords.fallbackReasonCounts.timeout >= 1);
+});
+
+test("Phase 5 wiring: scorer generic error degrades gracefully — runtimeState = scorer_error_fallback", async () => {
+  const fixture = makePhase5Fixture();
+  const errorScorer = async () => {
+    throw new Error("provider went sideways");
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: PHASE5_SEMANTIC_ON,
+    semanticTagScorer: errorScorer,
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.ok(!payload.stories[0].tags.keywords.includes("oil"));
+  assert.equal(log.tags.keywords.runtimeState, "scorer_error_fallback");
+  assert.ok(log.tags.keywords.fallbackReasonCounts.error >= 1);
+});
+
+test("Phase 5 wiring: enabled but no scorer wired → runtimeState = enabled_no_scorer (no uplift, no errors)", async () => {
+  const fixture = makePhase5Fixture();
+  const { payload, log } = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: PHASE5_SEMANTIC_ON,
+    semanticTagScorer: null, // production scorer not wired
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.ok(!payload.stories[0].tags.keywords.includes("oil"));
+  assert.equal(log.tags.keywords.runtimeState, "enabled_no_scorer");
+  assert.equal(log.tags.keywords.fallbackReasonCounts.timeout, 0);
+  assert.equal(log.tags.keywords.fallbackReasonCounts.error, 0);
+});
+
+test("Phase 5 wiring: scorer-ready run sets runtimeState = enabled_scorer_ready and records latency", async () => {
+  const fixture = makePhase5Fixture();
+  const readyScorer = async (_evidence, label) => {
+    await new Promise((r) => setTimeout(r, 2));
+    return label.toLowerCase() === "oil" ? 0.9 : 0.1;
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: PHASE5_SEMANTIC_ON,
+    semanticTagScorer: readyScorer,
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.ok(payload.stories[0].tags.keywords.includes("oil"));
+  assert.equal(log.tags.keywords.runtimeState, "enabled_scorer_ready");
+  assert.ok(log.tags.keywords.scorerLatencyMs > 0, "latency must be recorded for the scorer-ready path");
+});
+
+test("Phase 5 wiring: funnel counts identical for scorer-OFF vs scorer-FAIL (K1a invariant under fallback)", async () => {
+  const fixture = makePhase5Fixture();
+  const off = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    // semantic OFF
+  });
+  const failScorer = async () => {
+    throw new (await import("./meta-story-semantic-mapper.mjs")).SemanticScorerTimeoutError("slow");
+  };
+  const failed = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: PHASE5_SEMANTIC_ON,
+    semanticTagScorer: failScorer,
+  });
+  // Even when the scorer fails closed, funnel counts must match the OFF run.
+  assert.deepEqual(failed.log.funnel.stages, off.log.funnel.stages);
+  assert.equal(failed.log.metaStoryCount, off.log.metaStoryCount);
+  // Geographies axis is always locked to no semantic application.
+  assert.equal(failed.log.tags.geographies.semanticApplied, false);
+});
+
+test("Phase 5 wiring: geographies stay deterministic when scorer ready (no semantic geo path, even on full success)", async () => {
+  // Aggressive scorer would happily widen anything; geographies must stay
+  // deterministic-only.  Beijing evidence + China NOT in settings → no widening.
+  const fixture = makePhase5Fixture();
+  const settingsNoChina = { ...fixture.settings, geographies: ["US", "Colombia"] };
+  const aggressiveScorer = async () => 0.99;
+  const { payload, log } = await runRefreshPipeline({
+    settings: settingsNoChina,
+    rawItems: [
+      makeItem({
+        sourceId: "src-1",
+        outlet: "Reuters",
+        minutesAgo: 30,
+        topic: "Diplomatic relations",
+        geographies: ["US"],
+        headline: "Officials in Beijing met today",
+        body: ["Diplomatic friction persists."],
+      }),
+    ],
+    clusterFn: async () => [{
+      ...fixture.metaStory,
+      title: "Diplomatic friction widens",
+      summary: "Beijing pushed back on the measures.",
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: PHASE5_SEMANTIC_ON,
+    semanticTagScorer: aggressiveScorer,
+  });
+  assert.ok(!payload.stories[0].tags.geographies.includes("China"));
+  assert.equal(log.tags.geographies.semanticApplied, false);
+});

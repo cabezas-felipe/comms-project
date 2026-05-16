@@ -1415,13 +1415,27 @@ export async function runRefreshPipeline({
     keywords: semanticKeywordsAggMut,
     geographies: { axis: "geographies", semanticApplied: false },
   };
+  // Phase 5: log line carries `runtimeState`, `scorerLatencyMs`, and
+  // `fallbackReasonCounts` per axis so an operator can read the rollout
+  // state from a single line: "is semantic on, did the scorer succeed, how
+  // slow was it, did anything time out?".  Geographies remain locked
+  // deterministic-only — that stamp is in the persisted `_meta.tags` too.
   console.log(
-    `[pipeline.tags] semantic_topics=${tagsDiagnostics.topics.enabled ? "on" : "off"}` +
-      ` accepted=${tagsDiagnostics.topics.acceptedCount} rejected=${tagsDiagnostics.topics.rejectedCount}` +
+    `[pipeline.tags]` +
+      ` semantic_topics=${tagsDiagnostics.topics.runtimeState}` +
+      ` accepted=${tagsDiagnostics.topics.acceptedCount}` +
+      ` rejected=${tagsDiagnostics.topics.rejectedCount}` +
       ` below_threshold=${tagsDiagnostics.topics.belowThresholdCount}` +
-      `  semantic_keywords=${tagsDiagnostics.keywords.enabled ? "on" : "off"}` +
-      ` accepted=${tagsDiagnostics.keywords.acceptedCount} rejected=${tagsDiagnostics.keywords.rejectedCount}` +
+      ` latency_ms=${tagsDiagnostics.topics.scorerLatencyMs}` +
+      ` timeouts=${tagsDiagnostics.topics.fallbackReasonCounts.timeout}` +
+      ` errors=${tagsDiagnostics.topics.fallbackReasonCounts.error}` +
+      `  semantic_keywords=${tagsDiagnostics.keywords.runtimeState}` +
+      ` accepted=${tagsDiagnostics.keywords.acceptedCount}` +
+      ` rejected=${tagsDiagnostics.keywords.rejectedCount}` +
       ` below_threshold=${tagsDiagnostics.keywords.belowThresholdCount}` +
+      ` latency_ms=${tagsDiagnostics.keywords.scorerLatencyMs}` +
+      ` timeouts=${tagsDiagnostics.keywords.fallbackReasonCounts.timeout}` +
+      ` errors=${tagsDiagnostics.keywords.fallbackReasonCounts.error}` +
       `  semantic_geographies=off(locked)`
   );
 

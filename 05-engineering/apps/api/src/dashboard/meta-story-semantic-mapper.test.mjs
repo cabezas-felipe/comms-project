@@ -2,10 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  RUNTIME_STATE,
+  SemanticScorerTimeoutError,
   accumulateAxisDiagnostics,
+  createEmbeddingSemanticScorer,
   emptyAggregateAxisDiagnostics,
   mapSemanticAxis,
   mapSemanticTopicsAndKeywords,
+  resolveSemanticScorerRuntimeConfig,
   resolveSemanticTagConfig,
 } from "./meta-story-semantic-mapper.mjs";
 
@@ -394,4 +398,277 @@ test("mapSemanticAxis: a never-accepting scorer rejects everything and produces 
   assert.deepEqual(accepted, []);
   assert.equal(diagnostics.candidateCount, 2);
   assert.equal(diagnostics.belowThresholdCount, 2);
+});
+
+// ─── Phase 5: runtime state + fallback categorization ───────────────────────
+//
+// `mapSemanticAxis` now surfaces a single-string `runtimeState`, per-axis
+// `scorerLatencyMs`, and `fallbackReasonCounts: {timeout, error}` so an
+// operator can read rollout posture without recombining flags.  These tests
+// pin (a) the state derivation rules, (b) timeout vs error categorization,
+// (c) latency aggregation, and (d) graceful degradation on scorer failures.
+
+test("mapSemanticAxis: runtimeState = 'disabled' when enabled flag is false", async () => {
+  const { diagnostics } = await mapSemanticAxis({
+    axis: "topics",
+    evidenceText: "Anything.",
+    allowedLabels: ["Diplomatic relations"],
+    threshold: 0.5,
+    enabled: false,
+    scorer: alwaysScorer(1),
+  });
+  assert.equal(diagnostics.runtimeState, RUNTIME_STATE.DISABLED);
+  assert.equal(diagnostics.fallbackReasonCounts.timeout, 0);
+  assert.equal(diagnostics.fallbackReasonCounts.error, 0);
+});
+
+test("mapSemanticAxis: runtimeState = 'enabled_no_scorer' when scorer is missing", async () => {
+  const { diagnostics } = await mapSemanticAxis({
+    axis: "topics",
+    evidenceText: "Talks resumed.",
+    allowedLabels: ["Diplomatic relations"],
+    threshold: 0.5,
+    enabled: true,
+    // scorer omitted
+  });
+  assert.equal(diagnostics.runtimeState, RUNTIME_STATE.ENABLED_NO_SCORER);
+});
+
+test("mapSemanticAxis: runtimeState = 'enabled_scorer_ready' on a clean run", async () => {
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb.",
+    allowedLabels: ["oil"],
+    threshold: 0.5,
+    enabled: true,
+    scorer: alwaysScorer(0.9),
+  });
+  assert.deepEqual(accepted, ["oil"]);
+  assert.equal(diagnostics.runtimeState, RUNTIME_STATE.ENABLED_SCORER_READY);
+  assert.equal(diagnostics.fallbackReasonCounts.timeout, 0);
+  assert.equal(diagnostics.fallbackReasonCounts.error, 0);
+});
+
+test("mapSemanticAxis: timeout error in scorer → runtimeState = 'scorer_timeout_fallback', deterministic baseline preserved", async () => {
+  // Mapper itself returns the deterministic-only result; the *pipeline* keeps
+  // the Phase 3 baseline ahead of it.  Here we verify the mapper categorizes
+  // the failure correctly and counts it under `timeout`.
+  const scorer = async () => {
+    throw new SemanticScorerTimeoutError("simulated");
+  };
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb.",
+    allowedLabels: ["oil", "sanctions"],
+    threshold: 0.5,
+    enabled: true,
+    scorer,
+  });
+  assert.deepEqual(accepted, [], "no semantic uplift when scorer times out");
+  assert.equal(diagnostics.runtimeState, RUNTIME_STATE.SCORER_TIMEOUT_FALLBACK);
+  assert.equal(diagnostics.fallbackReasonCounts.timeout, 2);
+  assert.equal(diagnostics.fallbackReasonCounts.error, 0);
+});
+
+test("mapSemanticAxis: generic scorer error → runtimeState = 'scorer_error_fallback'", async () => {
+  const scorer = async () => {
+    throw new Error("provider went sideways");
+  };
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Anything.",
+    allowedLabels: ["OFAC"],
+    threshold: 0.5,
+    enabled: true,
+    scorer,
+  });
+  assert.deepEqual(accepted, []);
+  assert.equal(diagnostics.runtimeState, RUNTIME_STATE.SCORER_ERROR_FALLBACK);
+  assert.equal(diagnostics.fallbackReasonCounts.error, 1);
+  assert.equal(diagnostics.fallbackReasonCounts.timeout, 0);
+});
+
+test("mapSemanticAxis: timeout dominates error in runtime state when both occur", async () => {
+  let i = 0;
+  const scorer = async () => {
+    i += 1;
+    if (i === 1) throw new Error("boom");
+    throw new SemanticScorerTimeoutError("slow");
+  };
+  const { diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb.",
+    allowedLabels: ["OFAC", "sanctions"],
+    threshold: 0.5,
+    enabled: true,
+    scorer,
+  });
+  // Both reasons counted, but the runtime state surfaces the more actionable
+  // signal (timeout > error).
+  assert.equal(diagnostics.fallbackReasonCounts.error, 1);
+  assert.equal(diagnostics.fallbackReasonCounts.timeout, 1);
+  assert.equal(diagnostics.runtimeState, RUNTIME_STATE.SCORER_TIMEOUT_FALLBACK);
+});
+
+test("mapSemanticAxis: scorerLatencyMs accumulates wall-clock time, including failed calls", async () => {
+  let i = 0;
+  const scorer = async () => {
+    i += 1;
+    // First call succeeds quickly; second call sleeps then throws timeout.
+    if (i === 1) return 0.9;
+    await new Promise((r) => setTimeout(r, 25));
+    throw new SemanticScorerTimeoutError("slow");
+  };
+  const { diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb.",
+    allowedLabels: ["oil", "sanctions"],
+    threshold: 0.5,
+    enabled: true,
+    scorer,
+  });
+  assert.ok(diagnostics.scorerLatencyMs >= 25, "failed timeout call latency must be included");
+});
+
+// ─── Aggregate diagnostics: worse-state precedence + per-reason sums ────────
+
+test("accumulateAxisDiagnostics: runtime state aggregates to the worst seen across stories", () => {
+  const ready = {
+    runtimeState: RUNTIME_STATE.ENABLED_SCORER_READY,
+    enabled: true,
+    scorerProvided: true,
+    threshold: 0.75,
+    candidateCount: 1,
+    acceptedCount: 1,
+    rejectedCount: 0,
+    belowThresholdCount: 0,
+    scorerLatencyMs: 10,
+    fallbackReasonCounts: { timeout: 0, error: 0 },
+  };
+  const errored = { ...ready, runtimeState: RUNTIME_STATE.SCORER_ERROR_FALLBACK, fallbackReasonCounts: { timeout: 0, error: 1 } };
+  const timedOut = { ...ready, runtimeState: RUNTIME_STATE.SCORER_TIMEOUT_FALLBACK, fallbackReasonCounts: { timeout: 1, error: 0 } };
+  let agg = emptyAggregateAxisDiagnostics("keywords");
+  agg = accumulateAxisDiagnostics(agg, ready);
+  agg = accumulateAxisDiagnostics(agg, errored);
+  agg = accumulateAxisDiagnostics(agg, timedOut);
+  // Worst rank wins.
+  assert.equal(agg.runtimeState, RUNTIME_STATE.SCORER_TIMEOUT_FALLBACK);
+  assert.equal(agg.fallbackReasonCounts.error, 1);
+  assert.equal(agg.fallbackReasonCounts.timeout, 1);
+  assert.equal(agg.scorerLatencyMs, 30);
+  assert.equal(agg.storyCount, 3);
+});
+
+// ─── Production scorer factory (cosine over injected embedder) ──────────────
+//
+// `createEmbeddingSemanticScorer` is the seam Phase 5 wires into server.mjs.
+// These tests inject a deterministic `embedFn` so the factory's behavior is
+// covered without any network calls.  Cosine similarity is rescaled from
+// `[-1, 1]` to `[0, 1]`.
+
+function makeStaticEmbedFn(table) {
+  // table: { [text]: number[] }
+  return async (texts) => texts.map((t) => table[t] ?? new Array(3).fill(0));
+}
+
+test("createEmbeddingSemanticScorer: identical vectors → score = 1 (cosine 1 → 1.0)", async () => {
+  const scorer = createEmbeddingSemanticScorer({
+    embedFn: makeStaticEmbedFn({
+      "Petroleum prices climb.": [1, 0, 0],
+      oil: [1, 0, 0],
+    }),
+  });
+  const score = await scorer("Petroleum prices climb.", "oil");
+  assert.ok(score > 0.999 && score <= 1, `expected ≈1, got ${score}`);
+});
+
+test("createEmbeddingSemanticScorer: orthogonal vectors → score = 0.5 (cosine 0 → 0.5 after rescale)", async () => {
+  const scorer = createEmbeddingSemanticScorer({
+    embedFn: makeStaticEmbedFn({ x: [1, 0, 0], y: [0, 1, 0] }),
+  });
+  const score = await scorer("x", "y");
+  assert.ok(score > 0.49 && score < 0.51, `expected ≈0.5, got ${score}`);
+});
+
+test("createEmbeddingSemanticScorer: truncates evidence text to maxEvidenceChars before embedding", async () => {
+  const seenTexts = [];
+  const embedFn = async (texts) => {
+    seenTexts.push(...texts);
+    return texts.map(() => [1, 0]);
+  };
+  const scorer = createEmbeddingSemanticScorer({ embedFn, maxEvidenceChars: 10 });
+  await scorer("x".repeat(100), "oil");
+  // First text passed to embedFn should be the truncated evidence.
+  assert.equal(seenTexts[0].length, 10);
+});
+
+test("createEmbeddingSemanticScorer: memoizes evidence + label vectors across calls", async () => {
+  let callCount = 0;
+  const embedFn = async (texts) => {
+    callCount += 1;
+    return texts.map(() => [1, 0]);
+  };
+  const scorer = createEmbeddingSemanticScorer({ embedFn });
+  await scorer("evidence-a", "oil");
+  await scorer("evidence-a", "oil"); // both cached → no second embedFn call
+  assert.equal(callCount, 1, "second probe with same inputs must hit cache");
+  await scorer("evidence-a", "sanctions"); // new label → one more call
+  assert.equal(callCount, 2);
+});
+
+test("createEmbeddingSemanticScorer: throws SemanticScorerTimeoutError on slow embedFn", async () => {
+  const embedFn = async () => {
+    await new Promise((r) => setTimeout(r, 50));
+    return [[1, 0]];
+  };
+  const scorer = createEmbeddingSemanticScorer({ embedFn, timeoutMs: 5 });
+  await assert.rejects(() => scorer("evidence", "oil"), SemanticScorerTimeoutError);
+});
+
+test("createEmbeddingSemanticScorer: malformed embedFn response → generic Error (categorized as 'error', not 'timeout')", async () => {
+  const embedFn = async () => "not an array";
+  const scorer = createEmbeddingSemanticScorer({ embedFn });
+  await assert.rejects(
+    () => scorer("evidence", "oil"),
+    (err) => err instanceof Error && !(err instanceof SemanticScorerTimeoutError)
+  );
+});
+
+test("createEmbeddingSemanticScorer: throws on construction when embedFn is not a function", () => {
+  assert.throws(() => createEmbeddingSemanticScorer({ embedFn: null }), /embedFn must be a function/);
+});
+
+// ─── resolveSemanticScorerRuntimeConfig ─────────────────────────────────────
+
+test("resolveSemanticScorerRuntimeConfig: defaults are sane (1500ms timeout, 4000-char evidence cap)", () => {
+  const cfg = resolveSemanticScorerRuntimeConfig({});
+  assert.equal(cfg.timeoutMs, 1500);
+  assert.equal(cfg.maxEvidenceChars, 4000);
+});
+
+test("resolveSemanticScorerRuntimeConfig: env overrides parse positive integers", () => {
+  const cfg = resolveSemanticScorerRuntimeConfig({
+    TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS: "500",
+    TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS: "200",
+  });
+  assert.equal(cfg.timeoutMs, 500);
+  assert.equal(cfg.maxEvidenceChars, 200);
+});
+
+test("resolveSemanticScorerRuntimeConfig: out-of-range / non-numeric env values fall back to defaults", () => {
+  const cfg = resolveSemanticScorerRuntimeConfig({
+    TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS: "-1",
+    TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS: "abc",
+  });
+  assert.equal(cfg.timeoutMs, 1500);
+  assert.equal(cfg.maxEvidenceChars, 4000);
+});
+
+test("resolveSemanticScorerRuntimeConfig: overrides shortcut env reads", () => {
+  const cfg = resolveSemanticScorerRuntimeConfig(
+    { TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS: "999" },
+    { timeoutMs: 250, maxEvidenceChars: 50 }
+  );
+  assert.equal(cfg.timeoutMs, 250);
+  assert.equal(cfg.maxEvidenceChars, 50);
 });
