@@ -314,14 +314,14 @@ async function scenarioSourceScopedRelevance() {
 }
 
 async function scenarioEmptyProfileLexicalPath() {
-  // Sparse settings: only sources + keywords (no topics/geo/narrative).
-  // buildProfileText returns non-empty (sources + keywords axes), so this is
-  // NOT the E3b empty-profile path — for E3b, we strip everything.
-  // To hit E3b cleanly: empty topics+keywords+geographies+sources+narrative.
-  // But empty sources triggers C2 fail-closed BEFORE recall. So the scenario
-  // that exercises E3b at the recall level is the lexical-only-via-empty-
-  // profile path AFTER source selection has matched at least one outlet.
-  // We use sources for source selection but otherwise leave the profile empty.
+  // Intentionally narrow profile (only keywords + sources) so the recall
+  // stage exercises its lexical-only path.  A fully empty profile is not
+  // reachable here: empty traditionalSources+socialSources trips C2
+  // fail-closed BEFORE recall, so we must keep one source to clear the gate.
+  // The assertion below only requires that lexical hits surface — whether
+  // `recall.degraded` ends up true (profile text empty) or false (sources
+  // axis contributed text) doesn't matter, as long as the run is NOT an
+  // embedding-failure cliff.
   const settings = {
     contractVersion: "2026-04-22-slice1",
     topics: [],
@@ -330,15 +330,6 @@ async function scenarioEmptyProfileLexicalPath() {
     traditionalSources: ["Reuters"],
     socialSources: [],
   };
-  // Stub buildProfileText to return empty by setting all the axes the function
-  // checks to empty/whitespace — except sources, which we need for selection.
-  // The recall stage's `buildProfileText` reads from settings — to force the
-  // empty-profile branch we instead pass settings that produce an empty
-  // profile text. Sources DO contribute to profile text, so we can't fully
-  // null it without also tripping C2. Instead, run scenario with a profile
-  // that is intentionally narrow to exercise the lexical-only path, and
-  // assert that lexical hits are surfaced regardless of recall's `degraded`
-  // flag (which may be false here since the profile is non-empty after all).
   const rawItems = [
     makeItem({
       sourceId: "lex-1",

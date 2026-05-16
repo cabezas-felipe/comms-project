@@ -178,21 +178,20 @@ function canonicalizeTopic(topic) {
 // Never used as a gate — model-emitted open-vocab topics flow through
 // untouched.
 function deriveTopicHints(text) {
-  const lower = text.toLowerCase();
   const hints = [];
   if (/\bmigration\b/i.test(text)) hints.push("Migration policy");
-  if (/\bdeportation\b/i.test(text) && !/\bhumanitarian\b/i.test(lower)) {
+  if (/\bdeportation\b/i.test(text) && !/\bhumanitarian\b/i.test(text)) {
     hints.push("Deportation policy");
   }
   if (/\bborder\b/i.test(text) || /\b(cbp|dhs|ice)\b/i.test(text)) hints.push("Border policy");
   if (/\bsecurity\b/i.test(text)) hints.push("Security policy");
   if (/\bpublic health\b/i.test(text)) hints.push("Public health");
   if (/\btariffs?\b/i.test(text) || /\btrade\b/i.test(text)) hints.push("Trade policy");
-  if (/\bhealth ngo\b/i.test(lower)) hints.push("Health policy");
-  if (/\boutbreak\b/i.test(lower) || /\bvaccine\b/i.test(lower)) {
+  if (/\bhealth ngo\b/i.test(text)) hints.push("Health policy");
+  if (/\boutbreak\b/i.test(text) || /\bvaccine\b/i.test(text)) {
     hints.push("International health");
   }
-  if (/\btrade\b/i.test(lower) && /\bacross\b/i.test(lower)) {
+  if (/\btrade\b/i.test(text) && /\bacross\b/i.test(text)) {
     hints.push("International trade");
   }
   return hints;
@@ -214,8 +213,6 @@ function whoAppearsAsTextNotHandle(text) {
 }
 
 function sanitizeKeywords(rawKeywords, text) {
-  const lower = text.toLowerCase();
-
   const fromModel = applyHygiene(rawKeywords, "keywords").map(normalizeKeywordLabel);
 
   const fromText = KEYWORD_PATTERNS
@@ -224,8 +221,8 @@ function sanitizeKeywords(rawKeywords, text) {
 
   // Handle-derived keyword enrichment. These are additive; the model is free
   // to surface its own keywords whether or not the handle hint fires.
-  if (/@icegov\b/i.test(lower)) fromText.push("ICE");
-  if (/@diancolombia\b/i.test(lower) && /\bcustoms policy\b/i.test(lower)) {
+  if (/@icegov\b/i.test(text)) fromText.push("ICE");
+  if (/@diancolombia\b/i.test(text) && /\bcustoms policy\b/i.test(text)) {
     fromText.push("DIAN");
   }
 
