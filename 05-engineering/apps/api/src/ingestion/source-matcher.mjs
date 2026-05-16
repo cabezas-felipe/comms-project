@@ -3,7 +3,7 @@
 // Resolves the user's selected source names (from settings.traditionalSources +
 // settings.socialSources) against the ingestion manifest, applying:
 //   1. Alias mapping (canonical aliases from Supabase registry when available;
-//      otherwise repo's SOURCE_NAME_ALIASES from @tempo/contracts).
+//      otherwise repo's SOURCE_NAME_ALIASES from ../contracts-runtime).
 //   2. Normalization (lowercase, drop "the ", strip punctuation, collapse spaces).
 //   3. Substring matching against normalized feed names — so a publisher-level
 //      selection like "Washington Post" matches every section feed (Politics,
@@ -16,7 +16,7 @@
 // Returns rich selection metadata so the route handler can surface it through
 // `_meta.selection` for telemetry + frontend status cues.
 
-import { SOURCE_NAME_ALIASES } from "@tempo/contracts";
+import { SOURCE_NAME_ALIASES } from "../contracts-runtime/index.mjs";
 
 // Connector kinds that have an implemented ingestion path.  Extend this set
 // when new connectors land (e.g. social scraping in Phase 4).

@@ -2,6 +2,51 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-16 - D-053 - Vercel API runtime stability Option A: remove workspace-package runtime dependency
+
+#### Context
+
+- `tempo-api` production (`tempo-gray-psi.vercel.app`) returned `500` with `ERR_MODULE_NOT_FOUND` immediately after a successful build.
+- The failing path imports `@tempo/contracts` from API runtime code, while `@tempo/contracts` resolves to `dist/index.js`. In Vercel builds, workspace package `dist` artifacts can be absent or drift from runtime assumptions.
+- A tactical guard (`postinstall` building workspace packages) can unblock short-term deploys, but this still leaves runtime coupled to build-order details.
+
+#### Decision
+
+Adopt **Option A** for the durable fix: API runtime code must not depend on workspace package build artifacts. Keep `@tempo/contracts` package use for tests/tooling only where appropriate.
+
+Implementation direction:
+
+- Move API runtime imports from `@tempo/contracts` to a local source-of-truth module under `apps/api/src/contracts-runtime/` (or equivalent) that exports only what runtime needs.
+- Ensure runtime uses source files checked into the API project, not generated `dist` from another workspace package.
+- Keep contract compatibility by reusing existing schemas/types semantics; no payload shape changes in this slice.
+
+#### Why
+
+- Removes the highest-risk failure mode for production (`ERR_MODULE_NOT_FOUND` from missing package build output).
+- Makes deployment deterministic: runtime correctness no longer depends on workspace build orchestration.
+- Reduces rollback risk during test windows with actual users.
+
+#### Tradeoffs
+
+- Introduces duplicate logic pressure if shared contract behavior diverges; requires parity checks/tests.
+- Slightly larger API code surface because runtime-safe contract helpers are local.
+- Follow-up cleanup needed to keep package and API runtime contract paths aligned.
+
+#### Low-risk rollout sequence
+
+1. **Branch-only hardening:** implement Option A behind no feature flags and no external behavior changes.
+2. **Parity tests:** add/extend tests asserting runtime schemas/normalizers match current contract behavior.
+3. **Preview deploy verification:** validate `/health`, `/api/settings`, `/api/dashboard` on preview before production.
+4. **Production deploy gate:** promote only after smoke checks pass and runtime logs show no module-resolution errors for 30-60 minutes.
+5. **Post-cutover cleanup:** the tactical `postinstall` workaround mentioned in Context was never applied — Option A made it unnecessary, so no rollback is needed.
+
+#### Consequences
+
+- API deployments become less sensitive to Vercel workspace build quirks.
+- Future contract-sharing changes must treat runtime safety as a first-class requirement.
+
+---
+
 ### 2026-05-16 - D-052 - Trust cleanup Phase 7: rollout hardening + operational guardrails (cancellation, kill switch, telemetry, debug endpoint)
 
 #### Context

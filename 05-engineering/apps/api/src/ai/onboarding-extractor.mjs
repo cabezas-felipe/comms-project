@@ -49,7 +49,7 @@
 
 import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
-import { normalizeKeywordLabel, normalizeSourceName, normalizeTopicLabel } from "@tempo/contracts";
+import { normalizeKeywordLabel, normalizeSourceName, normalizeTopicLabel } from "../contracts-runtime/index.mjs";
 import { providerFor } from "./model-router.mjs";
 import { withTimeout } from "./guardrails.mjs";
 

@@ -3,7 +3,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
-import { settingsPayloadSchema } from "./contracts/settings-schema.mjs";
 import {
   getAiCapabilityMap,
   getAiMetrics,
@@ -40,7 +39,13 @@ import { parseFallbackFeedIdsEnv, parseFallbackEnabledEnv } from "./ingestion/so
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
 import { appendOnboardingNarrative, readCurrentOnboardingNarrative } from "./db/narrative-repo.mjs";
 import { atomicSaveSettingsAndNarrative } from "./db/atomic-settings-save.mjs";
-import { normalizeTopicLabel, normalizeKeywordLabel, normalizeSourceName, dashboardPayloadSchema } from "@tempo/contracts";
+import {
+  normalizeTopicLabel,
+  normalizeKeywordLabel,
+  normalizeSourceName,
+  dashboardPayloadSchema,
+  settingsPayloadSchema,
+} from "./contracts-runtime/index.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

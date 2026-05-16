@@ -34,7 +34,7 @@ import {
   GEOGRAPHY_ALIASES,
   normalizeTopicLabel,
   resolveGeographyAlias,
-} from "@tempo/contracts";
+} from "../contracts-runtime/index.mjs";
 import {
   mapSemanticTopicsAndKeywords,
   resolveSemanticTagConfig,
@@ -189,8 +189,9 @@ function assignKeywords(evidenceText, settingsKeywords) {
 //       settings entry when the alias surface form appears in the bundle.
 //
 // (c) is the new Phase 3 capability.  The alias map and settings gate live in
-// `@tempo/contracts/src/geography-aliases.ts` so both server and tests share
-// a single source of truth.
+// `../contracts-runtime/geography-aliases.mjs` (mirrored from
+// `@tempo/contracts/src/geography-aliases.ts`) so server runtime stays free of
+// build-artifact dependencies; a parity test enforces equivalence.
 
 function assignGeographies(evidenceText, sourceItems, settingsGeographies) {
   if (settingsGeographies.length === 0) return [];

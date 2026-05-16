@@ -1,4 +1,4 @@
-import { normalizeTopicLabel, normalizeKeywordLabel, normalizeSourceName } from "@tempo/contracts";
+import { normalizeTopicLabel, normalizeKeywordLabel, normalizeSourceName } from "../../contracts-runtime/index.mjs";
 
 /**
  * Build and validate the telemetry payload for onboarding_extraction_scored.

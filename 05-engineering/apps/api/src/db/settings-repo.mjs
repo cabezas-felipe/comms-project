@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertSupabaseEnv, getSupabaseClient } from "./client.mjs";
-import { CONTRACT_VERSION } from "../contracts/settings-schema.mjs";
+import { CONTRACT_VERSION } from "../contracts-runtime/index.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,7 +16,7 @@ const PACKAGE_ROOT = path.resolve(__dirname, "../..");
 // nothing has been chosen yet and the pipeline operates against an empty
 // vocabulary until the user opts in.
 export const DEFAULT_SETTINGS = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: CONTRACT_VERSION,
   topics: [],
   keywords: [],
   geographies: [],

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { settingsPayloadSchema } from "@tempo/contracts";
+import { settingsPayloadSchema } from "./contracts-runtime/index.mjs";
 
 const VALID_BODY = {
   contractVersion: "2026-04-22-slice1",
