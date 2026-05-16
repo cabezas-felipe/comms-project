@@ -778,3 +778,171 @@ test("invariant I5: above-threshold pass-through is unchanged (no rescue flag, n
   );
   assert.equal(summary.rescuedCount, 0);
 });
+
+// ─── Semantic intent blending (Option A) ─────────────────────────────────────
+//
+// The deterministic scorer keeps its full reason-code surface; the blend just
+// rewrites the final score and adds extra trace codes so an operator can spot
+// when semantic moved the needle.
+
+test("scoreBeatFit: no semanticIntentScore on item → deterministic score is unchanged", () => {
+  const item = makeRssItem({
+    sourceId: "no-semantic",
+    headline: INCLUDE_HEADLINE,
+    body: ["WASHINGTON — The Pentagon confirmed two strikes."],
+  });
+  const result = scoreBeatFit(item, COMMS_SETTINGS);
+  assert.equal(result.blendApplied, false);
+  assert.equal(result.semanticIntentScore, null);
+  assert.equal(result.score, result.deterministicScore);
+  assert.ok(
+    !result.reasonCodes.some((c) => c.startsWith("semantic_intent_")),
+    "no semantic input → no semantic reason codes"
+  );
+});
+
+test("scoreBeatFit: blend = deterministic * 0.65 + semantic * 0.35 to within rounding", () => {
+  const item = makeRssItem({
+    sourceId: "blended",
+    headline: INCLUDE_HEADLINE,
+    body: ["WASHINGTON — The Pentagon confirmed two strikes."],
+    semanticIntentScore: 0.5,
+  });
+  const result = scoreBeatFit(item, COMMS_SETTINGS);
+  assert.equal(result.blendApplied, true);
+  const expected = result.deterministicScore * 0.65 + 0.5 * 0.35;
+  assert.ok(
+    Math.abs(result.score - expected) < 1e-9,
+    `expected ${expected}, got ${result.score}`
+  );
+  assert.equal(result.breakdown.deterministicWeighted, result.deterministicScore * 0.65);
+  assert.equal(result.breakdown.semanticIntentWeighted, 0.5 * 0.35);
+  assert.ok(result.reasonCodes.some((c) => c.startsWith("semantic_intent_score:")));
+});
+
+test("scoreBeatFit: blend stays in [0, 1] even when both inputs are at extremes", () => {
+  const item = makeRssItem({
+    headline: "Asia farmers wheat soy livestock fertilizer commodity",
+    semanticIntentScore: 1,
+  });
+  const result = scoreBeatFit(item, COMMS_SETTINGS);
+  assert.ok(result.score >= 0 && result.score <= 1);
+});
+
+test("scoreBeatFit: out-of-range semanticIntentScore is clamped before blending", () => {
+  const r1 = scoreBeatFit(
+    makeRssItem({ headline: INCLUDE_HEADLINE, semanticIntentScore: 5 }),
+    COMMS_SETTINGS
+  );
+  const r2 = scoreBeatFit(
+    makeRssItem({ headline: INCLUDE_HEADLINE, semanticIntentScore: -2 }),
+    COMMS_SETTINGS
+  );
+  assert.equal(r1.semanticIntentScore, 1);
+  assert.equal(r2.semanticIntentScore, 0);
+});
+
+test("scoreBeatFit: non-finite semantic input is ignored (treated as missing)", () => {
+  const result = scoreBeatFit(
+    makeRssItem({ headline: INCLUDE_HEADLINE, semanticIntentScore: Number.NaN }),
+    COMMS_SETTINGS
+  );
+  assert.equal(result.blendApplied, false);
+  assert.equal(result.semanticIntentScore, null);
+});
+
+test("scoreBeatFit: semanticBlendEnabled=false bypasses blend even when score is present", () => {
+  const result = scoreBeatFit(
+    makeRssItem({ headline: INCLUDE_HEADLINE, semanticIntentScore: 0.95 }),
+    COMMS_SETTINGS,
+    { semanticBlendEnabled: false }
+  );
+  assert.equal(result.blendApplied, false);
+  assert.equal(result.score, result.deterministicScore);
+});
+
+test("scoreBeatFit: strong semantic score adds 'semantic_intent_strong' reason code", () => {
+  const result = scoreBeatFit(
+    makeRssItem({ headline: INCLUDE_HEADLINE, semanticIntentScore: 0.8 }),
+    COMMS_SETTINGS
+  );
+  assert.ok(result.reasonCodes.includes("semantic_intent_strong"));
+});
+
+test("scoreBeatFit: weak-deterministic + strong semantic → 'semantic_intent_lift_over_threshold' code", () => {
+  // Sub-threshold deterministic baseline (single keyword hit + recency) gets
+  // lifted across the threshold by a strong semantic input. Pinning the lift
+  // arithmetic here so a refactor of either component surfaces immediately.
+  const item = makeRssItem({
+    sourceId: "weak-det-strong-sem",
+    // Single configured keyword fires (+0.20) and recency adds ~0.10 — total
+    // deterministic ~0.30, comfortably below the 0.40 threshold.
+    headline: "Sanctions update issued today by an unnamed authority",
+    body: [""],
+    topic: "Other",
+    geographies: [],
+    minutesAgo: 30,
+    semanticIntentScore: 0.95,
+  });
+  const result = scoreBeatFit(item, COMMS_SETTINGS);
+  assert.ok(
+    result.deterministicScore < BEAT_FIT_THRESHOLD,
+    `expected deterministic ${result.deterministicScore} < ${BEAT_FIT_THRESHOLD}`
+  );
+  assert.ok(
+    result.score >= BEAT_FIT_THRESHOLD,
+    `expected blended ${result.score} >= ${BEAT_FIT_THRESHOLD}`
+  );
+  assert.ok(result.reasonCodes.includes("semantic_intent_lift_over_threshold"));
+});
+
+test("applyBeatFitFilter: semantic blend rollup counts lift / missing across the batch", () => {
+  const items = [
+    // No semantic on the item → blend missing.
+    makeRssItem({
+      sourceId: "no-semantic",
+      headline: INCLUDE_HEADLINE,
+      body: ["WASHINGTON — Pentagon confirms strikes."],
+    }),
+    // Single keyword (+0.20) + recency lift (~0.10) → ~0.30 deterministic
+    // (below threshold). Strong semantic crosses the 0.40 line — counted as
+    // both blend-applied and a lift.
+    makeRssItem({
+      sourceId: "lift",
+      headline: "Sanctions update issued today by an unnamed authority",
+      body: [""],
+      topic: "Other",
+      geographies: [],
+      minutesAgo: 30,
+      semanticIntentScore: 0.98,
+    }),
+  ];
+  const { summary } = applyBeatFitFilter(items, COMMS_SETTINGS);
+  assert.equal(summary.semanticBlendEnabled, true);
+  assert.equal(summary.semanticBlendMissingCount, 1);
+  assert.equal(summary.semanticBlendAppliedCount, 1);
+  assert.ok(summary.semanticLiftOverThresholdCount >= 1);
+});
+
+test("applyBeatFitFilter: opts.semanticBlendEnabled=false short-circuits blending across the batch", () => {
+  // Single keyword + recency = ~0.30 deterministic; semantic 0.99 would lift
+  // it past threshold under the default blend. With the kill-switch opt set,
+  // blending is bypassed and the item stays excluded.
+  const items = [
+    makeRssItem({
+      sourceId: "would-lift",
+      headline: "Sanctions update issued today by an unnamed authority",
+      body: [""],
+      topic: "Other",
+      geographies: [],
+      minutesAgo: 30,
+      semanticIntentScore: 0.99,
+    }),
+  ];
+  const { included, summary } = applyBeatFitFilter(items, COMMS_SETTINGS, {
+    semanticBlendEnabled: false,
+  });
+  assert.equal(summary.semanticBlendEnabled, false);
+  assert.equal(summary.semanticBlendAppliedCount, 0);
+  assert.equal(included.length, 0);
+});

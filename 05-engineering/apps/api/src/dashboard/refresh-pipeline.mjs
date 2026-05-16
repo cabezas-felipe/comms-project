@@ -26,6 +26,12 @@ import {
   resolveRecallConfig,
   runEmbeddingRecall,
 } from "../ingestion/embedding-recall.mjs";
+import {
+  SEMANTIC_BEAT_FIT_VERSION,
+  attachSemanticScores,
+  computeSemanticBeatFitScores,
+  resolveSemanticBeatFitConfig,
+} from "./semantic-beat-fit.mjs";
 import { dedupeSourceItems } from "../ingestion/source-deduper.mjs";
 import { assignMetaStoryTags, assignMetaStoryTagsDetailed } from "./meta-story-tags.mjs";
 import {
@@ -831,9 +837,26 @@ export async function runRefreshPipeline({
   // [`meta-story-tags.mjs`](./meta-story-tags.mjs) for the Phase 4 scope.
   semanticTagConfig = null,
   semanticTagScorer = null,
+  // Option A — semantic BeatFit configuration + scorer wiring.
+  // `semanticBeatFitConfig` falls through to env (default ENABLED).
+  // `semanticBeatFitEmbedFn` falls through to `embedFn` so callers can wire
+  // one embedder for both recall widening and semantic BeatFit; tests inject
+  // a distinct deterministic stub when they want to assert the two stages
+  // independently.
+  // `semanticBeatFitProfileCache` lets tests pass an isolated cache to avoid
+  // leaking profile vectors across cases.
+  semanticBeatFitConfig = null,
+  semanticBeatFitEmbedFn = null,
+  semanticBeatFitProfileCache = null,
 }) {
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
+  const effectiveSemanticBeatFitConfig =
+    semanticBeatFitConfig ?? resolveSemanticBeatFitConfig();
+  const effectiveSemanticBeatFitEmbedFn =
+    typeof semanticBeatFitEmbedFn === "function"
+      ? semanticBeatFitEmbedFn
+      : embedFn;
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
   if (normErrors.length > 0) {
@@ -988,6 +1011,45 @@ export async function runRefreshPipeline({
     console.log(`[pipeline] ${geoHeldItems.length} item(s) in geo hold bucket after this refresh`);
   }
 
+  // 4c. Semantic intent scoring (Option A — semantic BeatFit uplift).
+  //
+  //     Runs over ALL post-geo candidates (deliberately *before* the recall
+  //     stage narrows) so the blended BeatFit score later has access to a
+  //     semantic signal for every item that reached this point — not just the
+  //     ones lexical recall passed.
+  //
+  //     The stage is fully optional: when disabled, mid-run kill-switched,
+  //     or unable to embed (no fn / provider error / timeout), the function
+  //     returns an empty score map and the items pass through unchanged.
+  //     The BeatFit scorer then runs in pure deterministic mode for the rest
+  //     of the refresh (graceful degradation, no broken snapshot).
+  const semanticBeatFitResult = await computeSemanticBeatFitScores({
+    items: geoPassedItems,
+    settings,
+    embedFn: effectiveSemanticBeatFitEmbedFn,
+    config: effectiveSemanticBeatFitConfig,
+    profileCache: semanticBeatFitProfileCache ?? undefined,
+  });
+  const semanticBeatFitDiagnostics = semanticBeatFitResult.diagnostics;
+  const semanticAnnotatedGeoItems = attachSemanticScores(
+    geoPassedItems,
+    semanticBeatFitResult.scoresBySourceId
+  );
+  console.log(
+    `[pipeline.semantic-beat-fit] version=${SEMANTIC_BEAT_FIT_VERSION}` +
+      ` enabled=${semanticBeatFitDiagnostics.enabled}` +
+      ` model=${semanticBeatFitDiagnostics.model ?? "n/a"}` +
+      ` candidates=${geoPassedItems.length}` +
+      ` scored=${semanticBeatFitDiagnostics.scoredCount}` +
+      ` skipped=${semanticBeatFitDiagnostics.skippedCount}` +
+      ` cache_hit=${semanticBeatFitDiagnostics.profileCacheHit}` +
+      ` latency_ms=${semanticBeatFitDiagnostics.latencyMs}` +
+      ` mean=${semanticBeatFitDiagnostics.meanScore == null ? "n/a" : semanticBeatFitDiagnostics.meanScore.toFixed(3)}` +
+      (semanticBeatFitDiagnostics.degraded
+        ? ` degraded=true reason=${semanticBeatFitDiagnostics.degradedReason}`
+        : "")
+  );
+
   // 5. Recall stage (embedding-aware).
   //
   //    Legacy keyword/topic filter still runs first so we never narrow recall
@@ -1004,8 +1066,11 @@ export async function runRefreshPipeline({
   // "neither matched" — the four causes operators ask about when a clearly
   // relevant story is missing from the dashboard.  Counts are mutually
   // exclusive and add up to inputCount.
-  const topicKeywordBreakdown = analyzeTopicKeywordStage(geoPassedItems, settings);
-  const keywordRecallItems = applyTopicKeywordFilter(geoPassedItems, settings);
+  // Use the semantically-annotated set from here on so every downstream item
+  // carries its `semanticIntentScore` (when scored) into the recall, beat-fit,
+  // and clustering stages.
+  const topicKeywordBreakdown = analyzeTopicKeywordStage(semanticAnnotatedGeoItems, settings);
+  const keywordRecallItems = applyTopicKeywordFilter(semanticAnnotatedGeoItems, settings);
   console.log(
     `[pipeline.topic-keyword] input=${topicKeywordBreakdown.inputCount}` +
       ` topicOnly=${topicKeywordBreakdown.topicOnly}` +
@@ -1021,7 +1086,7 @@ export async function runRefreshPipeline({
   );
 
   const recallResult = await runEmbeddingRecall({
-    candidateItems: geoPassedItems,
+    candidateItems: semanticAnnotatedGeoItems,
     settings,
     keywordRecallItems,
     embedFn,
@@ -1086,6 +1151,12 @@ export async function runRefreshPipeline({
         rescuedCount: 0,
         rescueBlockedPenaltyCount: 0,
         rescueBlockedInsufficientSignalsCount: 0,
+        semanticBlendEnabled: false,
+        semanticBlendAppliedCount: 0,
+        semanticBlendMissingCount: 0,
+        semanticLiftOverThresholdCount: 0,
+        semanticDropBelowThresholdCount: 0,
+        excludedWithSemanticPresentCount: 0,
       },
     };
   }
@@ -1197,7 +1268,14 @@ export async function runRefreshPipeline({
           includedCount: beatFitResult.summary.includedCount,
           excludedCount: beatFitResult.summary.excludedCount,
           excludeReasonHistogram: beatFitResult.summary.excludeReasonHistogram,
+          semanticBlendEnabled: beatFitResult.summary.semanticBlendEnabled,
+          semanticBlendAppliedCount: beatFitResult.summary.semanticBlendAppliedCount,
+          semanticBlendMissingCount: beatFitResult.summary.semanticBlendMissingCount,
+          semanticLiftOverThresholdCount: beatFitResult.summary.semanticLiftOverThresholdCount,
+          semanticDropBelowThresholdCount: beatFitResult.summary.semanticDropBelowThresholdCount,
+          excludedWithSemanticPresentCount: beatFitResult.summary.excludedWithSemanticPresentCount,
         },
+        semanticBeatFit: semanticBeatFitDiagnostics,
         dedupe: {
           inputCount: relevantItems.length,
           uniqueCount: dedupedItems.length,
@@ -1490,7 +1568,21 @@ export async function runRefreshPipeline({
       includedCount: beatFitResult.summary.includedCount,
       excludedCount: beatFitResult.summary.excludedCount,
       excludeReasonHistogram: beatFitResult.summary.excludeReasonHistogram,
+      // Option A — semantic blend rollup carried through to _meta so an
+      // operator can answer "did semantic actually move the needle this
+      // refresh?" without running a counterfactual.
+      semanticBlendEnabled: beatFitResult.summary.semanticBlendEnabled,
+      semanticBlendAppliedCount: beatFitResult.summary.semanticBlendAppliedCount,
+      semanticBlendMissingCount: beatFitResult.summary.semanticBlendMissingCount,
+      semanticLiftOverThresholdCount: beatFitResult.summary.semanticLiftOverThresholdCount,
+      semanticDropBelowThresholdCount: beatFitResult.summary.semanticDropBelowThresholdCount,
+      excludedWithSemanticPresentCount: beatFitResult.summary.excludedWithSemanticPresentCount,
     },
+    // Option A — semantic stage diagnostics: latency, cache hit/miss, model,
+    // per-bucket distribution, and any degraded reason. Surfaced under its
+    // own `_meta.semanticBeatFit` key so the scorer log and the stage log
+    // are independently inspectable.
+    semanticBeatFit: semanticBeatFitDiagnostics,
     // Cross-feed dedupe metrics — `inputCount` is the post-beat-fit candidate
     // pool, `uniqueCount` what clustering actually saw, `collapsedCount` the
     // number of duplicate-article folds.  Operator-facing only; never

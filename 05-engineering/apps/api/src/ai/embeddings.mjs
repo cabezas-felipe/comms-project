@@ -66,7 +66,7 @@ function isTransientError(err) {
  *   TEMPO_EMBED_MAX_ATTEMPTS       default: 2 (1 + 1 retry)
  *   TEMPO_EMBED_RETRY_DELAY_MS     default: 250
  */
-export async function embedTexts(texts, { signal } = {}) {
+export async function embedTexts(texts, { signal, model: modelOverride } = {}) {
   const arr = Array.isArray(texts) ? texts : [];
   if (arr.length === 0) return [];
 
@@ -81,7 +81,13 @@ export async function embedTexts(texts, { signal } = {}) {
   if (!apiKey) {
     throw new Error("TEMPO_OPENAI_API_KEY (or OPENAI_API_KEY) required for embeddings");
   }
-  const model = process.env.TEMPO_OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
+  // Per-call `model` override wins so the semantic-BeatFit stage can request
+  // text-embedding-3-large while the recall stage stays on
+  // text-embedding-3-small (the env default).
+  const model =
+    typeof modelOverride === "string" && modelOverride.length > 0
+      ? modelOverride
+      : process.env.TEMPO_OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
   const timeoutMs = Number(process.env.TEMPO_EMBED_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
   const maxAttempts = Math.max(
     1,
