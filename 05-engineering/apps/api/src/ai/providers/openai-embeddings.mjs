@@ -7,13 +7,24 @@
 
 const DEFAULT_ENDPOINT = "https://api.openai.com/v1/embeddings";
 
-export async function embedTextsWithOpenAI({ apiKey, model, texts, timeoutMs }) {
+export async function embedTextsWithOpenAI({ apiKey, model, texts, timeoutMs, signal }) {
   if (!apiKey) throw new Error("embedTextsWithOpenAI: apiKey is required");
   if (!Array.isArray(texts) || texts.length === 0) return [];
 
   const endpoint = process.env.TEMPO_OPENAI_EMBEDDINGS_URL || DEFAULT_ENDPOINT;
+  // Phase 7: end-to-end cancellation.  The internal AbortController still
+  // owns the per-request timeout; we additionally listen to an external
+  // `signal` (the semantic-scorer wrapper's signal) so a caller-initiated
+  // abort actually cancels the in-flight HTTP request instead of just
+  // resolving the surrounding Promise race.  Either source firing aborts
+  // the controller exactly once.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const externalOnAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", externalOnAbort, { once: true });
+  }
   try {
     const response = await fetch(endpoint, {
       method: "POST",
@@ -50,5 +61,6 @@ export async function embedTextsWithOpenAI({ apiKey, model, texts, timeoutMs }) 
     return out;
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", externalOnAbort);
   }
 }

@@ -27,6 +27,13 @@ import {
   runEmbeddingRecall,
 } from "../ingestion/embedding-recall.mjs";
 import { dedupeSourceItems } from "../ingestion/source-deduper.mjs";
+import { assignMetaStoryTags, assignMetaStoryTagsDetailed } from "./meta-story-tags.mjs";
+import {
+  TAGS_DIAGNOSTICS_SCHEMA_VERSION,
+  accumulateAxisDiagnostics,
+  emptyAggregateAxisDiagnostics,
+  resolveSemanticTagConfig,
+} from "./meta-story-semantic-mapper.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -314,36 +321,15 @@ function buildDecisionTrace({ stageCounts, beatFitResult }) {
 const VALID_GEOGRAPHIES = new Set(geographySchema.options);
 const VALID_TOPICS = new Set(topicSchema.options);
 
-// ─── Settings-only + evidence-backed tag governance ──────────────────────────
+// ─── Legacy tag-governance helpers (back-compat) ─────────────────────────────
 //
-// Final story tags must satisfy BOTH:
-//   (1) settings vocabulary — each axis ⊆ the matching settings list.
-//   (2) source evidence — each emitted value must be supported by at least
-//       one source item in the story.
-//
-// Why two gates: settings alone trusts the model too much (it can echo
-// in-settings values that have no support in the actual sources), and
-// evidence alone would let any out-of-settings label leak through.  We
-// compute `final = settings ∩ evidence` per axis; model tags are not
-// authoritative.
-//
-// Evidence per axis:
-//   - topics       : `sourceItem.topic` (with `normalizeTopicLabel` so
-//                    synonyms like "bilateral relations" resolve against
-//                    settings without expanding the taxonomy).
-//   - geographies  : `sourceItem.geographies` (case-insensitive match;
-//                    out-of-settings geos like "France" are dropped).
-//   - keywords     : whole-word presence in `sourceItem.headline` + body
-//                    (consistent with `applyTopicKeywordFilter` matching).
-//
-// Output values are always the canonical settings-cased string (settings is
-// authoritative for spelling).  When nothing matches, the axis is an empty
-// array — never a fabricated placeholder.  Settings is treated as read-only
-// throughout; nothing here mutates or appends to it.
-//
-// `constrainTagsToSettings` (settings ∩ model-tag list) remains exported as
-// a standalone utility, but `buildStory` no longer uses it — production tag
-// derivation goes through `deriveStoryTags(sourceItems, settings)` below.
+// `constrainTagsToSettings` and `deriveStoryTags` implement the original
+// Phase 1/2 `settings ∩ source-evidence` contract.  Production tag emission
+// now goes through [`assignMetaStoryTags`](./meta-story-tags.mjs) (Phase 3+);
+// these helpers stay exported for the existing test surface and to give a
+// clean rollback target.  Both functions are read-only on `settings` and
+// emit canonical settings spelling; empty arrays mean "no evidence" — never
+// fabricated placeholders.
 
 function buildSettingsLookup(values, { useTopicNormalization = false } = {}) {
   const lookup = new Map();
@@ -705,20 +691,25 @@ function buildStory(metaStory, sourceItems, settings) {
     .filter((g) => VALID_GEOGRAPHIES.has(g));
   const geographies = [...new Set(validGeos)];
 
+  // Phase 1 trust cleanup: never fabricate a topic.  The legacy fallback
+  // (`?? "Diplomatic relations"`) silently invented a canonical-looking label
+  // for stories whose sources carried no recognized topic, which then showed
+  // up as a real chip in the UI.  Now we emit `topic` only when at least one
+  // source item resolves to a canonical topic; otherwise the field is omitted
+  // (`storySchema.topic` is optional).  UI labels are driven by `tags` only.
   const rawTopics = sourceItems.map((i) => normalizeTopicLabel(i.topic));
-  const validTopic = rawTopics.find((t) => VALID_TOPICS.has(t)) ?? "Diplomatic relations";
+  const validTopic = rawTopics.find((t) => VALID_TOPICS.has(t));
 
   const maxWeight = Math.max(...sourceItems.map((i) => i.weight), 0);
   const priority = maxWeight >= 80 ? "top" : "standard";
   const freshestMinutesAgo = Math.min(...sourceItems.map((i) => i.minutesAgo));
 
-  return {
+  const story = {
     id: metaStory.meta_story_id,
     metaStoryId: metaStory.meta_story_id,
     title: metaStory.title,
     subtitle: metaStory.subtitle,
     geographies,
-    topic: validTopic,
     takeaway: metaStory.summary,
     summary: metaStory.summary,
     whyItMatters: metaStory.subtitle,
@@ -736,7 +727,11 @@ function buildStory(metaStory, sourceItems, settings) {
         .map((i) => normalizeSourceIdentity(i.outlet))
         .filter((k) => k.length > 0)
     ).size,
-    tags: deriveStoryTags(sourceItems, settings),
+    // Deterministic baseline tags (Phase 3 — settings-gated, evidence-bundle
+    // + alias-driven).  Phase 4 semantic uplift, when enabled, is layered
+    // over this baseline by the post-build overlay below.  See
+    // [`meta-story-tags.mjs`](./meta-story-tags.mjs).
+    tags: assignMetaStoryTags({ metaStory, sourceItems, settings }),
     // `_duplicates` provenance from the cross-feed dedupe stage is intentionally
     // NOT projected onto the response shape — duplicate provenance stays
     // server-side for integrity/debugging only (product req: no expand UI,
@@ -759,6 +754,11 @@ function buildStory(metaStory, sourceItems, settings) {
         body: item.body,
       })),
   };
+  // Only attach `topic` when we actually have a canonical value — omitting
+  // the field is the schema-honest signal for "no recognized topic" and
+  // prevents the legacy "Diplomatic relations" fabrication.
+  if (validTopic) story.topic = validTopic;
+  return story;
 }
 
 // ─── Main pipeline ────────────────────────────────────────────────────────────
@@ -823,8 +823,17 @@ export async function runRefreshPipeline({
   beatFitEnabled = true,
   embedFn = null,
   recallConfig = null,
+  // Phase 4: optional semantic tag-mapping config + scorer.  When omitted,
+  // `resolveSemanticTagConfig()` reads env (defaults OFF), and no scorer is
+  // present — the pipeline degrades cleanly to the Phase 3 deterministic
+  // baseline.  Tests inject both to exercise the uplift path without env
+  // mutation.  Geographies are intentionally NOT widened — see
+  // [`meta-story-tags.mjs`](./meta-story-tags.mjs) for the Phase 4 scope.
+  semanticTagConfig = null,
+  semanticTagScorer = null,
 }) {
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
+  const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
   if (normErrors.length > 0) {
@@ -1337,6 +1346,90 @@ export async function runRefreshPipeline({
   storiesWithSortKeys.sort((a, b) => compareStoriesR1(a.sortKey, b.sortKey));
   const stories = storiesWithSortKeys.map(({ story }) => story);
 
+  // ── Phase 4: optional semantic tag uplift (topics + keywords only) ──────
+  // Runs AFTER the deterministic stories are built and sorted — the overlay
+  // only mutates `story.tags` and aggregates per-axis diagnostics for the
+  // operator log.  It does NOT affect funnel counts, ordering, grounding, or
+  // any pre-clustering stage (K1a one-way invariant).  When the config has
+  // both axes OFF (the default), this loop is a no-op for `tags` and emits
+  // skipped-state diagnostics.
+  const semanticTopicsAgg = emptyAggregateAxisDiagnostics("topics");
+  const semanticKeywordsAgg = emptyAggregateAxisDiagnostics("keywords");
+  let semanticTopicsAggMut = semanticTopicsAgg;
+  let semanticKeywordsAggMut = semanticKeywordsAgg;
+  if (stories.length > 0) {
+    // We re-resolve sourceItems per story from the cluster-output meta-stories
+    // (groundedStories) — the same map already used for `buildStory`.
+    for (let i = 0; i < storiesWithSortKeys.length; i++) {
+      const ms = groundedStories.find(
+        (m) => m.meta_story_id === storiesWithSortKeys[i].sortKey.metaStoryId
+      );
+      if (!ms) continue;
+      const sourceItems = ms.source_item_ids
+        .map((id) => sourceItemsById.get(id))
+        .filter(Boolean);
+      const { tags, diagnostics } = await assignMetaStoryTagsDetailed({
+        metaStory: ms,
+        sourceItems,
+        settings,
+        semantic: {
+          config: effectiveSemanticTagConfig,
+          scorer: semanticTagScorer,
+        },
+      });
+      // Overlay only the tags — leave the rest of the deterministic story
+      // payload (title, summary, geographies, sources, …) untouched.
+      stories[i].tags = tags;
+      semanticTopicsAggMut = accumulateAxisDiagnostics(semanticTopicsAggMut, diagnostics.topics);
+      semanticKeywordsAggMut = accumulateAxisDiagnostics(semanticKeywordsAggMut, diagnostics.keywords);
+    }
+  }
+  const tagsDiagnostics = {
+    // Phase 7 schema version — operators and downstream consumers can read a
+    // single string to detect contract changes without inspecting every
+    // field.  Bumped on every Phase that grows/shrinks the per-axis diag
+    // shape.  Older snapshots without this key are the "phase4/5" baseline.
+    schemaVersion: TAGS_DIAGNOSTICS_SCHEMA_VERSION,
+    // Phase 7 kill-switch surface: when `TEMPO_TAG_SEMANTIC_KILL_SWITCH=true`
+    // the per-axis runtime states are forced to `disabled` regardless of
+    // other flags.  Surfacing the kill-switch state explicitly here lets an
+    // operator answer "is semantic OFF because of the kill switch, or
+    // because the per-axis flag was never on?" from `_meta.tags` alone.
+    killSwitchActive: Boolean(effectiveSemanticTagConfig.killSwitch),
+    topics: semanticTopicsAggMut,
+    keywords: semanticKeywordsAggMut,
+    geographies: { axis: "geographies", semanticApplied: false },
+  };
+  // Phase 5: log line carries `runtimeState`, `scorerLatencyMs`, and
+  // `fallbackReasonCounts` per axis so an operator can read the rollout
+  // state from a single line: "is semantic on, did the scorer succeed, how
+  // slow was it, did anything time out?".  Geographies remain locked
+  // deterministic-only — that stamp is in the persisted `_meta.tags` too.
+  console.log(
+    `[pipeline.tags]` +
+      ` schema=${tagsDiagnostics.schemaVersion}` +
+      ` kill_switch=${tagsDiagnostics.killSwitchActive ? "on" : "off"}` +
+      ` semantic_topics=${tagsDiagnostics.topics.runtimeState}` +
+      ` accepted=${tagsDiagnostics.topics.acceptedCount}` +
+      ` rejected=${tagsDiagnostics.topics.rejectedCount}` +
+      ` below_threshold=${tagsDiagnostics.topics.belowThresholdCount}` +
+      ` latency_ms=${tagsDiagnostics.topics.scorerLatencyMs}` +
+      ` latency_max_ms=${tagsDiagnostics.topics.scorerLatencyMaxMs}` +
+      ` calls=${tagsDiagnostics.topics.scorerCallCount}` +
+      ` timeouts=${tagsDiagnostics.topics.fallbackReasonCounts.timeout}` +
+      ` errors=${tagsDiagnostics.topics.fallbackReasonCounts.error}` +
+      `  semantic_keywords=${tagsDiagnostics.keywords.runtimeState}` +
+      ` accepted=${tagsDiagnostics.keywords.acceptedCount}` +
+      ` rejected=${tagsDiagnostics.keywords.rejectedCount}` +
+      ` below_threshold=${tagsDiagnostics.keywords.belowThresholdCount}` +
+      ` latency_ms=${tagsDiagnostics.keywords.scorerLatencyMs}` +
+      ` latency_max_ms=${tagsDiagnostics.keywords.scorerLatencyMaxMs}` +
+      ` calls=${tagsDiagnostics.keywords.scorerCallCount}` +
+      ` timeouts=${tagsDiagnostics.keywords.fallbackReasonCounts.timeout}` +
+      ` errors=${tagsDiagnostics.keywords.fallbackReasonCounts.error}` +
+      `  semantic_geographies=off(locked)`
+  );
+
   const payload = {
     contractVersion,
     stories,
@@ -1412,6 +1505,13 @@ export async function runRefreshPipeline({
     // operators can answer "did embeddings widen recall this run, or did the
     // run fall through fail-closed?" from logs alone.
     recall: recallDiagnostics,
+    // Phase 4: per-axis semantic tag-mapping diagnostics aggregated across
+    // shipped stories.  `enabled` reflects the configured state; `accepted`/
+    // `rejected`/`belowThresholdCount` show how often the uplift fired and
+    // how often it was borderline.  Geographies axis carries the explicit
+    // `semanticApplied: false` lock so an operator can see Phase 4 scope
+    // hasn't drifted.
+    tags: tagsDiagnostics,
     // Per-stage funnel + primary-drop-stage diagnosis. Operator-facing only.
     funnel,
     // Phase 4 hardening: watermark + skip metadata.  `unchanged` is false here

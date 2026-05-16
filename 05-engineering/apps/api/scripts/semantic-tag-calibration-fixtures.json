@@ -1,0 +1,83 @@
+{
+  "_comment": "Phase 5 semantic-tag calibration fixture set.  Used by `semantic-tag-calibration.mjs` to compare candidate thresholds against curated 'should accept' / 'should reject' pairs.  Add to this file as new precision/recall failure modes are observed; each entry exercises one (axis, evidence, expected) triple.  `axis` is `topics` or `keywords`; `expectedAccept` lists labels that ought to clear threshold for the given settings vocabulary; `expectedReject` lists labels that must NOT clear threshold even though they're in the settings list.  Geographies are intentionally not in scope — Phase 5 keeps the deterministic-only lock.",
+  "settings": {
+    "topics": [
+      "Diplomatic relations",
+      "Migration policy",
+      "Security cooperation",
+      "Energy policy"
+    ],
+    "keywords": [
+      "OFAC",
+      "sanctions",
+      "oil",
+      "deportation",
+      "border"
+    ]
+  },
+  "cases": [
+    {
+      "id": "kw-petroleum-oil-positive",
+      "axis": "keywords",
+      "evidence": "Petroleum prices climbed as refining capacity tightened across the Gulf Coast.",
+      "expectedAccept": ["oil"],
+      "expectedReject": ["OFAC", "sanctions", "deportation", "border"]
+    },
+    {
+      "id": "kw-crude-oil-positive",
+      "axis": "keywords",
+      "evidence": "Crude inventories drew sharply this week, supporting prices.",
+      "expectedAccept": ["oil"],
+      "expectedReject": ["OFAC", "sanctions", "deportation", "border"]
+    },
+    {
+      "id": "kw-sanctions-direct-positive",
+      "axis": "keywords",
+      "evidence": "Treasury weighs an expansion of sanctions on the Colombian leadership circle.",
+      "expectedAccept": ["sanctions"],
+      "expectedReject": ["oil", "deportation", "border"]
+    },
+    {
+      "id": "kw-removal-deportation-positive",
+      "axis": "keywords",
+      "evidence": "ICE announced the removal of 220 migrants on flights to Bogota.",
+      "expectedAccept": ["deportation"],
+      "expectedReject": ["OFAC", "sanctions", "oil", "border"]
+    },
+    {
+      "id": "kw-no-keywords-negative",
+      "axis": "keywords",
+      "evidence": "The ceremony unfolded under heavy rain and was attended by senior officials.",
+      "expectedAccept": [],
+      "expectedReject": ["OFAC", "sanctions", "oil", "deportation", "border"]
+    },
+    {
+      "id": "topic-talks-diplomatic-positive",
+      "axis": "topics",
+      "evidence": "High-stakes talks resumed in the capital, focused on bilateral economic ties.",
+      "expectedAccept": ["Diplomatic relations"],
+      "expectedReject": ["Migration policy", "Security cooperation", "Energy policy"]
+    },
+    {
+      "id": "topic-asylum-migration-positive",
+      "axis": "topics",
+      "evidence": "A new asylum-processing accord widens the bilateral migration corridor.",
+      "expectedAccept": ["Migration policy"],
+      "expectedReject": ["Security cooperation", "Energy policy"]
+    },
+    {
+      "id": "topic-joint-patrol-security-positive",
+      "axis": "topics",
+      "evidence": "Joint border patrols continued through the weekend amid regional tensions.",
+      "expectedAccept": ["Security cooperation"],
+      "expectedReject": ["Diplomatic relations", "Energy policy"]
+    },
+    {
+      "id": "topic-unrelated-negative",
+      "axis": "topics",
+      "evidence": "The local food festival drew record crowds, organizers said.",
+      "expectedAccept": [],
+      "expectedReject": ["Diplomatic relations", "Migration policy", "Security cooperation", "Energy policy"]
+    }
+  ]
+}

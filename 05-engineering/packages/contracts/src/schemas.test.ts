@@ -29,6 +29,9 @@ const minimalStory = {
   whatChanged: "What",
   priority: "standard" as const,
   outletCount: 2,
+  // Phase 2: `tags` is required on every emitted story.  Empty arrays mean
+  // "no evidence on this axis" — never fabricated.
+  tags: { topics: [], keywords: [], geographies: [] },
   sources: [minimalSource],
 };
 
@@ -52,6 +55,29 @@ describe("storySchema", () => {
   it("accepts a minimal valid story", () => {
     const parsed = storySchema.parse(minimalStory);
     expect(parsed.id).toBe("s1");
+  });
+
+  // Phase 2 trust cleanup: emitted payloads must always carry `tags`.
+  // Loaders that surface legacy snapshots are expected to normalize the
+  // field to empty arrays before validation — the display contract itself
+  // does not accept stories without tags.
+  it("rejects a story that omits the tags object", () => {
+    const { tags: _omitted, ...withoutTags } = minimalStory;
+    expect(() => storySchema.parse(withoutTags)).toThrow();
+  });
+
+  it("accepts a story whose tags axes are all empty arrays (no evidence)", () => {
+    const parsed = storySchema.parse({
+      ...minimalStory,
+      tags: { topics: [], keywords: [], geographies: [] },
+    });
+    expect(parsed.tags).toEqual({ topics: [], keywords: [], geographies: [] });
+  });
+
+  it("accepts a story without a canonical topic (Phase 1 fabrication guard)", () => {
+    const { topic: _omitted, ...withoutTopic } = minimalStory;
+    const parsed = storySchema.parse(withoutTopic);
+    expect(parsed.topic).toBeUndefined();
   });
 });
 

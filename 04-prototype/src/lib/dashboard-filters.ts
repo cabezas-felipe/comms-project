@@ -5,9 +5,10 @@
 //   - Sections derive from the CURRENT payload's stories — not a static enum.
 //   - Empty sections are hidden by the consumer (we just return the empty array).
 //   - Sorting inside each section: alphabetical, locale-aware.
-//   - Keyword source is `story.tags.keywords` ONLY (no free-text inference).
-//   - Topic/Geography sections fall back to the canonical `story.topic` and
-//     `story.geographies` fields when `story.tags` is absent (legacy/fixture data).
+//   - All three axes (topics, keywords, geographies) come from `story.tags`
+//     ONLY.  Legacy stories without `tags` contribute nothing to any axis —
+//     the root `story.topic` / `story.geographies` fields are NEVER used as
+//     a fallback (no fabricated labels).
 //   - Selection: multi-select within a section (OR), AND across sections.
 //   - "All" pill = no selection in any section.
 
@@ -25,10 +26,9 @@ export interface TagSelection {
   geographies: ReadonlySet<string>;
 }
 
-/** Resolve the topics set for a story (preferring tags, falling back to topic). */
+/** Resolve the topics set for a story (tags only — missing tags = empty). */
 function topicsOf(story: Story): string[] {
-  if (story.tags?.topics && story.tags.topics.length > 0) return story.tags.topics;
-  return story.topic ? [story.topic] : [];
+  return story.tags?.topics ?? [];
 }
 
 /** Resolve the keywords set for a story (tags only — never inferred from text). */
@@ -63,10 +63,9 @@ export function storyScanLabels(story: Story): string[] {
   return [];
 }
 
-/** Resolve the geographies set for a story (preferring tags, falling back to geographies). */
+/** Resolve the geographies set for a story (tags only — missing tags = empty). */
 function geographiesOf(story: Story): string[] {
-  if (story.tags?.geographies && story.tags.geographies.length > 0) return story.tags.geographies;
-  return story.geographies ?? [];
+  return story.tags?.geographies ?? [];
 }
 
 /**

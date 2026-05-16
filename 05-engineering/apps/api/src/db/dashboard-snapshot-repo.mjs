@@ -36,8 +36,38 @@ function holdBucketFile(userId) {
 // what happened without re-running the pipeline.  Lifted into `_meta.*` on
 // read.  Older snapshots without it simply omit those keys.
 
+// Phase 2 trust cleanup: emitted payloads must always carry `story.tags` with
+// the three-axis shape (`{ topics, keywords, geographies }`).  Older snapshots
+// persisted before Phase 1/2 may pre-date the `tags` field or carry a partial
+// shape (e.g. only `topics`).  This normalizer runs at the load boundary so
+// the strict display schema can assume the shape — no destructive migration,
+// just a read-time coercion to empty arrays where evidence is absent.  String
+// axes are filtered to keep only string entries; unknown payload shapes pass
+// through with safe empty defaults rather than crashing the dashboard read.
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v) => typeof v === "string");
+}
+
+function normalizeStoryTags(tags) {
+  const t = tags && typeof tags === "object" ? tags : {};
+  return {
+    topics: normalizeStringArray(t.topics),
+    keywords: normalizeStringArray(t.keywords),
+    geographies: normalizeStringArray(t.geographies),
+  };
+}
+
+function normalizeStoriesForLoad(stories) {
+  if (!Array.isArray(stories)) return [];
+  return stories.map((s) => {
+    if (!s || typeof s !== "object") return s;
+    return { ...s, tags: normalizeStoryTags(s.tags) };
+  });
+}
+
 function liftSnapshotMeta(payload, refreshed_at) {
-  const { _lastCheckedAt, _lastRunMeta, ...rest } = payload ?? {};
+  const { _lastCheckedAt, _lastRunMeta, stories, ...rest } = payload ?? {};
   const meta = { refreshedAt: refreshed_at, hasSnapshot: true };
   if (typeof _lastCheckedAt === "string") meta.lastCheckedAt = _lastCheckedAt;
   if (_lastRunMeta && typeof _lastRunMeta === "object") {
@@ -46,8 +76,12 @@ function liftSnapshotMeta(payload, refreshed_at) {
     if (_lastRunMeta.beatFit !== undefined) meta.beatFit = _lastRunMeta.beatFit;
     if (_lastRunMeta.clusterModel !== undefined) meta.clusterModel = _lastRunMeta.clusterModel;
     if (_lastRunMeta.embeddingModel !== undefined) meta.embeddingModel = _lastRunMeta.embeddingModel;
+    // Phase 4: per-axis semantic tag-mapping aggregate (topics + keywords)
+    // + the `geographies.semanticApplied: false` lock stamp.  Optional for
+    // backward compat with snapshots written before Phase 4.
+    if (_lastRunMeta.tags !== undefined) meta.tags = _lastRunMeta.tags;
   }
-  return { ...rest, _meta: meta };
+  return { ...rest, stories: normalizeStoriesForLoad(stories), _meta: meta };
 }
 
 async function readSnapshotFile(userId) {

@@ -10,16 +10,39 @@ interface Props {
 }
 
 export default function StoryDetail({ story, onClose }: Props) {
+  // Phase 6: chip row is sourced from `story.tags` (settings vocabulary).
+  // The root `story.topic` / `story.geographies` fields are no longer
+  // consulted for any UI label — Phase 1 already neutralized them for
+  // pills/scan-row; this completes the migration in the story-detail view.
+  // The first canonical topic tag (settings spelling) wins for the topic
+  // chip; the geo strip uses the full tag set so multi-geo stories
+  // ("US · Colombia · China") render cleanly without alias drift.
+  //
+  // Empty-state rule: when both axes have nothing, the chip row + divider
+  // are suppressed entirely.  No orphan `|` separator with nothing on one
+  // side; no empty box with no content.
+  const topicTag = story.tags?.topics?.[0];
+  const geoTags = story.tags?.geographies ?? [];
+  const hasTopic = typeof topicTag === "string" && topicTag.length > 0;
+  const hasGeos = geoTags.length > 0;
+  const hasAnyTagChip = hasTopic || hasGeos;
   return (
     <aside className="fade-up flex h-full flex-col overflow-hidden bg-surface-raised">
       {/* header */}
       <div className="flex items-start justify-between gap-4 border-b border-rule/60 px-7 py-5">
         <div className="space-y-3">
-          <div className="flex items-center gap-3">
-            <TopicTag topic={story.topic} />
-            <span className="text-rule">|</span>
-            <GeoStrip geographies={story.geographies} />
-          </div>
+          {hasAnyTagChip && (
+            <div
+              className="flex items-center gap-3"
+              data-testid="story-detail-tag-row"
+            >
+              {hasTopic && <TopicTag topic={topicTag} />}
+              {hasTopic && hasGeos && (
+                <span className="text-rule" aria-hidden="true">|</span>
+              )}
+              {hasGeos && <GeoStrip geographies={geoTags} />}
+            </div>
+          )}
           <h2 className="font-display text-3xl font-semibold leading-[1.08] tracking-tight">
             {story.title}
           </h2>

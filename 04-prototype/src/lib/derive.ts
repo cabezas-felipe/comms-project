@@ -51,14 +51,25 @@ export function deriveSignals(story: Story): DerivedSignals {
   const confidence: Confidence =
     confidenceScore >= 70 ? "high" : confidenceScore >= 45 ? "medium" : "early";
 
+  // Phase 6: recommended-action copy reads from `story.tags.topics` only —
+  // never from the legacy root `story.topic` field.  Phase 1 made root
+  // `topic` optional and non-authoritative for UI; this analyst copy was the
+  // last remaining UI consumer.  The case branching uses *presence* of a
+  // canonical topic in the tag set instead of equality on the (possibly
+  // undefined) root field.  When the tag set is empty, we fall through to
+  // the neutral copy — same posture as Phase 1/2 when no evidence supports
+  // a canonical topic.
+  const tagTopicSet = new Set(story.tags?.topics ?? []);
+  const hasDiplomaticTopic = tagTopicSet.has("Diplomatic relations");
+  const hasMigrationTopic = tagTopicSet.has("Migration policy");
   const recommendedAction =
     story.priority === "top"
-      ? story.topic === "Diplomatic relations"
+      ? hasDiplomaticTopic
         ? "Draft holding statement; align with policy lead before next cycle."
-        : story.topic === "Migration policy"
+        : hasMigrationTopic
         ? "Prepare bilateral Q&A; confirm spokesperson availability within 4h."
         : "Brief leadership; pre-clear two response options."
-      : story.topic === "Diplomatic relations"
+      : hasDiplomaticTopic
       ? "Maintain baseline summary; revisit if a tier-1 outlet reframes."
       : "Track through next refresh; no action required yet.";
 

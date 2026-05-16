@@ -2,6 +2,318 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-16 - D-052 - Trust cleanup Phase 7: rollout hardening + operational guardrails (cancellation, kill switch, telemetry, debug endpoint)
+
+#### Context
+
+Phase 5 ([D-050](#2026-05-16---d-050---trust-cleanup-phase-5-production-scorer-wiring--fail-closed-semantics--calibration-harness-default-off)) wired the production scorer behind the Phase 4 surface, but its tradeoffs spelled out the gap Phase 7 needed to close: (a) the timeout race did NOT cancel the underlying HTTP request, so provider quotas / cost-per-failed-call accumulated even on fail-closed runs; (b) the only way to flip semantic uplift off in an incident was to flip three separate env vars; (c) operators inspecting `_meta.tags` could only grep logs; (d) threshold tuning had a calibration harness but no path to feed production telemetry into it. Phase 6 was strictly front-of-house and didn't touch these.
+
+#### Decision
+
+Land **Phase 7 rollout hardening** with five additions: end-to-end cancellation, a kill switch, diagnostics schema version, latency observability, telemetry-driven threshold advisory, an internal debug endpoint, and a written operator runbook. Chunk K stays locked to K1a; semantic geographies still out of scope.
+
+**End-to-end cancellation:**
+
+- [`createEmbeddingSemanticScorer`](apps/api/src/dashboard/meta-story-semantic-mapper.mjs) creates a per-call `AbortController`; passes `controller.signal` into `embedFn(texts, { signal })`. On timeout, `controller.abort()` fires.
+- [`embedTexts`](apps/api/src/ai/embeddings.mjs) and [`embedTextsWithOpenAI`](apps/api/src/ai/providers/openai-embeddings.mjs) accept an optional `signal` (additive — recall callers unaffected) and forward it to `fetch(...)`.
+- The mapper tracks `timeoutFired` so an embedFn-side abort rejection still surfaces as `SemanticScorerTimeoutError`, preserving fallback-reason attribution.
+
+**Kill switch:**
+
+- `TEMPO_TAG_SEMANTIC_KILL_SWITCH=true` forces every per-axis flag to `disabled` regardless of any other config. Distinct from `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` so a misconfigured deploy can't accidentally re-enable semantic uplift.
+- Surfaced as `_meta.tags.killSwitchActive` + `[pipeline.tags]` log token.
+
+**Diagnostics schema version + latency observability:**
+
+- `TAGS_DIAGNOSTICS_SCHEMA_VERSION = "phase7-2026-05-16"` stamped on `_meta.tags.schemaVersion`. Bumped whenever the per-axis diag shape changes.
+- `scorerCallCount` + `scorerLatencyMaxMs` added per axis. Consumers derive average latency as `scorerLatencyMs / scorerCallCount`; the max field surfaces tail outliers a cumulative latency would average away.
+
+**Telemetry-driven threshold tuning:**
+
+- [`semantic-tag-calibration.mjs --telemetry=<file>`](apps/api/scripts/semantic-tag-calibration.mjs) reads `_meta.tags` snapshots and prints per-axis HOLD / LOWER / RAISE advisories. Conservative heuristic (small sample → HOLD; timeouts → HOLD threshold; too-tight → LOWER; too-loose → RAISE). Strictly advisory.
+
+**Internal debug endpoint:**
+
+- `GET /api/_debug/dashboard-tags` ([`server.mjs`](apps/api/src/server.mjs)). Gated on BOTH `TEMPO_DEBUG_TAGS_ENABLED=true` AND `NODE_ENV !== "production"`. Authenticated (same `requireIdentity` as `/api/dashboard`). Returns calling identity's last persisted `_meta.tags` only — no story content, no source bodies.
+
+**Operator runbook:**
+
+- New [`runbook-semantic-tags.md`](docs/runbook-semantic-tags.md) codifies flag precedence (kill-switch > global > per-axis), Stage 0–5 rollout, rollback procedure by symptom, calibration cadence, and the explicit "geographies remain deterministic" lock.
+
+#### Why
+
+- **Cancellation is a real cost lever.** Failed scorer calls that keep running on the provider side accumulate budget for no value. Plumbing the signal is small + safe; future Phase 8 work doesn't have to revisit it.
+- **One kill switch is better than three flags during an incident.** Operators in a stress situation flip a single var. Defense in depth: kill switch wins even if `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` is also true (which it would be in a healthy production state).
+- **Schema version + latency-max are cheap forward compat.** Two small fields; downstream consumers (Grafana, log scrapers, future Phase 8 work) get a clean upgrade story.
+- **Telemetry-driven tuning closes the operator loop.** Phase 5 calibration was fixture-only; Phase 7 lets the same harness ingest real run snapshots so threshold decisions are evidence-based, not guessed.
+- **Debug endpoint matches the existing ops posture.** Same gating idiom as DC validation mode; same authenticated identity; same persisted-snapshot read path. No new surface area to secure.
+- **Runbook codifies institutional knowledge.** The procedure spread across spec + walkthrough + DECISIONS is now in one operator-readable place.
+
+#### Tradeoffs
+
+- **AbortController does not refund provider cost for the partial second of work before abort.** It does cap cost at the cancellation point, but the cost up to that point is still billed. Not addressed in this slice — Phase 8 (cross-run cache) is the next lever if cost matters.
+- **Telemetry advisory heuristic is conservative.** It will under-recommend changes when telemetry is thin; we accept that precision over recall for an advisory tool.
+- **Debug endpoint adds a route to the surface.** Mitigated by two-gate isolation (env opt-in + non-prod) + identity auth + content-narrowing (returns only `_meta.tags`, never stories). Server test asserts content-narrowing explicitly.
+- **Schema version bumps could be missed.** We accept the manual discipline trade — the constant is `export`ed, referenced once in the pipeline, surfaces on every snapshot, and is small enough to grep.
+
+#### Consequences
+
+- Phase 8 deferred: semantic geographies still out of scope; per-axis runtime-adaptive thresholds out of scope; cross-run scorer cache out of scope.
+- Anyone touching the scorer factory or the embed adapter needs to keep the `{ signal }` plumbing intact. The Phase 7 mapper tests are the canary.
+- Operators rolling semantic uplift in production follow [`runbook-semantic-tags.md`](docs/runbook-semantic-tags.md); deviations should land as runbook PRs.
+
+---
+
+### 2026-05-16 - D-051 - Trust cleanup Phase 6: UI polish + trust-first empty states (front-of-house only)
+
+#### Context
+
+Phase 1 ([D-047](#2026-05-16---d-047---trust-cleanup-phase-1--2-tags-only-labels-no-fabricated-topic-required-tags-on-the-wire)) locked the "tags-only labels" decision and removed the dashboard-pills / scan-row fallbacks to root `story.topic` / `story.geographies`. But three UI surfaces still consumed the root fields: (a) the story-detail chip row, (b) the [`Tags.tsx`](../04-prototype/src/components/Tags.tsx) component signatures (legacy enum types), and (c) the `recommendedAction` analyst copy in [`derive.ts`](../04-prototype/src/lib/derive.ts) (equality checks on `story.topic`). The empty-tag state — stories exist but no tags surface — also rendered as a lone "All" pill with no narrative cue, which read as a glitch rather than a trust posture.
+
+Phases 4 + 5 ([D-049](#2026-05-16---d-049---trust-cleanup-phase-4-constrained-semantic-mapping-for-topics--keywords-default-off) / [D-050](#2026-05-16---d-050---trust-cleanup-phase-5-production-scorer-wiring--fail-closed-semantics--calibration-harness-default-off)) added rich operator-only diagnostics (`_meta.tags.{topics,keywords}.{runtimeState, scorerLatencyMs, fallbackReasonCounts}`); Phase 6 also pins as test invariants that none of those leak into user-facing UI.
+
+#### Decision
+
+Land Phase 6 trust cleanup as a **front-of-house-only slice** — no server behavior, semantic logic, or env-flag changes. Chunk K stays locked to K1a.
+
+**Changes:**
+
+- [`StoryDetail.tsx`](../04-prototype/src/components/StoryDetail.tsx) — chip row sources from `story.tags.topics[0]` + `story.tags.geographies`. Divider `|` only renders when both axes are present; whole chip row hidden when both empty.
+- [`Tags.tsx`](../04-prototype/src/components/Tags.tsx) — `TopicTag` / `GeoTag` / `GeoStrip` accept `string` / `string[]` instead of legacy `Topic` / `Geography` enums so Phase 3 alias canonicals (`China`, `Latin America`) render. `GeoTag` keeps the `US` / `CO` monogram for the original canonical pair and uppercases any other settings label.
+- [`derive.ts`](../04-prototype/src/lib/derive.ts) — `recommendedAction` reads `story.tags?.topics` (with `Set.prototype.has`) instead of `story.topic === …`. Survives Phase 2's optional-`topic` contract and aligns with the tags-only posture.
+- [`Dashboard.tsx`](../04-prototype/src/pages/Dashboard.tsx) — `showNoTagsCaption` flag + `pill-row-empty-caption` slot ("No tag groups yet") surfaces alongside the lone "All" pill when every section is empty. Pill row carries `role="group"` + `aria-label="Filter stories by tag"`; caption carries `role="status"`; Pill button uses `type="button"` + `focus-visible:outline`.
+- **Test coverage:** 5 new Dashboard cases, 3 new StoryCard cases, 7 new StoryDetail cases (file is new). All four diagnostic-leak strings (`runtimeState`, `scorerLatencyMs`, `belowThresholdCount`, `semanticApplied`, `fallbackReasonCounts`) are asserted as never appearing in rendered output.
+
+#### Why
+
+- **Single locked decision, finally implemented everywhere.** Phase 1's "tags-only" decision was correct; Phase 6 just closes the remaining inconsistencies.
+- **Trust posture surfaces at the empty edge.** "No tag groups yet" is the smallest possible cue that the dashboard is being honest about missing evidence. It doesn't lecture or warn — operators just see what's there.
+- **A11y is cheap when it's part of the polish slice.** `role="group"` / `aria-label` / `role="status"` are 4 attributes that materially improve assistive-tech usability and cost nothing.
+- **Operator-only diagnostics get their own audit lock.** Phase 6 is the natural place to assert "this UI is for users" — even though Phase 4 / 5 always intended diagnostics to be operator-only, a regression test pinning the absence of those strings catches a future leak class.
+
+#### Tradeoffs
+
+- **Open-string typing on `Tags.tsx`** loses some compile-time validation against the legacy `Topic` / `Geography` enum. That's fine for v1 — the production source (`story.tags`) is settings vocabulary (open string), so the runtime contract is already open; tightening the component type would have forced a translation layer for every Phase 3 geo alias.
+- **"No tag groups yet" is opinionated copy.** Different product directions might prefer "All stories" / "Showing all" / silence. Picked the explicit version because the missing pills look like a glitch otherwise; copy is easy to tune.
+- **No in-app debug surface for `_meta.tags`.** Operators still grep logs + persisted snapshots. Phase 7 territory.
+
+#### Consequences
+
+- Phase 7 (deferred): `AbortController` plumbing, adaptive threshold tuning, optional dev/staging-only debug panel surfacing `_meta.tags`. Semantic geographies stay out of scope.
+- Anyone touching the chip row / scan row / analyst copy needs to keep reading from `story.tags`. The 15 new Phase 6 tests are the canary.
+
+---
+
+### 2026-05-16 - D-050 - Trust cleanup Phase 5: production scorer wiring + fail-closed semantics + calibration harness (default OFF)
+
+#### Context
+
+Phase 4 ([D-049](#2026-05-16---d-049---trust-cleanup-phase-4-constrained-semantic-mapping-for-topics--keywords-default-off)) shipped the closed-vocabulary semantic mapping surface, the env flags, and the per-axis diagnostics — but no production scorer. The brief explicitly called out that flipping the env flags ON in Phase 4 would produce no uplift because `_refreshPipeline.run` never built a scorer. Phase 5 closes that gap with operational guardrails so the rollout is safe to stage.
+
+#### Decision
+
+Wire a production embedding-similarity scorer behind the Phase 4 surface, add fail-closed semantics with operator-readable runtime state, and ship a threshold calibration tool. **Chunk K is still locked to K1a** — Phase 5 doesn't change scope (closed vocabulary, topics + keywords only, geographies deterministic).
+
+**Mapper extensions — [`meta-story-semantic-mapper.mjs`](apps/api/src/dashboard/meta-story-semantic-mapper.mjs):**
+
+- `SemanticScorerTimeoutError` (exported sentinel) so timeout vs generic error are distinguishable.
+- `createEmbeddingSemanticScorer({embedFn, timeoutMs, maxEvidenceChars})` — wraps the recall-stage `embedFn` in cosine similarity (rescaled `[-1,1]` → `[0,1]`), per-call wall-clock timeout, evidence-text truncation, and a per-instance evidence + label vector cache.
+- `resolveSemanticScorerRuntimeConfig(env, overrides)` — `TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS` (default `1500`), `TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS` (default `4000`).
+- `RUNTIME_STATE` enum + per-axis `runtimeState` ∈ `{disabled, enabled_no_scorer, enabled_scorer_ready, scorer_error_fallback, scorer_timeout_fallback}`. Aggregate uses worst-observed precedence (timeout > error > ready > no_scorer > disabled).
+- `scorerLatencyMs` + `fallbackReasonCounts: {timeout, error}` per axis; aggregated across stories.
+
+**Server wiring — [`server.mjs`](apps/api/src/server.mjs):**
+
+- When `resolveSemanticTagConfig()` reports any axis enabled AND no test scorer is injected, `_refreshPipeline.run` builds a production scorer from `_embeddings.embed` + `resolveSemanticScorerRuntimeConfig()`. Tests inject their own scorer; both paths share the mapper.
+
+**Pipeline observability — [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs):**
+
+- `[pipeline.tags]` log line carries `runtime_state / accepted / rejected / below_threshold / latency_ms / timeouts / errors` per axis.
+- `log.tags` → `_lastRunMeta.tags` → `_meta.tags` carries the same fields + `geographies.semanticApplied: false` (tripwire for scope drift).
+
+**Calibration harness — [`semantic-tag-calibration.mjs`](apps/api/scripts/semantic-tag-calibration.mjs) + [fixtures](apps/api/scripts/semantic-tag-calibration-fixtures.json):**
+
+- Operator tool, NOT in CI. Reads curated fixtures (`{axis, evidence, expectedAccept, expectedReject}`); runs the mapper at candidate thresholds; prints precision / recall / F1 + confusion summary; recommends the highest threshold within 5pp of best recall (conservative bias toward precision). Supports `--provider=mock|embeddings`.
+
+**Test coverage:**
+
+- 19 new mapper tests: runtime-state derivation (disabled / no_scorer / ready / error / timeout), timeout-wins-over-error precedence, latency aggregation, aggregator runtime-state precedence, scorer factory cosine math, truncation, memoization, timeout, malformed-response handling, runtime-config env parsing.
+- 6 new pipeline-level Phase 5 regressions: scorer-ready accept + latency recorded, timeout fallback (deterministic ships), error fallback, enabled-no-scorer state, K1a invariant under scorer failure (funnel stages identical to OFF), geographies locked under aggressive scorer.
+
+#### Why
+
+- **Wiring without a guardrail is worse than no wiring.** Phase 5 ships both the production scorer AND the fail-closed contract that protects the dashboard from a flaky / slow provider. The deterministic baseline ALWAYS ships; the worst the scorer can do is no uplift.
+- **The state enum is the operator's primary diagnostic.** A single string in `_meta.tags.{topics,keywords}.runtimeState` answers "is rollout healthy?" without reasoning about flag combinations.
+- **Calibration belongs to operators, not the model.** The harness reduces threshold tuning to running one script + reading a table. We picked a conservative "recall within 5pp" recommendation so the first stable threshold biases toward precision.
+- **Default OFF preserved.** The brief explicitly said "Safe rollout first: default OFF remains, rollout staged". We didn't flip any flag.
+
+#### Tradeoffs
+
+- **No AbortController on the scorer.** Timeout races the Promise but the embedding HTTP request keeps running until it completes. Provider cost-per-failed-call is the operational risk; fix in Phase 6 if it matters.
+- **Per-instance cache, not cross-run.** The factory's evidence/label cache lives inside the scorer closure for the duration of one `runRefreshPipeline` call. Cross-run cache would save provider calls for stable labels (`settings.keywords` rarely change) but adds eviction/memory-pressure semantics we don't need yet.
+- **`semantic-tag-calibration-fixtures.json` is small and curated.** It's a starting set; ops should extend it as new precision/recall failure modes surface. The harness asserts the closed-vocabulary lock on every case, so even a sloppy fixture file can't accidentally widen the contract.
+- **`enabled_no_scorer` exists for defensive reasons.** If `_embeddings.embed` is ever overridden to undefined in a future server refactor, the mapper now surfaces this explicitly instead of silently skipping semantic uplift.
+
+#### Consequences
+
+- Phase 6 (deferred): `AbortController` plumbing, adaptive threshold tuning, optional cross-run cache. Semantic geographies stay out of scope.
+- The recommended staged rollout is in [the spec](docs/dashboard-story-pool-spec.md#tags-k1a) and [the walkthrough](docs/dashboard-story-pool-walkthrough.md#phase-5-amendment--production-scorer-wiring--fail-closed--calibration-harness-2026-05-16-default-off). TL;DR: enable global flag in staging with both axes OFF first (verify wiring via `runtimeState=disabled`); calibrate; enable topics; enable keywords; promote to prod the same way.
+- The pipeline regression *"funnel counts identical for scorer-OFF vs scorer-FAIL"* is the canary that K1a hasn't drifted under fallback — it MUST stay green for any future Phase 6+ work.
+
+---
+
+### 2026-05-16 - D-049 - Trust cleanup Phase 4: constrained semantic mapping for topics + keywords (default OFF)
+
+#### Context
+
+Phase 3 ([D-048](#2026-05-16---d-048---trust-cleanup-phase-3-deterministic-meta-story-tag-assignment--geography-alias-map)) closed the structural gap: meta-story-level tags now consume the full evidence bundle and a deterministic geography alias map. But Phase 3 keyword/topic matching is whole-word only, so evidence like `petroleum` does not light up a `settings.keywords` entry of `oil`, and a meta-story summary that says `talks resumed` does not surface `Diplomatic relations` unless the canonical phrase itself appears verbatim. This forces users to over-author their vocabulary or accept missed labels on stories whose evidence is *semantically* clear. The Phase 3 boundary regression test (*"'petroleum' in text + 'oil' in settings emits NO keyword tag"*) explicitly named this as Phase 4 work.
+
+#### Decision
+
+Land **Phase 4** trust cleanup: constrained semantic mapping for `topics` + `keywords` only, default OFF, behind per-axis env flags. **Chunk K is still locked to K1a** — the closed-vocabulary contract makes this a richer *evidence-to-tags* step, not a relock.
+
+**New module — [`meta-story-semantic-mapper.mjs`](apps/api/src/dashboard/meta-story-semantic-mapper.mjs):**
+
+- `mapSemanticAxis({axis, evidenceText, allowedLabels, deterministicLabels, threshold, enabled, scorer})` — scores each candidate from `allowedLabels` (a closed vocabulary, always `settings.topics` or `settings.keywords`) via an **injected scorer** `(evidenceText, candidateLabel) → number | Promise<number>`. Accepts iff `score >= threshold`. Returns `{accepted, diagnostics}`.
+- `mapSemanticTopicsAndKeywords({...})` — convenience wrapper running both axes with per-axis thresholds.
+- `resolveSemanticTagConfig(env, overrides)` — reads the env flags (with override seam for tests).
+
+**Assigner integration — [`meta-story-tags.mjs`](apps/api/src/dashboard/meta-story-tags.mjs):**
+
+- New async `assignMetaStoryTagsDetailed({metaStory, sourceItems, settings, semantic})` returns `{tags, diagnostics}`. Deterministic baseline runs first; semantic uplift merges in (dedupe, locale-sort).
+- Sync `assignMetaStoryTags` keeps its Phase 3 behavior — direct callers don't get Phase 4 uplift unless they explicitly opt in.
+
+**Pipeline + persistence:**
+
+- [`runRefreshPipeline`](apps/api/src/dashboard/refresh-pipeline.mjs) accepts optional `semanticTagConfig` + `semanticTagScorer`. After `buildStory`, the pipeline overlays semantic uplift per story (topics + keywords only), aggregates per-axis diagnostics, and emits `log.tags`.
+- [`server.mjs`](apps/api/src/server.mjs) lifts `log.tags` into `_lastRunMeta.tags`; [`dashboard-snapshot-repo.mjs`](apps/api/src/db/dashboard-snapshot-repo.mjs) lifts `_lastRunMeta.tags` into `_meta.tags` on read.
+
+**Closed-vocabulary lock + Phase 4 scope lock:**
+
+- Output stays a subset of `settings.{topics,keywords,geographies}` — by *construction* the mapper inspects only labels passed in.
+- Geographies are **explicitly NOT** semantically widened. The runtime diagnostic carries a `geographies.semanticApplied: false` stamp on every run as a tripwire.
+
+**Env flags (defaults OFF):**
+
+- `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` (global)
+- `TEMPO_TAG_SEMANTIC_TOPICS_ENABLED` / `TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED` (per-axis, AND-folded with global)
+- `TEMPO_TAG_SEMANTIC_TOPICS_THRESHOLD` / `TEMPO_TAG_SEMANTIC_KEYWORDS_THRESHOLD` (`[0,1]`, default `0.75`)
+
+**One-way invariant lock:** The semantic overlay runs **after** clustering + grounding. A regression test (*"Phase 4 wiring: semantic uplift does NOT change funnel / admission counts"*) compares ON vs OFF runs over the same fixture and asserts identical `funnel.stages` + `metaStoryCount`.
+
+#### Why
+
+- **Trust + recall tradeoff handled by a single dial.** Operators can choose to trade some precision for recall on topics/keywords by flipping a flag and tuning a threshold — without code changes, without touching the deterministic baseline.
+- **Closed-vocabulary is the safety net.** Even an over-eager scorer can never emit a label the user didn't opt into. The mapper inspects `allowedLabels` only; the evidence token cannot leak through.
+- **Geographies are still the riskiest axis to widen.** A semantic alias that maps `"Pacific Northwest"` → `"China"` would be a real and silent precision failure. The deterministic-only lock + explicit `semanticApplied: false` stamp catches drift.
+- **Default OFF is the rollout strategy.** Phase 4 ships the surface and the diagnostics; flipping the flag is a separate Phase 5 step that depends on a production scorer + calibrated thresholds.
+
+#### Tradeoffs
+
+- **No production scorer wired yet.** The brief asked for the module, integration, flags, diagnostics, and tests — not for a production scorer wired into `server.mjs`. We chose to keep the scorer injectable so tests can be deterministic; production wiring is a Phase 5 follow-up.
+- **Per-story async overhead.** When the flag is OFF (default), `assignMetaStoryTagsDetailed` still runs once per story to emit skipped-state diagnostics. Cost is dominated by the Promise + diagnostics object construction — negligible compared to per-story clustering + grounding cost, and the path is the same whether ON or OFF (so tests of ON/OFF parity are honest).
+- **Default threshold (`0.75`) is a conservative guess.** Actual calibration belongs to Phase 5 against the scenario-map goldens; the spec / walkthrough say so.
+- **`_lastRunMeta.tags` adds a field to persisted snapshots.** Snapshots written pre-Phase-4 don't have it; loaders skip the field cleanly (covered by existing back-compat normalization tests).
+
+#### Consequences
+
+- Phase 5: production scorer wiring + per-axis threshold calibration + staged flag flip. The diagnostics dashboard (operator-facing) is the canary signal — operators read `_meta.tags` to monitor "is uplift firing, how often is it borderline?" before promoting.
+- Existing Phase 3 boundary tests are kept (default-OFF path) AND extended with semantic-ON cases (Phase 4 uplift path). Both versions live side-by-side so any future scope change has to consciously delete or amend each.
+- No changes to recall, clustering, dedupe, grounding, or admission. The one-way K1a invariant continues to hold even with Phase 4 ON.
+
+---
+
+### 2026-05-16 - D-048 - Trust cleanup Phase 3: deterministic meta-story tag assignment + geography alias map
+
+#### Context
+
+Phase 1/2 ([D-047](#2026-05-16---d-047---trust-cleanup-phase-1--2-tags-only-labels-no-fabricated-topic-required-tags-on-the-wire)) closed the leak paths that let fabricated labels reach the UI, made `story.tags` required on the wire, and tightened the snapshot loader. The remaining gap is *evidence*: production tag derivation still went through source-only [`deriveStoryTags(sourceItems, settings)`](apps/api/src/dashboard/refresh-pipeline.mjs), which meant a narrative whose **meta-story summary** clearly mentioned a canonical topic but whose **source `topic` fields** were thin/empty produced no topic tag — even though the evidence was right there. Geographies had the analogous gap: text like `"Officials in Beijing issued a statement"` produced no `China` tag because Beijing wasn't in `source.geographies`, and the matcher only did exact string-set intersection.
+
+#### Decision
+
+Implement **Phase 3 trust cleanup**: deterministic meta-story-level tag assignment + deterministic geography aliasing. Chunk K is still locked to **K1a**; the new mechanism enriches evidence-to-tags, not the one-way posture.
+
+**New API surface — [`meta-story-tags.mjs`](apps/api/src/dashboard/meta-story-tags.mjs):**
+
+- `buildMetaStoryEvidenceText(metaStory, sourceItems)` → text bundle (`title` + `subtitle` + `summary` + each source's `headline` + `body`), defensively tolerant of missing fields and non-object entries.
+- `assignMetaStoryTags({ metaStory, sourceItems, settings })` → strict three-axis tags object, deduped + locale-sorted. Combines (a) phrase match against the evidence bundle, (b) source structural fields (`source.topic` with synonym normalization, `source.geographies` intersected with settings), and (c) the geography alias map.
+
+**Geography alias map — [`geography-aliases.ts`](packages/contracts/src/geography-aliases.ts):**
+
+- `GEOGRAPHY_ALIASES` maps lowercase evidence tokens to canonical labels (`Beijing → China`, `Montevideo → Latin America`, `Tokyo → Japan`, etc.).
+- `resolveGeographyAlias(token, settingsGeographies)` returns the **settings-cased** canonical when both the alias hit and the settings gate fire; returns `null` otherwise. Alias surface forms are **never** emitted into the payload.
+
+**Wiring — [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs):**
+
+- [`buildStory`](apps/api/src/dashboard/refresh-pipeline.mjs) calls `assignMetaStoryTags({ metaStory, sourceItems, settings })` instead of `deriveStoryTags(sourceItems, settings)`. The legacy helper stays exported as a back-compat utility.
+
+**Phase 4 boundary held — keywords stay deterministic:**
+
+- Whole-word phrase match against `settings.keywords` only. Semantic widening (`petroleum` evidence → `oil` tag when `oil` is in settings) is **explicitly Phase 4**. A regression test (*"Phase 3 wiring: 'petroleum' in text + 'oil' in settings emits NO keyword tag"*) locks this boundary; an analogous module-level test makes the deferral obvious to a future reader.
+
+#### Why
+
+- **Trust matches what the narrative actually says.** "Beijing" is China-evidence; with the alias map the UI surfaces the canonical `China` tag (when the user has opted into China), without inventing it for users who haven't. "Diplomatic relations" mentioned in the meta-story summary surfaces as a topic tag even when the source structural `topic` is weak.
+- **Deterministic posture stays.** No model lookup, no embedding probe, no synonym lexicon for keywords — every match is a regex hit against a string the operator can read in the source data. Auditable and reproducible across runs.
+- **Single source of truth for the alias map.** Putting it in `@tempo/contracts` colocates it with the existing label-normalization vocabulary and lets eval/scoring code consume the same map if/when that comes up.
+- **Phase 4 left clean.** Locking the `petroleum`/`oil` boundary in regression now means the semantic mapper can land later without anyone having to guess what Phase 3 *meant*.
+
+#### Tradeoffs
+
+- The evidence bundle grew: phrase matching now scans the meta-story narrative text, not just source headlines/body. Per-story cost is still O(text length × |settings|) per axis — well within budget for the per-story tag step, and the assigner sits **after** clustering so the cost is paid once per shipped story, not per candidate.
+- The alias map is curated by hand (low tens of entries in v1). When the product surfaces a missed alias that's causing real label drops, we add it; we do not over-author the map preemptively because every entry is a chance to leak the wrong canonical.
+- Source-only [`deriveStoryTags`](apps/api/src/dashboard/refresh-pipeline.mjs) still exists. We could drop it, but keeping it preserves the existing test surface and gives us a clean rollback target if Phase 3 ever needs to be reverted.
+- [`storySchema.tags`](packages/contracts/src/schemas.ts) being required (Phase 2) caught a stale Phase 2 issue: the prototype's [`STORIES`](../04-prototype/src/data/stories.ts) demo fixture was missing `tags` on its five entries, which surfaced as 26 failures in [`api.test.ts`](../04-prototype/src/lib/api.test.ts). Fixed in-flight (added an explicit `tags` object to each demo story); no other consumers needed to change.
+
+#### Consequences
+
+- Phase 4 (deferred): a semantic keyword mapper — constrained synonym lexicon or embedding-backed proximity check, still settings-gated. The Phase 3 regression test will need to be amended or replaced when that lands. Chunk K stays at K1a; semantic widening must not bleed into recall/clustering.
+- The alias map is small in v1 and will grow on a per-evidence basis. New entries follow the authoring convention in [`geography-aliases.ts`](packages/contracts/src/geography-aliases.ts) (lowercase keys, Title Case canonicals).
+- Existing pipeline tests that asserted source-only tag derivation continue to pass — the new assigner consults source structural fields as well as the evidence bundle, so backward-compatible behavior is preserved on fixtures whose source `topic`/`geographies` already encoded the canonical evidence.
+
+---
+
+### 2026-05-16 - D-047 - Trust cleanup Phase 1 + 2: tags-only labels, no fabricated topic, required `tags` on the wire
+
+#### Context
+
+The dashboard was surfacing fabricated topic/geography labels in three places: (1) [`dashboard-filters.ts`](../04-prototype/src/lib/dashboard-filters.ts) fell back to root `story.topic` / `story.geographies` when `story.tags` was missing, so legacy stories produced phantom pills; (2) [`buildStory`](apps/api/src/dashboard/refresh-pipeline.mjs) defaulted `topic` to `"Diplomatic relations"` whenever no source carried a canonical topic; (3) `DEFAULT_SETTINGS` seeded a canonical taxonomy + sources list so an unconfigured installation looked like the user had already chosen a beat. Chunk K — locked to **K1a** — already said tags come from `deriveStoryTags(sourceItems, settings)` only, but these leak paths let evidence-free labels reach the UI anyway.
+
+#### Decision
+
+Land trust cleanup in two phases on `feat/meta-story-tags-phase1`, no Chunk K relock:
+
+**Phase 1 — fabrication removal:**
+
+- `dashboard-filters.ts` `topicsOf` / `keywordsOf` / `geographiesOf` read **only** from `story.tags`; missing tags = empty arrays on every axis.
+- `buildStory` drops `?? "Diplomatic relations"`; emits `topic` **only** when a source item carries a canonical value, otherwise omits the field (`storySchema.topic` becomes `optional`).
+- `DEFAULT_SETTINGS` / [`settings.json`](apps/api/data/settings.json) / `defaultSettingsPayload` in the prototype are fully empty (taxonomy + sources).
+
+**Phase 2 — contract + boundary alignment:**
+
+- `storySchema.tags` becomes **required** (`{ topics: string[], keywords: string[], geographies: string[] }` — empty arrays valid).
+- [`dashboard-snapshot-repo.mjs`](apps/api/src/db/dashboard-snapshot-repo.mjs) `normalizeStoriesForLoad` coerces legacy / missing / partial `tags` to the three-axis empty shape at the **read boundary** so the strict display schema can assume the field without a write-time migration.
+- Spec ([`dashboard-story-pool-spec.md`](docs/dashboard-story-pool-spec.md) — Chunk K) and walkthrough ([`dashboard-story-pool-walkthrough.md`](docs/dashboard-story-pool-walkthrough.md) — Chunk K) carry a Phase 1+2 amendment and a forward-look note for Phase 3.
+
+#### Why
+
+- **Trust posture.** Tags-on-the-screen now match tags-on-the-wire: if the system has no evidence on an axis, the UI shows nothing rather than a confident-looking placeholder. Phantom "Diplomatic relations" chips were eroding trust on thin-evidence stories.
+- **K1a was always tags-only.** This isn't a new decision — it closes leaks where the *absence* of evidence was being papered over.
+- **Read-boundary normalization, not migration.** Older snapshots stay readable; on-disk shape doesn't drift; new writes always carry the three-axis shape because the API only emits the new shape now.
+
+#### Tradeoffs
+
+- Stories whose sources carry no canonical topic now omit `story.topic` on the wire. Lineage matching in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) already handled `prior.topic ?? ""` defensively, so this is a no-op for narrative continuity.
+- `topic` is optional on the contract, which is one more shape callers must handle — but the UI doesn't render it (tags drive labels), and the schema is strict on `tags` to compensate.
+- Empty defaults mean a fresh install shows no pills until the user configures settings. That is the intended behavior — fewer fabricated chips trumps a "demo-friendly" but misleading first impression.
+
+#### Consequences
+
+- Phase 3 (deferred) will tackle the **geography alias map** (`Beijing → China`) and **meta-story-level tag assignment** (consult `metaStory.tags` subject to `constrainTagsToSettings`). Chunk K stays at K1a until that lands; existing test *"deriveStoryTags: does not consult model tags at all"* will need to be amended when Phase 3 ships.
+- Loaders that read snapshots from any backend already go through `dashboard-snapshot-repo.mjs` — no other callers need a back-compat tweak.
+
+---
+
 ### 2026-05-03 - D-046 - Phase 5: read-only Markdown catalog export from Supabase
 
 #### Context

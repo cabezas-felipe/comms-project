@@ -21,7 +21,12 @@ export interface Story {
   id: string;
   title: string;
   geographies: Geography[];
-  topic: Topic;
+  /**
+   * Phase 1 trust cleanup: `topic` is optional.  The pipeline no longer
+   * fabricates a default value, so legacy/empty payloads may omit it.  UI
+   * labels (header pills, scan-row chips) are driven by `tags` only.
+   */
+  topic?: Topic;
   /** one-line takeaway shown on the card */
   takeaway: string;
   summary: string;
@@ -31,12 +36,11 @@ export interface Story {
   outletCount: number;
   sources: Source[];
   /**
-   * Phase 6: optional tag arrays surfaced by clustering.  When present, drive
-   * the dashboard's dynamic header pills (topics / keywords / geographies).
-   * When absent (e.g. local fixture, legacy snapshots), the dashboard falls
-   * back to the canonical `topic` / `geographies` fields.  Keyword pills only
-   * render when this object provides them — keywords are NEVER inferred from
-   * free text.
+   * Phase 6: tag arrays surfaced by clustering.  Drives the dashboard's
+   * dynamic header pills (topics / keywords / geographies) and the scan-row
+   * chips.  Phase 1 trust cleanup: when this object is absent (legacy
+   * snapshots), all three axes are treated as empty — the root `topic` /
+   * `geographies` fields are NEVER used as a fallback to fabricate labels.
    */
   tags?: {
     topics: string[];
@@ -51,6 +55,11 @@ export const STORIES: Story[] = [
     title: "OFAC scrutiny expands around Colombia leadership narrative",
     geographies: ["US", "Colombia"],
     topic: "Diplomatic relations",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: ["OFAC", "sanctions"],
+      geographies: ["US", "Colombia"],
+    },
     takeaway:
       "Story is moving from policy reporting into political reaction — response cycle likely within the day.",
     summary:
@@ -154,6 +163,11 @@ export const STORIES: Story[] = [
     title: "US deportation-routing discussion involving Rwanda resurfaces",
     geographies: ["US", "Colombia"],
     topic: "Migration policy",
+    tags: {
+      topics: ["Migration policy"],
+      keywords: ["deportation routing"],
+      geographies: ["US", "Colombia"],
+    },
     takeaway:
       "Bilateral framing is back; expect inbound press questions for Colombia-adjacent statements within 24h.",
     summary:
@@ -240,6 +254,11 @@ export const STORIES: Story[] = [
     title: "Regional security coordination debate grows after congressional comments",
     geographies: ["US"],
     topic: "Security cooperation",
+    tags: {
+      topics: ["Security cooperation"],
+      keywords: ["bilateral"],
+      geographies: ["US"],
+    },
     takeaway:
       "Debate framing — not policy framing — typically precedes opinion-page cycles. Worth tracking.",
     summary:
@@ -297,6 +316,11 @@ export const STORIES: Story[] = [
     title: "Pacific trade corridor talks gain quiet traction in regional press",
     geographies: ["Colombia"],
     topic: "Diplomatic relations",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: [],
+      geographies: ["Colombia"],
+    },
     takeaway:
       "Procedural framing now means political framing later. Establish a baseline summary before the cycle turns.",
     summary:
@@ -354,6 +378,11 @@ export const STORIES: Story[] = [
     title: "Border coordination figures cited in two unrelated US opinion pieces",
     geographies: ["US"],
     topic: "Migration policy",
+    tags: {
+      topics: ["Migration policy"],
+      keywords: ["bilateral"],
+      geographies: ["US"],
+    },
     takeaway:
       "Cross-spectrum citation usually predicts the dataset becoming a fixture in next-cycle coverage.",
     summary:
@@ -407,9 +436,6 @@ export const STORIES: Story[] = [
     ],
   },
 ];
-
-export const TOPICS: Topic[] = ["Diplomatic relations", "Migration policy", "Security cooperation"];
-export const GEOGRAPHIES: Geography[] = ["US", "Colombia"];
 
 /** Find a source across all stories. */
 export function findSource(sourceId: string): { story: Story; source: Source } | null {

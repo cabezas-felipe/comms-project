@@ -24,6 +24,11 @@ import { appendRejections as appendStoryRejections } from "./db/story-rejection-
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
 import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
+import {
+  createEmbeddingSemanticScorer,
+  resolveSemanticTagConfig,
+  resolveSemanticScorerRuntimeConfig,
+} from "./dashboard/meta-story-semantic-mapper.mjs";
 import { resolveRecallConfig } from "./ingestion/embedding-recall.mjs";
 import {
   tryAcquire as tryAcquireRefresh,
@@ -243,8 +248,24 @@ export const _embeddings = { embed: embedTexts };
  * pipeline.
  */
 export const _refreshPipeline = {
-  run: (opts) =>
-    runRefreshPipeline({
+  run: (opts) => {
+    // Attach the production embedding-similarity scorer when any semantic
+    // axis is enabled and no test scorer was injected.  When semantic is
+    // OFF (default) or kill-switched, the scorer stays null and the
+    // pipeline falls into its `disabled` / `enabled_no_scorer` runtime
+    // states.  See [`runbook-semantic-tags.md`](../docs/runbook-semantic-tags.md).
+    const semanticConfig = opts.semanticTagConfig ?? resolveSemanticTagConfig();
+    const semanticAnyAxisOn = semanticConfig.topicsEnabled || semanticConfig.keywordsEnabled;
+    let semanticTagScorer = opts.semanticTagScorer ?? null;
+    if (!semanticTagScorer && semanticAnyAxisOn) {
+      const runtime = resolveSemanticScorerRuntimeConfig();
+      semanticTagScorer = createEmbeddingSemanticScorer({
+        embedFn: (texts) => _embeddings.embed(texts),
+        timeoutMs: runtime.timeoutMs,
+        maxEvidenceChars: runtime.maxEvidenceChars,
+      });
+    }
+    return runRefreshPipeline({
       ...opts,
       clusterFn: _clusterEngine.cluster,
       geoAssessFn: _geoFilter.assess,
@@ -262,7 +283,13 @@ export const _refreshPipeline = {
       // Embedding-aware recall: in `hybrid_strict` mode the pipeline calls
       // this fn with [profileText, ...itemTexts]; absent/throwing → fail-closed.
       embedFn: (texts) => _embeddings.embed(texts),
-    }),
+      // Phase 5 semantic-tag scorer (config + scorer).  Both may be null /
+      // disabled; the pipeline degrades cleanly to the Phase 3 deterministic
+      // baseline.  Diagnostics surface the runtime state on every run.
+      semanticTagConfig: semanticConfig,
+      semanticTagScorer,
+    });
+  },
 };
 
 /**
@@ -894,6 +921,11 @@ async function executeRefreshFlow(identity) {
     if (log.recall !== undefined) lastRunMeta.recall = log.recall;
     if (log.beatFit !== undefined) lastRunMeta.beatFit = log.beatFit;
     if (log.decisionTrace !== undefined) lastRunMeta.decisionTrace = log.decisionTrace;
+    // Phase 4: per-axis semantic tag-mapping aggregate (topics/keywords) and
+    // the locked `geographies.semanticApplied: false` stamp.  Persisted so
+    // `GET /api/dashboard` can surface "was semantic widening on for this
+    // run, and how often did it fire?" without re-running the pipeline.
+    if (log.tags !== undefined) lastRunMeta.tags = log.tags;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
@@ -1158,6 +1190,58 @@ app.get("/api/ai/metrics", (_req, res) => {
   res.json({
     metrics: getAiMetrics(),
   });
+});
+
+// Phase 7: internal-only debug surface for `_meta.tags` (semantic tag rollout
+// diagnostics).  Two compounding gates: the env opt-in MUST be true AND
+// NODE_ENV must NOT be "production" — neither alone is sufficient.  This
+// keeps the surface unavailable from prod even if the env var leaks, and
+// unavailable from staging/dev unless an operator deliberately opts in.
+// The endpoint is also identity-bound (same `requireIdentity` as
+// `/api/dashboard`) so the diagnostics never leak to anonymous callers.
+//
+// Returns ONLY the `_meta.tags` aggregate from the user's last persisted
+// snapshot — never any story content, source bodies, or selection meta.
+// Operators reading this can answer "is semantic uplift firing? how often
+// is it borderline? is the scorer healthy?" without log grep.
+function isDebugTagsEnabled(env = process.env) {
+  if (env.NODE_ENV === "production") return false;
+  const raw = String(env.TEMPO_DEBUG_TAGS_ENABLED ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+app.get("/api/_debug/dashboard-tags", async (req, res) => {
+  if (!isDebugTagsEnabled()) {
+    return res.status(404).json({ message: "Not found" });
+  }
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  try {
+    const snapshot = await _snapshotRepo.read(identity.userId);
+    if (!snapshot) {
+      return res.json({
+        hasSnapshot: false,
+        tags: null,
+        message: "No persisted snapshot for this identity yet.",
+      });
+    }
+    const tags = snapshot._meta?.tags ?? null;
+    return res.json({
+      hasSnapshot: true,
+      schemaVersion: tags?.schemaVersion ?? null,
+      killSwitchActive: tags?.killSwitchActive ?? null,
+      tags,
+      refreshedAt: snapshot._meta?.refreshedAt ?? null,
+      lastCheckedAt: snapshot._meta?.lastCheckedAt ?? null,
+    });
+  } catch (error) {
+    trackServerEvent("api_error", {
+      route: "/api/_debug/dashboard-tags",
+      statusCode: 500,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+    return res.status(500).json({ message: "Internal error" });
+  }
 });
 
 // ─── Prototype routing: resolve destination by email ─────────────────────────

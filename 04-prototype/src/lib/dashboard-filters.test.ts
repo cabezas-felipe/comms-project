@@ -63,15 +63,15 @@ describe("aggregateTagSections", () => {
     expect(sections.geographies).toEqual(["Colombia", "US"]);
   });
 
-  it("falls back to story.topic and story.geographies when tags are absent", () => {
+  it("returns empty sections when stories have no tags (no fallback to root topic/geographies)", () => {
     const stories = [
       makeStory({ id: "a", topic: "Diplomatic relations", geographies: ["US"] }),
       makeStory({ id: "b", topic: "Security cooperation", geographies: ["Colombia"] }),
     ];
     const sections = aggregateTagSections(stories);
-    expect(sections.topics).toEqual(["Diplomatic relations", "Security cooperation"]);
-    expect(sections.geographies).toEqual(["Colombia", "US"]);
-    // Keywords are NEVER inferred — section stays empty without tags
+    // All axes are tags-only — no fabricated labels from root fields.
+    expect(sections.topics).toEqual([]);
+    expect(sections.geographies).toEqual([]);
     expect(sections.keywords).toEqual([]);
   });
 
@@ -122,15 +122,15 @@ describe("storyMatchesSelection", () => {
     expect(storyMatchesSelection(story, selection(["Diplomatic relations"], ["asylum"], ["US"]))).toBe(false);
   });
 
-  it("falls back to story.topic when tags are absent for topics", () => {
+  it("never matches a topic selection when tags are absent (no fallback to story.topic)", () => {
     const legacy = makeStory({ topic: "Migration policy", tags: undefined });
-    expect(storyMatchesSelection(legacy, selection(["Migration policy"]))).toBe(true);
+    expect(storyMatchesSelection(legacy, selection(["Migration policy"]))).toBe(false);
     expect(storyMatchesSelection(legacy, selection(["Diplomatic relations"]))).toBe(false);
   });
 
-  it("falls back to story.geographies when tags are absent for geographies", () => {
+  it("never matches a geography selection when tags are absent (no fallback to story.geographies)", () => {
     const legacy = makeStory({ geographies: ["Colombia"], tags: undefined });
-    expect(storyMatchesSelection(legacy, selection([], [], ["Colombia"]))).toBe(true);
+    expect(storyMatchesSelection(legacy, selection([], [], ["Colombia"]))).toBe(false);
     expect(storyMatchesSelection(legacy, selection([], [], ["US"]))).toBe(false);
   });
 
@@ -210,9 +210,9 @@ describe("storyScanLabels", () => {
     expect(storyScanLabels(story)).toEqual(["sanctions"]);
   });
 
-  it("falls back to story.topic when tags are absent", () => {
+  it("returns an empty array when tags are absent (no fallback to story.topic)", () => {
     const legacy = makeStory({ topic: "Diplomatic relations", tags: undefined });
-    expect(storyScanLabels(legacy)).toEqual(["Diplomatic relations"]);
+    expect(storyScanLabels(legacy)).toEqual([]);
   });
 
   it("dedupes topics and keywords before counting/sorting", () => {

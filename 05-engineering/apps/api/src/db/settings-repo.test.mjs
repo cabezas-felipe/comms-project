@@ -21,9 +21,14 @@ after(async () => {
 test("readSettings returns default settings when no file exists", async () => {
   const settings = await readSettings();
   assert.equal(settings.contractVersion, DEFAULT_SETTINGS.contractVersion);
-  assert.ok(Array.isArray(settings.topics));
-  assert.ok(settings.topics.length > 0);
-  assert.deepEqual(settings.geographies, DEFAULT_SETTINGS.geographies);
+  // Phase 1 trust cleanup: defaults are fully empty so an unconfigured
+  // installation surfaces nothing rather than seed values that look like
+  // the user has already chosen a taxonomy.
+  assert.deepEqual(settings.topics, []);
+  assert.deepEqual(settings.keywords, []);
+  assert.deepEqual(settings.geographies, []);
+  assert.deepEqual(settings.traditionalSources, []);
+  assert.deepEqual(settings.socialSources, []);
 });
 
 test("writeSettings persists and readSettings returns updated data", async () => {

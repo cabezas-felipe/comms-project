@@ -3,7 +3,6 @@ import {
   settingsPayloadSchema,
   type SettingsPayload,
 } from "@tempo/contracts";
-import { STORIES } from "@/data/stories";
 import { supabase } from "./supabase";
 import { getProtoSession } from "./auth";
 
@@ -47,37 +46,19 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
   return {};
 }
 
-function seedSourcesFromStories(): { traditionalSources: string[]; socialSources: string[] } {
-  const seenTraditional = new Set<string>();
-  const seenSocial = new Set<string>();
-  const traditionalSources: string[] = [];
-  const socialSources: string[] = [];
-
-  STORIES.forEach((story) => {
-    story.sources.forEach((source) => {
-      if (source.kind === "traditional" && !seenTraditional.has(source.outlet)) {
-        seenTraditional.add(source.outlet);
-        traditionalSources.push(source.outlet);
-      }
-      if (source.kind === "social" && !seenSocial.has(source.outlet)) {
-        seenSocial.add(source.outlet);
-        socialSources.push(source.outlet);
-      }
-    });
-  });
-
-  return { traditionalSources, socialSources };
-}
-
+// Phase 1 trust cleanup: defaults are fully empty.  The previous seed list
+// (canonical taxonomy + sources mined from fixture stories) silently planted
+// real-looking selections before the user had configured anything, which
+// then drove fabricated chips/filters in the UI.  An empty default makes the
+// unconfigured state honest — nothing has been chosen yet.
 export function defaultSettingsPayload(): SettingsPayload {
-  const seeds = seedSourcesFromStories();
   return settingsPayloadSchema.parse({
     contractVersion: CONTRACT_VERSION,
-    topics: ["Diplomatic relations", "Migration policy", "Security cooperation"],
-    keywords: ["OFAC", "sanctions", "deportation routing", "bilateral"],
-    geographies: ["US", "Colombia"],
-    traditionalSources: seeds.traditionalSources,
-    socialSources: seeds.socialSources,
+    topics: [],
+    keywords: [],
+    geographies: [],
+    traditionalSources: [],
+    socialSources: [],
   });
 }
 
