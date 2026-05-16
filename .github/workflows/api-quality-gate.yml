@@ -1,0 +1,44 @@
+name: API quality gate
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "05-engineering/**"
+      - ".github/workflows/api-quality-gate.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: api-quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-quality-gate:
+    name: Test API + critical eval gate
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: 05-engineering/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: 05-engineering
+
+      - name: Run API tests
+        run: npm run test:api
+        working-directory: 05-engineering
+
+      - name: Run critical hard-fail suite
+        run: npm run eval:critical --workspace=@tempo/api
+        working-directory: 05-engineering

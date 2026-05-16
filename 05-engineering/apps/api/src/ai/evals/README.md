@@ -58,7 +58,7 @@ If both fail for an example, it is marked `extraction_error` and scored 0 on all
 - After any system-prompt or model change
 - After adding or editing gold examples
 - Before cutting a release that touches extraction logic
-- When overall exact-match drops below the 0.70 warning threshold
+- When onboarding extraction exact-match drifts materially (advisory only; release gate remains `npm run eval:critical`)
 
 ## Dataset
 
