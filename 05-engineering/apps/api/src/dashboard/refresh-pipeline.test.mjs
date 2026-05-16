@@ -12,6 +12,14 @@ import assert from "node:assert/strict";
 // Safe to set at module top: `node --test` runs each test file in a child
 // process, so this env mutation does not leak across files.
 process.env.TEMPO_RECALL_MODE = "keyword";
+// Semantic BeatFit defaults to enabled in production. Legacy tests in this
+// file predate the stage and don't inject a `semanticBeatFitEmbedFn`; if the
+// stage ran they would observe a degraded "embed_fn_unavailable" log line
+// (harmless) and any test counting embedFn invocations would see the fallback
+// fire. Disable at the file top so legacy assertions keep their original
+// contract; the dedicated semantic tests below opt in via
+// `semanticBeatFitConfig: SEMANTIC_ON`.
+process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED = "false";
 
 import {
   selectSourcePool,
@@ -5394,4 +5402,296 @@ test("Phase 7 wiring: log.tags surfaces scorerCallCount + scorerLatencyMaxMs", a
   assert.ok(log.tags.keywords.scorerLatencyMaxMs > 0);
   // Max must never exceed cumulative — basic invariant.
   assert.ok(log.tags.keywords.scorerLatencyMaxMs <= log.tags.keywords.scorerLatencyMs);
+});
+
+// ─── Semantic BeatFit (Option A) ─────────────────────────────────────────────
+//
+// Contract pinned at the pipeline level:
+//   1. Lexical-miss / semantic-hit rescue (the ISIS/Nigeria regression).
+//   2. Precision posture preserved: irrelevant items still excluded with
+//      semantic stage enabled and active.
+//   3. Embedding failure (timeout/error) degrades to deterministic-only —
+//      refresh completes, no broken snapshot.
+//   4. Kill switch (env or override) instantly restores deterministic-only
+//      behavior with no other pipeline changes.
+
+import {
+  resolveSemanticBeatFitConfig,
+  createProfileEmbeddingCache,
+} from "./semantic-beat-fit.mjs";
+
+const TERRORISM_SETTINGS = {
+  contractVersion: "2026-04-22-slice1",
+  topics: ["Terrorism"],
+  keywords: ["terrorism"],
+  geographies: ["US", "Nigeria"],
+  traditionalSources: ["Reuters"],
+  socialSources: [],
+};
+
+const SEMANTIC_ON = Object.freeze(
+  resolveSemanticBeatFitConfig({}, { enabled: true })
+);
+const SEMANTIC_OFF = Object.freeze(
+  resolveSemanticBeatFitConfig({}, { enabled: false })
+);
+const SEMANTIC_KILL = Object.freeze(
+  resolveSemanticBeatFitConfig({}, { killSwitch: true })
+);
+
+// Deterministic semantic stub: returns a 2-D vector that maps the user's
+// intent profile to one direction and "aligned" items (containing concept
+// tokens for terrorism/extremism) to the same direction. Non-aligned items
+// land orthogonal so their cosine collapses to ~0 (normalized score ~0.5).
+// Keeps the test's semantic-score expectations tight without depending on
+// real embedding behavior.
+const SEMANTIC_ALIGNMENT_RE = /\b(isis|militant|militants|extremist|extremists|attack|attacks|terror|terrorism)\b/i;
+
+function semanticStubEmbedFn() {
+  return async (texts) =>
+    texts.map((text) => {
+      const s = String(text);
+      // Profile text always starts with "I monitor news about" — see
+      // semantic-beat-fit.mjs#buildIntentProfileText.
+      if (s.startsWith("I monitor news about")) return [1, 0];
+      return SEMANTIC_ALIGNMENT_RE.test(s) ? [1, 0] : [0, 1];
+    });
+}
+
+test("Semantic BeatFit: rescues ISIS/Nigeria-style lexical miss when stage is enabled", async () => {
+  // Headline doesn't carry the literal "terrorism" keyword, so deterministic
+  // BeatFit would score it below threshold. The semantic stage aligns
+  // ISIS/militant/attack with the user's terrorism intent and the blended
+  // score crosses the threshold.
+  const isisItem = makeItem({
+    sourceId: "isis-nigeria",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Other",
+    geographies: ["Nigeria"],
+    headline: "ISIS militants attack village in northeast Nigeria, dozens killed",
+    body: ["Witnesses said extremist fighters launched the assault overnight."],
+  });
+  const seenIds = [];
+  const { payload } = await runRefreshPipeline({
+    settings: TERRORISM_SETTINGS,
+    rawItems: [isisItem],
+    clusterFn: async (items) => {
+      seenIds.push(...items.map((i) => i.sourceId));
+      return items.map((i) => ({
+        meta_story_id: "ms-isis",
+        title: "ISIS attack in Nigeria",
+        subtitle: "Sub",
+        source_item_ids: [i.sourceId],
+        summary: "Summary.",
+        tags: { topics: ["Terrorism"], keywords: [], geographies: ["Nigeria"] },
+        factual_claims: ["A claim."],
+        claim_evidence_map: { "0": [i.sourceId] },
+      }));
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+    semanticBeatFitConfig: SEMANTIC_ON,
+    semanticBeatFitEmbedFn: semanticStubEmbedFn(),
+    semanticBeatFitProfileCache: createProfileEmbeddingCache(),
+  });
+  assert.equal(payload.stories.length, 1, "ISIS/Nigeria must survive BeatFit when semantic is enabled");
+  assert.ok(seenIds.includes("isis-nigeria"));
+});
+
+test("Semantic BeatFit: same ISIS/Nigeria item is excluded when semantic is OFF (regression boundary)", async () => {
+  // Same item, semantic stage disabled — confirms it's the semantic stage
+  // doing the work, not some other coincidence in fixtures.
+  const isisItem = makeItem({
+    sourceId: "isis-nigeria-off",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Other",
+    geographies: ["Nigeria"],
+    headline: "ISIS militants attack village in northeast Nigeria, dozens killed",
+    body: ["Witnesses said extremist fighters launched the assault overnight."],
+  });
+  const { payload, log } = await runRefreshPipeline({
+    settings: TERRORISM_SETTINGS,
+    rawItems: [isisItem],
+    clusterFn: async (items) => items.map((i) => ({
+      meta_story_id: "ms-isis-off",
+      title: "ISIS attack",
+      subtitle: "Sub",
+      source_item_ids: [i.sourceId],
+      summary: "Summary.",
+      tags: { topics: ["Terrorism"], keywords: [], geographies: ["Nigeria"] },
+      factual_claims: ["A claim."],
+      claim_evidence_map: { "0": [i.sourceId] },
+    })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+    semanticBeatFitConfig: SEMANTIC_OFF,
+    semanticBeatFitEmbedFn: semanticStubEmbedFn(),
+    semanticBeatFitProfileCache: createProfileEmbeddingCache(),
+  });
+  // Either nothing reaches clustering (recall drops) or beat-fit drops it.
+  // The contract we want: zero shipped stories when semantic is off.
+  assert.equal(payload.stories.length, 0);
+  assert.equal(log.semanticBeatFit.enabled, false);
+});
+
+test("Semantic BeatFit: irrelevant story still excluded under precision-first posture (no flood)", async () => {
+  // Even with the semantic stage on, an obviously off-beat story (low
+  // deterministic + low semantic) must not slip through. Locks the
+  // precision-first invariant.
+  const irrelevantItem = makeItem({
+    sourceId: "celeb-yacht",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Other",
+    geographies: [],
+    headline: "Celebrity buys yacht for tropical vacation",
+    body: ["Tabloid coverage of celebrity excess."],
+  });
+  let clusterCalled = false;
+  const { payload } = await runRefreshPipeline({
+    settings: TERRORISM_SETTINGS,
+    rawItems: [irrelevantItem],
+    clusterFn: async () => {
+      clusterCalled = true;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+    semanticBeatFitConfig: SEMANTIC_ON,
+    semanticBeatFitEmbedFn: semanticStubEmbedFn(),
+    semanticBeatFitProfileCache: createProfileEmbeddingCache(),
+  });
+  assert.equal(payload.stories.length, 0, "irrelevant story must not be promoted by semantic stage");
+  assert.equal(clusterCalled, false);
+});
+
+test("Semantic BeatFit: embedding failure → deterministic-only, refresh completes with degraded reason", async () => {
+  // The semantic embed function rejects; refresh must NOT fail. It falls back
+  // to deterministic-only BeatFit. Recall's embedFn still works (we keep that
+  // path on a separate stub to isolate the semantic-stage failure).
+  const item = makeItem({
+    sourceId: "real-kw-hit",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Terrorism",
+    geographies: ["US"],
+    headline: "Treasury sanctions tied to terrorism financing",
+    body: ["The action targets known networks."],
+  });
+  const { payload, log } = await runRefreshPipeline({
+    settings: TERRORISM_SETTINGS,
+    rawItems: [item],
+    clusterFn: async (items) => items.map((i) => ({
+      meta_story_id: "ms-deg",
+      title: "Sanctions update",
+      subtitle: "Sub",
+      source_item_ids: [i.sourceId],
+      summary: "Summary.",
+      tags: { topics: ["Terrorism"], keywords: [], geographies: ["US"] },
+      factual_claims: ["A claim."],
+      claim_evidence_map: { "0": [i.sourceId] },
+    })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+    semanticBeatFitConfig: SEMANTIC_ON,
+    semanticBeatFitEmbedFn: async () => {
+      throw new Error("provider 503 service unavailable");
+    },
+    semanticBeatFitProfileCache: createProfileEmbeddingCache(),
+  });
+  assert.equal(payload.stories.length, 1, "refresh must complete on semantic stage failure");
+  assert.equal(log.semanticBeatFit.degraded, true);
+  assert.equal(log.semanticBeatFit.degradedReason, "embedding_error");
+  // BeatFit should report zero semantic-blend applications since the stage
+  // emitted no scores.
+  assert.equal(log.beatFit.semanticBlendAppliedCount, 0);
+});
+
+test("Semantic BeatFit: kill switch active → stage disabled, deterministic-only path intact", async () => {
+  const item = makeItem({
+    sourceId: "kill-switch-item",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Terrorism",
+    geographies: ["US"],
+    headline: "U.S. counterterrorism partnership widens",
+    body: ["A bilateral statement was issued."],
+  });
+  const { log, payload } = await runRefreshPipeline({
+    settings: TERRORISM_SETTINGS,
+    rawItems: [item],
+    clusterFn: async (items) => items.map((i) => ({
+      meta_story_id: "ms-kill",
+      title: "Counterterror",
+      subtitle: "Sub",
+      source_item_ids: [i.sourceId],
+      summary: "Summary.",
+      tags: { topics: ["Terrorism"], keywords: [], geographies: ["US"] },
+      factual_claims: ["A claim."],
+      claim_evidence_map: { "0": [i.sourceId] },
+    })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+    semanticBeatFitConfig: SEMANTIC_KILL,
+    semanticBeatFitEmbedFn: semanticStubEmbedFn(),
+    semanticBeatFitProfileCache: createProfileEmbeddingCache(),
+  });
+  assert.equal(log.semanticBeatFit.killSwitchActive, true);
+  assert.equal(log.semanticBeatFit.enabled, false);
+  assert.equal(log.semanticBeatFit.degradedReason, "kill_switch_active");
+  assert.equal(payload.stories.length, 1);
+});
+
+test("Semantic BeatFit: log surfaces version, model, latency, and score buckets", async () => {
+  const item = makeItem({
+    sourceId: "log-shape",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Terrorism",
+    geographies: ["US"],
+    headline: "Terrorism investigation update",
+    body: ["Officials confirm."],
+  });
+  const { log } = await runRefreshPipeline({
+    settings: TERRORISM_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+    semanticBeatFitConfig: SEMANTIC_ON,
+    semanticBeatFitEmbedFn: semanticStubEmbedFn(),
+    semanticBeatFitProfileCache: createProfileEmbeddingCache(),
+  });
+  assert.ok(log.semanticBeatFit, "log.semanticBeatFit must be present");
+  for (const f of [
+    "version",
+    "enabled",
+    "killSwitchActive",
+    "model",
+    "scoredCount",
+    "skippedCount",
+    "profileCacheHit",
+    "latencyMs",
+    "scoreBuckets",
+    "meanScore",
+    "degraded",
+    "degradedReason",
+  ]) {
+    assert.ok(f in log.semanticBeatFit, `log.semanticBeatFit.${f} must be present`);
+  }
+  assert.equal(typeof log.semanticBeatFit.latencyMs, "number");
 });

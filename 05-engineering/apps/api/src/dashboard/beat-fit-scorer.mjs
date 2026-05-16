@@ -21,8 +21,16 @@
 //     consistent across stages.
 
 import { normalizeTopicLabel } from "../contracts-runtime/index.mjs";
+import {
+  SEMANTIC_BLEND_DETERMINISTIC,
+  SEMANTIC_BLEND_SEMANTIC,
+} from "./semantic-beat-fit.mjs";
 
 export const BEAT_FIT_VERSION = "beat-fit-v1";
+
+// Re-export the blend weights so callers can reference them without reaching
+// into the semantic module.
+export { SEMANTIC_BLEND_DETERMINISTIC, SEMANTIC_BLEND_SEMANTIC };
 
 // Threshold tuned to the "balanced" product posture. Items at or above this
 // reach clustering. The pairwise regression (US strikes Iranian tankers vs.
@@ -191,15 +199,34 @@ function recencyScore(minutesAgo) {
  *
  * Returns:
  *   {
- *     score:        number in [0, 1]
+ *     score:        number in [0, 1]  — final score the threshold compares
+ *                   against. When the item carries a valid
+ *                   `semanticIntentScore` and blending is enabled, this is the
+ *                   blended value (deterministic * 0.65 + semantic * 0.35);
+ *                   otherwise it equals `deterministicScore`.
+ *     deterministicScore:  number in [0, 1] — pure heuristic score
+ *     semanticIntentScore: number | null  — input score from the semantic
+ *                          stage (passed through for diagnostics, never
+ *                          recomputed here)
+ *     blendApplied: boolean  — true iff the final score was blended
  *     breakdown:    per-component signed contributions (positive bonuses,
- *                   negative penalties), useful for logs and tests
+ *                   negative penalties), useful for logs and tests. When
+ *                   blending is applied, also includes:
+ *                     `deterministicWeighted` = deterministic * 0.65
+ *                     `semanticIntentWeighted` = semantic * 0.35
  *     reasonCodes:  string[] — internal-only codes describing why the score
  *                   landed where it did (e.g. "topic_match", "actor_us",
- *                   "geo_offbeat_asia", "commodity_framing")
+ *                   "geo_offbeat_asia", "commodity_framing",
+ *                   "semantic_intent_blend:0.74")
  *   }
+ *
+ * Opts:
+ *   - semanticBlendEnabled (default true): controls whether the blend formula
+ *     is applied when a `semanticIntentScore` is present on the item. Set to
+ *     false at the call site (or via kill switch in opts) for an instant
+ *     rollback to deterministic-only behavior without removing the field.
  */
-export function scoreBeatFit(item, settings) {
+export function scoreBeatFit(item, settings, opts = {}) {
   const breakdown = {};
   const reasonCodes = [];
   const text = joinText(item);
@@ -293,9 +320,46 @@ export function scoreBeatFit(item, settings) {
   }
 
   const raw = positiveSum + breakdown.recency - penalty;
-  const score = Math.max(0, Math.min(1, raw));
+  const deterministicScore = Math.max(0, Math.min(1, raw));
 
-  return { score, breakdown, reasonCodes };
+  // Semantic intent blending. The blend is applied only when:
+  //   1. `semanticBlendEnabled` opt is true (default true — flip to false to
+  //      force deterministic-only behavior without touching the field).
+  //   2. The item carries a finite `semanticIntentScore` in [0, 1].
+  // Otherwise the final score equals the deterministic score so existing
+  // behavior is preserved bit-for-bit when the semantic stage is off / failed
+  // / not yet wired.
+  const semanticBlendEnabled = opts.semanticBlendEnabled !== false;
+  const rawSemantic =
+    typeof item?.semanticIntentScore === "number" && Number.isFinite(item.semanticIntentScore)
+      ? Math.max(0, Math.min(1, item.semanticIntentScore))
+      : null;
+  let score = deterministicScore;
+  let blendApplied = false;
+  if (semanticBlendEnabled && rawSemantic !== null) {
+    const deterministicWeighted = deterministicScore * SEMANTIC_BLEND_DETERMINISTIC;
+    const semanticWeighted = rawSemantic * SEMANTIC_BLEND_SEMANTIC;
+    breakdown.deterministicWeighted = deterministicWeighted;
+    breakdown.semanticIntentWeighted = semanticWeighted;
+    score = Math.max(0, Math.min(1, deterministicWeighted + semanticWeighted));
+    blendApplied = true;
+    // Surface the raw semantic input + the rounded contribution so an
+    // operator reading the trace can answer "did semantic help or hurt?".
+    reasonCodes.push(`semantic_intent_score:${rawSemantic.toFixed(3)}`);
+    if (rawSemantic >= 0.7) reasonCodes.push("semantic_intent_strong");
+    if (deterministicScore < BEAT_FIT_THRESHOLD && score >= BEAT_FIT_THRESHOLD) {
+      reasonCodes.push("semantic_intent_lift_over_threshold");
+    }
+  }
+
+  return {
+    score,
+    deterministicScore,
+    semanticIntentScore: rawSemantic,
+    blendApplied,
+    breakdown,
+    reasonCodes,
+  };
 }
 
 // Read the configurable rescue band lower bound from the environment, with
@@ -405,22 +469,49 @@ export function evaluateRescue(score, breakdown, reasonCodes, opts = {}) {
 export function applyBeatFitFilter(items, settings, opts = {}) {
   const threshold = opts.threshold ?? BEAT_FIT_THRESHOLD;
   const rescueLowerBound = opts.rescueLowerBound ?? readRescueLowerBound();
+  const semanticBlendEnabled = opts.semanticBlendEnabled !== false;
   const included = [];
   const excluded = [];
   const histogram = {};
   let rescuedCount = 0;
   let rescueBlockedPenaltyCount = 0;
   let rescueBlockedInsufficientSignalsCount = 0;
+  // Semantic-blend counters: surfaced on _meta so an operator can answer
+  // "how often did semantic actually move the needle?" without re-running.
+  let semanticBlendAppliedCount = 0;
+  let semanticBlendMissingCount = 0;
+  let semanticLiftOverThresholdCount = 0;
+  let semanticDropBelowThresholdCount = 0;
+  let excludedWithSemanticPresentCount = 0;
 
   for (const item of items ?? []) {
-    const { score, breakdown, reasonCodes } = scoreBeatFit(item, settings);
+    const result = scoreBeatFit(item, settings, { semanticBlendEnabled });
+    const { score, deterministicScore, breakdown, reasonCodes, blendApplied } = result;
     const normalPass = score >= threshold;
+
+    if (blendApplied) {
+      semanticBlendAppliedCount += 1;
+      if (deterministicScore < threshold && score >= threshold) {
+        semanticLiftOverThresholdCount += 1;
+      } else if (deterministicScore >= threshold && score < threshold) {
+        semanticDropBelowThresholdCount += 1;
+      }
+    } else if (
+      typeof item?.semanticIntentScore === "number" &&
+      Number.isFinite(item.semanticIntentScore)
+    ) {
+      // Score was on the item but blend was disabled at the call site.
+    } else {
+      semanticBlendMissingCount += 1;
+    }
 
     if (normalPass) {
       included.push({
         ...item,
         beatFitScore: score,
+        beatFitDeterministicScore: deterministicScore,
         beatFitReasonCodes: reasonCodes,
+        beatFitBlendApplied: blendApplied,
       });
       continue;
     }
@@ -435,8 +526,10 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
       included.push({
         ...item,
         beatFitScore: score,
+        beatFitDeterministicScore: deterministicScore,
         beatFitReasonCodes: [...reasonCodes, BEAT_FIT_RESCUE_REASON],
         beatFitRescued: true,
+        beatFitBlendApplied: blendApplied,
       });
       continue;
     }
@@ -453,7 +546,20 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
     }
     const excludeReason = pickPrimaryExcludeReason(breakdown);
     histogram[excludeReason] = (histogram[excludeReason] ?? 0) + 1;
-    excluded.push({ item, score, reasonCodes: annotatedCodes, excludeReason });
+    if (
+      typeof item?.semanticIntentScore === "number" &&
+      Number.isFinite(item.semanticIntentScore)
+    ) {
+      excludedWithSemanticPresentCount += 1;
+    }
+    excluded.push({
+      item,
+      score,
+      deterministicScore,
+      semanticIntentScore: result.semanticIntentScore,
+      reasonCodes: annotatedCodes,
+      excludeReason,
+    });
   }
 
   return {
@@ -468,6 +574,14 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
       excludeReasonHistogram: histogram,
       rescueBlockedPenaltyCount,
       rescueBlockedInsufficientSignalsCount,
+      // Semantic-blend rollup (always present so the shape is stable; counts
+      // are zero when the semantic stage is off or no item carried a score).
+      semanticBlendEnabled,
+      semanticBlendAppliedCount,
+      semanticBlendMissingCount,
+      semanticLiftOverThresholdCount,
+      semanticDropBelowThresholdCount,
+      excludedWithSemanticPresentCount,
     },
   };
 }

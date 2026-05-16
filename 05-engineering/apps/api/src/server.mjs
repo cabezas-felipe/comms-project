@@ -29,6 +29,7 @@ import {
   resolveSemanticScorerRuntimeConfig,
 } from "./dashboard/meta-story-semantic-mapper.mjs";
 import { resolveRecallConfig } from "./ingestion/embedding-recall.mjs";
+import { resolveSemanticBeatFitConfig } from "./dashboard/semantic-beat-fit.mjs";
 import {
   tryAcquire as tryAcquireRefresh,
   release as releaseRefresh,
@@ -293,6 +294,18 @@ export const _refreshPipeline = {
       // baseline.  Diagnostics surface the runtime state on every run.
       semanticTagConfig: semanticConfig,
       semanticTagScorer,
+      // Option A — semantic BeatFit. The stage reads its own config (kill
+      // switch + enable flag + model) from env via resolveSemanticBeatFitConfig.
+      // The embedFn is the same OpenAI router, but pinned to the configured
+      // semantic model (default text-embedding-3-large) so recall keeps using
+      // text-embedding-3-small while BeatFit upgrades to the larger model.
+      semanticBeatFitConfig: opts.semanticBeatFitConfig ?? resolveSemanticBeatFitConfig(),
+      semanticBeatFitEmbedFn: (texts, callOpts = {}) =>
+        _embeddings.embed(texts, {
+          signal: callOpts.signal,
+          model:
+            (opts.semanticBeatFitConfig ?? resolveSemanticBeatFitConfig()).model,
+        }),
     });
   },
 };
