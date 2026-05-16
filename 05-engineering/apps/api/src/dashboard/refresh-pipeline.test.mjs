@@ -4196,3 +4196,455 @@ test("runRefreshPipeline: hybrid_strict + sparse multi-axis profile → runs, no
   assert.equal(log.recall.degraded, false);
   assert.equal(log.recall.degraded_reason, null);
 });
+
+// ─── Phase 2: lightweight decision trace ─────────────────────────────────────
+//
+// log.decisionTrace is a compact, backend-only diagnostics object: stage
+// counts mirror the funnel, beatFit mirrors the scorer summary (including the
+// rescue counters), and sampleExclusions is a capped list of {sourceId,
+// stage, excludeReason, inRescueBand, rescueBlockedBy, score}. Never carries
+// source bodies or large text — safe for log scrapes and _meta payloads.
+
+test("decisionTrace: full-run log carries stageCounts, beatFit details, and a sample array", async () => {
+  // One include item that clears beat-fit; one off-beat item that fails the
+  // gate. Tests the happy-path shape on a representative mixed run.
+  const include = makeItem({
+    sourceId: "include",
+    outlet: "The Washington Post — World",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    headline: "U.S. strikes two Iranian-flagged tankers as tensions continue amid ceasefire",
+    body: ["WASHINGTON — The Pentagon confirmed two strikes."],
+    minutesAgo: 30,
+  });
+  const exclude = makeItem({
+    sourceId: "exclude",
+    outlet: "The Washington Post — World",
+    geographies: ["US"],
+    topic: "Migration policy",
+    headline: "Iran war is crushing Asia's farmers, threatening global food supply",
+    body: ["Wheat and grain prices have surged across Asia."],
+    minutesAgo: 30,
+  });
+  const { log } = await runRefreshPipeline({
+    settings: PHASE1_SETTINGS,
+    rawItems: [include, exclude],
+    clusterFn: async (items) =>
+      items.map((i) => ({
+        title: "T",
+        subtitle: "S",
+        source_item_ids: [i.sourceId],
+        summary: "x",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        factual_claims: ["A claim."],
+        claim_evidence_map: { "0": [i.sourceId] },
+      })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+
+  assert.ok(log.decisionTrace, "full-run log must carry decisionTrace");
+  const trace = log.decisionTrace;
+
+  // stageCounts mirrors the funnel inputs (and stays in sync with it).
+  assert.equal(typeof trace.stageCounts, "object");
+  assert.equal(trace.stageCounts.totalNormalized, log.funnel.totalNormalized);
+  assert.equal(trace.stageCounts.afterTopicKeyword, log.funnel.afterTopicKeyword);
+  assert.equal(trace.stageCounts.afterBeatFit, log.funnel.afterBeatFit);
+  assert.equal(trace.stageCounts.finalStories, log.funnel.finalStories);
+
+  // beatFit mirrors the scorer summary (incl. rescue counters added in P1).
+  assert.equal(typeof trace.beatFit.threshold, "number");
+  assert.equal(typeof trace.beatFit.includedCount, "number");
+  assert.equal(typeof trace.beatFit.excludedCount, "number");
+  assert.equal(typeof trace.beatFit.rescuedCount, "number");
+  assert.equal(typeof trace.beatFit.rescueBlockedPenaltyCount, "number");
+  assert.equal(typeof trace.beatFit.rescueBlockedInsufficientSignalsCount, "number");
+  assert.equal(typeof trace.beatFit.excludeReasonHistogram, "object");
+
+  // sampleExclusions is an array; entries (if any) carry the documented shape.
+  assert.ok(Array.isArray(trace.sampleExclusions));
+  if (trace.sampleExclusions.length > 0) {
+    const sample = trace.sampleExclusions[0];
+    assert.equal(sample.stage, "beat_fit");
+    assert.equal(typeof sample.sourceId, "string");
+    assert.equal(typeof sample.excludeReason, "string");
+    assert.equal(typeof sample.inRescueBand, "boolean");
+    assert.ok(
+      sample.rescueBlockedBy === null ||
+        sample.rescueBlockedBy === "penalty" ||
+        sample.rescueBlockedBy === "insufficient_signals",
+      "rescueBlockedBy must be null | 'penalty' | 'insufficient_signals'"
+    );
+    assert.equal(typeof sample.score, "number");
+  }
+});
+
+test("decisionTrace: beatFit counters are consistent with histogram totals (no double-counting)", async () => {
+  // A mixed run with one in-band penalty-blocked candidate plus one clear
+  // include. Verifies that the trace's rescue-blocked counters never exceed
+  // excludedCount, and that excludedCount equals the sum of histogram values.
+  const include = makeItem({
+    sourceId: "incl",
+    outlet: "The Washington Post — World",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    headline: "U.S. strikes two Iranian-flagged tankers as tensions continue amid ceasefire",
+    minutesAgo: 30,
+  });
+  const offbeat = makeItem({
+    sourceId: "off",
+    outlet: "The Washington Post — World",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    headline: "Asian commodity markets brace for fertilizer crunch",
+    body: ["Farmers across Asia face commodity stress."],
+    minutesAgo: 30,
+  });
+  const { log } = await runRefreshPipeline({
+    settings: PHASE1_SETTINGS,
+    rawItems: [include, offbeat],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const t = log.decisionTrace.beatFit;
+  const histTotal = Object.values(t.excludeReasonHistogram).reduce(
+    (acc, v) => acc + v,
+    0
+  );
+  assert.equal(
+    histTotal,
+    t.excludedCount,
+    "excludeReasonHistogram sum must equal excludedCount"
+  );
+  assert.ok(
+    t.rescueBlockedPenaltyCount + t.rescueBlockedInsufficientSignalsCount <=
+      t.excludedCount,
+    "rescue-blocked counters cannot exceed excludedCount"
+  );
+});
+
+test("decisionTrace: sampleExclusions is capped (≤ 5) and entries carry only minimal fields", async () => {
+  // Six recall-passing but beat-fit-failing items.  Each clears recall via
+  // a configured topic, then trips beat-fit (off-beat geo + commodity).
+  // Cap = 5 is enforced inside the pipeline.
+  const items = Array.from({ length: 6 }, (_, i) =>
+    makeItem({
+      sourceId: `off-${i}`,
+      outlet: "The Washington Post — World",
+      geographies: ["US"],                  // pass geo filter
+      topic: "Diplomatic relations",        // pass topic+keyword recall
+      headline: "Asia farmers face commodity squeeze on wheat and fertilizer",
+      body: ["Farmers across Asia continue to face commodity stress."],
+      minutesAgo: 30,
+    })
+  );
+  const { log } = await runRefreshPipeline({
+    settings: PHASE1_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const trace = log.decisionTrace;
+  assert.ok(trace.beatFit.excludedCount >= 6);
+  assert.ok(
+    trace.sampleExclusions.length <= 5,
+    `sample must be capped at 5 (got ${trace.sampleExclusions.length})`
+  );
+  // Sample entries must NOT carry raw source bodies / headlines.
+  const allowedKeys = new Set([
+    "sourceId",
+    "stage",
+    "excludeReason",
+    "inRescueBand",
+    "rescueBlockedBy",
+    "score",
+  ]);
+  for (const entry of trace.sampleExclusions) {
+    for (const k of Object.keys(entry)) {
+      assert.ok(allowedKeys.has(k), `sample entry has unexpected key: ${k}`);
+    }
+  }
+});
+
+test("decisionTrace: watermark-skip branch still emits a trace with finalStories=null", async () => {
+  // First run computes a watermark. Second run with the same priorWatermark
+  // short-circuits, and must still surface decisionTrace — beat-fit ran
+  // before the short-circuit, so the trace is meaningful.
+  const items = [
+    makeItem({
+      sourceId: "in",
+      outlet: "Reuters",
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "U.S. policy update",
+      minutesAgo: 30,
+    }),
+  ];
+  const first = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    beatFitEnabled: false, // skip-branch + bypassed beat-fit: trace must still be safe
+  });
+  assert.ok(first.log.decisionTrace, "full-run trace must be present even when beat-fit is bypassed");
+  assert.equal(typeof first.log.decisionTrace.beatFit.includedCount, "number");
+
+  const second = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    beatFitEnabled: false,
+    priorWatermark: first.log.watermark,
+  });
+  assert.equal(second.payload, null, "watermark-skip returns payload=null");
+  assert.equal(second.log.unchanged, true);
+  assert.ok(second.log.decisionTrace, "watermark-skip log must carry decisionTrace");
+  assert.equal(
+    second.log.decisionTrace.stageCounts.finalStories,
+    null,
+    "skip-branch trace must report finalStories=null (clustering never ran)"
+  );
+  assert.ok(Array.isArray(second.log.decisionTrace.sampleExclusions));
+});
+
+// ─── Phase 3: regression harness ─────────────────────────────────────────────
+//
+// High-signal, end-to-end regression coverage for the rescue + decision-trace
+// behaviors that ship as a unit. Tests in this section deliberately use
+// synthetic fixtures (no production URLs/titles) and assert on shapes rather
+// than exact floats so they survive small, intentional weight tweaks but
+// catch directional drift.
+
+// User profile modeled after a comms team monitoring multiple foreign
+// hotspots (Ukraine, Haiti, China) from a US perspective. The contract
+// geography enum is "US" | "Colombia"; hotspot country names live in
+// `keywords` (where the actual filter logic looks for them in headlines
+// and bodies). topics/keywords/sources are wide enough that all three
+// candidate stories below clear source-selection + topic+keyword recall.
+const WAPO_REGRESSION_SETTINGS = {
+  contractVersion: "2026-04-22-slice1",
+  topics: ["Diplomatic relations", "Security cooperation"],
+  keywords: ["war", "gang", "trade", "Ukraine", "Haiti", "China", "sanctions"],
+  geographies: ["US"],
+  traditionalSources: ["The Washington Post"],
+  socialSources: [],
+};
+
+// Synthetic three-story candidate set: war, gang, summit. Each fires the
+// four core beat-fit signals (topic, actor "u.s.", a configured keyword,
+// explicit US geo) so all three should pass the gate cleanly. If a future
+// change drops one, the decision trace below must explain WHY.
+function makeWapoCandidates() {
+  return [
+    makeItem({
+      sourceId: "wapo-ukraine",
+      outlet: "The Washington Post",
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "U.S. expands Ukraine aid amid intensifying war on the eastern front",
+      body: ["Officials briefed congressional leaders on the latest aid package."],
+      minutesAgo: 30,
+    }),
+    makeItem({
+      sourceId: "wapo-haiti",
+      outlet: "The Washington Post",
+      topic: "Security cooperation",
+      geographies: ["US"],
+      headline: "Gang violence in Haiti prompts new U.S. sanctions and aid coordination",
+      body: ["The State Department announced fresh measures targeting gang financiers."],
+      minutesAgo: 45,
+    }),
+    makeItem({
+      sourceId: "wapo-china",
+      outlet: "The Washington Post",
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "U.S. and China hold trade summit amid renewed tariff tensions",
+      body: ["The summit followed weeks of escalating tariff exchanges."],
+      minutesAgo: 60,
+    }),
+  ];
+}
+
+function buildOneClusterPerItem(items) {
+  return items.map((i) => ({
+    title: `Story-${i.sourceId}`,
+    subtitle: "Subtitle",
+    source_item_ids: [i.sourceId],
+    summary: "Summary.",
+    tags: { topics: [i.topic], keywords: [], geographies: ["US"] },
+    factual_claims: ["A claim."],
+    claim_evidence_map: { "0": [i.sourceId] },
+  }));
+}
+
+test("regression (three-story WaPo): all three candidates pass source/recall and become stories", async () => {
+  const candidates = makeWapoCandidates();
+  const seenAtCluster = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: WAPO_REGRESSION_SETTINGS,
+    rawItems: candidates,
+    clusterFn: async (items) => {
+      seenAtCluster.push(...items.map((i) => i.sourceId));
+      return buildOneClusterPerItem(items);
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+
+  // Source + recall stages: all three reach clustering. Stage counts hold a
+  // monotonic invariant — no stage may produce more items than the previous.
+  const counts = log.decisionTrace.stageCounts;
+  assert.equal(counts.afterSourceSelection, 3, "all three WaPo items pass source selection");
+  assert.equal(counts.afterTopicKeyword, 3, "all three clear topic+keyword recall");
+  const monotonic = [
+    counts.totalNormalized,
+    counts.afterTimeWindow,
+    counts.afterSourceSelection,
+    counts.afterGeoFilter,
+    counts.afterTopicKeyword,
+    counts.afterBeatFit,
+    counts.afterDedupe,
+  ];
+  for (let i = 1; i < monotonic.length; i++) {
+    assert.ok(
+      monotonic[i] <= monotonic[i - 1],
+      `funnel monotonicity broken at stage index ${i}: ${monotonic.join(" → ")}`
+    );
+  }
+
+  // Beat-fit: with three core signals firing on each candidate, all three
+  // should clear the gate. If a future change drops one, the test fails AND
+  // the decision trace must explain it (no silent drops).
+  assert.equal(
+    log.decisionTrace.beatFit.includedCount,
+    3,
+    "all three core-aligned candidates must clear beat-fit"
+  );
+  assert.equal(log.decisionTrace.beatFit.excludedCount, 0);
+  assert.equal(log.decisionTrace.sampleExclusions.length, 0);
+
+  // Clustering: all three reached cluster; payload contains three stories.
+  assert.deepEqual(
+    seenAtCluster.sort(),
+    ["wapo-china", "wapo-haiti", "wapo-ukraine"],
+    "all three candidates must reach clustering"
+  );
+  assert.equal(payload.stories.length, 3);
+});
+
+test("regression (three-story WaPo): if a candidate is excluded, decisionTrace explains it (no silent drops)", async () => {
+  // Same profile but the China story now has off-beat-geo framing (mentions
+  // "Asia" with no US/Colombia overlap), so beat-fit drops it. The other two
+  // still clear. The contract: the drop is NEVER silent — the trace surfaces
+  // the excluded item with a structured reason and counters.
+  const candidates = makeWapoCandidates();
+  candidates[2] = makeItem({
+    sourceId: "wapo-china",
+    outlet: "The Washington Post",
+    topic: "Diplomatic relations",
+    geographies: [],
+    headline: "Asia commodity markets brace for fertilizer crunch after trade dispute",
+    body: ["Farmers across Asia continue to face commodity stress."],
+    minutesAgo: 60,
+  });
+
+  const { log } = await runRefreshPipeline({
+    settings: WAPO_REGRESSION_SETTINGS,
+    rawItems: candidates,
+    clusterFn: async (items) => buildOneClusterPerItem(items),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+
+  assert.equal(log.decisionTrace.beatFit.includedCount, 2);
+  assert.equal(log.decisionTrace.beatFit.excludedCount, 1);
+
+  // Trace must identify the dropped sourceId AND give a primary reason.
+  const sample = log.decisionTrace.sampleExclusions.find(
+    (s) => s.sourceId === "wapo-china"
+  );
+  assert.ok(sample, "decisionTrace.sampleExclusions must include the dropped wapo-china");
+  assert.equal(sample.stage, "beat_fit");
+  assert.ok(
+    typeof sample.excludeReason === "string" && sample.excludeReason.length > 0,
+    "drop must carry a non-empty primary reason code"
+  );
+  assert.equal(typeof sample.inRescueBand, "boolean");
+});
+
+// ─── Phase 2 trace invariants (consolidated lock) ────────────────────────────
+//
+// One representative batch exercises every trace invariant at once so any
+// regression in shape/cap/counters surfaces with a single specific failure.
+
+test("trace invariants: cap, key-whitelist, and counter consistency hold on a mixed batch", async () => {
+  // Six off-beat candidates that all pass recall (via topic) but fail
+  // beat-fit (off-beat geo + commodity framing). Exercises the cap (6 → ≤5
+  // samples), the key-whitelist, and the counter-vs-histogram identity in
+  // one shot.
+  const items = Array.from({ length: 6 }, (_, i) =>
+    makeItem({
+      sourceId: `off-${i}`,
+      outlet: "The Washington Post",
+      geographies: ["US"],
+      topic: "Diplomatic relations",
+      headline: "Asia farmers brace for fertilizer and wheat commodity squeeze",
+      body: ["Farmers across Asia continue to face commodity stress."],
+      minutesAgo: 30,
+    })
+  );
+  const { log } = await runRefreshPipeline({
+    settings: WAPO_REGRESSION_SETTINGS,
+    rawItems: items,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const trace = log.decisionTrace;
+  const bf = trace.beatFit;
+
+  // Cap.
+  assert.ok(
+    trace.sampleExclusions.length <= 5,
+    `sampleExclusions cap violated (${trace.sampleExclusions.length} > 5)`
+  );
+
+  // Key whitelist — sample entries never leak headlines/bodies.
+  const ALLOWED = new Set([
+    "sourceId", "stage", "excludeReason", "inRescueBand", "rescueBlockedBy", "score",
+  ]);
+  for (const entry of trace.sampleExclusions) {
+    for (const k of Object.keys(entry)) {
+      assert.ok(ALLOWED.has(k), `sample entry leaked unexpected key: ${k}`);
+    }
+  }
+
+  // Histogram identity: every excluded item contributes exactly one bucket.
+  const histTotal = Object.values(bf.excludeReasonHistogram).reduce(
+    (acc, v) => acc + v,
+    0
+  );
+  assert.equal(histTotal, bf.excludedCount, "histogram sum must equal excludedCount");
+
+  // Rescue-blocked counters can never exceed excluded total.
+  assert.ok(
+    bf.rescueBlockedPenaltyCount + bf.rescueBlockedInsufficientSignalsCount <=
+      bf.excludedCount,
+    "rescue-blocked counters cannot exceed excludedCount"
+  );
+
+  // included + excluded = candidates that reached the gate (post-recall).
+  assert.equal(
+    bf.includedCount + bf.excludedCount,
+    trace.stageCounts.afterTopicKeyword,
+    "included + excluded must equal the post-recall candidate count"
+  );
+});
