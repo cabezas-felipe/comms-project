@@ -832,6 +832,9 @@ async function executeRefreshFlow(identity) {
       if (log.recall) skipMeta.recall = log.recall;
       if (log.funnel) skipMeta.funnel = log.funnel;
       if (log.beatFit) skipMeta.beatFit = log.beatFit;
+      // Phase 2 lightweight decision trace.  Optional — older pipeline mocks
+      // and partial returns may omit it; consumers ignore unknown _meta keys.
+      if (log.decisionTrace) skipMeta.decisionTrace = log.decisionTrace;
       if (log.selection) skipMeta.selection = log.selection;
       if (priorSnapshot) {
         // Persist the bumped lastCheckedAt onto the existing snapshot so a
@@ -890,6 +893,7 @@ async function executeRefreshFlow(identity) {
     if (log.funnel !== undefined) lastRunMeta.funnel = log.funnel;
     if (log.recall !== undefined) lastRunMeta.recall = log.recall;
     if (log.beatFit !== undefined) lastRunMeta.beatFit = log.beatFit;
+    if (log.decisionTrace !== undefined) lastRunMeta.decisionTrace = log.decisionTrace;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
@@ -945,6 +949,10 @@ async function executeRefreshFlow(identity) {
           beatFit: log.beatFit,
           recall: log.recall,
           funnel: log.funnel,
+          // Phase 2 lightweight decision trace.  Optional, compact,
+          // backend-only.  Carries stage counts, beat-fit details, and a
+          // capped sample of exclusions — no raw source bodies.
+          decisionTrace: log.decisionTrace,
           // M3 / L1a: SKU identity on the refresh response.  Persistence to
           // snapshot storage is deferred to M3b.
           clusterModel,

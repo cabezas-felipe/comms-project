@@ -231,6 +231,84 @@ export function summarizeFunnel(funnel, settings = {}, opts = {}) {
   };
 }
 
+// ─── Decision-trace (Phase 2 lightweight diagnostics) ───────────────────────
+//
+// Backend-only, internal-explainability surface on top of the pipeline log.
+// Purpose: answer "why did this item land in/out of the snapshot?" from a
+// single compact object without storing full source bodies or re-running the
+// pipeline.  Optional — never required by the dashboard payload contract.
+//
+// Shape (everything optional from a consumer's perspective):
+//   decisionTrace.stageCounts      — per-gate enter/exit counts (mirrors funnel)
+//   decisionTrace.beatFit          — scorer summary + rescue counters
+//   decisionTrace.sampleExclusions — capped list (≤ DECISION_TRACE_SAMPLE_CAP)
+//                                    of {sourceId, stage, excludeReason,
+//                                    inRescueBand, rescueBlockedBy, score}
+//
+// Cap is deliberately small (5).  This is a debugging aid, not an audit log;
+// operators only need a representative sample to spot a class of problem.
+
+const DECISION_TRACE_SAMPLE_CAP = 5;
+const DECISION_TRACE_SCORE_PRECISION = 4;
+
+// Derive in-band / rescue-blocked context from the annotated reason codes the
+// scorer attaches to excluded items.  Keeps the scorer's contract narrow (it
+// already emits these codes for compatibility); the pipeline just translates
+// them into a structured field for the trace.
+function deriveRescueContext(reasonCodes) {
+  const codes = Array.isArray(reasonCodes) ? reasonCodes : [];
+  if (codes.includes("rescue_blocked_penalty")) {
+    return { inRescueBand: true, rescueBlockedBy: "penalty" };
+  }
+  if (codes.includes("rescue_blocked_insufficient_signals")) {
+    return { inRescueBand: true, rescueBlockedBy: "insufficient_signals" };
+  }
+  return { inRescueBand: false, rescueBlockedBy: null };
+}
+
+function roundForTrace(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  const factor = 10 ** DECISION_TRACE_SCORE_PRECISION;
+  return Math.round(n * factor) / factor;
+}
+
+function buildSampleExclusions(excluded) {
+  if (!Array.isArray(excluded) || excluded.length === 0) return [];
+  const sample = [];
+  for (const entry of excluded) {
+    if (sample.length >= DECISION_TRACE_SAMPLE_CAP) break;
+    const ctx = deriveRescueContext(entry?.reasonCodes);
+    sample.push({
+      sourceId: entry?.item?.sourceId ?? null,
+      stage: "beat_fit",
+      excludeReason: entry?.excludeReason ?? null,
+      inRescueBand: ctx.inRescueBand,
+      rescueBlockedBy: ctx.rescueBlockedBy,
+      score: roundForTrace(entry?.score),
+    });
+  }
+  return sample;
+}
+
+function buildDecisionTrace({ stageCounts, beatFitResult }) {
+  const summary = beatFitResult?.summary ?? {};
+  return {
+    stageCounts: { ...stageCounts },
+    beatFit: {
+      threshold: summary.threshold,
+      rescueLowerBound: summary.rescueLowerBound,
+      includedCount: summary.includedCount ?? 0,
+      excludedCount: summary.excludedCount ?? 0,
+      rescuedCount: summary.rescuedCount ?? 0,
+      rescueBlockedPenaltyCount: summary.rescueBlockedPenaltyCount ?? 0,
+      rescueBlockedInsufficientSignalsCount:
+        summary.rescueBlockedInsufficientSignalsCount ?? 0,
+      excludeReasonHistogram: summary.excludeReasonHistogram ?? {},
+    },
+    sampleExclusions: buildSampleExclusions(beatFitResult?.excluded),
+  };
+}
+
 // Sourced directly from the canonical zod enums so the pipeline never drifts
 // from the contract schema.
 const VALID_GEOGRAPHIES = new Set(geographySchema.options);
@@ -996,6 +1074,9 @@ export async function runRefreshPipeline({
         includedCount: recallItems.length,
         excludedCount: 0,
         excludeReasonHistogram: {},
+        rescuedCount: 0,
+        rescueBlockedPenaltyCount: 0,
+        rescueBlockedInsufficientSignalsCount: 0,
       },
     };
   }
@@ -1115,6 +1196,22 @@ export async function runRefreshPipeline({
         },
         recall: recallDiagnostics,
         funnel: skipFunnel,
+        // Phase 2 lightweight decision trace.  Beat-fit ran before we decided
+        // to short-circuit, so the trace surfaces the same explainability
+        // surface as a full run, with finalStories=null to match the funnel.
+        decisionTrace: buildDecisionTrace({
+          stageCounts: {
+            totalNormalized: normalizedItems.length,
+            afterTimeWindow: recentNormalizedItems.length,
+            afterSourceSelection: recentItems.length,
+            afterGeoFilter: geoPassedItems.length,
+            afterTopicKeyword: recallItems.length,
+            afterBeatFit: relevantItems.length,
+            afterDedupe: dedupedItems.length,
+            finalStories: null,
+          },
+          beatFitResult,
+        }),
       },
     };
   }
@@ -1325,6 +1422,22 @@ export async function runRefreshPipeline({
     watermark: watermarkInfo.watermark,
     candidateCount: watermarkInfo.candidateCount,
     selectedFeedCount: watermarkInfo.selectedFeedCount,
+    // Phase 2 lightweight decision trace.  Compact, backend-only diagnostics
+    // mirroring the funnel + beat-fit summary with a small capped sample of
+    // exclusions.  Never carries source bodies; safe for log scrapes.
+    decisionTrace: buildDecisionTrace({
+      stageCounts: {
+        totalNormalized: normalizedItems.length,
+        afterTimeWindow: recentNormalizedItems.length,
+        afterSourceSelection: recentItems.length,
+        afterGeoFilter: geoPassedItems.length,
+        afterTopicKeyword: recallItems.length,
+        afterBeatFit: relevantItems.length,
+        afterDedupe: dedupedItems.length,
+        finalStories: stories.length,
+      },
+      beatFitResult,
+    }),
   };
 
   return { payload, log };
