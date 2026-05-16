@@ -7,6 +7,7 @@ import {
   buildItemText,
   cosineSimilarity,
   runEmbeddingRecall,
+  summarizeProfileContent,
 } from "./embedding-recall.mjs";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
@@ -523,4 +524,226 @@ test("WaPo Iran/oil: items returned in lexical fallback are real ingested items 
   assert.equal(out.headline, WAPO_IRAN_ITEM.headline);
   // The lexical fallback must never invent a topic or summary.
   assert.equal(out.topic, "");
+});
+
+// ─── Phase 3: buildProfileText hygiene ───────────────────────────────────────
+
+test("buildProfileText: drops whitespace-only entries within an axis", () => {
+  // Phase 1 hygiene normally strips these before persistence, but the recall
+  // stage must be defensive — a malformed settings row should not emit a
+  // heading like "Topics:    , Migration policy".
+  const text = buildProfileText({
+    topics: ["", "  ", "Migration policy"],
+    keywords: ["\t", "OFAC"],
+    geographies: [],
+    traditionalSources: ["   "],
+    socialSources: [],
+  });
+  assert.match(text, /Topics: Migration policy/);
+  assert.match(text, /Keywords: OFAC/);
+  // No "Geographies:" / "Sources:" line — those axes contributed nothing.
+  assert.doesNotMatch(text, /Geographies:/);
+  assert.doesNotMatch(text, /Sources:/);
+});
+
+test("buildProfileText: returns empty string when every axis is whitespace-only", () => {
+  const text = buildProfileText({
+    topics: [""],
+    keywords: ["  ", "\t"],
+    geographies: [],
+    traditionalSources: [],
+    socialSources: [],
+    onboardingNarrative: "   ",
+  });
+  assert.equal(text, "");
+});
+
+test("buildProfileText: ignores non-string entries defensively", () => {
+  const text = buildProfileText({
+    // The schema enforces strings at the API boundary, but the recall stage
+    // is downstream of several layers and could receive shapes it doesn't
+    // own.  Non-strings must be dropped silently rather than crashing the
+    // join with a "[object Object]" leak.
+    topics: [42, null, undefined, "Migration policy"],
+    keywords: [],
+    geographies: [],
+    traditionalSources: [],
+    socialSources: [],
+  });
+  assert.equal(text, "Topics: Migration policy");
+});
+
+// ─── Phase 3: summarizeProfileContent (sparseness observability) ─────────────
+
+test("summarizeProfileContent: counts axes that contributed", () => {
+  const s = summarizeProfileContent(BASE_SETTINGS);
+  // BASE_SETTINGS = topics + keywords + geographies + sources (no narrative)
+  assert.equal(s.profileAxes, 4);
+  assert.deepEqual(s.profileAxisNames, ["topics", "keywords", "geographies", "sources"]);
+  assert.ok(s.profileTextLength > 0);
+  assert.equal(s.profileText, buildProfileText(BASE_SETTINGS));
+});
+
+test("summarizeProfileContent: empty settings → axes=0, text empty", () => {
+  const s = summarizeProfileContent({});
+  assert.equal(s.profileAxes, 0);
+  assert.deepEqual(s.profileAxisNames, []);
+  assert.equal(s.profileText, "");
+  assert.equal(s.profileTextLength, 0);
+});
+
+test("summarizeProfileContent: single-axis sparse profile → axes=1, only that name listed", () => {
+  // Sparse-profile signature: operators reading `_meta.recall.profileAxes=1`
+  // know the semantic widen is running against a degenerate single-axis
+  // embedding (e.g. just sources), which often produces low-confidence
+  // top-K matches.  This is observability, not a behavior gate.
+  const s = summarizeProfileContent({
+    topics: [],
+    keywords: [],
+    geographies: [],
+    traditionalSources: ["Reuters"],
+    socialSources: [],
+  });
+  assert.equal(s.profileAxes, 1);
+  assert.deepEqual(s.profileAxisNames, ["sources"]);
+});
+
+test("summarizeProfileContent: narrative-only profile is counted (axis=narrative)", () => {
+  const s = summarizeProfileContent({
+    topics: [],
+    keywords: [],
+    geographies: [],
+    traditionalSources: [],
+    socialSources: [],
+    onboardingNarrative: "I cover US-Colombia bilateral comms.",
+  });
+  assert.equal(s.profileAxes, 1);
+  assert.deepEqual(s.profileAxisNames, ["narrative"]);
+});
+
+// ─── Phase 3: recall diagnostics surface profileAxes on every return path ────
+
+test("runEmbeddingRecall: diagnostics surface profileAxes on the full-run (hybrid_strict) path", async () => {
+  const items = [makeItem({ sourceId: "a", headline: "OFAC update" })];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: items,
+    embedFn: makeStubEmbedder(),
+    config: HYBRID_CONFIG,
+  });
+  assert.equal(result.diagnostics.profileAxes, 4);
+  assert.deepEqual(result.diagnostics.profileAxisNames, [
+    "topics",
+    "keywords",
+    "geographies",
+    "sources",
+  ]);
+  assert.ok(result.diagnostics.profileTextLength > 0);
+});
+
+test("runEmbeddingRecall: diagnostics surface profileAxes on the keyword-mode bypass path", async () => {
+  // Keyword mode skips embedding entirely, but the diagnostic surface must
+  // be the same shape so `_meta.recall` doesn't shrink on a mode toggle.
+  const items = [makeItem({ sourceId: "a" })];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: items,
+    embedFn: async () => [],
+    config: { ...HYBRID_CONFIG, mode: RECALL_MODE.KEYWORD },
+  });
+  assert.equal(result.diagnostics.profileAxes, 4);
+  assert.deepEqual(result.diagnostics.profileAxisNames, [
+    "topics",
+    "keywords",
+    "geographies",
+    "sources",
+  ]);
+  assert.equal(result.diagnostics.mode, "keyword");
+});
+
+test("runEmbeddingRecall: diagnostics surface profileAxes=0 on the empty-profile lexical-only path", async () => {
+  // E3b path: empty profile is degraded (lexical-only) but profileAxes must
+  // be 0 — the formal invariant for the empty-profile branch.
+  const items = [makeItem({ sourceId: "a" })];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: {},
+    keywordRecallItems: items,
+    embedFn: async () => [],
+    config: HYBRID_CONFIG,
+  });
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "empty_profile_text_lexical_only");
+  assert.equal(result.diagnostics.profileAxes, 0);
+  assert.deepEqual(result.diagnostics.profileAxisNames, []);
+  assert.equal(result.diagnostics.profileTextLength, 0);
+});
+
+test("runEmbeddingRecall: diagnostics surface profileAxes on a fail-closed lexical-fallback path", async () => {
+  // Provider failure with lexical hits → lexical fallback (degraded).
+  // profileAxes must still reflect what the profile WOULD have looked like
+  // so operators can disentangle "thin profile" from "provider cliff".
+  const items = [makeItem({ sourceId: "a", headline: "OFAC update" })];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: items,
+    embedFn: makeStubEmbedder({ throwOnCall: new Error("provider 500") }),
+    config: HYBRID_CONFIG,
+  });
+  assert.equal(result.diagnostics.degraded, true);
+  assert.equal(result.diagnostics.degraded_reason, "embedding_error_fail_closed");
+  assert.equal(result.diagnostics.profileAxes, 4);
+});
+
+test("runEmbeddingRecall: profileAxes=1 + degraded:false documents the sparse-profile signature", async () => {
+  // The sparse-but-valid case: a profile with only one axis still runs end
+  // to end (no behavior gate), but `profileAxes=1` lets ops see WHY semantic
+  // widen might be producing low-confidence top-K matches.
+  const items = [makeItem({ sourceId: "a", headline: "Reuters reporting" })];
+  const sparseSettings = {
+    topics: [],
+    keywords: [],
+    geographies: [],
+    traditionalSources: ["Reuters"],
+    socialSources: [],
+  };
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: sparseSettings,
+    keywordRecallItems: [],
+    embedFn: makeStubEmbedder(),
+    config: HYBRID_CONFIG,
+  });
+  // Behavior unchanged: still runs the embedder, still returns a result.
+  assert.equal(result.diagnostics.profileAxes, 1);
+  assert.deepEqual(result.diagnostics.profileAxisNames, ["sources"]);
+  // No degraded flag — sparse is not a failure.
+  assert.equal(result.diagnostics.degraded, false);
+  assert.equal(result.diagnostics.degraded_reason, null);
+});
+
+// ─── Phase 3: post-union invariant ───────────────────────────────────────────
+
+test("runEmbeddingRecall: post-union finalRelevant equals merged set size (no double count)", async () => {
+  // Invariant: `finalRelevant` is the size of the merged set, which equals
+  // `unionCount`.  A drift between the two would mean the funnel and the
+  // recall diagnostics are quietly disagreeing about how many items reached
+  // beat-fit.
+  const items = [
+    makeItem({ sourceId: "kw-1", headline: "OFAC sanctions update" }),
+    makeItem({ sourceId: "sem-1", headline: "U.S. and Colombia coordinate" }),
+    makeItem({ sourceId: "off", headline: "Local sports" }),
+  ];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [items[0]],
+    embedFn: makeStubEmbedder(),
+    config: { ...HYBRID_CONFIG, embedTopK: 2 },
+  });
+  assert.equal(result.items.length, result.diagnostics.unionCount);
+  assert.equal(result.diagnostics.finalRelevant, result.diagnostics.unionCount);
 });
