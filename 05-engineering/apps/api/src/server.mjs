@@ -894,6 +894,11 @@ async function executeRefreshFlow(identity) {
     if (log.recall !== undefined) lastRunMeta.recall = log.recall;
     if (log.beatFit !== undefined) lastRunMeta.beatFit = log.beatFit;
     if (log.decisionTrace !== undefined) lastRunMeta.decisionTrace = log.decisionTrace;
+    // Phase 4: per-axis semantic tag-mapping aggregate (topics/keywords) and
+    // the locked `geographies.semanticApplied: false` stamp.  Persisted so
+    // `GET /api/dashboard` can surface "was semantic widening on for this
+    // run, and how often did it fire?" without re-running the pipeline.
+    if (log.tags !== undefined) lastRunMeta.tags = log.tags;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);

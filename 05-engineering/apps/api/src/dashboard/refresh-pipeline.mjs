@@ -27,7 +27,12 @@ import {
   runEmbeddingRecall,
 } from "../ingestion/embedding-recall.mjs";
 import { dedupeSourceItems } from "../ingestion/source-deduper.mjs";
-import { assignMetaStoryTags } from "./meta-story-tags.mjs";
+import { assignMetaStoryTags, assignMetaStoryTagsDetailed } from "./meta-story-tags.mjs";
+import {
+  accumulateAxisDiagnostics,
+  emptyAggregateAxisDiagnostics,
+  resolveSemanticTagConfig,
+} from "./meta-story-semantic-mapper.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -844,8 +849,17 @@ export async function runRefreshPipeline({
   beatFitEnabled = true,
   embedFn = null,
   recallConfig = null,
+  // Phase 4: optional semantic tag-mapping config + scorer.  When omitted,
+  // `resolveSemanticTagConfig()` reads env (defaults OFF), and no scorer is
+  // present — the pipeline degrades cleanly to the Phase 3 deterministic
+  // baseline.  Tests inject both to exercise the uplift path without env
+  // mutation.  Geographies are intentionally NOT widened — see
+  // [`meta-story-tags.mjs`](./meta-story-tags.mjs) for the Phase 4 scope.
+  semanticTagConfig = null,
+  semanticTagScorer = null,
 }) {
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
+  const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
   if (normErrors.length > 0) {
@@ -1358,6 +1372,59 @@ export async function runRefreshPipeline({
   storiesWithSortKeys.sort((a, b) => compareStoriesR1(a.sortKey, b.sortKey));
   const stories = storiesWithSortKeys.map(({ story }) => story);
 
+  // ── Phase 4: optional semantic tag uplift (topics + keywords only) ──────
+  // Runs AFTER the deterministic stories are built and sorted — the overlay
+  // only mutates `story.tags` and aggregates per-axis diagnostics for the
+  // operator log.  It does NOT affect funnel counts, ordering, grounding, or
+  // any pre-clustering stage (K1a one-way invariant).  When the config has
+  // both axes OFF (the default), this loop is a no-op for `tags` and emits
+  // skipped-state diagnostics.
+  const semanticTopicsAgg = emptyAggregateAxisDiagnostics("topics");
+  const semanticKeywordsAgg = emptyAggregateAxisDiagnostics("keywords");
+  let semanticTopicsAggMut = semanticTopicsAgg;
+  let semanticKeywordsAggMut = semanticKeywordsAgg;
+  if (stories.length > 0) {
+    // We re-resolve sourceItems per story from the cluster-output meta-stories
+    // (groundedStories) — the same map already used for `buildStory`.
+    for (let i = 0; i < storiesWithSortKeys.length; i++) {
+      const ms = groundedStories.find(
+        (m) => m.meta_story_id === storiesWithSortKeys[i].sortKey.metaStoryId
+      );
+      if (!ms) continue;
+      const sourceItems = ms.source_item_ids
+        .map((id) => sourceItemsById.get(id))
+        .filter(Boolean);
+      const { tags, diagnostics } = await assignMetaStoryTagsDetailed({
+        metaStory: ms,
+        sourceItems,
+        settings,
+        semantic: {
+          config: effectiveSemanticTagConfig,
+          scorer: semanticTagScorer,
+        },
+      });
+      // Overlay only the tags — leave the rest of the deterministic story
+      // payload (title, summary, geographies, sources, …) untouched.
+      stories[i].tags = tags;
+      semanticTopicsAggMut = accumulateAxisDiagnostics(semanticTopicsAggMut, diagnostics.topics);
+      semanticKeywordsAggMut = accumulateAxisDiagnostics(semanticKeywordsAggMut, diagnostics.keywords);
+    }
+  }
+  const tagsDiagnostics = {
+    topics: semanticTopicsAggMut,
+    keywords: semanticKeywordsAggMut,
+    geographies: { axis: "geographies", semanticApplied: false },
+  };
+  console.log(
+    `[pipeline.tags] semantic_topics=${tagsDiagnostics.topics.enabled ? "on" : "off"}` +
+      ` accepted=${tagsDiagnostics.topics.acceptedCount} rejected=${tagsDiagnostics.topics.rejectedCount}` +
+      ` below_threshold=${tagsDiagnostics.topics.belowThresholdCount}` +
+      `  semantic_keywords=${tagsDiagnostics.keywords.enabled ? "on" : "off"}` +
+      ` accepted=${tagsDiagnostics.keywords.acceptedCount} rejected=${tagsDiagnostics.keywords.rejectedCount}` +
+      ` below_threshold=${tagsDiagnostics.keywords.belowThresholdCount}` +
+      `  semantic_geographies=off(locked)`
+  );
+
   const payload = {
     contractVersion,
     stories,
@@ -1433,6 +1500,13 @@ export async function runRefreshPipeline({
     // operators can answer "did embeddings widen recall this run, or did the
     // run fall through fail-closed?" from logs alone.
     recall: recallDiagnostics,
+    // Phase 4: per-axis semantic tag-mapping diagnostics aggregated across
+    // shipped stories.  `enabled` reflects the configured state; `accepted`/
+    // `rejected`/`belowThresholdCount` show how often the uplift fired and
+    // how often it was borderline.  Geographies axis carries the explicit
+    // `semanticApplied: false` lock so an operator can see Phase 4 scope
+    // hasn't drifted.
+    tags: tagsDiagnostics,
     // Per-stage funnel + primary-drop-stage diagnosis. Operator-facing only.
     funnel,
     // Phase 4 hardening: watermark + skip metadata.  `unchanged` is false here

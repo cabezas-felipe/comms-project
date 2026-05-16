@@ -1,0 +1,397 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  accumulateAxisDiagnostics,
+  emptyAggregateAxisDiagnostics,
+  mapSemanticAxis,
+  mapSemanticTopicsAndKeywords,
+  resolveSemanticTagConfig,
+} from "./meta-story-semantic-mapper.mjs";
+
+// ─── Test scorer fixtures ────────────────────────────────────────────────────
+//
+// The mapper is provider-agnostic — production wires in an embedding or
+// constrained-classifier call; tests inject a deterministic `scorer(text,
+// label) -> number`.  These small fixtures keep each test's intent obvious:
+// the table IS the test.
+
+function makeTableScorer(table) {
+  // table: { [labelLower]: { keywords: [substring -> score]} } where the
+  // score is returned when ANY substring is found in the evidence text.
+  // First-match-wins; default score = 0.
+  return async (evidence, label) => {
+    const entry = table[label.toLowerCase()];
+    if (!entry) return 0;
+    const lower = evidence.toLowerCase();
+    for (const [needle, score] of entry) {
+      if (lower.includes(needle)) return score;
+    }
+    return 0;
+  };
+}
+
+function neverScorer() {
+  return async () => 0;
+}
+
+function alwaysScorer(score) {
+  return async () => score;
+}
+
+// ─── resolveSemanticTagConfig ────────────────────────────────────────────────
+
+test("resolveSemanticTagConfig: defaults are OFF and per-axis OFF when env is empty", () => {
+  const cfg = resolveSemanticTagConfig({});
+  assert.equal(cfg.enabled, false);
+  assert.equal(cfg.topicsEnabled, false);
+  assert.equal(cfg.keywordsEnabled, false);
+  assert.equal(cfg.topicsThreshold, 0.75);
+  assert.equal(cfg.keywordsThreshold, 0.75);
+});
+
+test("resolveSemanticTagConfig: per-axis flag requires the global flag too (AND semantics)", () => {
+  // Per-axis ON but global OFF — axis stays OFF.
+  const cfg = resolveSemanticTagConfig({
+    TEMPO_TAG_SEMANTIC_MAPPING_ENABLED: "false",
+    TEMPO_TAG_SEMANTIC_TOPICS_ENABLED: "true",
+    TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED: "true",
+  });
+  assert.equal(cfg.enabled, false);
+  assert.equal(cfg.topicsEnabled, false);
+  assert.equal(cfg.keywordsEnabled, false);
+});
+
+test("resolveSemanticTagConfig: global ON + per-axis ON enables that axis only", () => {
+  const cfg = resolveSemanticTagConfig({
+    TEMPO_TAG_SEMANTIC_MAPPING_ENABLED: "true",
+    TEMPO_TAG_SEMANTIC_TOPICS_ENABLED: "true",
+    TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED: "false",
+  });
+  assert.equal(cfg.enabled, true);
+  assert.equal(cfg.topicsEnabled, true);
+  assert.equal(cfg.keywordsEnabled, false);
+});
+
+test("resolveSemanticTagConfig: thresholds parse from env in [0,1]; out-of-range falls back to default", () => {
+  const cfg = resolveSemanticTagConfig({
+    TEMPO_TAG_SEMANTIC_TOPICS_THRESHOLD: "0.42",
+    TEMPO_TAG_SEMANTIC_KEYWORDS_THRESHOLD: "2.5", // out of range → default
+  });
+  assert.equal(cfg.topicsThreshold, 0.42);
+  assert.equal(cfg.keywordsThreshold, 0.75);
+});
+
+test("resolveSemanticTagConfig: overrides shortcut env reads (test seam)", () => {
+  const cfg = resolveSemanticTagConfig(
+    {
+      // env would say OFF; overrides must win.
+      TEMPO_TAG_SEMANTIC_MAPPING_ENABLED: "false",
+    },
+    { enabled: true, topicsEnabled: true, topicsThreshold: 0.6 }
+  );
+  assert.equal(cfg.enabled, true);
+  assert.equal(cfg.topicsEnabled, true);
+  assert.equal(cfg.topicsThreshold, 0.6);
+});
+
+// ─── mapSemanticAxis — disabled / missing-scorer fast paths ──────────────────
+
+test("mapSemanticAxis: disabled (enabled=false) returns empty additions and skipped diagnostics", async () => {
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb.",
+    allowedLabels: ["oil"],
+    deterministicLabels: [],
+    threshold: 0.5,
+    enabled: false,
+    scorer: alwaysScorer(0.99), // would otherwise accept everything
+  });
+  assert.deepEqual(accepted, []);
+  assert.equal(diagnostics.enabled, false);
+  assert.equal(diagnostics.candidateCount, 0);
+  assert.equal(diagnostics.acceptedCount, 0);
+});
+
+test("mapSemanticAxis: enabled but no scorer → no-op (scorerProvided=false)", async () => {
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb.",
+    allowedLabels: ["oil"],
+    threshold: 0.5,
+    enabled: true,
+    // scorer omitted
+  });
+  assert.deepEqual(accepted, []);
+  assert.equal(diagnostics.scorerProvided, false);
+  assert.equal(diagnostics.candidateCount, 0);
+});
+
+test("mapSemanticAxis: empty evidence text yields no candidates (no work done)", async () => {
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "topics",
+    evidenceText: "",
+    allowedLabels: ["Diplomatic relations", "Migration policy"],
+    threshold: 0.5,
+    enabled: true,
+    scorer: alwaysScorer(1.0),
+  });
+  assert.deepEqual(accepted, []);
+  assert.equal(diagnostics.candidateCount, 0);
+});
+
+// ─── mapSemanticAxis — accept / reject / dedupe ──────────────────────────────
+
+test("mapSemanticAxis (keywords): 'petroleum' evidence + 'oil' in settings + above-threshold scorer → accepts 'oil'", async () => {
+  const scorer = makeTableScorer({ oil: [["petroleum", 0.9]] });
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb again.",
+    allowedLabels: ["oil", "OFAC", "sanctions"],
+    deterministicLabels: [],
+    threshold: 0.75,
+    enabled: true,
+    scorer,
+  });
+  assert.deepEqual(accepted, ["oil"]);
+  assert.equal(diagnostics.candidateCount, 3, "all settings labels considered (none were deterministic)");
+  assert.equal(diagnostics.acceptedCount, 1);
+  assert.equal(diagnostics.rejectedCount, 2);
+  assert.equal(diagnostics.belowThresholdCount, 2);
+});
+
+test("mapSemanticAxis (keywords): below-threshold score is rejected and counted as belowThreshold", async () => {
+  const scorer = makeTableScorer({ oil: [["petroleum", 0.6]] });
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb again.",
+    allowedLabels: ["oil"],
+    threshold: 0.75,
+    enabled: true,
+    scorer,
+  });
+  assert.deepEqual(accepted, []);
+  assert.equal(diagnostics.acceptedCount, 0);
+  assert.equal(diagnostics.belowThresholdCount, 1);
+});
+
+test("mapSemanticAxis: labels already on the deterministic list are skipped (no rescoring, no double-count)", async () => {
+  const scorer = alwaysScorer(0.99);
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Sanctions news.",
+    allowedLabels: ["sanctions", "OFAC"],
+    deterministicLabels: ["sanctions"], // already accepted upstream
+    threshold: 0.5,
+    enabled: true,
+    scorer,
+  });
+  // 'sanctions' is skipped (deterministic), 'OFAC' scored and accepted.
+  assert.deepEqual(accepted, ["OFAC"]);
+  assert.equal(diagnostics.candidateCount, 1);
+  assert.equal(diagnostics.acceptedCount, 1);
+});
+
+test("mapSemanticAxis: case-insensitive deterministic dedupe", async () => {
+  const { accepted } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Sanctions news.",
+    allowedLabels: ["Sanctions"],
+    deterministicLabels: ["sanctions"], // different case, same label
+    threshold: 0.1,
+    enabled: true,
+    scorer: alwaysScorer(0.9),
+  });
+  assert.deepEqual(accepted, []);
+});
+
+test("mapSemanticAxis: out-of-settings label can NEVER appear in `accepted` (closed vocabulary)", async () => {
+  // Test that the function only scores `allowedLabels`.  We try to feed a
+  // scorer that loves "petroleum"; but petroleum isn't in `allowedLabels`,
+  // so it's never even passed to the scorer.
+  const seenLabels = [];
+  const scorer = async (_text, label) => {
+    seenLabels.push(label);
+    return 0.99;
+  };
+  const { accepted } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Petroleum prices climb again.",
+    allowedLabels: ["oil"], // closed vocab
+    threshold: 0.5,
+    enabled: true,
+    scorer,
+  });
+  assert.deepEqual(accepted, ["oil"]);
+  assert.deepEqual(seenLabels, ["oil"], "scorer must only see settings labels — never the evidence token");
+});
+
+test("mapSemanticAxis: scorer throwing on one candidate counts as a rejection and doesn't break the run", async () => {
+  let calls = 0;
+  const scorer = async (_text, label) => {
+    calls += 1;
+    if (label === "OFAC") throw new Error("boom");
+    return 0.9;
+  };
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Sanctions news.",
+    allowedLabels: ["OFAC", "sanctions"],
+    threshold: 0.5,
+    enabled: true,
+    scorer,
+  });
+  assert.equal(calls, 2, "both candidates scored");
+  assert.deepEqual(accepted, ["sanctions"], "the throwing candidate is treated as rejected");
+  assert.equal(diagnostics.rejectedCount, 1);
+});
+
+// ─── Topics axis behavior ────────────────────────────────────────────────────
+
+test("mapSemanticAxis (topics): only emits a settings topic that is opted in (no fabrication)", async () => {
+  const scorer = makeTableScorer({
+    "diplomatic relations": [["talks", 0.9]],
+    "energy policy": [["talks", 0.95]], // would be highest, but not in settings
+  });
+  const { accepted } = await mapSemanticAxis({
+    axis: "topics",
+    evidenceText: "High-stakes talks resumed in the capital.",
+    allowedLabels: ["Diplomatic relations"], // user hasn't opted into Energy policy
+    threshold: 0.75,
+    enabled: true,
+    scorer,
+  });
+  assert.deepEqual(accepted, ["Diplomatic relations"]);
+});
+
+// ─── mapSemanticTopicsAndKeywords (convenience wrapper) ──────────────────────
+
+test("mapSemanticTopicsAndKeywords: maps both axes in one call with per-axis thresholds", async () => {
+  const scorer = makeTableScorer({
+    "diplomatic relations": [["talks", 0.9]],
+    "oil": [["petroleum", 0.9]],
+  });
+  const out = await mapSemanticTopicsAndKeywords({
+    evidenceText: "Talks resumed; petroleum prices climb.",
+    settingsTopics: ["Diplomatic relations"],
+    settingsKeywords: ["oil"],
+    config: {
+      enabled: true,
+      topicsEnabled: true,
+      keywordsEnabled: true,
+      topicsThreshold: 0.75,
+      keywordsThreshold: 0.75,
+    },
+    scorer,
+  });
+  assert.deepEqual(out.topics.accepted, ["Diplomatic relations"]);
+  assert.deepEqual(out.keywords.accepted, ["oil"]);
+});
+
+test("mapSemanticTopicsAndKeywords: per-axis disable still runs the other axis", async () => {
+  const scorer = makeTableScorer({
+    "diplomatic relations": [["talks", 0.9]],
+    "oil": [["petroleum", 0.9]],
+  });
+  const out = await mapSemanticTopicsAndKeywords({
+    evidenceText: "Talks resumed; petroleum prices climb.",
+    settingsTopics: ["Diplomatic relations"],
+    settingsKeywords: ["oil"],
+    config: {
+      enabled: true,
+      topicsEnabled: true,
+      keywordsEnabled: false, // keywords axis is OFF
+      topicsThreshold: 0.75,
+      keywordsThreshold: 0.75,
+    },
+    scorer,
+  });
+  assert.deepEqual(out.topics.accepted, ["Diplomatic relations"]);
+  assert.deepEqual(out.keywords.accepted, []);
+  assert.equal(out.keywords.diagnostics.enabled, false);
+});
+
+test("mapSemanticTopicsAndKeywords: passes through deterministic baselines so semantic doesn't re-score them", async () => {
+  const scorer = alwaysScorer(0.99); // would accept everything not skipped
+  const out = await mapSemanticTopicsAndKeywords({
+    evidenceText: "Anything goes.",
+    settingsTopics: ["Diplomatic relations", "Migration policy"],
+    settingsKeywords: ["OFAC", "sanctions"],
+    deterministicTopics: ["Diplomatic relations"],
+    deterministicKeywords: ["OFAC"],
+    config: {
+      enabled: true,
+      topicsEnabled: true,
+      keywordsEnabled: true,
+      topicsThreshold: 0.5,
+      keywordsThreshold: 0.5,
+    },
+    scorer,
+  });
+  // Already-deterministic labels are skipped; only the *new* candidates count.
+  assert.deepEqual(out.topics.accepted, ["Migration policy"]);
+  assert.deepEqual(out.keywords.accepted, ["sanctions"]);
+});
+
+// ─── Diagnostic aggregation helpers ──────────────────────────────────────────
+
+test("accumulateAxisDiagnostics: composes axis diagnostics across stories without mutation", () => {
+  const story1 = {
+    axis: "keywords",
+    enabled: true,
+    scorerProvided: true,
+    threshold: 0.75,
+    candidateCount: 3,
+    acceptedCount: 1,
+    rejectedCount: 2,
+    belowThresholdCount: 2,
+  };
+  const story2 = { ...story1, candidateCount: 2, acceptedCount: 0, rejectedCount: 2, belowThresholdCount: 1 };
+  const agg = accumulateAxisDiagnostics(
+    accumulateAxisDiagnostics(emptyAggregateAxisDiagnostics("keywords"), story1),
+    story2
+  );
+  assert.equal(agg.storyCount, 2);
+  assert.equal(agg.candidateCount, 5);
+  assert.equal(agg.acceptedCount, 1);
+  assert.equal(agg.rejectedCount, 4);
+  assert.equal(agg.belowThresholdCount, 3);
+  assert.equal(agg.threshold, 0.75);
+  assert.equal(agg.enabled, true);
+  // Original story diagnostics unchanged
+  assert.equal(story1.acceptedCount, 1);
+});
+
+test("accumulateAxisDiagnostics: gracefully handles malformed entries (no NaN, no throws)", () => {
+  const agg = accumulateAxisDiagnostics(emptyAggregateAxisDiagnostics("topics"), null);
+  assert.equal(agg.storyCount, 0);
+});
+
+// ─── Defensive uses of neverScorer (no leakage of out-of-settings labels) ────
+
+test("mapSemanticAxis: even with a non-zero scorer, nothing is emitted when allowedLabels is empty", async () => {
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Anything.",
+    allowedLabels: [],
+    threshold: 0.1,
+    enabled: true,
+    scorer: alwaysScorer(0.99),
+  });
+  assert.deepEqual(accepted, []);
+  assert.equal(diagnostics.candidateCount, 0);
+});
+
+test("mapSemanticAxis: a never-accepting scorer rejects everything and produces clean diagnostics", async () => {
+  const { accepted, diagnostics } = await mapSemanticAxis({
+    axis: "topics",
+    evidenceText: "Talks resumed.",
+    allowedLabels: ["Diplomatic relations", "Migration policy"],
+    threshold: 0.75,
+    enabled: true,
+    scorer: neverScorer(),
+  });
+  assert.deepEqual(accepted, []);
+  assert.equal(diagnostics.candidateCount, 2);
+  assert.equal(diagnostics.belowThresholdCount, 2);
+});

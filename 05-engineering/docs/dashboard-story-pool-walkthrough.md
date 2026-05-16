@@ -570,12 +570,43 @@ These are **expected drops** or **safe transforms**; **Chunk L** maps each to **
 
 **Why this is still K1a:** Settings-as-vocabulary, settings ∩ evidence semantics, and one-way direction (tags never feed candidates, recall, clustering, or dedupe) are all preserved. Phase 3 deepens evidence ("evidence bundle" instead of "structural source fields only") and adds a deterministic alias layer; both stay strictly inside the existing contract.
 
-### Phase 4 (deferred — not in this slice)
+### Phase 4 amendment — constrained semantic mapping for topics + keywords (2026-05-16; default OFF)
 
-> Forward-look only — captured so the next pass picks up cleanly. Not yet locked.
+**Status:** Shipped on `feat/meta-story-tags-phase1`; **Chunk K is still locked to K1a**. Semantic uplift sits inside the existing "settings ∩ evidence" surface — it tightens *how* a candidate label is matched against evidence, never *what* vocabulary is emitted. Default is OFF; production rollout is a separate Phase 5 step.
 
-- **Semantic keyword aliasing** — a constrained mapper (synonym lexicon, or embedding-backed proximity check with a fixed threshold) that lets evidence like `petroleum` light up a `settings.keywords` entry of `oil`. Must stay settings-gated: only emit canonical settings strings; **never** an out-of-settings keyword. The Phase 3 regression *"'petroleum' in text + 'oil' in settings emits NO keyword tag"* will need to be amended or replaced when this lands.
-- **No widening of recall/clustering** — K1a's one-way posture must continue to hold even after Phase 4. Semantic widening only affects shipped `tags`; the pool, recall, and clustering layers remain on their existing inputs.
+**What changed:**
+
+- **New module — [`meta-story-semantic-mapper.mjs`](../apps/api/src/dashboard/meta-story-semantic-mapper.mjs):** `mapSemanticAxis({axis, evidenceText, allowedLabels, deterministicLabels, threshold, enabled, scorer})` scores each candidate against a closed vocabulary (`settings.topics` or `settings.keywords`) using an **injected scorer** function. Accepts iff `score >= threshold`; rejects everything below and counts it as `belowThresholdCount`. `mapSemanticTopicsAndKeywords` is a thin wrapper that runs both axes with per-axis thresholds. `resolveSemanticTagConfig(env, overrides)` reads the env flag/threshold variables (with override seam for tests).
+- **Closed-vocabulary by construction.** The mapper only ever inspects labels you pass in; it cannot widen `allowedLabels`. A test (*"out-of-settings label can NEVER appear in `accepted`"*) and a parallel pipeline regression lock this: even an aggressive scorer that loves `"petroleum"` can never emit `"petroleum"` — only `"oil"` (and only if it's in `settings.keywords` and clears the threshold).
+- **Assigner integration — [`meta-story-tags.mjs`](../apps/api/src/dashboard/meta-story-tags.mjs):** new async sibling `assignMetaStoryTagsDetailed({metaStory, sourceItems, settings, semantic})` returns `{tags, diagnostics}`. Deterministic baseline runs first; semantic uplift is merged in (dedupe, locale-sort) and produces a per-axis diagnostic record (`{axis, enabled, scorerProvided, threshold, candidateCount, acceptedCount, rejectedCount, belowThresholdCount}`). The sync `assignMetaStoryTags` keeps its Phase 3 behavior — direct callers don't get Phase 4 uplift unless they explicitly opt in.
+- **Pipeline plumbing — [`refresh-pipeline.mjs`](../apps/api/src/dashboard/refresh-pipeline.mjs):** `runRefreshPipeline` accepts optional `semanticTagConfig` and `semanticTagScorer`. After `buildStory` produces the deterministic baseline, the pipeline overlays semantic uplift per story (topics + keywords only), aggregates per-axis diagnostics, and emits `log.tags = { topics, keywords, geographies: { semanticApplied: false } }`. A `[pipeline.tags]` console line surfaces `enabled / accepted / rejected / belowThresholdCount` per axis on every run. The overlay sits **after** clustering/grounding so it cannot change funnel counts — a regression test (*"Phase 4 wiring: semantic uplift does NOT change funnel / admission counts"*) compares ON vs OFF runs over the same fixture and asserts identical funnel stages.
+- **Persistence + read path — [`server.mjs`](../apps/api/src/server.mjs) + [`dashboard-snapshot-repo.mjs`](../apps/api/src/db/dashboard-snapshot-repo.mjs):** `log.tags` rolls up into `finalPayload._lastRunMeta.tags`; the snapshot loader lifts `_lastRunMeta.tags` into `_meta.tags` on read. Optional everywhere for back-compat with pre-Phase-4 snapshots.
+- **Geographies axis is locked deterministic-only.** Phase 4 does NOT extend semantic mapping to geographies. The diagnostic aggregate carries an explicit `geographies.semanticApplied: false` stamp on every run; an aggressive scorer that loves `"Beijing"` still cannot emit a `China` tag unless China is in `settings.geographies` **and** the Phase 3 deterministic alias map fires. Pipeline test *"geography axis is unchanged when semantic is ON"* locks this.
+
+**Env flags + thresholds (defaults OFF):**
+
+| Env var | Effect | Default |
+|--------|--------|---------|
+| `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` | global gate; **all** semantic uplift is gated on this | `false` |
+| `TEMPO_TAG_SEMANTIC_TOPICS_ENABLED` | per-axis gate; AND-folded with global | `false` |
+| `TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED` | per-axis gate; AND-folded with global | `false` |
+| `TEMPO_TAG_SEMANTIC_TOPICS_THRESHOLD` | `[0,1]` cut-off for topic acceptance | `0.75` |
+| `TEMPO_TAG_SEMANTIC_KEYWORDS_THRESHOLD` | `[0,1]` cut-off for keyword acceptance | `0.75` |
+
+**Diagnostics consumers (operator-facing only):**
+
+- Console log per refresh: `[pipeline.tags] semantic_topics=on accepted=N rejected=M below_threshold=K  semantic_keywords=… semantic_geographies=off(locked)`.
+- `_meta.tags` on the dashboard response: `{topics: {…}, keywords: {…}, geographies: {semanticApplied: false}}`. The UI does NOT render semantic internals as user-facing labels — chips read tag strings (still settings vocabulary) directly.
+
+**Why this is still K1a:** Settings-as-vocabulary, settings ∩ evidence semantics, and one-way direction (semantic uplift only affects shipped `tags`, never pool/recall/clustering/dedupe) are all preserved. The change is a richer *evidence-to-tags* step; admission inputs are untouched, and the closed-vocabulary mapper cannot fabricate.
+
+### Phase 5 (deferred — not in this slice)
+
+> Forward-look. Not yet locked.
+
+- **Production scorer wiring.** Phase 4 ships the surface; a production scorer (embedding-similarity probe via `TEMPO_OPENAI_EMBEDDING_MODEL`, or a small constrained-classifier prompt) needs to be wired into `server.mjs` and exercised against the [scenario map](dashboard-story-pool-scenario-map.md) goldens before the env flags flip on outside staging.
+- **Threshold calibration.** Defaults (`0.75`) are conservative; per-axis calibration should be tuned against a curated set of "should match" / "should not match" pairs.
+- **Semantic geography aliasing** — still deliberately out of scope. The deterministic alias map in [`geography-aliases.ts`](../packages/contracts/src/geography-aliases.ts) remains the only geo widening path.
 
 ---
 

@@ -76,6 +76,10 @@ function liftSnapshotMeta(payload, refreshed_at) {
     if (_lastRunMeta.beatFit !== undefined) meta.beatFit = _lastRunMeta.beatFit;
     if (_lastRunMeta.clusterModel !== undefined) meta.clusterModel = _lastRunMeta.clusterModel;
     if (_lastRunMeta.embeddingModel !== undefined) meta.embeddingModel = _lastRunMeta.embeddingModel;
+    // Phase 4: per-axis semantic tag-mapping aggregate (topics + keywords)
+    // + the `geographies.semanticApplied: false` lock stamp.  Optional for
+    // backward compat with snapshots written before Phase 4.
+    if (_lastRunMeta.tags !== undefined) meta.tags = _lastRunMeta.tags;
   }
   return { ...rest, stories: normalizeStoriesForLoad(stories), _meta: meta };
 }

@@ -2,6 +2,67 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-16 - D-049 - Trust cleanup Phase 4: constrained semantic mapping for topics + keywords (default OFF)
+
+#### Context
+
+Phase 3 ([D-048](#2026-05-16---d-048---trust-cleanup-phase-3-deterministic-meta-story-tag-assignment--geography-alias-map)) closed the structural gap: meta-story-level tags now consume the full evidence bundle and a deterministic geography alias map. But Phase 3 keyword/topic matching is whole-word only, so evidence like `petroleum` does not light up a `settings.keywords` entry of `oil`, and a meta-story summary that says `talks resumed` does not surface `Diplomatic relations` unless the canonical phrase itself appears verbatim. This forces users to over-author their vocabulary or accept missed labels on stories whose evidence is *semantically* clear. The Phase 3 boundary regression test (*"'petroleum' in text + 'oil' in settings emits NO keyword tag"*) explicitly named this as Phase 4 work.
+
+#### Decision
+
+Land **Phase 4** trust cleanup: constrained semantic mapping for `topics` + `keywords` only, default OFF, behind per-axis env flags. **Chunk K is still locked to K1a** — the closed-vocabulary contract makes this a richer *evidence-to-tags* step, not a relock.
+
+**New module — [`meta-story-semantic-mapper.mjs`](apps/api/src/dashboard/meta-story-semantic-mapper.mjs):**
+
+- `mapSemanticAxis({axis, evidenceText, allowedLabels, deterministicLabels, threshold, enabled, scorer})` — scores each candidate from `allowedLabels` (a closed vocabulary, always `settings.topics` or `settings.keywords`) via an **injected scorer** `(evidenceText, candidateLabel) → number | Promise<number>`. Accepts iff `score >= threshold`. Returns `{accepted, diagnostics}`.
+- `mapSemanticTopicsAndKeywords({...})` — convenience wrapper running both axes with per-axis thresholds.
+- `resolveSemanticTagConfig(env, overrides)` — reads the env flags (with override seam for tests).
+
+**Assigner integration — [`meta-story-tags.mjs`](apps/api/src/dashboard/meta-story-tags.mjs):**
+
+- New async `assignMetaStoryTagsDetailed({metaStory, sourceItems, settings, semantic})` returns `{tags, diagnostics}`. Deterministic baseline runs first; semantic uplift merges in (dedupe, locale-sort).
+- Sync `assignMetaStoryTags` keeps its Phase 3 behavior — direct callers don't get Phase 4 uplift unless they explicitly opt in.
+
+**Pipeline + persistence:**
+
+- [`runRefreshPipeline`](apps/api/src/dashboard/refresh-pipeline.mjs) accepts optional `semanticTagConfig` + `semanticTagScorer`. After `buildStory`, the pipeline overlays semantic uplift per story (topics + keywords only), aggregates per-axis diagnostics, and emits `log.tags`.
+- [`server.mjs`](apps/api/src/server.mjs) lifts `log.tags` into `_lastRunMeta.tags`; [`dashboard-snapshot-repo.mjs`](apps/api/src/db/dashboard-snapshot-repo.mjs) lifts `_lastRunMeta.tags` into `_meta.tags` on read.
+
+**Closed-vocabulary lock + Phase 4 scope lock:**
+
+- Output stays a subset of `settings.{topics,keywords,geographies}` — by *construction* the mapper inspects only labels passed in.
+- Geographies are **explicitly NOT** semantically widened. The runtime diagnostic carries a `geographies.semanticApplied: false` stamp on every run as a tripwire.
+
+**Env flags (defaults OFF):**
+
+- `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` (global)
+- `TEMPO_TAG_SEMANTIC_TOPICS_ENABLED` / `TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED` (per-axis, AND-folded with global)
+- `TEMPO_TAG_SEMANTIC_TOPICS_THRESHOLD` / `TEMPO_TAG_SEMANTIC_KEYWORDS_THRESHOLD` (`[0,1]`, default `0.75`)
+
+**One-way invariant lock:** The semantic overlay runs **after** clustering + grounding. A regression test (*"Phase 4 wiring: semantic uplift does NOT change funnel / admission counts"*) compares ON vs OFF runs over the same fixture and asserts identical `funnel.stages` + `metaStoryCount`.
+
+#### Why
+
+- **Trust + recall tradeoff handled by a single dial.** Operators can choose to trade some precision for recall on topics/keywords by flipping a flag and tuning a threshold — without code changes, without touching the deterministic baseline.
+- **Closed-vocabulary is the safety net.** Even an over-eager scorer can never emit a label the user didn't opt into. The mapper inspects `allowedLabels` only; the evidence token cannot leak through.
+- **Geographies are still the riskiest axis to widen.** A semantic alias that maps `"Pacific Northwest"` → `"China"` would be a real and silent precision failure. The deterministic-only lock + explicit `semanticApplied: false` stamp catches drift.
+- **Default OFF is the rollout strategy.** Phase 4 ships the surface and the diagnostics; flipping the flag is a separate Phase 5 step that depends on a production scorer + calibrated thresholds.
+
+#### Tradeoffs
+
+- **No production scorer wired yet.** The brief asked for the module, integration, flags, diagnostics, and tests — not for a production scorer wired into `server.mjs`. We chose to keep the scorer injectable so tests can be deterministic; production wiring is a Phase 5 follow-up.
+- **Per-story async overhead.** When the flag is OFF (default), `assignMetaStoryTagsDetailed` still runs once per story to emit skipped-state diagnostics. Cost is dominated by the Promise + diagnostics object construction — negligible compared to per-story clustering + grounding cost, and the path is the same whether ON or OFF (so tests of ON/OFF parity are honest).
+- **Default threshold (`0.75`) is a conservative guess.** Actual calibration belongs to Phase 5 against the scenario-map goldens; the spec / walkthrough say so.
+- **`_lastRunMeta.tags` adds a field to persisted snapshots.** Snapshots written pre-Phase-4 don't have it; loaders skip the field cleanly (covered by existing back-compat normalization tests).
+
+#### Consequences
+
+- Phase 5: production scorer wiring + per-axis threshold calibration + staged flag flip. The diagnostics dashboard (operator-facing) is the canary signal — operators read `_meta.tags` to monitor "is uplift firing, how often is it borderline?" before promoting.
+- Existing Phase 3 boundary tests are kept (default-OFF path) AND extended with semantic-ON cases (Phase 4 uplift path). Both versions live side-by-side so any future scope change has to consciously delete or amend each.
+- No changes to recall, clustering, dedupe, grounding, or admission. The one-way K1a invariant continues to hold even with Phase 4 ON.
+
+---
+
 ### 2026-05-16 - D-048 - Trust cleanup Phase 3: deterministic meta-story tag assignment + geography alias map
 
 #### Context

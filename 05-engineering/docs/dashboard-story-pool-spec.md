@@ -96,9 +96,23 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 - **Keywords remain deterministic only in Phase 3.** Whole-word phrase match against `settings.keywords` in the evidence bundle. Semantic synonym widening (e.g. `petroleum` evidence → `oil` tag when "oil" is in settings) is **explicitly Phase 4** — a regression test in [`refresh-pipeline.test.mjs`](../apps/api/src/dashboard/refresh-pipeline.test.mjs) (*"Phase 3 wiring: 'petroleum' in text + 'oil' in settings emits NO keyword tag"*) locks this boundary so a future change cannot accidentally light up semantic matching here.
 - **K1a still holds.** The new assigner is a richer *evidence-to-tags* step; the one-way invariant (tags never widen pool/recall/clustering/dedupe) is unchanged. Source-only [`deriveStoryTags`](../apps/api/src/dashboard/refresh-pipeline.mjs) remains exported as a back-compat helper.
 
-**Phase 4 (deferred, not in this slice):**
+**Phase 4 — constrained semantic mapping for topics + keywords (shipped — 2026-05-16, default OFF):**
 
-- **Semantic keyword aliasing** — a constrained mapper (synonym lexicon or embedding-backed proximity check) that lets evidence like `petroleum` light up a `settings.keywords` entry of `oil`. Must stay settings-gated and emit canonical settings strings; **no out-of-settings keywords ever**. Phase 3's deterministic regression case will be amended/replaced when this lands. Recall and clustering stay untouched (K1a one-way).
+- New module [`meta-story-semantic-mapper.mjs`](../apps/api/src/dashboard/meta-story-semantic-mapper.mjs) exports `mapSemanticAxis`, `mapSemanticTopicsAndKeywords`, and `resolveSemanticTagConfig`. The mapper accepts an **injected scorer** `(evidenceText, candidateLabel) → number | Promise<number>` so production can wire embedding similarity / a constrained classifier while tests inject deterministic fixtures.
+- **Closed-vocabulary by construction.** The mapper scores candidates only against `settings.topics` / `settings.keywords` — it can never propose an out-of-settings label. Threshold-gated: accept iff `score >= threshold`; below-threshold candidates are dropped and counted in diagnostics.
+- **Phase 3 deterministic baseline always runs first.** Semantic uplift ADDs settings-constrained labels; it never removes a deterministic match. Already-deterministic labels are skipped (no rescoring, no double-count).
+- **Geographies stay deterministic-only** — Phase 4 explicitly does NOT introduce a semantic geography path. The runtime aggregate carries an explicit `geographies.semanticApplied: false` stamp ([`_lastRunMeta.tags`](../apps/api/src/db/dashboard-snapshot-repo.mjs) → `_meta.tags`) so operators can see the lock hasn't drifted.
+- **Env flags + thresholds** (default OFF):
+  - `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` — global gate.
+  - `TEMPO_TAG_SEMANTIC_TOPICS_ENABLED` / `TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED` — per-axis gates (AND with the global flag).
+  - `TEMPO_TAG_SEMANTIC_TOPICS_THRESHOLD` / `TEMPO_TAG_SEMANTIC_KEYWORDS_THRESHOLD` — `[0,1]` cut-off, default `0.75`.
+- **Diagnostics aggregated per run.** [`runRefreshPipeline`](../apps/api/src/dashboard/refresh-pipeline.mjs) collects per-axis aggregates (`candidateCount`, `acceptedCount`, `rejectedCount`, `belowThresholdCount`, `enabled`, `threshold`) and surfaces them via `log.tags` → `_lastRunMeta.tags` → `_meta.tags`. The pipeline also emits a `[pipeline.tags]` log line per refresh.
+- **K1a one-way invariant unchanged.** Semantic uplift runs **after** clustering / grounding inside the per-story tag overlay — it cannot change funnel counts or admission. A regression case in [`refresh-pipeline.test.mjs`](../apps/api/src/dashboard/refresh-pipeline.test.mjs) (*"Phase 4 wiring: semantic uplift does NOT change funnel / admission counts"*) locks this.
+
+**Phase 5 (deferred — not in this slice):**
+
+- **Production scorer wiring.** Phase 4 ships the module + flags + diagnostics; a production scorer (embedding similarity probe against `TEMPO_OPENAI_EMBEDDING_MODEL`, or a constrained classifier) is intentionally not wired into `server.mjs` yet. Rollout will (a) prove the scorer in staging behind the OFF default, (b) calibrate per-axis thresholds against the golden set, (c) flip flags incrementally with the diagnostics dashboard as the canary.
+- **Semantic geography aliasing** — still deliberately out of scope. The deterministic alias map in [`geography-aliases.ts`](../packages/contracts/src/geography-aliases.ts) remains the only geo widening path.
 
 ---
 

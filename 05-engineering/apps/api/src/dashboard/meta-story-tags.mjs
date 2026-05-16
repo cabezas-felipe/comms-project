@@ -1,8 +1,8 @@
-// Phase 3 — deterministic meta-story tag assignment.
+// Phase 3 + Phase 4 — meta-story tag assignment.
 //
-// Replaces the source-only `deriveStoryTags` helper as the production tag
-// emitter for shipped stories.  Compared to the Phase 1/2 behavior, this
-// module:
+// Phase 3 (LOCKED) — deterministic baseline.  This module replaces the
+// source-only `deriveStoryTags` helper as the production tag emitter for
+// shipped stories.  Compared to the Phase 1/2 behavior, it:
 //
 //   1. Operates on the **meta-story evidence bundle** (title + subtitle +
 //      summary + source headline/body) instead of source structural fields
@@ -14,23 +14,31 @@
 //      always the canonical setting string (preserving the user's casing),
 //      never the alias surface form, and never a fabricated value.
 //
-// Phase 3 keeps keyword matching **deterministic** (whole-word phrase match
-// only).  Semantic keyword aliasing (e.g. "petroleum" → "oil") is explicitly
-// deferred to Phase 4 — the assigner does NOT consult any synonym/embedding
-// step for keywords here.  Phase 4 will introduce a constrained semantic
-// mapper that still gates on settings; until then, "petroleum" in text with
-// "oil" in settings yields no keyword tag.
+// Phase 4 (opt-in) — constrained semantic mapping.  When the env flags
+// `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` + `TEMPO_TAG_SEMANTIC_TOPICS_ENABLED` /
+// `TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED` are set and a scorer is wired in, the
+// assigner consults `mapSemanticTopicsAndKeywords` from
+// [`meta-story-semantic-mapper.mjs`](./meta-story-semantic-mapper.mjs) to add
+// **settings-constrained** topic / keyword labels above a confidence
+// threshold.  Geographies remain deterministic-only in Phase 4 (no semantic
+// path).  Semantic uplift ADDs to the deterministic baseline; it never
+// removes a deterministic match.  When semantic is off, this module behaves
+// exactly as in Phase 3.
 //
 // One-way invariant (Chunk K — K1a) still holds: tags **explain** a card.
 // They do not widen the candidate pool, recall, clustering, or dedupe.  The
-// only behavioral change from Phase 1/2 is *how* tags are populated for the
-// shipped payload.
+// only behavioral changes from Phase 1/2 are *how* tags are populated for
+// the shipped payload (Phase 3 evidence bundle, Phase 4 semantic uplift).
 
 import {
   GEOGRAPHY_ALIASES,
   normalizeTopicLabel,
   resolveGeographyAlias,
 } from "@tempo/contracts";
+import {
+  mapSemanticTopicsAndKeywords,
+  resolveSemanticTagConfig,
+} from "./meta-story-semantic-mapper.mjs";
 
 // Precomputed alias entries for the per-story matching loop.  Tiny map
 // (low tens of entries in v1), pre-frozen at module load — no per-call work.
@@ -216,10 +224,14 @@ function assignGeographies(evidenceText, sourceItems, settingsGeographies) {
 }
 
 /**
- * Phase 3 entry point: derive the three-axis `tags` object for a shipped
- * story from the meta-story evidence bundle, source structural fields, and
- * settings vocabulary.  Returns a fresh `{ topics, keywords, geographies }`
- * shape with each axis deduped and locale-sorted; never mutates inputs.
+ * Phase 3 + 4 entry point: derive the three-axis `tags` object for a shipped
+ * story from the meta-story evidence bundle, source structural fields, the
+ * settings vocabulary, and (optionally) a constrained semantic mapper.
+ *
+ * Returns a fresh `{ topics, keywords, geographies }` shape with each axis
+ * deduped and locale-sorted; never mutates inputs.  The deterministic
+ * baseline runs unconditionally; semantic uplift only fires when both flags
+ * AND a scorer are present (see `semantic` arg below).
  *
  * Strictness contract (Phase 1/2 carry-over):
  *   - Empty arrays are valid — "no evidence on this axis" must NOT become a
@@ -227,14 +239,30 @@ function assignGeographies(evidenceText, sourceItems, settingsGeographies) {
  *   - All emitted values are members of the corresponding `settings.*` list
  *     (canonical settings casing preserved).
  *
- * Phase 3 additions:
+ * Phase 3 additions (deterministic):
  *   - Geography alias map (e.g. Beijing → China) when the canonical target
  *     is in `settings.geographies`.
  *   - Topic/keyword/geography matching against the evidence text bundle in
  *     addition to source structural fields.
  *
- * Phase 4 (deferred): semantic keyword aliasing.  Until that lands, keyword
- * matching here is deterministic whole-word only.
+ * Phase 4 additions (semantic, opt-in, topics + keywords only):
+ *   - When `semantic.config` indicates an axis is enabled AND `semantic.scorer`
+ *     is provided, the assigner asks the mapper for additional
+ *     settings-constrained labels above the configured threshold and merges
+ *     them with the deterministic baseline.
+ *   - Geographies are NOT semantically widened in Phase 4 — the geo path
+ *     remains the deterministic exact + alias rules from Phase 3.
+ *
+ * The semantic argument shape:
+ *
+ *   semantic: {
+ *     config?: ReturnType<typeof resolveSemanticTagConfig>,
+ *     scorer?: (text, label, ctx) => number | Promise<number>,
+ *   }
+ *
+ * When `semantic` is omitted entirely, the function returns the Phase 3
+ * deterministic baseline — preserving the synchronous, dependency-free
+ * behavior the existing callers/tests rely on.
  */
 export function assignMetaStoryTags({ metaStory, sourceItems, settings }) {
   const evidenceText = buildMetaStoryEvidenceText(metaStory, sourceItems);
@@ -245,5 +273,77 @@ export function assignMetaStoryTags({ metaStory, sourceItems, settings }) {
     topics: assignTopics(evidenceText, sourceItems, settingsTopics),
     keywords: assignKeywords(evidenceText, settingsKeywords),
     geographies: assignGeographies(evidenceText, sourceItems, settingsGeographies),
+  };
+}
+
+/**
+ * Phase 4 entry point.  Same as `assignMetaStoryTags`, but:
+ *   - async (semantic mapper is async — production scorers may hit a remote
+ *     embedding API or constrained classifier),
+ *   - returns `{ tags, diagnostics }` so the pipeline can aggregate per-axis
+ *     counts for `_lastRunMeta.tags` and operator logs,
+ *   - applies the semantic uplift for topics + keywords only.
+ *
+ * Diagnostics shape:
+ *
+ *   diagnostics: {
+ *     topics:   { axis, enabled, scorerProvided, threshold, candidateCount, acceptedCount, rejectedCount, belowThresholdCount },
+ *     keywords: { ...same shape },
+ *     geographies: { axis: "geographies", semanticApplied: false },
+ *   }
+ *
+ * `semanticApplied: false` on geographies is the explicit, locked stamp that
+ * Phase 4 does not introduce a semantic geo path.  An operator (or a future
+ * Phase 5 commit) can read this field to confirm the scope is intact.
+ *
+ * Backwards compatibility: existing callers can keep using
+ * `assignMetaStoryTags` for the Phase 3 baseline.  This sibling function is
+ * what the pipeline calls when semantic is opt-in via env flags.
+ */
+export async function assignMetaStoryTagsDetailed({
+  metaStory,
+  sourceItems,
+  settings,
+  semantic = {},
+}) {
+  const evidenceText = buildMetaStoryEvidenceText(metaStory, sourceItems);
+  const settingsTopics = sanitizeStringList(settings?.topics);
+  const settingsKeywords = sanitizeStringList(settings?.keywords);
+  const settingsGeographies = sanitizeStringList(settings?.geographies);
+
+  // Deterministic baseline — same for both function variants.
+  const deterministicTopics = assignTopics(evidenceText, sourceItems, settingsTopics);
+  const deterministicKeywords = assignKeywords(evidenceText, settingsKeywords);
+  const geographies = assignGeographies(evidenceText, sourceItems, settingsGeographies);
+
+  // Semantic uplift (topics + keywords only).  When config is unset, fall
+  // back to the env-driven default (which is OFF) — keeps direct callers
+  // honest about opting in.
+  const config = semantic.config ?? resolveSemanticTagConfig();
+  const semanticOut = await mapSemanticTopicsAndKeywords({
+    evidenceText,
+    settingsTopics,
+    settingsKeywords,
+    deterministicTopics,
+    deterministicKeywords,
+    config,
+    scorer: semantic.scorer,
+  });
+
+  const topics = sortAlphaLocale(
+    dedupePreserveOrder([...deterministicTopics, ...semanticOut.topics.accepted])
+  );
+  const keywords = sortAlphaLocale(
+    dedupePreserveOrder([...deterministicKeywords, ...semanticOut.keywords.accepted])
+  );
+
+  return {
+    tags: { topics, keywords, geographies },
+    diagnostics: {
+      topics: semanticOut.topics.diagnostics,
+      keywords: semanticOut.keywords.diagnostics,
+      // Phase 4 lock: semantic path does not extend to geographies.
+      geographies: { axis: "geographies", semanticApplied: false },
+    },
   };
 }
