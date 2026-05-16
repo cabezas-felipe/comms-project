@@ -35,6 +35,10 @@ jobs:
         run: npm ci
         working-directory: 05-engineering
 
+      - name: Build shared packages
+        run: npm run build:packages
+        working-directory: 05-engineering
+
       - name: Run API tests
         run: npm run test:api
         working-directory: 05-engineering
