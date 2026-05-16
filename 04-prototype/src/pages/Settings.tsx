@@ -115,17 +115,17 @@ type SettingsSnapshot = {
 
 export default function Settings() {
   // Computed once on mount; provides defaults for state and snapshot without duplicating values.
-  const [_defaults] = useState(defaultSettingsPayload);
-  const [topics, setTopics] = useState(_defaults.topics);
-  const [keywords, setKeywords] = useState(_defaults.keywords);
-  const [geographies, setGeographies] = useState(_defaults.geographies);
+  const [defaults] = useState(defaultSettingsPayload);
+  const [topics, setTopics] = useState(defaults.topics);
+  const [keywords, setKeywords] = useState(defaults.keywords);
+  const [geographies, setGeographies] = useState(defaults.geographies);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const saveTimer = useRef<number | null>(null);
   const [sourceTab, setSourceTab] = useState<SourceTab>("traditional");
   const [loading, setLoading] = useState(true);
 
-  const [traditional, setTraditional] = useState<string[]>(_defaults.traditionalSources);
-  const [social, setSocial] = useState<string[]>(_defaults.socialSources);
+  const [traditional, setTraditional] = useState<string[]>(defaults.traditionalSources);
+  const [social, setSocial] = useState<string[]>(defaults.socialSources);
   const [draftSource, setDraftSource] = useState("");
 
   // After a successful debounced save we fire a manual dashboard refresh so
@@ -138,11 +138,11 @@ export default function Settings() {
   triggerDashboardRefreshRef.current = triggerDashboardRefresh;
 
   const snapshotRef = useRef<SettingsSnapshot>({
-    topics: _defaults.topics,
-    keywords: _defaults.keywords,
-    geographies: _defaults.geographies,
-    traditional: _defaults.traditionalSources,
-    social: _defaults.socialSources,
+    topics: defaults.topics,
+    keywords: defaults.keywords,
+    geographies: defaults.geographies,
+    traditional: defaults.traditionalSources,
+    social: defaults.socialSources,
   });
 
   // stateRef keeps save callback from closing over stale state values
