@@ -1,3 +1,52 @@
+// ─── Onboarding extraction policy (canonical) ────────────────────────────────
+//
+// This file is the single source of truth for the onboarding extraction
+// contract. Any drift from this comment block — either in code or in docs —
+// is a bug; reconcile here first.
+//
+// Open-vocabulary, hygiene-only.
+//   The extractor MUST NOT gate model output against a fixed
+//   `ALLOWED_TOPICS` / `ALLOWED_KEYWORDS` set. Phase 1 removed those
+//   allowlists; the extractor now applies hygiene-only post-processing:
+//     1. Trim, drop empty / whitespace-only / over-length / punctuation-only
+//        items (Unicode-safe — non-Latin scripts survive).
+//     2. Canonicalize via `normalizeTopicLabel` / `normalizeKeywordLabel` /
+//        `normalizeSourceName` so synonyms resolve to the canonical spelling.
+//     3. Apply additive helpers (`KEYWORD_PATTERNS`, `deriveTopicHints`,
+//        handle-derived ICE/DIAN enrichment). These widen the output when
+//        text matches; they NEVER gate what the model is allowed to emit.
+//     4. Dedupe case-insensitively (first occurrence wins), stable
+//        case-insensitive sort, and cap each axis at `MAX_LIST_SIZE` items.
+//
+// Caps and bounds (MVP).
+//   `MAX_ITEM_LENGTH = 64` characters / item and `MAX_LIST_SIZE = 24`
+//   items / axis are intentionally generous signal-quality guardrails for
+//   pathological model output (runaway tokens, sentence-as-topic,
+//   duplicates) — NOT vocabulary gates. Tighten in a future phase only if
+//   evidence shows real-world outputs need it.
+//
+// Unicode-safe junk detection.
+//   `isJunkValue` accepts any item containing at least one Unicode letter
+//   or number (`\p{L}` / `\p{N}` with the `u` flag), so tokens like
+//   `中国`, `العربية`, `Москва`, `café`, and `elección` survive while
+//   pure punctuation / whitespace / em-dash items are dropped.
+//
+// Social handle hygiene (pragmatic MVP).
+//   `isWellFormedHandle` accepts `@` followed by at least one Unicode
+//   letter or number, with the remainder restricted to letters / numbers
+//   / `_` / `.` / `-`. Accepts common cross-platform forms
+//   (`@dot.handle`, `@dash-handle`, `@user_123`, `@中国`); rejects `@`,
+//   `@!`, `@ space`, `@.`, `@----`, `@dot@handle`, `@path/segment`. This
+//   is platform-neutral by design — we don't model Twitter vs Bluesky
+//   handle rules at extraction time; downstream stages can re-validate
+//   if they need platform-specific shape.
+//
+// Schema contract preserved.
+//   `extractionOutputSchema` shape (`topics`, `keywords`, `geographies`,
+//   `traditionalSources`, `socialSources` — all `string[]`) is unchanged.
+//   Provider routing (Anthropic / OpenAI / mock) and the deterministic
+//   mock extractor are unchanged.
+
 import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
 import { normalizeKeywordLabel, normalizeSourceName, normalizeTopicLabel } from "@tempo/contracts";

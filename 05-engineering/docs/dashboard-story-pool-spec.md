@@ -35,8 +35,8 @@ Order in [`refresh-pipeline.mjs`](../apps/api/src/dashboard/refresh-pipeline.mjs
 |------|------|
 | **Sources (C2)** | Zero traditional **and** zero social sources → **no items** (not “all outlets”) |
 | **Geo (F)** | Non-empty geo list → filter + holds; assessor **Haiku** when wired (**F3b**) |
-| **Lexical (D)** | Topics/keywords **OR** when both configured; **noop** if both empty |
-| **Embedding (E)** | `hybrid_strict`: embed errors / empty profile → **E3b:** lexical-only when profile empty (after **M5**); union with lexical |
+| **Lexical (D)** | Whole-word match (`\b<token>\b`), case-insensitive; topics/keywords **OR** when both configured; **noop** if both empty. Breadth comes from the embedding union, not from substring matching. |
+| **Embedding (E)** | `hybrid_strict`: union semantic top-K with lexical recall. **Empty profile** → **E3b** lexical-only pass-through (`degraded_reason: "empty_profile_text_lexical_only"`); **provider failure with lexical hits** → lexical fallback flagged `keywordFallbackAfterEmbeddingFailure: true`; **provider failure with no lexical hits** → strict-empty. |
 | **Beat-fit (G)** | Threshold **0.40**; strict-empty when no item passes |
 | **Dedupe (H)** | Cross-feed; survivors only become candidates |
 
@@ -101,9 +101,51 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 
 ## Observability
 
-Refresh **`_meta`** (not in strict `stories` contract): `selection`, `recall`, `beatFit`, `funnel`, `watermark`; plus **`clusterModel`** / embedding model id after **M3** (**L1a**).
+Refresh **`_meta`** (not in strict `stories` contract): `selection`, `recall`, `beatFit`, `funnel`, `watermark`; plus **`clusterModel`** / embedding model id (**L1a**).
+
+**`_meta.recall` fields** ([`embedding-recall.mjs`](../apps/api/src/ingestion/embedding-recall.mjs)):
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | `hybrid_strict` (default) or `keyword` (env `TEMPO_RECALL_MODE`) |
+| `keywordRecallCount` | Lexical-only hits (whole-word recall, pre-union) |
+| `embeddedCount` / `similarityKept` | Candidates embedded / semantic top-K kept |
+| `unionCount` / `finalRelevant` | Post-union size = input to beat-fit |
+| `degraded` / `degraded_reason` | Fail-closed enum: `embedding_unavailable_fail_closed`, `embedding_timeout_fail_closed`, `embedding_error_fail_closed`, `embedding_invalid_response_fail_closed`, `empty_profile_text_lexical_only` |
+| `keywordFallbackAfterEmbeddingFailure` | `true` when provider failed but lexical had hits — operators see the cliff without losing the run |
+| `profileAxes` / `profileAxisNames` / `profileTextLength` | Sparseness diagnostics — operator should read `0` as empty-profile path, `1` as degenerate semantic widen (still runs, low confidence), `≥2` as normal |
+| `topicKeywordBreakdown` | Per-stage breakdown: `topicOnly`, `keywordOnly`, `both`, `neither`, `primaryDropCause` |
+
+**Funnel naming note:** `_meta.funnel.afterTopicKeyword` is the **post-recall-stage count** (lexical-or-union, mode-dependent) — the legacy field/label name is retained for log-scraper compatibility. The split between lexical-only and post-union lives in `_meta.recall`. See [refresh-pipeline.mjs `FUNNEL_STAGES`](../apps/api/src/dashboard/refresh-pipeline.mjs).
 
 Console logs + `_meta` answer “why 0 stories?” — see [scenario map](dashboard-story-pool-scenario-map.md).
+
+---
+
+## Onboarding extraction (open-vocabulary, hygiene-only)
+
+**Canonical source:** comment block at the top of [`onboarding-extractor.mjs`](../apps/api/src/ai/onboarding-extractor.mjs). Do not duplicate the contract elsewhere; link to that file.
+
+**Summary:**
+
+- **No fixed allowlist gates.** `ALLOWED_TOPICS` / `ALLOWED_KEYWORDS` were removed in Phase 1. The extractor surfaces whatever the model emits, subject only to hygiene.
+- **Hygiene-only post-processing:** trim → drop empty / whitespace-only / over-length / punctuation-only items → canonicalize via the `@tempo/contracts` normalizers → dedupe case-insensitive → stable sort → cap each axis at `MAX_LIST_SIZE = 24`.
+- **Item bounds:** `MAX_ITEM_LENGTH = 64` chars; Unicode-safe junk filter (`\p{L}` / `\p{N}`) so non-Latin tokens survive.
+- **Social handles:** pragmatic MVP shape — `@` + at least one letter/number + only letters/numbers/`_`/`.`/`-` after. Platform-neutral; downstream stages can revalidate.
+- **Additive helpers** (`KEYWORD_PATTERNS`, `deriveTopicHints`, ICE/DIAN handle enrichment, WHO-handle anti-promotion) widen output when text matches; they never gate model output.
+
+---
+
+## Settings save to dashboard refresh
+
+A successful debounced settings save in the prototype now **triggers a dashboard refresh immediately** (not waiting for the hourly heartbeat). See [`refresh-context.tsx`](../../04-prototype/src/lib/refresh-context.tsx) `triggerDashboardRefresh` and [`Settings.tsx`](../../04-prototype/src/pages/Settings.tsx) save success branch.
+
+**Backend interaction:**
+
+- The trigger calls `POST /api/dashboard/refresh` — same endpoint as the heartbeat. The backend runs the full pipeline; watermark short-circuit, recall diagnostics, and grounding all apply unchanged.
+- Stale-revision and failed saves do **not** trigger the refresh.
+- A subsequent `GET /api/dashboard` reads the freshly persisted snapshot (no re-execution).
+- The bootstrap endpoint (`POST /api/dashboard/bootstrap`) is unaffected — it still decides between `served_fresh_snapshot` / `ran_refresh` / `no_snapshot` for Landing → Dashboard and Onboarding → Dashboard entries.
 
 ---
 
