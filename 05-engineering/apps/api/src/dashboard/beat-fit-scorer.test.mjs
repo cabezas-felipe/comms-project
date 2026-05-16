@@ -628,3 +628,153 @@ test("applyBeatFitFilter: summary exposes rescueLowerBound, rescuedCount, and re
   assert.equal(summary.rescueBlockedPenaltyCount, 0);
   assert.equal(summary.rescueBlockedInsufficientSignalsCount, 0);
 });
+
+// ─── Phase 1 anti-regression invariants ──────────────────────────────────────
+//
+// Consolidated lock tests for the rescue rule. These are deliberately broad
+// (table-driven) so a regression in ANY of the invariants below produces a
+// clear, specific failure — not a vague "one of the rescue tests broke":
+//
+//   I1. Rescue band is half-open [lowerBound, threshold). The lower edge
+//       qualifies; the upper edge does not.
+//   I2. The four CORE signals are exactly {topic, actor, keyword, geoMatch}.
+//       Any 3 of them with no penalty rescues, regardless of which one is
+//       missing. Score is held at a known in-band value to isolate the rule.
+//   I3. recency_fresh never substitutes for a core signal — 2 core + recency
+//       must NOT rescue, no matter how strong recency is.
+//   I4. Each major penalty (offBeatGeo / pureCommodity / noConfiguredSignal)
+//       independently blocks rescue even with 3+ core signals.
+//   I5. Above-threshold items take the normal pass path and never carry the
+//       rescue flag or reason code (baseline threshold behavior unchanged).
+
+const CORE_SIGNAL_WEIGHTS = Object.freeze({
+  topic: 0.30,
+  actor: 0.25,
+  keyword: 0.20,
+  geoMatch: 0.15,
+});
+const CORE_SIGNALS = Object.freeze(["topic", "actor", "keyword", "geoMatch"]);
+
+function breakdownWith(coreNames) {
+  const b = makeBreakdown();
+  for (const name of coreNames) b[name] = CORE_SIGNAL_WEIGHTS[name];
+  return b;
+}
+
+test("invariant I1: rescue band is half-open [lowerBound, threshold)", () => {
+  // Three core signals + no penalty so the only thing under test is the band.
+  const breakdown = breakdownWith(["topic", "actor", "keyword"]);
+  const reasonCodes = ["topic_match", "actor_match", "keyword_match"];
+  const opts = { threshold: 0.50, rescueLowerBound: 0.30 };
+
+  // Lower edge: a score exactly at the lower bound qualifies as in-band.
+  assert.equal(
+    evaluateRescue(0.30, breakdown, reasonCodes, opts).rescued,
+    true,
+    "score === rescueLowerBound must qualify (inclusive lower bound)"
+  );
+  // Just below: out of band.
+  assert.equal(
+    evaluateRescue(0.2999, breakdown, reasonCodes, opts).inBand,
+    false,
+    "score just below rescueLowerBound is out of band"
+  );
+  // Just under threshold: still in band.
+  assert.equal(
+    evaluateRescue(0.4999, breakdown, reasonCodes, opts).rescued,
+    true,
+    "score just below threshold is in band"
+  );
+  // Upper edge: a score exactly at the threshold is NOT in the rescue band —
+  // it takes the normal pass path instead.
+  assert.equal(
+    evaluateRescue(0.50, breakdown, reasonCodes, opts).inBand,
+    false,
+    "score === threshold is out of the rescue band (exclusive upper bound)"
+  );
+});
+
+test("invariant I2: any 3-of-4 core signals rescue (no penalty, in band)", () => {
+  // Enumerate every 3-of-4 subset. Recency is intentionally omitted from the
+  // breakdown AND from the reason codes so the test isolates core-signal
+  // counting from the recency-exclusion rule (covered by I3).
+  for (let omitIdx = 0; omitIdx < CORE_SIGNALS.length; omitIdx++) {
+    const present = CORE_SIGNALS.filter((_, i) => i !== omitIdx);
+    const breakdown = breakdownWith(present);
+    const reasonCodes = present.map((s) => `${s}_match`);
+    const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+    assert.equal(
+      outcome.rescued,
+      true,
+      `omitting ${CORE_SIGNALS[omitIdx]} — remaining 3 core signals must rescue`
+    );
+    assert.equal(outcome.strongSignals, 3);
+    assert.equal(outcome.blockedBy, null);
+  }
+});
+
+test("invariant I3: recency_fresh never substitutes for a missing core signal", () => {
+  // Every 2-of-4 core combination paired with recency_fresh must fail rescue.
+  // Recency contributes to the SCORE (held in band here) but not to the tally.
+  for (let i = 0; i < CORE_SIGNALS.length; i++) {
+    for (let j = i + 1; j < CORE_SIGNALS.length; j++) {
+      const present = [CORE_SIGNALS[i], CORE_SIGNALS[j]];
+      const breakdown = breakdownWith(present);
+      breakdown.recency = 0.10; // maximum recency contribution
+      const reasonCodes = [...present.map((s) => `${s}_match`), "recency_fresh"];
+      const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+      assert.equal(
+        outcome.rescued,
+        false,
+        `2 core (${present.join("+")}) + recency_fresh must NOT rescue`
+      );
+      assert.equal(outcome.strongSignals, 2);
+      assert.equal(outcome.blockedBy, "insufficient_signals");
+    }
+  }
+});
+
+test("invariant I4: each major penalty independently blocks rescue", () => {
+  // Three core signals fire (would normally rescue). Each penalty in turn
+  // vetoes — proving the veto is independent and not coincidental on any one
+  // penalty type.
+  const baseBreakdown = breakdownWith(["topic", "actor", "keyword"]);
+  const baseCodes = ["topic_match", "actor_match", "keyword_match"];
+  const penalties = [
+    { name: "offBeatGeo", value: -0.30, code: "geo_offbeat:asia" },
+    { name: "pureCommodity", value: -0.15, code: "commodity_framing:wheat" },
+    { name: "noConfiguredSignal", value: -0.20, code: "no_configured_signal" },
+  ];
+  for (const p of penalties) {
+    const breakdown = { ...baseBreakdown, [p.name]: p.value };
+    const outcome = evaluateRescue(0.37, breakdown, [...baseCodes, p.code]);
+    assert.equal(
+      outcome.rescued,
+      false,
+      `${p.name} must independently block rescue`
+    );
+    assert.equal(outcome.blockedBy, "major_penalty");
+  }
+});
+
+test("invariant I5: above-threshold pass-through is unchanged (no rescue flag, no rescue reason)", () => {
+  // Locks baseline threshold behavior: a clearly-above-threshold item must
+  // take the normal pass path. The rescue mechanism must not retroactively
+  // tag normal passes.
+  const item = makeRssItem({
+    sourceId: "normal-pass",
+    headline: INCLUDE_HEADLINE,
+    body: [
+      "WASHINGTON — The Pentagon confirmed two strikes on tankers in the Gulf of Oman.",
+    ],
+  });
+  const { included, summary } = applyBeatFitFilter([item], COMMS_SETTINGS);
+  assert.equal(included.length, 1);
+  assert.ok(included[0].beatFitScore >= BEAT_FIT_THRESHOLD);
+  assert.equal(included[0].beatFitRescued, undefined, "normal pass must not carry rescue flag");
+  assert.ok(
+    !included[0].beatFitReasonCodes.includes(BEAT_FIT_RESCUE_REASON),
+    "normal pass must not include the rescue reason code"
+  );
+  assert.equal(summary.rescuedCount, 0);
+});
