@@ -671,13 +671,7 @@ These are **expected drops** or **safe transforms**; **Chunk L** maps each to **
 - **Internal-only debug endpoint — `GET /api/_debug/dashboard-tags`.** Gated on `TEMPO_DEBUG_TAGS_ENABLED=true` AND `NODE_ENV !== "production"`; authenticated. Returns the calling identity's last persisted `_meta.tags` only — never story content, source bodies, or selection meta. Server test asserts the gating + the no-leak invariant explicitly.
 - **Runbook lock.** [`runbook-semantic-tags.md`](runbook-semantic-tags.md) codifies flag precedence (kill-switch > global > per-axis), staged rollout (Stage 0–5), rollback procedure (which flag for which symptom), calibration cadence, and the "geographies stay deterministic" tripwire.
 
-**Test coverage additions:**
-
-- 11 new mapper cases ([`meta-story-semantic-mapper.test.mjs`](../apps/api/src/dashboard/meta-story-semantic-mapper.test.mjs)) — `SCHEMA_VERSION` export, kill-switch override (env + test-seam), latency-max + call-count tracking, aggregator preserves the new fields, scorer aborts embedFn signal on timeout (forward + ignored-signal compat).
-- 4 new pipeline cases ([`refresh-pipeline.test.mjs`](../apps/api/src/dashboard/refresh-pipeline.test.mjs)) — `log.tags.schemaVersion` + `killSwitchActive` always present, kill-switch forces axes off even with confident scorer, K1a invariant under abort fallback (funnel stages identical to OFF), latency observability surfaces in the log.
-- 4 new server-route cases ([`server.routes.test.mjs`](../apps/api/src/server.routes.test.mjs)) — debug endpoint 404 by default, 404 under `NODE_ENV=production`, returns `_meta.tags` when both gates pass (with explicit no-leak assertion), graceful no-snapshot path.
-
-**Why this is still K1a:** Same closed-vocabulary contract, same one-way invariant, same settings-only output. Phase 7 hardens the operational envelope around the existing semantic mapping — cancellation is an additive cost / latency win, kill switch and schema version are operator-facing observability, debug endpoint is staging-only. None of these mutate admission, recall, clustering, or the tag-emission contract.
+**Why this is still K1a:** Phase 7 only hardens the operational envelope — cancellation, kill switch, schema version, and the debug endpoint do not touch the closed-vocabulary contract, the one-way invariant, or the tag-emission shape.  Test inventory lives next to the code; the canary is the regression *"K1a invariant under abort cancellation"*.
 
 ### Phase 8 (deferred — not in this slice)
 

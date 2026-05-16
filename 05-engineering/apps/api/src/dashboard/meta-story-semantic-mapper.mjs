@@ -24,16 +24,20 @@
 // a no-op — it returns the empty addition set and diagnostics reflect the
 // "skipped" state.  This keeps the rollout safe behind the env flags below.
 //
-// Env flags consumed by `resolveSemanticTagConfig`:
+// Env flags (full precedence + defaults documented in
+// [`docs/runbook-semantic-tags.md`](../../../docs/runbook-semantic-tags.md)):
 //
+//   TEMPO_TAG_SEMANTIC_KILL_SWITCH           — wins over all other flags (default: false)
 //   TEMPO_TAG_SEMANTIC_MAPPING_ENABLED       — global gate (default: false)
 //   TEMPO_TAG_SEMANTIC_TOPICS_ENABLED        — per-axis gate (default: false)
 //   TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED      — per-axis gate (default: false)
 //   TEMPO_TAG_SEMANTIC_TOPICS_THRESHOLD      — float in [0,1] (default: 0.75)
 //   TEMPO_TAG_SEMANTIC_KEYWORDS_THRESHOLD    — float in [0,1] (default: 0.75)
+//   TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS     — production scorer timeout (default: 1500)
+//   TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS    — evidence text cap (default: 4000)
 //
-// An axis is considered ENABLED only when BOTH the global flag AND the
-// per-axis flag are truthy.  Either flag missing/false → axis is OFF.
+// An axis is ENABLED only when the kill switch is off AND the global flag
+// AND the per-axis flag are all truthy.  Any one off → axis is disabled.
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 

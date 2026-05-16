@@ -321,36 +321,15 @@ function buildDecisionTrace({ stageCounts, beatFitResult }) {
 const VALID_GEOGRAPHIES = new Set(geographySchema.options);
 const VALID_TOPICS = new Set(topicSchema.options);
 
-// ─── Settings-only + evidence-backed tag governance ──────────────────────────
+// ─── Legacy tag-governance helpers (back-compat) ─────────────────────────────
 //
-// Final story tags must satisfy BOTH:
-//   (1) settings vocabulary — each axis ⊆ the matching settings list.
-//   (2) source evidence — each emitted value must be supported by at least
-//       one source item in the story.
-//
-// Why two gates: settings alone trusts the model too much (it can echo
-// in-settings values that have no support in the actual sources), and
-// evidence alone would let any out-of-settings label leak through.  We
-// compute `final = settings ∩ evidence` per axis; model tags are not
-// authoritative.
-//
-// Evidence per axis:
-//   - topics       : `sourceItem.topic` (with `normalizeTopicLabel` so
-//                    synonyms like "bilateral relations" resolve against
-//                    settings without expanding the taxonomy).
-//   - geographies  : `sourceItem.geographies` (case-insensitive match;
-//                    out-of-settings geos like "France" are dropped).
-//   - keywords     : whole-word presence in `sourceItem.headline` + body
-//                    (consistent with `applyTopicKeywordFilter` matching).
-//
-// Output values are always the canonical settings-cased string (settings is
-// authoritative for spelling).  When nothing matches, the axis is an empty
-// array — never a fabricated placeholder.  Settings is treated as read-only
-// throughout; nothing here mutates or appends to it.
-//
-// `constrainTagsToSettings` (settings ∩ model-tag list) remains exported as
-// a standalone utility, but `buildStory` no longer uses it — production tag
-// derivation goes through `deriveStoryTags(sourceItems, settings)` below.
+// `constrainTagsToSettings` and `deriveStoryTags` implement the original
+// Phase 1/2 `settings ∩ source-evidence` contract.  Production tag emission
+// now goes through [`assignMetaStoryTags`](./meta-story-tags.mjs) (Phase 3+);
+// these helpers stay exported for the existing test surface and to give a
+// clean rollback target.  Both functions are read-only on `settings` and
+// emit canonical settings spelling; empty arrays mean "no evidence" — never
+// fabricated placeholders.
 
 function buildSettingsLookup(values, { useTopicNormalization = false } = {}) {
   const lookup = new Map();
@@ -748,16 +727,10 @@ function buildStory(metaStory, sourceItems, settings) {
         .map((i) => normalizeSourceIdentity(i.outlet))
         .filter((k) => k.length > 0)
     ).size,
-    // Phase 3: meta-story-level tag assignment (`assignMetaStoryTags`).
-    // Drives shipped `tags` from the meta-story evidence bundle (title +
-    // subtitle + summary + source headlines/body) plus source structural
-    // fields (`source.topic`, `source.geographies`), gated on settings
-    // vocabulary and extended with a deterministic geography alias map
-    // (Beijing → China, etc.).  Keyword matching stays deterministic
-    // whole-word in this phase — semantic synonym widening (e.g.
-    // "petroleum" → "oil") is explicitly deferred to Phase 4.  K1a still
-    // holds: tags are label-only; they never widen pool/recall/clustering.
-    // `deriveStoryTags` remains exported as a back-compat helper.
+    // Deterministic baseline tags (Phase 3 — settings-gated, evidence-bundle
+    // + alias-driven).  Phase 4 semantic uplift, when enabled, is layered
+    // over this baseline by the post-build overlay below.  See
+    // [`meta-story-tags.mjs`](./meta-story-tags.mjs).
     tags: assignMetaStoryTags({ metaStory, sourceItems, settings }),
     // `_duplicates` provenance from the cross-feed dedupe stage is intentionally
     // NOT projected onto the response shape — duplicate provenance stays

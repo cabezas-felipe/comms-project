@@ -118,17 +118,10 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
   - `TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS` — per-scorer-call timeout (default `1500`).
   - `TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS` — evidence text cap before embedding (default `4000`).
 - **Operator observability.** `[pipeline.tags]` log line now carries `runtime_state / accepted / rejected / below_threshold / latency_ms / timeouts / errors` per axis. `_meta.tags` carries the same shape + `geographies.semanticApplied: false`.
-- **Calibration harness — [`semantic-tag-calibration.mjs`](../apps/api/scripts/semantic-tag-calibration.mjs).** Operator tool (NOT exercised in CI). Runs the mapper against a curated fixture set ([`semantic-tag-calibration-fixtures.json`](../apps/api/scripts/semantic-tag-calibration-fixtures.json)) across candidate thresholds, prints a confusion-style summary, and recommends the highest threshold whose recall is within 5pp of the best observed. Supports `--provider=mock|embeddings`.
-- **K1a one-way invariant unchanged.** Semantic overlay still runs strictly post-clustering. Regression *"funnel counts identical for scorer-OFF vs scorer-FAIL"* compares ON-with-failure vs OFF baseline and asserts identical funnel stages + `metaStoryCount`.
-- **Geographies remain deterministic-only.** No Phase 5 scope drift; the `geographies.semanticApplied: false` stamp is asserted in pipeline tests for both successful-scorer and aggressive-scorer paths.
+- **Calibration harness — [`semantic-tag-calibration.mjs`](../apps/api/scripts/semantic-tag-calibration.mjs).** Operator tool (NOT exercised in CI). Runs the mapper against a curated fixture set ([`semantic-tag-calibration-fixtures.json`](../apps/api/scripts/semantic-tag-calibration-fixtures.json)) across candidate thresholds, prints a confusion-style summary, and recommends the highest threshold whose recall is within 5pp of the best observed. Supports `--provider=mock|embeddings` and `--telemetry=<file>` (Phase 7).
+- **K1a one-way invariant unchanged.** Regression *"funnel counts identical for scorer-OFF vs scorer-FAIL"* compares ON-with-failure vs OFF baseline and asserts identical funnel stages + `metaStoryCount`.  Geographies stay deterministic-only — the `geographies.semanticApplied: false` stamp is asserted on every run.
 
-**Recommended rollout sequence (operator runbook):**
-
-1. **Staging — scorer wiring smoke.** Set `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED=true` but leave both per-axis flags OFF. Pipeline still produces deterministic tags; `_meta.tags.{topics,keywords}.runtimeState=disabled` confirms wiring without any uplift.
-2. **Staging — calibration.** Run [`semantic-tag-calibration.mjs --provider=embeddings`](../apps/api/scripts/semantic-tag-calibration.mjs) against the curated fixtures (extend the fixture set with real product evidence). Use the recommended-threshold output as the starting point for `TEMPO_TAG_SEMANTIC_*_THRESHOLD`.
-3. **Staging — topics axis on.** `TEMPO_TAG_SEMANTIC_TOPICS_ENABLED=true`. Monitor `_meta.tags.topics.{acceptedCount, belowThresholdCount, fallbackReasonCounts, runtimeState}`. Watch for `scorer_timeout_fallback` — if observed, bump timeout or open a provider ticket.
-4. **Staging — keywords axis on.** Same monitor, with extra attention to precision (a bad chip on the scan row is more visible than a missed one).
-5. **Production — staged.** Flip the global flag in prod; leave per-axis flags off; verify wiring. Then enable topics, then keywords, one at a time. Roll back by toggling the per-axis flag to false — no code deploy needed.
+**Operator rollout procedure:** see [`runbook-semantic-tags.md`](runbook-semantic-tags.md) for the full Stage 0–5 sequence (staging wiring smoke → calibration → topics → keywords → production), rollback by symptom, and flag precedence.
 
 **Phase 6 — UI polish + trust-first empty states (shipped — 2026-05-16):**
 

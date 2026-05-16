@@ -224,45 +224,19 @@ function assignGeographies(evidenceText, sourceItems, settingsGeographies) {
 }
 
 /**
- * Phase 3 + 4 entry point: derive the three-axis `tags` object for a shipped
- * story from the meta-story evidence bundle, source structural fields, the
- * settings vocabulary, and (optionally) a constrained semantic mapper.
+ * Phase 3 entry point: derive the three-axis `tags` object for a shipped
+ * story from the meta-story evidence bundle, source structural fields, and
+ * the settings vocabulary.  Synchronous, dependency-free, deterministic.
  *
- * Returns a fresh `{ topics, keywords, geographies }` shape with each axis
- * deduped and locale-sorted; never mutates inputs.  The deterministic
- * baseline runs unconditionally; semantic uplift only fires when both flags
- * AND a scorer are present (see `semantic` arg below).
+ * Returns a fresh `{ topics, keywords, geographies }` with each axis deduped
+ * and locale-sorted; never mutates inputs.  Every emitted value is a member
+ * of the corresponding `settings.*` list (canonical settings casing); empty
+ * arrays mean "no evidence on this axis" — never a fabricated placeholder.
  *
- * Strictness contract (Phase 1/2 carry-over):
- *   - Empty arrays are valid — "no evidence on this axis" must NOT become a
- *     fabricated placeholder.
- *   - All emitted values are members of the corresponding `settings.*` list
- *     (canonical settings casing preserved).
- *
- * Phase 3 additions (deterministic):
- *   - Geography alias map (e.g. Beijing → China) when the canonical target
- *     is in `settings.geographies`.
- *   - Topic/keyword/geography matching against the evidence text bundle in
- *     addition to source structural fields.
- *
- * Phase 4 additions (semantic, opt-in, topics + keywords only):
- *   - When `semantic.config` indicates an axis is enabled AND `semantic.scorer`
- *     is provided, the assigner asks the mapper for additional
- *     settings-constrained labels above the configured threshold and merges
- *     them with the deterministic baseline.
- *   - Geographies are NOT semantically widened in Phase 4 — the geo path
- *     remains the deterministic exact + alias rules from Phase 3.
- *
- * The semantic argument shape:
- *
- *   semantic: {
- *     config?: ReturnType<typeof resolveSemanticTagConfig>,
- *     scorer?: (text, label, ctx) => number | Promise<number>,
- *   }
- *
- * When `semantic` is omitted entirely, the function returns the Phase 3
- * deterministic baseline — preserving the synchronous, dependency-free
- * behavior the existing callers/tests rely on.
+ * For the semantic-uplift variant (Phase 4+, async, returns diagnostics),
+ * use [`assignMetaStoryTagsDetailed`](./meta-story-tags.mjs) instead.  The
+ * pipeline calls the detailed variant; this entrypoint stays the simple
+ * baseline for tests and direct callers.
  */
 export function assignMetaStoryTags({ metaStory, sourceItems, settings }) {
   const evidenceText = buildMetaStoryEvidenceText(metaStory, sourceItems);
@@ -277,28 +251,18 @@ export function assignMetaStoryTags({ metaStory, sourceItems, settings }) {
 }
 
 /**
- * Phase 4 entry point.  Same as `assignMetaStoryTags`, but:
- *   - async (semantic mapper is async — production scorers may hit a remote
- *     embedding API or constrained classifier),
+ * Phase 4+ entry point.  Same shape as `assignMetaStoryTags`, but:
+ *   - async (semantic mapper may hit a remote embedding API),
+ *   - applies semantic uplift to topics + keywords (when enabled + scorer wired),
  *   - returns `{ tags, diagnostics }` so the pipeline can aggregate per-axis
- *     counts for `_lastRunMeta.tags` and operator logs,
- *   - applies the semantic uplift for topics + keywords only.
+ *     counts and runtime state for `_lastRunMeta.tags` and operator logs.
  *
- * Diagnostics shape:
- *
- *   diagnostics: {
- *     topics:   { axis, enabled, scorerProvided, threshold, candidateCount, acceptedCount, rejectedCount, belowThresholdCount },
- *     keywords: { ...same shape },
- *     geographies: { axis: "geographies", semanticApplied: false },
- *   }
- *
- * `semanticApplied: false` on geographies is the explicit, locked stamp that
- * Phase 4 does not introduce a semantic geo path.  An operator (or a future
- * Phase 5 commit) can read this field to confirm the scope is intact.
- *
- * Backwards compatibility: existing callers can keep using
- * `assignMetaStoryTags` for the Phase 3 baseline.  This sibling function is
- * what the pipeline calls when semantic is opt-in via env flags.
+ * Diagnostics carry the shape produced by [`mapSemanticAxis`](./meta-story-semantic-mapper.mjs)
+ * (per axis: axis, enabled, scorerProvided, threshold, candidateCount,
+ * acceptedCount, rejectedCount, belowThresholdCount, runtimeState,
+ * scorerLatencyMs, scorerCallCount, scorerLatencyMaxMs, fallbackReasonCounts),
+ * plus a fixed `geographies: { axis: "geographies", semanticApplied: false }`
+ * stamp — the locked tripwire that no semantic geo path has been introduced.
  */
 export async function assignMetaStoryTagsDetailed({
   metaStory,

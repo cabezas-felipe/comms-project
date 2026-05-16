@@ -249,15 +249,11 @@ export const _embeddings = { embed: embedTexts };
  */
 export const _refreshPipeline = {
   run: (opts) => {
-    // Phase 5: wire a production semantic-tag scorer when env enables Phase 4
-    // semantic mapping AND no test scorer has been injected.  The scorer
-    // wraps `_embeddings.embed` in cosine similarity + per-call timeout +
-    // evidence truncation.  When the env flag is OFF (default), no scorer is
-    // attached and `assignMetaStoryTagsDetailed` falls into its
-    // `enabled_no_scorer` / `disabled` runtime states — semantic uplift
-    // produces no additions and the deterministic baseline ships.  Tests
-    // override `semanticTagScorer` in `opts` to inject deterministic
-    // fixtures; that path takes precedence over the production scorer here.
+    // Attach the production embedding-similarity scorer when any semantic
+    // axis is enabled and no test scorer was injected.  When semantic is
+    // OFF (default) or kill-switched, the scorer stays null and the
+    // pipeline falls into its `disabled` / `enabled_no_scorer` runtime
+    // states.  See [`runbook-semantic-tags.md`](../docs/runbook-semantic-tags.md).
     const semanticConfig = opts.semanticTagConfig ?? resolveSemanticTagConfig();
     const semanticAnyAxisOn = semanticConfig.topicsEnabled || semanticConfig.keywordsEnabled;
     let semanticTagScorer = opts.semanticTagScorer ?? null;

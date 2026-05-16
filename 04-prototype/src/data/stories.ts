@@ -437,9 +437,6 @@ export const STORIES: Story[] = [
   },
 ];
 
-export const TOPICS: Topic[] = ["Diplomatic relations", "Migration policy", "Security cooperation"];
-export const GEOGRAPHIES: Geography[] = ["US", "Colombia"];
-
 /** Find a source across all stories. */
 export function findSource(sourceId: string): { story: Story; source: Source } | null {
   for (const story of STORIES) {
