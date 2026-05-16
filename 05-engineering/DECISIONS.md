@@ -2,6 +2,68 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-16 - D-052 - Trust cleanup Phase 7: rollout hardening + operational guardrails (cancellation, kill switch, telemetry, debug endpoint)
+
+#### Context
+
+Phase 5 ([D-050](#2026-05-16---d-050---trust-cleanup-phase-5-production-scorer-wiring--fail-closed-semantics--calibration-harness-default-off)) wired the production scorer behind the Phase 4 surface, but its tradeoffs spelled out the gap Phase 7 needed to close: (a) the timeout race did NOT cancel the underlying HTTP request, so provider quotas / cost-per-failed-call accumulated even on fail-closed runs; (b) the only way to flip semantic uplift off in an incident was to flip three separate env vars; (c) operators inspecting `_meta.tags` could only grep logs; (d) threshold tuning had a calibration harness but no path to feed production telemetry into it. Phase 6 was strictly front-of-house and didn't touch these.
+
+#### Decision
+
+Land **Phase 7 rollout hardening** with five additions: end-to-end cancellation, a kill switch, diagnostics schema version, latency observability, telemetry-driven threshold advisory, an internal debug endpoint, and a written operator runbook. Chunk K stays locked to K1a; semantic geographies still out of scope.
+
+**End-to-end cancellation:**
+
+- [`createEmbeddingSemanticScorer`](apps/api/src/dashboard/meta-story-semantic-mapper.mjs) creates a per-call `AbortController`; passes `controller.signal` into `embedFn(texts, { signal })`. On timeout, `controller.abort()` fires.
+- [`embedTexts`](apps/api/src/ai/embeddings.mjs) and [`embedTextsWithOpenAI`](apps/api/src/ai/providers/openai-embeddings.mjs) accept an optional `signal` (additive — recall callers unaffected) and forward it to `fetch(...)`.
+- The mapper tracks `timeoutFired` so an embedFn-side abort rejection still surfaces as `SemanticScorerTimeoutError`, preserving fallback-reason attribution.
+
+**Kill switch:**
+
+- `TEMPO_TAG_SEMANTIC_KILL_SWITCH=true` forces every per-axis flag to `disabled` regardless of any other config. Distinct from `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` so a misconfigured deploy can't accidentally re-enable semantic uplift.
+- Surfaced as `_meta.tags.killSwitchActive` + `[pipeline.tags]` log token.
+
+**Diagnostics schema version + latency observability:**
+
+- `TAGS_DIAGNOSTICS_SCHEMA_VERSION = "phase7-2026-05-16"` stamped on `_meta.tags.schemaVersion`. Bumped whenever the per-axis diag shape changes.
+- `scorerCallCount` + `scorerLatencyMaxMs` added per axis. Consumers derive average latency as `scorerLatencyMs / scorerCallCount`; the max field surfaces tail outliers a cumulative latency would average away.
+
+**Telemetry-driven threshold tuning:**
+
+- [`semantic-tag-calibration.mjs --telemetry=<file>`](apps/api/scripts/semantic-tag-calibration.mjs) reads `_meta.tags` snapshots and prints per-axis HOLD / LOWER / RAISE advisories. Conservative heuristic (small sample → HOLD; timeouts → HOLD threshold; too-tight → LOWER; too-loose → RAISE). Strictly advisory.
+
+**Internal debug endpoint:**
+
+- `GET /api/_debug/dashboard-tags` ([`server.mjs`](apps/api/src/server.mjs)). Gated on BOTH `TEMPO_DEBUG_TAGS_ENABLED=true` AND `NODE_ENV !== "production"`. Authenticated (same `requireIdentity` as `/api/dashboard`). Returns calling identity's last persisted `_meta.tags` only — no story content, no source bodies.
+
+**Operator runbook:**
+
+- New [`runbook-semantic-tags.md`](docs/runbook-semantic-tags.md) codifies flag precedence (kill-switch > global > per-axis), Stage 0–5 rollout, rollback procedure by symptom, calibration cadence, and the explicit "geographies remain deterministic" lock.
+
+#### Why
+
+- **Cancellation is a real cost lever.** Failed scorer calls that keep running on the provider side accumulate budget for no value. Plumbing the signal is small + safe; future Phase 8 work doesn't have to revisit it.
+- **One kill switch is better than three flags during an incident.** Operators in a stress situation flip a single var. Defense in depth: kill switch wins even if `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` is also true (which it would be in a healthy production state).
+- **Schema version + latency-max are cheap forward compat.** Two small fields; downstream consumers (Grafana, log scrapers, future Phase 8 work) get a clean upgrade story.
+- **Telemetry-driven tuning closes the operator loop.** Phase 5 calibration was fixture-only; Phase 7 lets the same harness ingest real run snapshots so threshold decisions are evidence-based, not guessed.
+- **Debug endpoint matches the existing ops posture.** Same gating idiom as DC validation mode; same authenticated identity; same persisted-snapshot read path. No new surface area to secure.
+- **Runbook codifies institutional knowledge.** The procedure spread across spec + walkthrough + DECISIONS is now in one operator-readable place.
+
+#### Tradeoffs
+
+- **AbortController does not refund provider cost for the partial second of work before abort.** It does cap cost at the cancellation point, but the cost up to that point is still billed. Not addressed in this slice — Phase 8 (cross-run cache) is the next lever if cost matters.
+- **Telemetry advisory heuristic is conservative.** It will under-recommend changes when telemetry is thin; we accept that precision over recall for an advisory tool.
+- **Debug endpoint adds a route to the surface.** Mitigated by two-gate isolation (env opt-in + non-prod) + identity auth + content-narrowing (returns only `_meta.tags`, never stories). Server test asserts content-narrowing explicitly.
+- **Schema version bumps could be missed.** We accept the manual discipline trade — the constant is `export`ed, referenced once in the pipeline, surfaces on every snapshot, and is small enough to grep.
+
+#### Consequences
+
+- Phase 8 deferred: semantic geographies still out of scope; per-axis runtime-adaptive thresholds out of scope; cross-run scorer cache out of scope.
+- Anyone touching the scorer factory or the embed adapter needs to keep the `{ signal }` plumbing intact. The Phase 7 mapper tests are the canary.
+- Operators rolling semantic uplift in production follow [`runbook-semantic-tags.md`](docs/runbook-semantic-tags.md); deviations should land as runbook PRs.
+
+---
+
 ### 2026-05-16 - D-051 - Trust cleanup Phase 6: UI polish + trust-first empty states (front-of-house only)
 
 #### Context

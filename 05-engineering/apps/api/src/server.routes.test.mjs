@@ -3242,3 +3242,102 @@ test("POST /api/dashboard/refresh: validation mode OFF + mock-only → does NOT 
     r2RestoreEnv(saved);
   }
 });
+
+// ─── Phase 7: /api/_debug/dashboard-tags — internal-only debug surface ──────
+//
+// The endpoint surfaces `_meta.tags` from the user's last persisted snapshot
+// for operator inspection of the semantic-tag rollout state.  It is gated
+// by BOTH `TEMPO_DEBUG_TAGS_ENABLED=true` AND `NODE_ENV !== "production"`,
+// AND requires the same authenticated identity as `/api/dashboard`.  These
+// tests pin the gating behavior and confirm no story content / source bodies
+// leak through the endpoint.
+
+test("GET /api/_debug/dashboard-tags: 404 when TEMPO_DEBUG_TAGS_ENABLED is unset (default closed)", async () => {
+  delete process.env.TEMPO_DEBUG_TAGS_ENABLED;
+  const res = await request(app).get("/api/_debug/dashboard-tags");
+  assert.equal(res.status, 404, "endpoint must be invisible without explicit opt-in");
+});
+
+test("GET /api/_debug/dashboard-tags: 404 when NODE_ENV=production even if TEMPO_DEBUG_TAGS_ENABLED=true", async () => {
+  const savedNodeEnv = process.env.NODE_ENV;
+  const savedDebug = process.env.TEMPO_DEBUG_TAGS_ENABLED;
+  process.env.NODE_ENV = "production";
+  process.env.TEMPO_DEBUG_TAGS_ENABLED = "true";
+  try {
+    const res = await request(app).get("/api/_debug/dashboard-tags");
+    assert.equal(res.status, 404, "NODE_ENV=production gates the endpoint off regardless of opt-in");
+  } finally {
+    if (savedNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = savedNodeEnv;
+    if (savedDebug === undefined) delete process.env.TEMPO_DEBUG_TAGS_ENABLED;
+    else process.env.TEMPO_DEBUG_TAGS_ENABLED = savedDebug;
+  }
+});
+
+test("GET /api/_debug/dashboard-tags: returns _meta.tags when both gates pass + identity authenticated", async () => {
+  const savedDebug = process.env.TEMPO_DEBUG_TAGS_ENABLED;
+  process.env.TEMPO_DEBUG_TAGS_ENABLED = "true";
+  const prevRead = _snapshotRepo.read;
+  // Stub the snapshot to carry a `_meta.tags` payload as the dashboard
+  // pipeline would have written it.
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-04-22-slice1",
+    stories: [
+      {
+        id: "story-A",
+        title: "Story A",
+        // story body — must NOT leak through the debug endpoint
+        summary: "Confidential summary",
+        sources: [{ id: "src-1", outlet: "Reuters" }],
+        tags: { topics: [], keywords: [], geographies: [] },
+      },
+    ],
+    _meta: {
+      hasSnapshot: true,
+      refreshedAt: "2026-05-16T00:00:00.000Z",
+      lastCheckedAt: "2026-05-16T00:05:00.000Z",
+      tags: {
+        schemaVersion: "phase7-2026-05-16",
+        killSwitchActive: false,
+        topics: { runtimeState: "enabled_scorer_ready", acceptedCount: 1 },
+        keywords: { runtimeState: "enabled_scorer_ready", acceptedCount: 0 },
+        geographies: { axis: "geographies", semanticApplied: false },
+      },
+    },
+  });
+  try {
+    const res = await request(app).get("/api/_debug/dashboard-tags");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.hasSnapshot, true);
+    assert.equal(res.body.schemaVersion, "phase7-2026-05-16");
+    assert.equal(res.body.killSwitchActive, false);
+    assert.equal(res.body.tags.topics.runtimeState, "enabled_scorer_ready");
+    assert.equal(res.body.tags.geographies.semanticApplied, false);
+    // Story content must NEVER appear in the debug response.
+    const bodyJson = JSON.stringify(res.body);
+    assert.ok(!bodyJson.includes("Story A"), "story title must not leak");
+    assert.ok(!bodyJson.includes("Confidential summary"), "story summary must not leak");
+    assert.ok(!bodyJson.includes("Reuters"), "source outlet must not leak");
+  } finally {
+    _snapshotRepo.read = prevRead;
+    if (savedDebug === undefined) delete process.env.TEMPO_DEBUG_TAGS_ENABLED;
+    else process.env.TEMPO_DEBUG_TAGS_ENABLED = savedDebug;
+  }
+});
+
+test("GET /api/_debug/dashboard-tags: returns hasSnapshot=false + null tags when no snapshot exists", async () => {
+  const savedDebug = process.env.TEMPO_DEBUG_TAGS_ENABLED;
+  process.env.TEMPO_DEBUG_TAGS_ENABLED = "true";
+  const prevRead = _snapshotRepo.read;
+  _snapshotRepo.read = async () => null;
+  try {
+    const res = await request(app).get("/api/_debug/dashboard-tags");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.hasSnapshot, false);
+    assert.equal(res.body.tags, null);
+  } finally {
+    _snapshotRepo.read = prevRead;
+    if (savedDebug === undefined) delete process.env.TEMPO_DEBUG_TAGS_ENABLED;
+    else process.env.TEMPO_DEBUG_TAGS_ENABLED = savedDebug;
+  }
+});

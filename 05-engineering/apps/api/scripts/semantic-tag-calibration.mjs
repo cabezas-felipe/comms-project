@@ -58,12 +58,19 @@ const { values } = parseArgs({
     provider: { type: "string", default: "mock" },
     fixtures: { type: "string" },
     thresholds: { type: "string" },
+    // Phase 7: read observed `_meta.tags.{topics,keywords}` snapshots from a
+    // file and emit a threshold adjustment recommendation based on per-axis
+    // acceptance / below-threshold ratios from real production runs.  Always
+    // human-in-the-loop — this prints a recommendation, it does NOT mutate
+    // any env config.
+    telemetry: { type: "string" },
   },
   strict: false,
 });
 
 const provider = (values.provider ?? "mock").toLowerCase();
 const fixturesPath = values.fixtures ?? DEFAULT_FIXTURE_PATH;
+const telemetryPath = values.telemetry;
 const candidateThresholds = values.thresholds
   ? values.thresholds
       .split(",")
@@ -248,6 +255,111 @@ async function main() {
     }
     console.log(``);
   }
+
+  // Phase 7: telemetry-driven threshold adjustment recommendation.  Reads a
+  // JSON file containing observed `_meta.tags` snapshots (an array of run
+  // metas; we aggregate per axis across runs) and prints an "adjust up /
+  // hold / adjust down" suggestion alongside the fixture-driven baseline
+  // recommendation above.  Strictly advisory — never auto-edits env config.
+  if (telemetryPath) {
+    const telemetry = await loadTelemetry(telemetryPath);
+    console.log(`## telemetry-driven threshold guidance`);
+    console.log(`telemetry: ${telemetryPath} (${telemetry.length} run snapshots)`);
+    console.log(``);
+    for (const axis of ["topics", "keywords"]) {
+      const agg = aggregateTelemetryAxis(telemetry, axis);
+      const advice = recommendThresholdAdjustment(agg);
+      console.log(
+        `${pad(axis, 12)}` +
+          `runs=${pad(agg.runs, 5)}` +
+          `calls=${pad(agg.calls, 7)}` +
+          `accept_rate=${pad(formatRate(agg.acceptRate), 7)}` +
+          `below_rate=${pad(formatRate(agg.belowRate), 7)}` +
+          `timeout_rate=${pad(formatRate(agg.timeoutRate), 9)}` +
+          `runtime_state=${agg.worstRuntimeState ?? "—"}`
+      );
+      console.log(`  guidance: ${advice}`);
+    }
+    console.log(``);
+  }
+}
+
+// ─── Telemetry-driven recommendation helpers ─────────────────────────────────
+//
+// `loadTelemetry` accepts either an array of `_meta.tags` objects or a
+// single object — the script tolerates both so an operator can paste one
+// run's snapshot or accumulate many over time.  Each axis is aggregated
+// independently; geographies are skipped because Phase 4/5/6 lock semantic
+// uplift to topics + keywords only.
+
+async function loadTelemetry(filePath) {
+  const raw = await fs.readFile(filePath, "utf8");
+  const parsed = JSON.parse(raw);
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === "object") return [parsed];
+  throw new Error("telemetry file must be a `_meta.tags` object or an array of them");
+}
+
+function aggregateTelemetryAxis(snapshots, axis) {
+  let candidates = 0;
+  let accepted = 0;
+  let below = 0;
+  let timeouts = 0;
+  let calls = 0;
+  let runs = 0;
+  let worstRuntimeState = null;
+  const RANK = {
+    disabled: 0,
+    enabled_no_scorer: 1,
+    enabled_scorer_ready: 2,
+    scorer_error_fallback: 3,
+    scorer_timeout_fallback: 4,
+  };
+  for (const snap of snapshots) {
+    const row = snap?.[axis];
+    if (!row || typeof row !== "object") continue;
+    runs += 1;
+    candidates += row.candidateCount ?? 0;
+    accepted += row.acceptedCount ?? 0;
+    below += row.belowThresholdCount ?? 0;
+    timeouts += row.fallbackReasonCounts?.timeout ?? 0;
+    calls += row.scorerCallCount ?? 0;
+    const rs = row.runtimeState;
+    if (rs && (worstRuntimeState == null || (RANK[rs] ?? 0) > (RANK[worstRuntimeState] ?? 0))) {
+      worstRuntimeState = rs;
+    }
+  }
+  const acceptRate = candidates > 0 ? accepted / candidates : 0;
+  const belowRate = candidates > 0 ? below / candidates : 0;
+  const timeoutRate = calls > 0 ? timeouts / calls : 0;
+  return { runs, candidates, accepted, below, timeouts, calls, acceptRate, belowRate, timeoutRate, worstRuntimeState };
+}
+
+function recommendThresholdAdjustment(agg) {
+  // Heuristic, conservative — only suggests adjustment when telemetry shows
+  // a meaningful signal.  Boundaries:
+  //   - too-tight (low accept, high below_threshold): try LOWERING by 0.05
+  //   - too-loose (high accept rate, near 100%): try RAISING by 0.05
+  //   - frequent timeouts: hold threshold; flag latency tuning instead
+  //   - thin telemetry (< 50 candidates): hold; collect more data
+  if (agg.candidates < 50) {
+    return "HOLD — telemetry sample too small (< 50 candidates); collect more before tuning.";
+  }
+  if (agg.timeoutRate > 0.05) {
+    return `HOLD threshold — ${(agg.timeoutRate * 100).toFixed(1)}% scorer calls timed out; bump TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS or open provider ticket before retuning.`;
+  }
+  if (agg.belowRate > 0.35 && agg.acceptRate < 0.15) {
+    return `LOWER threshold (e.g. by 0.05) — ${(agg.belowRate * 100).toFixed(1)}% of candidates fell just below threshold; recall may be too tight.`;
+  }
+  if (agg.acceptRate > 0.85) {
+    return `RAISE threshold (e.g. by 0.05) — ${(agg.acceptRate * 100).toFixed(1)}% of candidates accept; precision may be too loose.`;
+  }
+  return `HOLD — accept/below ratios sit in the healthy band (accept=${(agg.acceptRate * 100).toFixed(1)}%, below=${(agg.belowRate * 100).toFixed(1)}%).`;
+}
+
+function formatRate(rate) {
+  if (!Number.isFinite(rate)) return "—";
+  return `${(rate * 100).toFixed(1)}%`;
 }
 
 main().catch((err) => {

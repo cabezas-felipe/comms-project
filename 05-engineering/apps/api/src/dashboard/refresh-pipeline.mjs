@@ -29,6 +29,7 @@ import {
 import { dedupeSourceItems } from "../ingestion/source-deduper.mjs";
 import { assignMetaStoryTags, assignMetaStoryTagsDetailed } from "./meta-story-tags.mjs";
 import {
+  TAGS_DIAGNOSTICS_SCHEMA_VERSION,
   accumulateAxisDiagnostics,
   emptyAggregateAxisDiagnostics,
   resolveSemanticTagConfig,
@@ -1411,6 +1412,17 @@ export async function runRefreshPipeline({
     }
   }
   const tagsDiagnostics = {
+    // Phase 7 schema version — operators and downstream consumers can read a
+    // single string to detect contract changes without inspecting every
+    // field.  Bumped on every Phase that grows/shrinks the per-axis diag
+    // shape.  Older snapshots without this key are the "phase4/5" baseline.
+    schemaVersion: TAGS_DIAGNOSTICS_SCHEMA_VERSION,
+    // Phase 7 kill-switch surface: when `TEMPO_TAG_SEMANTIC_KILL_SWITCH=true`
+    // the per-axis runtime states are forced to `disabled` regardless of
+    // other flags.  Surfacing the kill-switch state explicitly here lets an
+    // operator answer "is semantic OFF because of the kill switch, or
+    // because the per-axis flag was never on?" from `_meta.tags` alone.
+    killSwitchActive: Boolean(effectiveSemanticTagConfig.killSwitch),
     topics: semanticTopicsAggMut,
     keywords: semanticKeywordsAggMut,
     geographies: { axis: "geographies", semanticApplied: false },
@@ -1422,11 +1434,15 @@ export async function runRefreshPipeline({
   // deterministic-only — that stamp is in the persisted `_meta.tags` too.
   console.log(
     `[pipeline.tags]` +
+      ` schema=${tagsDiagnostics.schemaVersion}` +
+      ` kill_switch=${tagsDiagnostics.killSwitchActive ? "on" : "off"}` +
       ` semantic_topics=${tagsDiagnostics.topics.runtimeState}` +
       ` accepted=${tagsDiagnostics.topics.acceptedCount}` +
       ` rejected=${tagsDiagnostics.topics.rejectedCount}` +
       ` below_threshold=${tagsDiagnostics.topics.belowThresholdCount}` +
       ` latency_ms=${tagsDiagnostics.topics.scorerLatencyMs}` +
+      ` latency_max_ms=${tagsDiagnostics.topics.scorerLatencyMaxMs}` +
+      ` calls=${tagsDiagnostics.topics.scorerCallCount}` +
       ` timeouts=${tagsDiagnostics.topics.fallbackReasonCounts.timeout}` +
       ` errors=${tagsDiagnostics.topics.fallbackReasonCounts.error}` +
       `  semantic_keywords=${tagsDiagnostics.keywords.runtimeState}` +
@@ -1434,6 +1450,8 @@ export async function runRefreshPipeline({
       ` rejected=${tagsDiagnostics.keywords.rejectedCount}` +
       ` below_threshold=${tagsDiagnostics.keywords.belowThresholdCount}` +
       ` latency_ms=${tagsDiagnostics.keywords.scorerLatencyMs}` +
+      ` latency_max_ms=${tagsDiagnostics.keywords.scorerLatencyMaxMs}` +
+      ` calls=${tagsDiagnostics.keywords.scorerCallCount}` +
       ` timeouts=${tagsDiagnostics.keywords.fallbackReasonCounts.timeout}` +
       ` errors=${tagsDiagnostics.keywords.fallbackReasonCounts.error}` +
       `  semantic_geographies=off(locked)`

@@ -1,0 +1,37 @@
+[
+  {
+    "schemaVersion": "phase7-2026-05-16",
+    "killSwitchActive": false,
+    "topics": {
+      "axis": "topics",
+      "enabled": true,
+      "scorerProvided": true,
+      "threshold": 0.75,
+      "candidateCount": 80,
+      "acceptedCount": 20,
+      "rejectedCount": 60,
+      "belowThresholdCount": 35,
+      "runtimeState": "enabled_scorer_ready",
+      "scorerLatencyMs": 1200,
+      "scorerCallCount": 80,
+      "scorerLatencyMaxMs": 240,
+      "fallbackReasonCounts": { "timeout": 0, "error": 0 }
+    },
+    "keywords": {
+      "axis": "keywords",
+      "enabled": true,
+      "scorerProvided": true,
+      "threshold": 0.8,
+      "candidateCount": 120,
+      "acceptedCount": 12,
+      "rejectedCount": 108,
+      "belowThresholdCount": 55,
+      "runtimeState": "enabled_scorer_ready",
+      "scorerLatencyMs": 2400,
+      "scorerCallCount": 120,
+      "scorerLatencyMaxMs": 310,
+      "fallbackReasonCounts": { "timeout": 0, "error": 0 }
+    },
+    "geographies": { "axis": "geographies", "semanticApplied": false }
+  }
+]

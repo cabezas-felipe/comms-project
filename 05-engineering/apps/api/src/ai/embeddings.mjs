@@ -54,17 +54,26 @@ function isTransientError(err) {
  * fail-closed branch is responsible for catching and emitting an empty
  * candidate set with `degraded_reason`.
  *
+ * Phase 7 — optional `{ signal }` parameter: when an `AbortSignal` is passed
+ * (typically by the semantic-tag scorer wrapper), the in-flight HTTP request
+ * is cancelled at the provider level if the caller aborts.  Existing callers
+ * that omit the second argument (e.g. recall) keep their original timeout-
+ * only semantics.
+ *
  * Configurable via env (all optional):
  *   TEMPO_OPENAI_EMBEDDING_MODEL   default: text-embedding-3-small
  *   TEMPO_EMBED_TIMEOUT_MS         default: 8000
  *   TEMPO_EMBED_MAX_ATTEMPTS       default: 2 (1 + 1 retry)
  *   TEMPO_EMBED_RETRY_DELAY_MS     default: 250
  */
-export async function embedTexts(texts) {
+export async function embedTexts(texts, { signal } = {}) {
   const arr = Array.isArray(texts) ? texts : [];
   if (arr.length === 0) return [];
 
   if (process.env.TEMPO_AI_MOCK_ONLY === "true") {
+    // Mock path honors aborts too — callers can rely on cancellation
+    // semantics regardless of provider mode.
+    if (signal?.aborted) throw new Error("aborted");
     return arr.map(mockEmbedding);
   }
 
@@ -85,11 +94,14 @@ export async function embedTexts(texts) {
 
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // External abort short-circuits the retry loop too — a cancelled call
+    // should not silently consume the retry budget.
+    if (signal?.aborted) throw new Error("aborted");
     try {
-      return await embedTextsWithOpenAI({ apiKey, model, texts: arr, timeoutMs });
+      return await embedTextsWithOpenAI({ apiKey, model, texts: arr, timeoutMs, signal });
     } catch (err) {
       lastErr = err;
-      if (attempt < maxAttempts && isTransientError(err)) {
+      if (attempt < maxAttempts && isTransientError(err) && !signal?.aborted) {
         console.warn(
           `[embeddings] transient error on attempt ${attempt}/${maxAttempts} (${err instanceof Error ? err.message : err}); retrying in ${retryDelayMs}ms`
         );

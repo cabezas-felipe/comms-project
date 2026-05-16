@@ -138,12 +138,22 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 - **A11y polish.** `role="group"` + `aria-label` on the pill row; `role="status"` on the caption; `type="button"` and `focus-visible:outline` on Pill.
 - **No diagnostics leak.** Regression tests in [`Dashboard.test.tsx`](../../04-prototype/src/pages/Dashboard.test.tsx) + [`StoryDetail.test.tsx`](../../04-prototype/src/components/StoryDetail.test.tsx) assert operator-only strings (`runtimeState`, `scorerLatencyMs`, `semanticApplied`, …) never appear in the rendered output.
 
-**Phase 7 (deferred — not in this slice):**
+**Phase 7 — rollout hardening + operational guardrails (shipped — 2026-05-16):**
 
-- **AbortController plumbing.** Phase 5 timeout cancels the Promise race but does NOT signal cancellation to the embedding provider — the underlying request continues running. Phase 7 should plumb an `AbortSignal` end-to-end if provider quotas/cost matter.
-- **Adaptive threshold tuning.** Hands-off threshold adjustment based on observed `belowThresholdCount` / `acceptedCount` ratios.
-- **Internal-only debug panel.** A staging/dev-gated surface that lets operators inspect `_meta.tags` directly. Out of scope for Phase 6; current rollout posture is "logs + persisted snapshots are enough".
+- **End-to-end cancellation.** [`createEmbeddingSemanticScorer`](../apps/api/src/dashboard/meta-story-semantic-mapper.mjs) creates a per-call `AbortController` and passes its `signal` into `embedFn(texts, { signal })`. When the timeout fires, the controller aborts — [`embedTexts`](../apps/api/src/ai/embeddings.mjs) and [`embedTextsWithOpenAI`](../apps/api/src/ai/providers/openai-embeddings.mjs) both forward the signal to `fetch(...)`, so the in-flight HTTP request is actually cancelled. Implementations that ignore the signal still degrade fail-closed; cancellation is an additive cost / latency optimization on top of the existing timeout contract.
+- **Kill switch — `TEMPO_TAG_SEMANTIC_KILL_SWITCH`.** When truthy, every per-axis flag is forced to `disabled` regardless of any other configuration. Distinct from `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED` so a misconfigured deploy can't accidentally turn semantic uplift back on. Surfaced as `_meta.tags.killSwitchActive`.
+- **Diagnostics schema version.** [`TAGS_DIAGNOSTICS_SCHEMA_VERSION`](../apps/api/src/dashboard/meta-story-semantic-mapper.mjs) is stamped on `_meta.tags.schemaVersion` so downstream consumers (dashboards, log scrapers) can detect contract changes without inspecting every field.
+- **Latency observability.** `_meta.tags.{topics,keywords}.scorerCallCount` + `scorerLatencyMaxMs` join the existing cumulative `scorerLatencyMs` so operators can derive average latency AND read tail-latency outliers from a single payload.
+- **Telemetry-driven threshold tuning.** [`semantic-tag-calibration.mjs --telemetry=<file>`](../apps/api/scripts/semantic-tag-calibration.mjs) reads `_meta.tags` snapshots and prints a per-axis "HOLD / LOWER / RAISE" recommendation based on observed acceptance / below-threshold / timeout ratios. Strictly advisory — never auto-edits env config.
+- **Internal-only debug endpoint.** `GET /api/_debug/dashboard-tags` ([`server.mjs`](../apps/api/src/server.mjs)) returns the calling identity's last persisted `_meta.tags`. Gated on BOTH `TEMPO_DEBUG_TAGS_ENABLED=true` AND `NODE_ENV !== "production"`; authenticated; returns 404 when either gate fails. Story content / source bodies never appear in the response.
+- **Operator runbook — [`runbook-semantic-tags.md`](runbook-semantic-tags.md).** Codifies flag precedence, staged rollout, rollback procedure, calibration cadence, and the "geographies remain deterministic" lock.
+- **K1a one-way invariant unchanged.** Regression *"K1a invariant under abort cancellation"* compares funnel counts under an aborting scorer to the scorer-OFF baseline and asserts they match.
+
+**Phase 8 (deferred — not in this slice):**
+
 - **Semantic geography aliasing** — still deliberately out of scope. The deterministic alias map in [`geography-aliases.ts`](../packages/contracts/src/geography-aliases.ts) remains the only geo widening path.
+- **Per-axis adaptive thresholds at runtime.** Phase 7 advises via the calibration harness; runtime adaptation (the system automatically nudges its own thresholds based on its own diagnostics) is a larger commitment we have not validated.
+- **Cross-run scorer cache.** Phase 5/7 cache is per-pipeline-call. Persisting label embeddings across runs (settings keywords rarely change) would save provider calls; defer until cost matters.
 
 ---
 

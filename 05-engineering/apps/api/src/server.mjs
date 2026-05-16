@@ -1196,6 +1196,58 @@ app.get("/api/ai/metrics", (_req, res) => {
   });
 });
 
+// Phase 7: internal-only debug surface for `_meta.tags` (semantic tag rollout
+// diagnostics).  Two compounding gates: the env opt-in MUST be true AND
+// NODE_ENV must NOT be "production" — neither alone is sufficient.  This
+// keeps the surface unavailable from prod even if the env var leaks, and
+// unavailable from staging/dev unless an operator deliberately opts in.
+// The endpoint is also identity-bound (same `requireIdentity` as
+// `/api/dashboard`) so the diagnostics never leak to anonymous callers.
+//
+// Returns ONLY the `_meta.tags` aggregate from the user's last persisted
+// snapshot — never any story content, source bodies, or selection meta.
+// Operators reading this can answer "is semantic uplift firing? how often
+// is it borderline? is the scorer healthy?" without log grep.
+function isDebugTagsEnabled(env = process.env) {
+  if (env.NODE_ENV === "production") return false;
+  const raw = String(env.TEMPO_DEBUG_TAGS_ENABLED ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+app.get("/api/_debug/dashboard-tags", async (req, res) => {
+  if (!isDebugTagsEnabled()) {
+    return res.status(404).json({ message: "Not found" });
+  }
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  try {
+    const snapshot = await _snapshotRepo.read(identity.userId);
+    if (!snapshot) {
+      return res.json({
+        hasSnapshot: false,
+        tags: null,
+        message: "No persisted snapshot for this identity yet.",
+      });
+    }
+    const tags = snapshot._meta?.tags ?? null;
+    return res.json({
+      hasSnapshot: true,
+      schemaVersion: tags?.schemaVersion ?? null,
+      killSwitchActive: tags?.killSwitchActive ?? null,
+      tags,
+      refreshedAt: snapshot._meta?.refreshedAt ?? null,
+      lastCheckedAt: snapshot._meta?.lastCheckedAt ?? null,
+    });
+  } catch (error) {
+    trackServerEvent("api_error", {
+      route: "/api/_debug/dashboard-tags",
+      statusCode: 500,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+    return res.status(500).json({ message: "Internal error" });
+  }
+});
+
 // ─── Prototype routing: resolve destination by email ─────────────────────────
 // Checks Supabase Auth + user settings to route to /dashboard or /onboarding.
 // No session is created; this is a pre-auth identity hint for the prototype.

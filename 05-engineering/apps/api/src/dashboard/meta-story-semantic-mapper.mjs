@@ -60,6 +60,16 @@ export class SemanticScorerTimeoutError extends Error {
   }
 }
 
+/**
+ * Phase 7 diagnostics schema version.  Pinned on `_meta.tags.schemaVersion`
+ * so downstream consumers (dashboards, log scrapers, future Phase 8+ work)
+ * can detect contract changes without inspecting individual field shapes.
+ * Bump this string whenever the per-axis diagnostic object grows or shrinks
+ * a field.  Older snapshots written before Phase 7 carry no version field —
+ * consumers should treat `undefined` as the unversioned baseline.
+ */
+export const TAGS_DIAGNOSTICS_SCHEMA_VERSION = "phase7-2026-05-16";
+
 function parseEnvBool(value) {
   if (typeof value !== "string") return false;
   const v = value.trim().toLowerCase();
@@ -88,10 +98,23 @@ function parseEnvThreshold(value, fallback) {
  * the actual `process.env` for other tests.
  */
 export function resolveSemanticTagConfig(env = process.env, overrides = {}) {
-  const globalEnabled =
+  // Phase 7: hardware-style kill switch.  When `TEMPO_TAG_SEMANTIC_KILL_SWITCH`
+  // is truthy, every per-axis flag is forced OFF regardless of how the global
+  // and per-axis flags are otherwise configured.  This is the single env var
+  // an operator flips to immediately disable semantic uplift in production
+  // without code deploy — distinct from `TEMPO_TAG_SEMANTIC_MAPPING_ENABLED`
+  // because the kill switch wins even when the global flag is also true
+  // (defense in depth: a misconfigured deploy can't accidentally turn
+  // semantic back on if the kill switch is asserted).
+  const killSwitch =
+    typeof overrides.killSwitch === "boolean"
+      ? overrides.killSwitch
+      : parseEnvBool(env.TEMPO_TAG_SEMANTIC_KILL_SWITCH);
+  const globalEnabledRaw =
     typeof overrides.enabled === "boolean"
       ? overrides.enabled
       : parseEnvBool(env.TEMPO_TAG_SEMANTIC_MAPPING_ENABLED);
+  const globalEnabled = !killSwitch && globalEnabledRaw;
   const topicsEnabledRaw =
     typeof overrides.topicsEnabled === "boolean"
       ? overrides.topicsEnabled
@@ -109,6 +132,7 @@ export function resolveSemanticTagConfig(env = process.env, overrides = {}) {
       ? clampThreshold(overrides.keywordsThreshold, DEFAULT_KEYWORD_THRESHOLD)
       : parseEnvThreshold(env.TEMPO_TAG_SEMANTIC_KEYWORDS_THRESHOLD, DEFAULT_KEYWORD_THRESHOLD);
   return {
+    killSwitch,
     enabled: globalEnabled,
     topicsEnabled: globalEnabled && topicsEnabledRaw,
     keywordsEnabled: globalEnabled && keywordsEnabledRaw,
@@ -238,6 +262,12 @@ function emptyAxisDiagnostics(axis, threshold, opts = {}) {
       errorCount: 0,
     }),
     scorerLatencyMs: 0,
+    // Phase 7: latency observability — `scorerCallCount` lets an operator
+    // derive average latency (`scorerLatencyMs / scorerCallCount`);
+    // `scorerLatencyMaxMs` surfaces the slowest single call so a tail-
+    // latency outlier doesn't get averaged out across the run.
+    scorerCallCount: 0,
+    scorerLatencyMaxMs: 0,
     fallbackReasonCounts: { timeout: 0, error: 0 },
   };
 }
@@ -310,7 +340,12 @@ export async function mapSemanticAxis({
     const startMs = Date.now();
     try {
       const raw = await scorer(evidenceText, label, { axis });
-      diagnostics.scorerLatencyMs += Date.now() - startMs;
+      const elapsedMs = Date.now() - startMs;
+      diagnostics.scorerLatencyMs += elapsedMs;
+      diagnostics.scorerCallCount += 1;
+      if (elapsedMs > diagnostics.scorerLatencyMaxMs) {
+        diagnostics.scorerLatencyMaxMs = elapsedMs;
+      }
       score = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
     } catch (err) {
       // Phase 5: categorize fallback reason.  Timeout (a `SemanticScorerTimeoutError`
@@ -320,7 +355,12 @@ export async function mapSemanticAxis({
       // provider is slow" from "the provider is broken".  Latency for the
       // failed call is still counted toward `scorerLatencyMs` so a slow
       // failure isn't invisible in the dashboards.
-      diagnostics.scorerLatencyMs += Date.now() - startMs;
+      const elapsedMs = Date.now() - startMs;
+      diagnostics.scorerLatencyMs += elapsedMs;
+      diagnostics.scorerCallCount += 1;
+      if (elapsedMs > diagnostics.scorerLatencyMaxMs) {
+        diagnostics.scorerLatencyMaxMs = elapsedMs;
+      }
       diagnostics.rejectedCount += 1;
       if (err instanceof SemanticScorerTimeoutError) {
         diagnostics.fallbackReasonCounts.timeout += 1;
@@ -423,6 +463,9 @@ export function emptyAggregateAxisDiagnostics(axis) {
     runtimeState: RUNTIME_STATE.DISABLED,
     scorerLatencyMs: 0,
     fallbackReasonCounts: { timeout: 0, error: 0 },
+    // Phase 7 latency observability
+    scorerCallCount: 0,
+    scorerLatencyMaxMs: 0,
   };
 }
 
@@ -478,19 +521,36 @@ export function accumulateAxisDiagnostics(aggregate, story) {
         (aggregate.fallbackReasonCounts?.error ?? 0) +
         (story.fallbackReasonCounts?.error ?? 0),
     },
+    // Phase 7 latency observability: total call count + worst single-call
+    // latency.  Average latency is derivable on the consumer side as
+    // `scorerLatencyMs / scorerCallCount`; we don't pre-compute it to avoid
+    // surfacing an `Infinity` when no calls fired.
+    scorerCallCount: (aggregate.scorerCallCount ?? 0) + (story.scorerCallCount ?? 0),
+    scorerLatencyMaxMs: Math.max(
+      aggregate.scorerLatencyMaxMs ?? 0,
+      story.scorerLatencyMaxMs ?? 0
+    ),
   };
 }
 
 // ─── Production scorer factory (embedding cosine similarity) ────────────────
 //
-// Wraps an `embedFn(texts) -> number[][]` (the same shape used by recall) in
-// the `(evidence, label) -> number` scorer interface that `mapSemanticAxis`
+// Wraps an `embedFn(texts, { signal }?) -> number[][]` in the
+// `(evidence, label) -> number` scorer interface that `mapSemanticAxis`
 // expects.  The wrapper:
 //   - truncates evidence text to `maxEvidenceChars` so the request size is
 //     bounded regardless of how chatty a meta-story is;
 //   - races each scorer call against a `timeoutMs` wall-clock budget; on
 //     timeout, throws `SemanticScorerTimeoutError` so the mapper categorizes
 //     the fallback as `scorer_timeout_fallback` rather than a generic error;
+//   - **Phase 7:** creates a per-call `AbortController` and passes its
+//     signal to `embedFn(texts, { signal })`.  When the timeout fires, the
+//     controller is aborted — provider implementations (e.g. the OpenAI
+//     embeddings adapter) that forward the signal to `fetch(...)` will
+//     actually cancel the in-flight HTTP request.  Provider implementations
+//     that ignore the signal still degrade fail-closed; cancellation is a
+//     best-effort cost / latency optimization on top of the existing
+//     timeout-race contract;
 //   - memoizes evidence + label embeddings WITHIN a single factory instance
 //     so repeated probes against the same evidence (one per candidate label)
 //     don't re-embed the bundle, and the same label probed in a later story
@@ -499,9 +559,8 @@ export function accumulateAxisDiagnostics(aggregate, story) {
 //     threshold knobs (`[0,1]`) keep working without re-calibration.
 //
 // Returns a scorer function ready to pass as `semanticTagScorer` to the
-// pipeline.  This factory is the seam Phase 5 wires into `server.mjs`; tests
-// continue to inject their own deterministic scorers and don't go through
-// this path.
+// pipeline.  Tests continue to inject their own deterministic scorers and
+// don't go through this path.
 export function createEmbeddingSemanticScorer({
   embedFn,
   timeoutMs,
@@ -529,17 +588,26 @@ export function createEmbeddingSemanticScorer({
         : "";
     if (!truncated || typeof label !== "string" || label.length === 0) return 0;
 
-    // Per-call timeout via Promise.race.  Note: the underlying embedFn may
-    // continue running after the race resolves (no AbortController plumbed
-    // through here yet) — that's acceptable for a fail-closed Phase 5 path,
-    // the work just doesn't influence the response.  A follow-up can plumb
-    // an AbortSignal end-to-end if provider quotas matter.
+    // Phase 7: end-to-end cancellation.  When the timeout fires we abort the
+    // per-call controller — `embedFn` implementations that forward the
+    // signal (e.g. `embedTexts` → `embedTextsWithOpenAI` → `fetch`) cancel
+    // the in-flight HTTP request.  Implementations that ignore the signal
+    // still degrade fail-closed via the existing Promise.race rejection.
+    //
+    // Important: the embedFn may reject with its own "aborted" Error when
+    // the controller fires.  We track `timeoutFired` and rethrow as
+    // `SemanticScorerTimeoutError` so the mapper categorizes the fallback
+    // as `scorer_timeout_fallback` (not a generic error) regardless of
+    // whether the timeoutPromise or the embedFn rejection wins the race.
+    const abortController = new AbortController();
+    let timeoutFired = false;
     let timeoutHandle;
     const timeoutPromise = new Promise((_, reject) => {
-      timeoutHandle = setTimeout(
-        () => reject(new SemanticScorerTimeoutError(`scorer timeout after ${effectiveTimeout}ms`)),
-        effectiveTimeout
-      );
+      timeoutHandle = setTimeout(() => {
+        timeoutFired = true;
+        abortController.abort();
+        reject(new SemanticScorerTimeoutError(`scorer timeout after ${effectiveTimeout}ms`));
+      }, effectiveTimeout);
     });
 
     try {
@@ -552,7 +620,23 @@ export function createEmbeddingSemanticScorer({
         const probeTexts = [];
         if (needEvidence) probeTexts.push(truncated);
         if (needLabel) probeTexts.push(label);
-        const vectors = await Promise.race([embedFn(probeTexts), timeoutPromise]);
+        let vectors;
+        try {
+          vectors = await Promise.race([
+            embedFn(probeTexts, { signal: abortController.signal }),
+            timeoutPromise,
+          ]);
+        } catch (err) {
+          // If the timeout already fired, the embedFn's own abort rejection
+          // (or any subsequent failure of an aborted request) must surface
+          // as a timeout — same root cause from the operator's POV.
+          if (timeoutFired) {
+            throw err instanceof SemanticScorerTimeoutError
+              ? err
+              : new SemanticScorerTimeoutError(`scorer timeout after ${effectiveTimeout}ms`);
+          }
+          throw err;
+        }
         if (!Array.isArray(vectors) || vectors.length !== probeTexts.length) {
           // Defensive: any malformed response counts as a generic scorer
           // error so the mapper records `scorer_error_fallback`.

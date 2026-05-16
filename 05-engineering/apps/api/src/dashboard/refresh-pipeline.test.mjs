@@ -5275,3 +5275,123 @@ test("Phase 5 wiring: geographies stay deterministic when scorer ready (no seman
   assert.ok(!payload.stories[0].tags.geographies.includes("China"));
   assert.equal(log.tags.geographies.semanticApplied, false);
 });
+
+// ─── Phase 7: rollout hardening (kill switch, schema version, abort) ────────
+//
+// These tests pin the pipeline-level guarantees that Phase 7 layers on top
+// of the Phase 4/5 surface:
+//   - `log.tags` carries `schemaVersion` + `killSwitchActive` for operator
+//     diagnostics;
+//   - the kill switch forces every axis to `disabled` regardless of the
+//     other flags;
+//   - K1a one-way invariant still holds under the abort/cancellation path
+//     (funnel counts identical to OFF when scorer aborts);
+//   - latency observability surfaces `scorerCallCount` + `scorerLatencyMaxMs`.
+
+test("Phase 7 wiring: log.tags carries schemaVersion + killSwitchActive on every run", async () => {
+  const fixture = makePhase5Fixture();
+  const { log } = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    // semantic OFF — schema version + killSwitchActive must still surface.
+  });
+  assert.equal(typeof log.tags.schemaVersion, "string");
+  assert.ok(log.tags.schemaVersion.length > 0);
+  assert.equal(log.tags.killSwitchActive, false);
+});
+
+test("Phase 7 wiring: kill switch forces semantic OFF and surfaces killSwitchActive=true even with flags ON", async () => {
+  const fixture = makePhase5Fixture();
+  const aggressiveScorer = async () => 0.99; // would otherwise widen everything
+  const { payload, log } = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: {
+      killSwitch: true,
+      enabled: false, // kill switch already forces global to false
+      topicsEnabled: false,
+      keywordsEnabled: false,
+      topicsThreshold: 0.75,
+      keywordsThreshold: 0.75,
+    },
+    semanticTagScorer: aggressiveScorer,
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(log.tags.killSwitchActive, true);
+  assert.equal(log.tags.topics.runtimeState, "disabled");
+  assert.equal(log.tags.keywords.runtimeState, "disabled");
+  // Even with a confident scorer in the slot, semantic uplift must be empty.
+  assert.equal(log.tags.topics.acceptedCount, 0);
+  assert.equal(log.tags.keywords.acceptedCount, 0);
+});
+
+test("Phase 7 wiring: K1a invariant under abort cancellation — funnel counts identical to scorer-OFF", async () => {
+  // Inject an embedFn that hangs until its `signal` aborts.  When the scorer
+  // wrapper aborts on timeout, embedFn's "aborted" rejection AND the
+  // scorer's timeout rejection both fire; the scorer surfaces the timeout
+  // attribution, the mapper falls closed, and the pipeline ships the
+  // deterministic baseline.  Funnel counts must be identical to a scorer-OFF
+  // run over the same fixture.
+  const { createEmbeddingSemanticScorer: makeScorer } = await import(
+    "./meta-story-semantic-mapper.mjs"
+  );
+  const fixture = makePhase5Fixture();
+  const hangingEmbedFn = (_texts, { signal } = {}) =>
+    new Promise((_, reject) => {
+      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  const abortingScorer = makeScorer({ embedFn: hangingEmbedFn, timeoutMs: 25 });
+
+  const off = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  const onAbort = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: PHASE5_SEMANTIC_ON,
+    semanticTagScorer: abortingScorer,
+  });
+  // Funnel counts MUST match across OFF and abort-fallback runs.
+  assert.deepEqual(onAbort.log.funnel.stages, off.log.funnel.stages);
+  assert.equal(onAbort.log.metaStoryCount, off.log.metaStoryCount);
+  // Abort fallback surfaces as timeout state at the axis level.
+  assert.equal(onAbort.log.tags.keywords.runtimeState, "scorer_timeout_fallback");
+  assert.ok(onAbort.log.tags.keywords.fallbackReasonCounts.timeout >= 1);
+  // Stories still shipped with deterministic baseline tags.
+  assert.equal(onAbort.payload.stories.length, 1);
+});
+
+test("Phase 7 wiring: log.tags surfaces scorerCallCount + scorerLatencyMaxMs", async () => {
+  const fixture = makePhase5Fixture();
+  const readyScorer = async (_evidence, label) => {
+    await new Promise((r) => setTimeout(r, 3));
+    return label.toLowerCase() === "oil" ? 0.9 : 0.1;
+  };
+  const { log } = await runRefreshPipeline({
+    settings: fixture.settings,
+    rawItems: fixture.rawItems,
+    clusterFn: async () => [fixture.metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticTagConfig: PHASE5_SEMANTIC_ON,
+    semanticTagScorer: readyScorer,
+  });
+  // Both axes were exercised on at least one candidate.
+  assert.ok(log.tags.keywords.scorerCallCount > 0);
+  assert.ok(log.tags.keywords.scorerLatencyMaxMs > 0);
+  // Max must never exceed cumulative — basic invariant.
+  assert.ok(log.tags.keywords.scorerLatencyMaxMs <= log.tags.keywords.scorerLatencyMs);
+});

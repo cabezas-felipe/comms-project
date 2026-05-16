@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   RUNTIME_STATE,
   SemanticScorerTimeoutError,
+  TAGS_DIAGNOSTICS_SCHEMA_VERSION,
   accumulateAxisDiagnostics,
   createEmbeddingSemanticScorer,
   emptyAggregateAxisDiagnostics,
@@ -671,4 +672,140 @@ test("resolveSemanticScorerRuntimeConfig: overrides shortcut env reads", () => {
   );
   assert.equal(cfg.timeoutMs, 250);
   assert.equal(cfg.maxEvidenceChars, 50);
+});
+
+// ─── Phase 7: kill switch, schema version, abort cancellation ───────────────
+
+test("Phase 7 — TAGS_DIAGNOSTICS_SCHEMA_VERSION is a non-empty string (operator-readable contract version)", () => {
+  assert.equal(typeof TAGS_DIAGNOSTICS_SCHEMA_VERSION, "string");
+  assert.ok(TAGS_DIAGNOSTICS_SCHEMA_VERSION.length > 0);
+});
+
+test("resolveSemanticTagConfig — kill switch forces every axis OFF even when other flags are ON", () => {
+  const cfg = resolveSemanticTagConfig({
+    TEMPO_TAG_SEMANTIC_MAPPING_ENABLED: "true",
+    TEMPO_TAG_SEMANTIC_TOPICS_ENABLED: "true",
+    TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED: "true",
+    TEMPO_TAG_SEMANTIC_KILL_SWITCH: "true",
+  });
+  assert.equal(cfg.killSwitch, true);
+  assert.equal(cfg.enabled, false, "kill switch overrides the global flag");
+  assert.equal(cfg.topicsEnabled, false);
+  assert.equal(cfg.keywordsEnabled, false);
+});
+
+test("resolveSemanticTagConfig — kill switch off (default) does not interfere with normal flag composition", () => {
+  const cfg = resolveSemanticTagConfig({
+    TEMPO_TAG_SEMANTIC_MAPPING_ENABLED: "true",
+    TEMPO_TAG_SEMANTIC_TOPICS_ENABLED: "true",
+  });
+  assert.equal(cfg.killSwitch, false);
+  assert.equal(cfg.enabled, true);
+  assert.equal(cfg.topicsEnabled, true);
+});
+
+test("resolveSemanticTagConfig — kill switch override seam (test-only) wins over env", () => {
+  const cfg = resolveSemanticTagConfig(
+    { TEMPO_TAG_SEMANTIC_MAPPING_ENABLED: "true" },
+    { killSwitch: true, topicsEnabled: true }
+  );
+  assert.equal(cfg.killSwitch, true);
+  assert.equal(cfg.topicsEnabled, false);
+});
+
+test("mapSemanticAxis — diagnostics carry Phase 7 latency fields (scorerCallCount, scorerLatencyMaxMs)", async () => {
+  const slowFastScorer = async () => {
+    await new Promise((r) => setTimeout(r, 5));
+    return 0.9;
+  };
+  const { diagnostics } = await mapSemanticAxis({
+    axis: "keywords",
+    evidenceText: "Anything.",
+    allowedLabels: ["a", "b"],
+    threshold: 0.1,
+    enabled: true,
+    scorer: slowFastScorer,
+  });
+  assert.equal(diagnostics.scorerCallCount, 2);
+  assert.ok(diagnostics.scorerLatencyMaxMs >= 5);
+  assert.ok(diagnostics.scorerLatencyMs >= diagnostics.scorerLatencyMaxMs);
+});
+
+test("accumulateAxisDiagnostics — Phase 7 fields aggregate correctly (call count sums, latency max takes worst)", () => {
+  const story1 = {
+    runtimeState: RUNTIME_STATE.ENABLED_SCORER_READY,
+    enabled: true,
+    scorerProvided: true,
+    threshold: 0.75,
+    candidateCount: 2,
+    acceptedCount: 1,
+    rejectedCount: 1,
+    belowThresholdCount: 1,
+    scorerLatencyMs: 50,
+    scorerCallCount: 2,
+    scorerLatencyMaxMs: 30,
+    fallbackReasonCounts: { timeout: 0, error: 0 },
+  };
+  const story2 = {
+    ...story1,
+    scorerLatencyMs: 200,
+    scorerCallCount: 3,
+    scorerLatencyMaxMs: 150,
+  };
+  let agg = emptyAggregateAxisDiagnostics("keywords");
+  agg = accumulateAxisDiagnostics(agg, story1);
+  agg = accumulateAxisDiagnostics(agg, story2);
+  assert.equal(agg.scorerCallCount, 5);
+  assert.equal(agg.scorerLatencyMaxMs, 150, "max across stories — second story's worst-call wins");
+  assert.equal(agg.scorerLatencyMs, 250);
+});
+
+test("createEmbeddingSemanticScorer — Phase 7: timeout actively aborts the embedFn signal", async () => {
+  // The scorer is supposed to abort the controller when the timeout fires.
+  // We inject an embedFn that waits indefinitely until the signal aborts, so
+  // we can directly observe cancellation (without relying on a real fetch).
+  let signalSawAbort = false;
+  const embedFn = (_texts, { signal } = {}) =>
+    new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        signalSawAbort = true;
+        reject(new Error("aborted"));
+        return;
+      }
+      signal?.addEventListener(
+        "abort",
+        () => {
+          signalSawAbort = true;
+          reject(new Error("aborted"));
+        },
+        { once: true }
+      );
+    });
+  const scorer = createEmbeddingSemanticScorer({ embedFn, timeoutMs: 25 });
+  await assert.rejects(() => scorer("ev", "lbl"), SemanticScorerTimeoutError);
+  assert.equal(signalSawAbort, true, "scorer must abort the embedFn signal on timeout");
+});
+
+test("createEmbeddingSemanticScorer — Phase 7: abort signal is wired even when embedFn ignores it (forward compat)", async () => {
+  // Provider implementations that don't read the signal must still see the
+  // scorer fail closed via the existing Promise race.  The `{signal}` arg is
+  // additive — older embedFns that take only `texts` keep working too.
+  const embedFn = async () => {
+    await new Promise((r) => setTimeout(r, 50));
+    return [[1, 0]];
+  };
+  const scorer = createEmbeddingSemanticScorer({ embedFn, timeoutMs: 5 });
+  await assert.rejects(() => scorer("ev", "lbl"), SemanticScorerTimeoutError);
+});
+
+test("createEmbeddingSemanticScorer — Phase 7: embedFn receives a real AbortSignal in its options arg", async () => {
+  let observedSignal = null;
+  const embedFn = async (texts, { signal } = {}) => {
+    observedSignal = signal;
+    return texts.map(() => [1, 0]);
+  };
+  const scorer = createEmbeddingSemanticScorer({ embedFn });
+  await scorer("ev", "lbl");
+  assert.ok(observedSignal && typeof observedSignal === "object");
+  assert.equal(typeof observedSignal.aborted, "boolean");
 });
