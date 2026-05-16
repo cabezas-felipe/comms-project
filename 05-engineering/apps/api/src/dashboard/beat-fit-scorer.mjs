@@ -357,7 +357,8 @@ function hasMajorPenalty(breakdown) {
  *   {
  *     rescued:       boolean — true only if in band, no penalty, ≥ N signals
  *     inBand:        boolean — score is in [lowerBound, threshold)
- *     strongSignals: number  — count of distinct positive signals
+ *     strongSignals: number  — count of distinct CORE positive signals
+ *                              (topic / actor / keyword / geo; recency excluded)
  *     blockedBy:     null | "major_penalty" | "insufficient_signals"
  *   }
  *
@@ -396,7 +397,9 @@ export function evaluateRescue(score, breakdown, reasonCodes, opts = {}) {
  *                 — excluded items in the rescue band get an extra
  *                   `rescue_blocked_*` annotation in reasonCodes.
  *     summary:  { threshold, rescueLowerBound, includedCount, rescuedCount,
- *                 excludedCount, excludeReasonHistogram }
+ *                 excludedCount, excludeReasonHistogram,
+ *                 rescueBlockedPenaltyCount,
+ *                 rescueBlockedInsufficientSignalsCount }
  *   }
  */
 export function applyBeatFitFilter(items, settings, opts = {}) {
@@ -448,7 +451,7 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
         rescueBlockedInsufficientSignalsCount++;
       }
     }
-    const excludeReason = pickPrimaryExcludeReason(annotatedCodes, breakdown);
+    const excludeReason = pickPrimaryExcludeReason(breakdown);
     histogram[excludeReason] = (histogram[excludeReason] ?? 0) + 1;
     excluded.push({ item, score, reasonCodes: annotatedCodes, excludeReason });
   }
@@ -471,7 +474,9 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
 
 // Pick the most informative single reason for the exclusion histogram. Order
 // matters — penalties and structural misses dominate over absence-of-bonus.
-function pickPrimaryExcludeReason(reasonCodes, breakdown) {
+// Derived from the breakdown alone; rescue-blocked annotations live on the
+// per-item reasonCodes (not the histogram).
+function pickPrimaryExcludeReason(breakdown) {
   if (breakdown.offBeatGeo) return "excluded_offbeat_geo";
   if (breakdown.pureCommodity) return "excluded_commodity_framing";
   if (breakdown.noConfiguredSignal) return "excluded_no_signal";
