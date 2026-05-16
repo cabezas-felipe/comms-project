@@ -2,6 +2,47 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-16 - D-047 - Trust cleanup Phase 1 + 2: tags-only labels, no fabricated topic, required `tags` on the wire
+
+#### Context
+
+The dashboard was surfacing fabricated topic/geography labels in three places: (1) [`dashboard-filters.ts`](../04-prototype/src/lib/dashboard-filters.ts) fell back to root `story.topic` / `story.geographies` when `story.tags` was missing, so legacy stories produced phantom pills; (2) [`buildStory`](apps/api/src/dashboard/refresh-pipeline.mjs) defaulted `topic` to `"Diplomatic relations"` whenever no source carried a canonical topic; (3) `DEFAULT_SETTINGS` seeded a canonical taxonomy + sources list so an unconfigured installation looked like the user had already chosen a beat. Chunk K — locked to **K1a** — already said tags come from `deriveStoryTags(sourceItems, settings)` only, but these leak paths let evidence-free labels reach the UI anyway.
+
+#### Decision
+
+Land trust cleanup in two phases on `feat/meta-story-tags-phase1`, no Chunk K relock:
+
+**Phase 1 — fabrication removal:**
+
+- `dashboard-filters.ts` `topicsOf` / `keywordsOf` / `geographiesOf` read **only** from `story.tags`; missing tags = empty arrays on every axis.
+- `buildStory` drops `?? "Diplomatic relations"`; emits `topic` **only** when a source item carries a canonical value, otherwise omits the field (`storySchema.topic` becomes `optional`).
+- `DEFAULT_SETTINGS` / [`settings.json`](apps/api/data/settings.json) / `defaultSettingsPayload` in the prototype are fully empty (taxonomy + sources).
+
+**Phase 2 — contract + boundary alignment:**
+
+- `storySchema.tags` becomes **required** (`{ topics: string[], keywords: string[], geographies: string[] }` — empty arrays valid).
+- [`dashboard-snapshot-repo.mjs`](apps/api/src/db/dashboard-snapshot-repo.mjs) `normalizeStoriesForLoad` coerces legacy / missing / partial `tags` to the three-axis empty shape at the **read boundary** so the strict display schema can assume the field without a write-time migration.
+- Spec ([`dashboard-story-pool-spec.md`](docs/dashboard-story-pool-spec.md) — Chunk K) and walkthrough ([`dashboard-story-pool-walkthrough.md`](docs/dashboard-story-pool-walkthrough.md) — Chunk K) carry a Phase 1+2 amendment and a forward-look note for Phase 3.
+
+#### Why
+
+- **Trust posture.** Tags-on-the-screen now match tags-on-the-wire: if the system has no evidence on an axis, the UI shows nothing rather than a confident-looking placeholder. Phantom "Diplomatic relations" chips were eroding trust on thin-evidence stories.
+- **K1a was always tags-only.** This isn't a new decision — it closes leaks where the *absence* of evidence was being papered over.
+- **Read-boundary normalization, not migration.** Older snapshots stay readable; on-disk shape doesn't drift; new writes always carry the three-axis shape because the API only emits the new shape now.
+
+#### Tradeoffs
+
+- Stories whose sources carry no canonical topic now omit `story.topic` on the wire. Lineage matching in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) already handled `prior.topic ?? ""` defensively, so this is a no-op for narrative continuity.
+- `topic` is optional on the contract, which is one more shape callers must handle — but the UI doesn't render it (tags drive labels), and the schema is strict on `tags` to compensate.
+- Empty defaults mean a fresh install shows no pills until the user configures settings. That is the intended behavior — fewer fabricated chips trumps a "demo-friendly" but misleading first impression.
+
+#### Consequences
+
+- Phase 3 (deferred) will tackle the **geography alias map** (`Beijing → China`) and **meta-story-level tag assignment** (consult `metaStory.tags` subject to `constrainTagsToSettings`). Chunk K stays at K1a until that lands; existing test *"deriveStoryTags: does not consult model tags at all"* will need to be amended when Phase 3 ships.
+- Loaders that read snapshots from any backend already go through `dashboard-snapshot-repo.mjs` — no other callers need a back-compat tweak.
+
+---
+
 ### 2026-05-03 - D-046 - Phase 5: read-only Markdown catalog export from Supabase
 
 #### Context

@@ -81,6 +81,17 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 
 `tags` = **settings ∩ source evidence** only. Tags **do not** widen pool, recall, or clustering.
 
+**Trust posture (Phase 1 + 2 — 2026-05-16):**
+
+- Shipped stories **always carry the three-axis `tags` object** ([`storySchema.tags` is required](../packages/contracts/src/schemas.ts) — `{ topics: [], keywords: [], geographies: [] }` when no evidence on an axis).
+- **UI labels (header pills, scan-row chips) read from `tags` only.** Root [`story.topic`](../packages/contracts/src/schemas.ts) and `story.geographies` are retained on the wire for lineage continuity ([`prior.topic`](../apps/api/src/dashboard/refresh-pipeline.mjs) in the keyed-merge code) but are **not authoritative** for any UI semantics. See [`dashboard-filters.ts`](../../04-prototype/src/lib/dashboard-filters.ts).
+- **No fabricated defaults.** The legacy `?? "Diplomatic relations"` fallback in [`buildStory`](../apps/api/src/dashboard/refresh-pipeline.mjs) is gone — when no source item carries a recognized canonical topic, `story.topic` is omitted entirely (the field is `optional` on the wire). Default settings are fully empty (no seed taxonomy / no seed sources).
+- **Legacy snapshots normalize at load.** The snapshot loader ([`dashboard-snapshot-repo.mjs`](../apps/api/src/db/dashboard-snapshot-repo.mjs)) coerces missing or partial `tags` to the three-axis empty shape before validation. No destructive write-time migration; this is a read-time guard so the strict display schema can assume the field.
+
+**Phase 3 (deferred, not in this slice):**
+
+- Move from **source-only evidence** (`deriveStoryTags(sourceItems, settings)`) to **meta-story-level tag assignment** that lets the clustering output (or a dedicated tagger) propose canonical tags subject to settings ∩ evidence checks. Will include the geography alias map (e.g. `Beijing → China`) and a meta-story tag-assignment engine. **Not implemented yet** — Chunk K still locked to **K1a** in v1.
+
 ---
 
 ## Models (prod SKUs — **N2**)

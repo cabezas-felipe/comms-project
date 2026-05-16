@@ -36,11 +36,14 @@ export const storySchema = z.object({
   metaStoryId: z.string().optional(),
   title: z.string().min(1),
   subtitle: z.string().optional(),
+  // Phase 2 trust cleanup: root `geographies` and `topic` are retained on the
+  // wire for historic clients but are NOT authoritative for UI labels/filters.
+  // The dashboard reads all topic/keyword/geography pills out of `tags`; these
+  // root fields are kept only to preserve back-compat of the response shape
+  // (and lineage code on the API side, which still keys narrative continuity
+  // by canonical topic).  See `04-prototype/src/lib/dashboard-filters.ts` and
+  // `05-engineering/docs/dashboard-story-pool-spec.md` (Chunk K).
   geographies: z.array(geographySchema),
-  // Phase 1 trust cleanup: `topic` is no longer fabricated by the pipeline
-  // (the old "Diplomatic relations" default is gone).  When no source item
-  // carries a canonical topic, the field is omitted entirely — UI labels are
-  // driven by `tags` only.  See `04-prototype/src/lib/dashboard-filters.ts`.
   topic: topicSchema.optional(),
   takeaway: z.string().min(1),
   summary: z.string().min(1),
@@ -48,7 +51,12 @@ export const storySchema = z.object({
   whatChanged: z.string().min(1),
   priority: storyPrioritySchema,
   outletCount: z.number().int().nonnegative(),
-  tags: storyTagsSchema.optional(),
+  // Phase 2: `tags` is required on emitted payloads.  Each axis is a string
+  // array; an empty array means "no evidence on this axis" (never fabricated).
+  // Loaders that surface older snapshots (which may lack the field) MUST
+  // normalize at the API boundary before validation — display schema stays
+  // strict so the UI can assume the shape.
+  tags: storyTagsSchema,
   sources: z.array(sourceSchema).min(1),
 });
 

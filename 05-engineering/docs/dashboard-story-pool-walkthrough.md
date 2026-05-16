@@ -535,6 +535,32 @@ These are **expected drops** or **safe transforms**; **Chunk L** maps each to **
 
 > **Tags vs pool (v1, one-way — K1a):** Shipped story **`tags`** come **only** from **`deriveStoryTags`** — per axis **`settings ∩ source evidence`** for the **resolved `sourceItems` in that story** (topics via normalized `source.topic`, geographies via intersection with settings list, keywords via whole-word hits in headline/body). **Model/cluster tags are not authoritative** for payload tags. **Empty axis = empty array** — no fabricated labels. Tags are **label-only**: they **do not** feed candidates, recall, clustering, or dedupe (**Chunk C**).
 
+### Phase 1 + 2 amendment — trust cleanup (2026-05-16)
+
+**Status:** Shipped on `feat/meta-story-tags-phase1`; **Chunk K is still locked to K1a** — the semantics below tighten the existing contract, they do not redefine it.
+
+**What changed (Phase 1 — fabrication removal):**
+
+- **No root-topic fallback for UI.** [`dashboard-filters.ts`](../../04-prototype/src/lib/dashboard-filters.ts) (`topicsOf` / `keywordsOf` / `geographiesOf`) now reads **only** from `story.tags`. Missing tags = empty arrays on every axis. The header-pill / scan-row code paths no longer fall back to root `story.topic` or `story.geographies` for label discovery — that fallback was a quiet way for fabricated chips to leak into the UI on legacy or thin-evidence stories.
+- **No fabricated default in [`buildStory`](../apps/api/src/dashboard/refresh-pipeline.mjs).** The legacy `?? "Diplomatic relations"` is gone; `validTopic` is now `rawTopics.find((t) => VALID_TOPICS.has(t))` (no default). When no source item carries a canonical topic, the field is **omitted** from the payload (`storySchema.topic` is optional). UI labels are tags-only, so the omission has no display impact — but it stops silently inventing a topic for stories whose sources didn't actually support one.
+- **Empty defaults.** [`DEFAULT_SETTINGS`](../apps/api/src/db/settings-repo.mjs), [`apps/api/data/settings.json`](../apps/api/data/settings.json), and the prototype's [`defaultSettingsPayload`](../../04-prototype/src/lib/settings-api.ts) are now fully empty (`topics`, `keywords`, `geographies`, `traditionalSources`, `socialSources` all `[]`). An unconfigured installation surfaces nothing rather than a seed taxonomy that looks like user-chosen evidence.
+
+**What changed (Phase 2 — contract + boundary alignment):**
+
+- **`storySchema.tags` is required.** [`schemas.ts`](../packages/contracts/src/schemas.ts) dropped `.optional()` on `tags`; the display contract now guarantees `{ topics: string[], keywords: string[], geographies: string[] }` on every emitted story (empty arrays are valid). Loaders that surface legacy snapshots **must** normalize before parse — see next bullet.
+- **Snapshot loader normalizes tags at read.** [`dashboard-snapshot-repo.mjs`](../apps/api/src/db/dashboard-snapshot-repo.mjs) (`normalizeStoriesForLoad`) coerces missing / non-object / partial `tags` to the three-axis empty shape before [`liftSnapshotMeta`](../apps/api/src/db/dashboard-snapshot-repo.mjs) returns. This is a **read-time boundary** guard — no destructive write-time migration, no schema drift on disk; older snapshots load safely and stay readable.
+- **Root `story.topic` / `story.geographies` are explicitly non-authoritative for UI.** They remain on the wire because lineage matching ([keyed-merge `prior.topic`](../apps/api/src/dashboard/refresh-pipeline.mjs)) still keys narrative continuity by canonical topic when the API has one. UI code reads only `tags`.
+
+**Why this is still K1a, not a new decision:** Source authority (`deriveStoryTags(sourceItems, settings)`), one-way direction (tags don't widen pool/recall/clustering), and `settings ∩ evidence` semantics are unchanged. Phase 1/2 closes leaks where the *absence* of evidence was being papered over with a fabricated topic or a root-field fallback — bringing the on-the-wire and on-the-screen shapes in line with what K1a always said about evidence-only labels.
+
+### Phase 3 (deferred — not in this slice)
+
+> Captured here so the next pass picks up cleanly; this is **forward-look only**, not yet locked.
+
+- **Geography alias map** (e.g. `Beijing → China`, `Pacific Northwest → US`). Currently `deriveStoryTags` does string-set intersection only; out-of-settings geo strings drop on the floor instead of folding into the closest configured value.
+- **Meta-story-level tag assignment.** Move from source-only evidence to a tagging step that can consult the clustering model's `metaStory.tags` (subject to `constrainTagsToSettings`) as an additional signal, so a narrative whose source items carry weak topic strings but whose meta-story summary clearly maps to a canonical topic can still surface a tag. Existing test *“deriveStoryTags: does not consult model tags at all”* will need to be amended or replaced when this lands.
+- **Broader ingestion/recall rewiring** — tags-driven recall expansion is explicitly out of scope; K1a's one-way posture continues to hold even in Phase 3.
+
 ---
 
 ## Chunk L — Observability, scenarios, golden suites, model id in meta (**LOCKED**)

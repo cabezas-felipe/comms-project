@@ -38,6 +38,8 @@ const SAMPLE_PAYLOAD = {
       whatChanged: "Changed.",
       priority: "standard",
       outletCount: 1,
+      // Phase 2: every emitted story carries the three-axis tags object.
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
       sources: [],
     },
   ],
@@ -57,6 +59,97 @@ test("writeSnapshot + readSnapshot: persists and retrieves payload", async () =>
   assert.equal(result.contractVersion, SAMPLE_PAYLOAD.contractVersion);
   assert.equal(result.stories.length, 1);
   assert.equal(result.stories[0].title, "Test Story");
+});
+
+// Phase 2 trust cleanup: legacy snapshots persisted before the `tags` field
+// existed — or with a partial/non-object tags value — must still load.  The
+// snapshot loader normalizes them to the three-axis shape at the boundary so
+// strict consumers (display schema, dashboard UI) can rely on the contract
+// without a destructive write-time migration.
+test("readSnapshot: legacy snapshot without story.tags loads with normalized empty tags", async () => {
+  const userId = "legacy-no-tags-user";
+  const legacyPayload = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [
+      {
+        id: "legacy-1",
+        metaStoryId: "legacy-1",
+        title: "Legacy Story",
+        subtitle: "Sub.",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        takeaway: "T",
+        summary: "S",
+        whyItMatters: "W",
+        whatChanged: "C",
+        priority: "standard",
+        outletCount: 1,
+        // No `tags` field on disk (legacy shape).
+        sources: [],
+      },
+    ],
+  };
+  await writeSnapshot(userId, legacyPayload);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result.stories[0].tags, { topics: [], keywords: [], geographies: [] });
+});
+
+test("readSnapshot: partial story.tags axes are filled in with empty arrays", async () => {
+  const userId = "legacy-partial-tags-user";
+  const partialPayload = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [
+      {
+        id: "partial-1",
+        title: "Partial Tags",
+        geographies: ["US"],
+        takeaway: "T",
+        summary: "S",
+        whyItMatters: "W",
+        whatChanged: "C",
+        priority: "standard",
+        outletCount: 1,
+        // Only one axis carried in legacy persistence — others must be filled.
+        tags: { topics: ["Diplomatic relations"] },
+        sources: [],
+      },
+    ],
+  };
+  await writeSnapshot(userId, partialPayload);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result.stories[0].tags, {
+    topics: ["Diplomatic relations"],
+    keywords: [],
+    geographies: [],
+  });
+});
+
+test("readSnapshot: non-object story.tags coerces to empty three-axis shape", async () => {
+  const userId = "legacy-bogus-tags-user";
+  const bogusPayload = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [
+      {
+        id: "bogus-1",
+        title: "Bogus Tags",
+        geographies: [],
+        takeaway: "T",
+        summary: "S",
+        whyItMatters: "W",
+        whatChanged: "C",
+        priority: "standard",
+        outletCount: 0,
+        tags: "not-an-object",
+        sources: [],
+      },
+    ],
+  };
+  await writeSnapshot(userId, bogusPayload);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result.stories[0].tags, { topics: [], keywords: [], geographies: [] });
 });
 
 test("readSnapshot: result includes _meta.hasSnapshot = true", async () => {
