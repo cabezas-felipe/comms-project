@@ -236,3 +236,7 @@ Run once real keys and feeds are healthy:
 | 2026-05-15 | Initial blueprint: M1b, T1, R1, P1, A1/B1/C1, M1–M8 |
 | 2026-05-15 | Execution snapshot added: M1–M7 complete, M8 optional and currently blocked by onboarding eval quality gate |
 | 2026-05-15 | Final status updated: onboarding eval recovered to threshold (`14/20`, `70.0%`), M8 completed with durable cluster smoke harness |
+| 2026-05-15 | Phase 1 — onboarding extraction hygiene-only: removed `ALLOWED_TOPICS` / `ALLOWED_KEYWORDS` allowlist gating; canonical extractor policy now lives at the top of [`onboarding-extractor.mjs`](../apps/api/src/ai/onboarding-extractor.mjs); Unicode-safe junk filter, MVP handle hygiene. |
+| 2026-05-15 | Phase 2 — `triggerDashboardRefresh` on debounced settings save success: `refresh-context.tsx` exposes a manual refresh entrypoint that mirrors heartbeat lifecycle and publishes `heartbeatResult`. Stale-revision / failed saves do not trigger. |
+| 2026-05-15 | Phase 3 — recall observability: `_meta.recall` carries `profileAxes` / `profileAxisNames` / `profileTextLength` on every return path; funnel `afterTopicKeyword` documented as post-recall-stage count (legacy label retained); lexical whole-word policy regression-tested. |
+| 2026-05-15 | Phase 4 — docs/spec alignment: closed historical "Spec ↔ code gap" rows; extraction policy + post-save trigger documented in [pool spec](dashboard-story-pool-spec.md); scenario map gains `E-fail-with-lex` / `E-fail-no-lex` / `E-sparse` / `P2-save` rows. |

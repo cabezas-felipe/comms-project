@@ -20,7 +20,7 @@ Living document for the **first-principles** walkthrough: post-fetch **ranking, 
 |------------|--------|
 | Scope | Post-fetch only — no ingestion breadth/cadence in this walkthrough |
 | Posture | **Fewer false positives** — accept false negatives and empty/thin dashboard over wrong cards |
-| Zero configured sources | **C2 fail-closed** — no items proceed down the funnel until the user selects at least one source (or an explicit future “use defaults” product path). **Spec may run ahead of code**; align [`selectSourcePool`](../apps/api/src/dashboard/refresh-pipeline.mjs) / manifest matcher with this. |
+| Zero configured sources | **C2 fail-closed** — no items proceed down the funnel until the user selects at least one source (or an explicit future “use defaults” product path). Implemented in [`refresh-pipeline.mjs`](../apps/api/src/dashboard/refresh-pipeline.mjs) (M6); both the legacy `selectSourcePool` and the manifest path enforce this gate. |
 | Code | Prior pipeline is a **catalog of decisions**, re-validated chunk by chunk |
 
 ---
@@ -203,7 +203,7 @@ Operator-facing breakdown and `primaryDropCause` codes follow [`analyzeTopicKeyw
 |---|--------|----------|
 | **1** | Default recall mode | **`hybrid_strict`** default in production; **`keyword`** remains an explicit env / ops toggle. |
 | **2** | Lexical fallback on embed failure | **Keep (2a):** when lexical recall is non-empty and embeddings fail, output **lexical hits**; mark **degraded** (`degraded_reason`, `keywordFallbackAfterEmbeddingFailure` when applicable). |
-| **3** | Empty profile text | **Pass lexical (3b):** if `buildProfileText` is empty, output = **lexical recall items** only (no semantic widen). **Implementation:** current code still returns empty — **change required** to match spec; recommend diagnostics e.g. `empty_profile_text_lexical_only`. |
+| **3** | Empty profile text | **Pass lexical (3b):** if `buildProfileText` is empty, output = **lexical recall items** only (no semantic widen). Implemented in [`embedding-recall.mjs`](../apps/api/src/ingestion/embedding-recall.mjs); diagnostic `degraded_reason: "empty_profile_text_lexical_only"` (distinct from provider-failure flag — `keywordFallbackAfterEmbeddingFailure` is NOT set for E3b). |
 | **4** | Caps / default model | **Defer to Chunk N (4a):** Chunk E references **env-driven** `TEMPO_EMBED_TOP_K`, `TEMPO_EMBED_MAX_ITEMS`, `TEMPO_OPENAI_EMBEDDING_MODEL` with **interim defaults** today (80 / 250 / `text-embedding-3-small`); canonical SKU, caps, and eval gates finalized in **N**. |
 
 ### Modes (env `TEMPO_RECALL_MODE`)
@@ -240,7 +240,7 @@ Output list = **all lexical recall items first** (stable relative order), then s
 | Condition | Spec result |
 |-----------|----------------|
 | `candidateItems.length === 0` | Empty list, **`degraded: false`**. |
-| **Empty profile text** | **3b:** **Lexical recall items only** (no semantic widen). *Code today: empty — align to 3b.* |
+| **Empty profile text** | **3b:** **Lexical recall items only** (no semantic widen); `degraded_reason: "empty_profile_text_lexical_only"`. Implemented (M5). |
 | `embedFn` not a function | **2a:** lexical fallback if lexical non-empty; else empty + `embedding_unavailable_fail_closed`. |
 | Provider **throw** / **invalid** response | **2a:** lexical fallback if lexical non-empty; else fail-closed empty with reason. |
 | Success | Union as above; **`degraded: false`**. |
@@ -258,8 +258,20 @@ When lexical fallback applies, diagnostics include **`keywordFallbackAfterEmbedd
 
 ### Implementation backlog (from Chunk E)
 
-1. **`embedding-recall.mjs`:** empty `buildProfileText` → return **`keywordRecallItems`** with diagnostics per **3b**, not empty array.  
-2. **`C2` zero sources:** align `selectSourcePool` / manifest path with Chunk **C** (separate backlog).
+1. ~~**`embedding-recall.mjs`:** empty `buildProfileText` → return **`keywordRecallItems`** with diagnostics per **3b**, not empty array.~~ **Done — M5.**
+2. ~~**`C2` zero sources:** align `selectSourcePool` / manifest path with Chunk **C**.~~ **Done — M6.**
+
+### Phase 3 observability addendum
+
+`_meta.recall` now carries profile-sparseness diagnostics on every return path (full-run, keyword bypass, fail-closed, empty-profile lexical-only):
+
+| Field | Read as |
+|-------|---------|
+| `profileAxes` | `0` → empty-profile path; `1` → degenerate single-axis semantic widen (still runs, low confidence); `≥2` → normal |
+| `profileAxisNames` | Ordered axis names that contributed (e.g. `["topics","keywords","geographies","sources"]`) |
+| `profileTextLength` | Char count of the embedding input — quick sniff for unusually small / large profile vectors |
+
+Pure observability — does **not** gate behavior. Surfaced for `_meta.recall` consumers and the `[pipeline.recall]` log line.
 
 ---
 
@@ -664,15 +676,15 @@ Canonical targets for **staging / DC prototype** (env vars still override). **Su
 
 **Scope:** Turn locked chunks **A–N** into a **build sequence** — not new product decisions. Each commit should be **reviewable**, keep **`npm run test:api`** green (**N3a**), and move prototype/staging to **real providers** per **N2**.
 
-**Known spec ↔ code gaps (address in M, not re-open chunks):**
+**Spec ↔ code gap table (historical — all rows closed by M1–M8):**
 
-| Spec (locked) | Code today | Planned commit |
-|---------------|------------|----------------|
-| **E3b** — empty profile → **pass lexical** | [`embedding-recall.mjs`](../apps/api/src/ingestion/embedding-recall.mjs) **fail-closes** (`empty_profile_text_fail_closed`) | **M5** |
-| **C2** — zero configured sources → **fail-closed** | [`selectSourcePool`](../apps/api/src/dashboard/refresh-pipeline.mjs) returns **all** items when both source lists empty | **M6** |
-| **F3b** — non-mock `geoAssessFn` | [`server.mjs`](../apps/api/src/server.mjs) still uses **`mockAssessGeoConfidence`** | **M4** |
-| **N2** — Sonnet clustering SKU | Default `TEMPO_AI_CLUSTER_MODEL` → **`mock-anthropic-haiku`** | **M2** |
-| **L1a** — `clusterModel` on `_meta` | Not on refresh `_meta` yet | **M3** |
+| Spec (locked) | Status | Commit |
+|---------------|--------|--------|
+| **E3b** — empty profile → **pass lexical** | ✅ Closed | **M5** |
+| **C2** — zero configured sources → **fail-closed** | ✅ Closed | **M6** |
+| **F3b** — non-mock `geoAssessFn` | ✅ Closed | **M4** |
+| **N2** — Sonnet clustering SKU | ✅ Closed | **M2** |
+| **L1a** — `clusterModel` on `_meta` | ✅ Closed | **M3** |
 
 **Already aligned (no M commit required for spec):** **J1a–J3b**, **K1a**, **G/H/I** behavior covered by existing tests unless prompts change.
 

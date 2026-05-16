@@ -4030,3 +4030,169 @@ test("runRefreshPipeline: R1 stable tie-break by metaStoryId when beat-fit + fre
     ["ms-a", "ms-b", "ms-c"]
   );
 });
+
+// ─── Phase 3: lexical whole-word policy preservation (regression guards) ─────
+//
+// Q6 locks lexical recall to whole-word matching (`\b<token>\b`).  Phase 1's
+// extractor hygiene changes (open-vocab + Unicode-safe junk filter) and
+// Phase 2's manual-refresh trigger do NOT touch the recall regex.  These
+// tests pin the contract end-to-end so a future refactor that converts to
+// substring matching trips loudly.
+
+test("applyTopicKeywordFilter: whole-word match excludes substring hits (Q6 lexical baseline)", () => {
+  const settings = { topics: [], keywords: ["OFAC"] };
+  const items = [
+    makeItem({ sourceId: "match", headline: "OFAC ruling" }),
+    // "ofacility" contains "ofac" but must NOT match under \b<token>\b.
+    makeItem({ sourceId: "no-match", headline: "Acme Ofacility ribbon-cutting" }),
+  ];
+  const passed = applyTopicKeywordFilter(items, settings);
+  assert.deepEqual(passed.map((i) => i.sourceId), ["match"]);
+});
+
+test("applyTopicKeywordFilter: case-insensitive whole-word (OFAC matches 'ofac' inside text)", () => {
+  const settings = { topics: [], keywords: ["OFAC"] };
+  const passed = applyTopicKeywordFilter(
+    [makeItem({ sourceId: "x", headline: "treasury ofac announced new sanctions" })],
+    settings
+  );
+  assert.equal(passed.length, 1);
+});
+
+test("applyTopicKeywordFilter: multi-word keyword treated as a contiguous phrase", () => {
+  // Phase 1 / Q6 baseline: multi-word entries match as phrases under
+  // `\b<exact phrase>\b`, not as independent word ORs.  "organized crime"
+  // matches the phrase but NOT "organized" alone, and NOT "crime" alone.
+  const settings = { topics: [], keywords: ["organized crime"] };
+  const items = [
+    makeItem({ sourceId: "phrase", headline: "Organized crime crackdown widens" }),
+    makeItem({ sourceId: "first-word-only", headline: "Organized labor talks" }),
+    makeItem({ sourceId: "second-word-only", headline: "Local crime stats released" }),
+  ];
+  const passed = applyTopicKeywordFilter(items, settings);
+  assert.deepEqual(passed.map((i) => i.sourceId), ["phrase"]);
+});
+
+test("applyTopicKeywordFilter: keyword-only matching surfaces items even when item.topic is empty", () => {
+  // RSS items often arrive with an empty `topic` field — recall must rely on
+  // the keyword regex.  Mirrors the WaPo Iran/oil regression at the recall
+  // module's level, but pinned here so the pipeline keyword gate stays honest
+  // independently.
+  const settings = { topics: ["Migration policy"], keywords: ["petroleum"] };
+  const passed = applyTopicKeywordFilter(
+    [makeItem({ sourceId: "lex-only", topic: "", headline: "Petroleum trade rerouted across the Gulf" })],
+    settings
+  );
+  assert.equal(passed.length, 1);
+  assert.equal(passed[0].sourceId, "lex-only");
+});
+
+// ─── Phase 3: log.recall coherence with funnel afterTopicKeyword ─────────────
+
+test("runRefreshPipeline: log.funnel.afterTopicKeyword === log.recall.finalRelevant (post-union invariant)", async () => {
+  // The funnel field is the legacy `afterTopicKeyword` name, but its value is
+  // the POST-RECALL-STAGE count (lexical-or-union).  Pin the invariant so a
+  // future refactor that re-introduces a separate post-lexical stage trips
+  // here and forces an explicit decision rather than silently double-counting.
+  const item = makeItem({
+    sourceId: "x",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    headline: "OFAC update on US Colombia",
+    topic: "Diplomatic relations",
+    geographies: ["US"],
+  });
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(log.funnel.afterTopicKeyword, log.recall.finalRelevant);
+});
+
+test("runRefreshPipeline: log.recall.profileAxes surfaces on full-run hybrid_strict", async () => {
+  // Phase 3 observability: every refresh emits the profile-axis count so
+  // operators reading `_meta.recall` can tell "thin profile" apart from
+  // "embedding cliff" without having to inspect raw settings.
+  const item = makeItem({
+    sourceId: "x",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    headline: "OFAC update on US Colombia",
+    topic: "Diplomatic relations",
+    geographies: ["US"],
+  });
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS, // 4 axes contribute (topics/keywords/geographies/sources)
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  assert.equal(log.recall.profileAxes, 4);
+  assert.deepEqual(log.recall.profileAxisNames, ["topics", "keywords", "geographies", "sources"]);
+  assert.ok(log.recall.profileTextLength > 0);
+});
+
+test("runRefreshPipeline: log.recall.profileAxes surfaces on keyword-mode bypass too (no diagnostic shrink on mode toggle)", async () => {
+  const item = makeItem({
+    sourceId: "kw",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    headline: "OFAC ruling",
+  });
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: async () => [],
+    recallConfig: KEYWORD_RECALL_CONFIG,
+  });
+  assert.equal(log.recall.mode, "keyword");
+  // Keyword mode skips the embedder, but still reports profile sparseness so
+  // `_meta.recall` shape is uniform across modes.
+  assert.equal(log.recall.profileAxes, 4);
+});
+
+test("runRefreshPipeline: hybrid_strict + sparse multi-axis profile → runs, no degrade, profileAxes=2", async () => {
+  // Sparse profile is observability-only — the recall stage MUST still run
+  // semantic widen, MUST NOT flip `degraded`, and MUST surface profileAxes
+  // so operators can see the sparseness signature on `_meta.recall`.
+  const item = makeItem({
+    sourceId: "kw-hit",
+    outlet: "Reuters",
+    minutesAgo: 30,
+    topic: "Diplomatic relations",
+    headline: "Reuters US sanctions update",
+    geographies: ["US"],
+  });
+  const sparseSettings = {
+    ...BASE_SETTINGS,
+    topics: [],
+    keywords: ["sanctions"], // one-axis lexical so recall still has hits
+    geographies: [],
+    traditionalSources: ["Reuters"],
+  };
+  const { log } = await runRefreshPipeline({
+    settings: sparseSettings,
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    embedFn: stubEmbedFn(),
+    recallConfig: HYBRID_RECALL_CONFIG,
+  });
+  // Two axes contribute (keywords + sources), so we pin this sparse
+  // multi-axis signature explicitly.
+  assert.equal(log.recall.profileAxes, 2);
+  assert.equal(log.recall.degraded, false);
+  assert.equal(log.recall.degraded_reason, null);
+});

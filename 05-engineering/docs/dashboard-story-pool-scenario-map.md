@@ -24,12 +24,15 @@
 
 | ID | Scenario | User symptom | Log / `_meta` | Test | Model-sensitive (**N2**) |
 |----|----------|--------------|---------------|------|--------------------------|
-| **C2-0** | Zero configured sources | Empty dashboard immediately | `selection` / early funnel | `refresh-pipeline.test.mjs` (after **M6**) | — |
-| **E-lex** | Empty profile, lexical only | Thin but non-empty possible | `recall.degraded_reason` → `empty_profile_text_lexical_only` (after **M5**) | `embedding-recall.test.mjs` | — |
-| **E-fail** | Embed API error | Thin / empty | `embedding_api_error` fail-closed | `embedding-recall.test.mjs` | OpenAI embed SKU |
+| **C2-0** | Zero configured sources | Empty dashboard immediately | `selection.sourceFallbackReason: "no_selected_sources"` | `refresh-pipeline.test.mjs` | — |
+| **E-lex** | Empty profile, lexical only | Thin but non-empty possible | `recall.degraded_reason: "empty_profile_text_lexical_only"`, `recall.profileAxes: 0` | `embedding-recall.test.mjs` | — |
+| **E-fail-with-lex** | Embed provider error + lexical hits | Dashboard not empty; cliff visible | `recall.degraded: true`, `degraded_reason: embedding_*_fail_closed`, `keywordFallbackAfterEmbeddingFailure: true` | `embedding-recall.test.mjs`, `refresh-pipeline.test.mjs` | OpenAI embed SKU |
+| **E-fail-no-lex** | Embed provider error + no lexical hits | Strict-empty | `recall.degraded: true`, `degraded_reason: embedding_*_fail_closed`; no fallback flag | `embedding-recall.test.mjs`, `refresh-pipeline.test.mjs` | OpenAI embed SKU |
+| **E-sparse** | Sparse profile (1 axis) | Runs, low-confidence semantic widen | `recall.profileAxes: 1`, `profileAxisNames: ["sources"]`, `degraded: false` | `embedding-recall.test.mjs`, `refresh-pipeline.test.mjs` | — |
 | **F-hold** | Geo implicit / conflict | Item deferred, not candidate | geo hold bucket | `geo-filter.test.mjs` | Haiku assessor (**M4**) |
 | **G-empty** | Beat-fit strict empty | No candidates | `beatFit.strictEmpty` | pipeline / beat-fit tests | — |
 | **I-fallback** | Cluster LLM throw | Heuristic clusters or empty cluster path | funnel / cluster logs | `cluster-engine.test.mjs` | Sonnet SKU (**M2**) |
+| **P2-save** | Settings save → fresh dashboard | Latest intent reflected without waiting for heartbeat | Prototype: `triggerDashboardRefresh` fires after debounced save; API: `POST /api/dashboard/refresh` (same endpoint as heartbeat) | `04-prototype/src/pages/Settings.test.tsx`, `refresh-context.test.tsx` | — |
 
 *Add rows when DC or staging surfaces a repeatable miss.*
 

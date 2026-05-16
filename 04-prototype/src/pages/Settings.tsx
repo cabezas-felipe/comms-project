@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { CONTRACT_VERSION } from "@tempo/contracts";
 import { defaultSettingsPayload, fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
+import { useRefreshContext } from "@/lib/refresh-context";
 
 interface ListSectionProps {
   title: string;
@@ -127,6 +128,15 @@ export default function Settings() {
   const [social, setSocial] = useState<string[]>(_defaults.socialSources);
   const [draftSource, setDraftSource] = useState("");
 
+  // After a successful debounced save we fire a manual dashboard refresh so
+  // the user's next return to /dashboard reflects the new intent profile
+  // without waiting for the hourly heartbeat.  Pulled through a ref so the
+  // save callback (created once when the timer fires) sees the current
+  // context method without re-creating the effect.
+  const { triggerDashboardRefresh } = useRefreshContext();
+  const triggerDashboardRefreshRef = useRef(triggerDashboardRefresh);
+  triggerDashboardRefreshRef.current = triggerDashboardRefresh;
+
   const snapshotRef = useRef<SettingsSnapshot>({
     topics: _defaults.topics,
     keywords: _defaults.keywords,
@@ -164,6 +174,20 @@ export default function Settings() {
         if (revisionAtStart !== pendingRevisionRef.current) return;
         snapshotRef.current = { ...s };
         setSaveState("saved");
+        // Phase 2: a successful save means the user's intent profile just
+        // changed, so the persisted dashboard snapshot is now stale.  Fire a
+        // manual refresh so the next /dashboard mount (or a still-mounted
+        // Dashboard via the shared heartbeatResult channel) picks up the
+        // new ranking immediately rather than waiting for the next hourly
+        // heartbeat.  Stale revisions return early above so we never trigger
+        // for a save that was superseded mid-flight; failures fall through to
+        // the catch block and intentionally skip the trigger.
+        //
+        // Fire-and-forget: the context method already handles its own slot
+        // lifecycle, telemetry, and error toast.  We don't await because the
+        // save badge ("All changes saved") should commit immediately; the
+        // dashboard refresh runs in the background.
+        void triggerDashboardRefreshRef.current();
       } catch {
         if (revisionAtStart !== pendingRevisionRef.current) return;
         notifyError("Could not save settings. Please try again.");

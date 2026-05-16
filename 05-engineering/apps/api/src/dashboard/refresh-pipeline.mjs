@@ -118,6 +118,15 @@ const TWENTY_FOUR_HOURS_MINUTES = 24 * 60;
 // input; if every stage is fine but no stories emerged, that points at
 // clustering/grounding instead.
 
+// IMPORTANT: `afterTopicKeyword` is the POST-RECALL-STAGE count — i.e. the
+// size of `recallResult.items`, which is:
+//   - in `hybrid_strict` mode: the LEXICAL ∪ SEMANTIC union (or the lexical
+//     fallback set on a degraded run);
+//   - in `keyword`         mode: the lexical-only set.
+// The field/label keep the legacy name (`topic_keyword_recall`) so existing
+// log scrapers / dashboards don't break, but the value reflects post-union
+// recall behavior.  The fine-grained breakdown (lexical vs union vs degraded
+// reason) lives in `_meta.recall` — see embedding-recall.mjs.
 const FUNNEL_STAGES = Object.freeze([
   // [field-on-funnel, label-in-log, prior-field]
   ["totalNormalized", "normalize", null],

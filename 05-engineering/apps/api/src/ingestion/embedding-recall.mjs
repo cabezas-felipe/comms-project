@@ -58,31 +58,64 @@ export function resolveRecallConfig() {
 
 // ─── Text builders ───────────────────────────────────────────────────────────
 
-/**
- * Compose one profile text from onboarding settings.  Order is "specific →
- * general" (topics, keywords, geos, sources, narrative) so the embedding
- * weights the user's explicit beat selection most heavily.  Empty arrays are
- * dropped so we don't pollute the vector with empty headings.
- */
-export function buildProfileText(settings) {
-  if (!settings || typeof settings !== "object") return "";
+// Per-axis segment builder.  Returns an ordered list of
+// `{ axis, text }` objects — empty / whitespace-only items are dropped at the
+// item level, and axes that contribute nothing are dropped at the axis level.
+// Used by both `buildProfileText` (joins `.text` into the embedding input) and
+// `summarizeProfileContent` (counts axes for sparse-profile diagnostics).
+function profileSegments(settings) {
+  if (!settings || typeof settings !== "object") return [];
+  const clean = (xs) =>
+    (Array.isArray(xs) ? xs : [])
+      .filter((v) => typeof v === "string")
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
   const parts = [];
-  const topics = (settings.topics ?? []).filter(Boolean);
-  if (topics.length > 0) parts.push(`Topics: ${topics.join(", ")}`);
-  const keywords = (settings.keywords ?? []).filter(Boolean);
-  if (keywords.length > 0) parts.push(`Keywords: ${keywords.join(", ")}`);
-  const geos = (settings.geographies ?? []).filter(Boolean);
-  if (geos.length > 0) parts.push(`Geographies: ${geos.join(", ")}`);
-  const traditional = (settings.traditionalSources ?? []).filter(Boolean);
-  const social = (settings.socialSources ?? []).filter(Boolean);
+  const topics = clean(settings.topics);
+  if (topics.length > 0) parts.push({ axis: "topics", text: `Topics: ${topics.join(", ")}` });
+  const keywords = clean(settings.keywords);
+  if (keywords.length > 0) parts.push({ axis: "keywords", text: `Keywords: ${keywords.join(", ")}` });
+  const geos = clean(settings.geographies);
+  if (geos.length > 0) parts.push({ axis: "geographies", text: `Geographies: ${geos.join(", ")}` });
+  const traditional = clean(settings.traditionalSources);
+  const social = clean(settings.socialSources);
   const sources = [...traditional, ...social];
-  if (sources.length > 0) parts.push(`Sources: ${sources.join(", ")}`);
+  if (sources.length > 0) parts.push({ axis: "sources", text: `Sources: ${sources.join(", ")}` });
   const narrative =
     typeof settings.onboardingNarrative === "string" && settings.onboardingNarrative.trim()
       ? settings.onboardingNarrative.trim()
       : null;
-  if (narrative) parts.push(`Beat narrative: ${narrative}`);
-  return parts.join("\n");
+  if (narrative) parts.push({ axis: "narrative", text: `Beat narrative: ${narrative}` });
+  return parts;
+}
+
+/**
+ * Compose one profile text from onboarding settings.  Order is "specific →
+ * general" (topics, keywords, geos, sources, narrative) so the embedding
+ * weights the user's explicit beat selection most heavily.  Empty arrays,
+ * whitespace-only entries, and axes with no usable content are dropped so we
+ * don't pollute the vector with empty/garbled headings.
+ */
+export function buildProfileText(settings) {
+  return profileSegments(settings).map((s) => s.text).join("\n");
+}
+
+/**
+ * Summarize what went into the profile text: the joined text itself, a count
+ * of axes that contributed, the ordered axis names, and the final char
+ * length.  Surfaced on `_meta.recall` so operators can spot thin / single-axis
+ * profiles without having to inspect raw settings.  Phase 3: pure
+ * observability — does NOT change recall behavior.
+ */
+export function summarizeProfileContent(settings) {
+  const segments = profileSegments(settings);
+  const text = segments.map((s) => s.text).join("\n");
+  return {
+    profileText: text,
+    profileAxes: segments.length,
+    profileAxisNames: segments.map((s) => s.axis),
+    profileTextLength: text.length,
+  };
 }
 
 /**
@@ -146,6 +179,13 @@ export async function runEmbeddingRecall(opts) {
     config = resolveRecallConfig(),
   } = opts ?? {};
 
+  // Phase 3: compute profile-content summary upfront so EVERY return path
+  // carries the same observability surface (`profileAxes`, axis names, char
+  // length).  Without this the keyword bypass + fail-closed paths emitted a
+  // narrower diagnostic shape than the full-run path, making "did we have
+  // anything to embed against?" hard to answer from `_meta.recall` alone.
+  const profileSummary = summarizeProfileContent(settings);
+
   const baseDiagnostics = {
     mode: config.mode,
     embeddedCount: null,
@@ -158,9 +198,24 @@ export async function runEmbeddingRecall(opts) {
     embedTopK: config.embedTopK,
     embedMaxItems: config.embedMaxItems,
     embeddingModel: config.embeddingModel,
+    // Profile sparseness diagnostics — pure observability, never gates behavior.
+    //   `profileAxes`      : how many of the 5 settings axes contributed
+    //                        (0 → empty profile guard fires; 1 → degenerate
+    //                        semantic widen; ≥2 → normal).
+    //   `profileAxisNames` : ordered axis names that contributed (e.g.
+    //                        ["topics","keywords","geographies"]) so operators
+    //                        can tell "thin profile, only sources" apart from
+    //                        "thin profile, only topics".
+    //   `profileTextLength`: char count of the embedding input — a quick sniff
+    //                        for unusually small / large profile vectors.
+    profileAxes: profileSummary.profileAxes,
+    profileAxisNames: profileSummary.profileAxisNames,
+    profileTextLength: profileSummary.profileTextLength,
   };
 
   // Legacy mode: embeddings never run; just pass through keyword recall.
+  // Profile-sparseness diagnostics are still surfaced so operators can spot
+  // "we're in keyword mode and the profile would have been thin anyway."
   if (config.mode === RECALL_MODE.KEYWORD) {
     return { items: keywordRecallItems, diagnostics: baseDiagnostics };
   }
@@ -264,7 +319,7 @@ export async function runEmbeddingRecall(opts) {
     };
   }
 
-  const profileText = buildProfileText(settings);
+  const profileText = profileSummary.profileText;
   if (!profileText) {
     // E3b (M5): no profile signal → skip semantic widen, pass lexical hits
     // through.  This is distinct from the provider-failure path: there's no
@@ -272,9 +327,12 @@ export async function runEmbeddingRecall(opts) {
     // the user simply hasn't given us anything to embed against.  When
     // keyword recall is also empty we surface strict-empty with the same
     // diagnostic so operators can tell empty-profile apart from a real cliff.
+    // `profileAxes === 0` is the formal invariant for this branch; pinned in
+    // tests so any future settings shape that produces a non-empty profile
+    // text with zero axes (or vice-versa) trips loudly.
     const n = keywordRecallItems.length;
     console.warn(
-      `[recall.embedding] LEXICAL-ONLY reason=empty_profile_text_lexical_only keywordRecall=${n} (no profile signal to embed)`
+      `[recall.embedding] LEXICAL-ONLY reason=empty_profile_text_lexical_only keywordRecall=${n} profileAxes=0 (no profile signal to embed)`
     );
     return {
       items: keywordRecallItems,

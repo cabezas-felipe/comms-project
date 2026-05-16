@@ -15,7 +15,7 @@ import {
   useRefreshHeartbeat,
   writeLastAttemptAt,
 } from "./refresh-heartbeat";
-import type { DashboardFetchResult } from "./api";
+import { refreshDashboard, type DashboardFetchResult } from "./api";
 import { trackSourceOpenError } from "./analytics";
 import { notifyError } from "./notify";
 
@@ -151,6 +151,18 @@ interface RefreshContextValue {
    * `served_fresh_snapshot`).
    */
   recordAttemptFinished: (token?: AttemptToken, options?: SettleOptions) => void;
+  /**
+   * Imperative refresh entrypoint for surfaces that mutate user data and
+   * want to force the dashboard to pick up the change immediately —
+   * notably Settings save success.  Runs a POST /refresh, publishes the
+   * result into the shared `heartbeatResult` channel so Dashboard renders
+   * the fresh payload, advances the anchor exactly like a heartbeat tick,
+   * and settles its own per-attempt slot regardless of outcome.  Resolves
+   * with the fetched result on success, or `null` on failure (the error
+   * telemetry + toast mirror the heartbeat error posture so callers don't
+   * need their own error UI).
+   */
+  triggerDashboardRefresh: () => Promise<DashboardFetchResult | null>;
 }
 
 const RefreshContext = createContext<RefreshContextValue | null>(null);
@@ -389,6 +401,36 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
     [settleSlot]
   );
 
+  // Manual refresh entrypoint.  Mirrors heartbeat semantics end-to-end:
+  // pushes its own slot (so `isRefreshing` reflects the in-flight POST),
+  // publishes the result into `heartbeatResult` on success so the Dashboard
+  // overlay updates without waiting for the next hourly tick, and settles
+  // the slot (advancing the anchor to the server `lastCheckedAt` when
+  // present) regardless of outcome.  Error posture matches heartbeat: one
+  // telemetry record + one user-facing toast; no rethrow — callers can
+  // ignore the returned `null` and rely on the heartbeatResult fallback.
+  //
+  // Concurrency: no internal dedupe.  Each call gets its own token, and
+  // the in-flight slot list lets multiple overlapping triggers settle
+  // independently — the monotonic anchor guard keeps the badge stable.
+  // Callers that fire bursts should debounce upstream (Settings does so
+  // via its 600ms save timer + revision guard).
+  const triggerDashboardRefresh = useCallback(async (): Promise<DashboardFetchResult | null> => {
+    const token = pushSlot();
+    try {
+      const result = await refreshDashboard();
+      setHeartbeatResult(result);
+      settleSlot(token, { result });
+      return result;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Manual refresh failed";
+      trackSourceOpenError({ message, code: "dashboard_refresh_failed" });
+      notifyError("We couldn't refresh stories. Showing previous run.");
+      settleSlot(token);
+      return null;
+    }
+  }, [pushSlot, settleSlot]);
+
   const lastRefreshedAt = useMemo<string | null>(() => {
     if (lastAttemptAt === null) return null;
     return new Date(lastAttemptAt).toISOString();
@@ -403,6 +445,7 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
       isRefreshing,
       recordAttemptStart,
       recordAttemptFinished,
+      triggerDashboardRefresh,
     }),
     [
       lastRefreshedAt,
@@ -412,6 +455,7 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
       isRefreshing,
       recordAttemptStart,
       recordAttemptFinished,
+      triggerDashboardRefresh,
     ]
   );
 

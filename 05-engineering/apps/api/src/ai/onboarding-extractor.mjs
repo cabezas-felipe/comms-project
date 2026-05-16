@@ -1,3 +1,52 @@
+// ─── Onboarding extraction policy (canonical) ────────────────────────────────
+//
+// This file is the single source of truth for the onboarding extraction
+// contract. Any drift from this comment block — either in code or in docs —
+// is a bug; reconcile here first.
+//
+// Open-vocabulary, hygiene-only.
+//   The extractor MUST NOT gate model output against a fixed
+//   `ALLOWED_TOPICS` / `ALLOWED_KEYWORDS` set. Phase 1 removed those
+//   allowlists; the extractor now applies hygiene-only post-processing:
+//     1. Trim, drop empty / whitespace-only / over-length / punctuation-only
+//        items (Unicode-safe — non-Latin scripts survive).
+//     2. Canonicalize via `normalizeTopicLabel` / `normalizeKeywordLabel` /
+//        `normalizeSourceName` so synonyms resolve to the canonical spelling.
+//     3. Apply additive helpers (`KEYWORD_PATTERNS`, `deriveTopicHints`,
+//        handle-derived ICE/DIAN enrichment). These widen the output when
+//        text matches; they NEVER gate what the model is allowed to emit.
+//     4. Dedupe case-insensitively (first occurrence wins), stable
+//        case-insensitive sort, and cap each axis at `MAX_LIST_SIZE` items.
+//
+// Caps and bounds (MVP).
+//   `MAX_ITEM_LENGTH = 64` characters / item and `MAX_LIST_SIZE = 24`
+//   items / axis are intentionally generous signal-quality guardrails for
+//   pathological model output (runaway tokens, sentence-as-topic,
+//   duplicates) — NOT vocabulary gates. Tighten in a future phase only if
+//   evidence shows real-world outputs need it.
+//
+// Unicode-safe junk detection.
+//   `isJunkValue` accepts any item containing at least one Unicode letter
+//   or number (`\p{L}` / `\p{N}` with the `u` flag), so tokens like
+//   `中国`, `العربية`, `Москва`, `café`, and `elección` survive while
+//   pure punctuation / whitespace / em-dash items are dropped.
+//
+// Social handle hygiene (pragmatic MVP).
+//   `isWellFormedHandle` accepts `@` followed by at least one Unicode
+//   letter or number, with the remainder restricted to letters / numbers
+//   / `_` / `.` / `-`. Accepts common cross-platform forms
+//   (`@dot.handle`, `@dash-handle`, `@user_123`, `@中国`); rejects `@`,
+//   `@!`, `@ space`, `@.`, `@----`, `@dot@handle`, `@path/segment`. This
+//   is platform-neutral by design — we don't model Twitter vs Bluesky
+//   handle rules at extraction time; downstream stages can re-validate
+//   if they need platform-specific shape.
+//
+// Schema contract preserved.
+//   `extractionOutputSchema` shape (`topics`, `keywords`, `geographies`,
+//   `traditionalSources`, `socialSources` — all `string[]`) is unchanged.
+//   Provider routing (Anthropic / OpenAI / mock) and the deterministic
+//   mock extractor are unchanged.
+
 import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
 import { normalizeKeywordLabel, normalizeSourceName, normalizeTopicLabel } from "@tempo/contracts";
@@ -14,53 +63,18 @@ export const extractionOutputSchema = z.object({
   socialSources: z.array(z.string().min(1)),
 });
 
-const ALLOWED_TOPICS = new Set([
-  "Border policy",
-  "Customs policy",
-  "Deportation policy",
-  "Diplomatic relations",
-  "Energy policy",
-  "Health policy",
-  "Humanitarian aid",
-  "International health",
-  "International trade",
-  "Migration policy",
-  "Public health",
-  "Public health policy",
-  "Sanctions enforcement",
-  "Security policy",
-  "Trade policy",
-]);
+// ── Hygiene bounds ───────────────────────────────────────────────────────────
+//
+// MVP guardrails for pathological model output (runaway tokens,
+// sentence-as-topic, duplicates) — not vocabulary gates. Open vocabulary,
+// including non-Latin scripts, survives by design.
 
-const ALLOWED_KEYWORDS = new Set([
-  "asylum",
-  "border",
-  "customs",
-  "deportation",
-  "dhs",
-  "dian",
-  "diplomacy",
-  "elections",
-  "energy",
-  "health",
-  "ice",
-  "labor",
-  "manufacturing",
-  "migration",
-  "ofac",
-  "organized crime",
-  "outbreak",
-  "public health",
-  "sanctions",
-  "security",
-  "tariffs",
-  "trade",
-  "united nations",
-  "vaccine",
-  "visa",
-  "who",
-]);
+export const MAX_ITEM_LENGTH = 64;     // characters per item (MVP cap)
+export const MAX_LIST_SIZE = 24;       // items per axis (MVP cap)
 
+// Additive keyword hints derived from the input text. These supplement model
+// output with high-signal canonical terms when the text matches; they do NOT
+// gate what the model is allowed to emit.
 const KEYWORD_PATTERNS = [
   { pattern: /\bofac\b/i, value: "OFAC" },
   { pattern: /\bmigration\b/i, value: "migration" },
@@ -90,13 +104,48 @@ const KEYWORD_PATTERNS = [
   { pattern: /\bwho\b/i, value: "WHO" },
 ];
 
-// Trim, drop empties, and dedupe case-insensitively (first-occurrence wins).
-function uniqueStrings(items) {
+// ── Junk detection ───────────────────────────────────────────────────────────
+
+function isJunkValue(s) {
+  if (!s) return true;
+  if (s.length > MAX_ITEM_LENGTH) return true;
+  // Require at least one Unicode letter or number. Drops "—", "...", "@@",
+  // "???" — but keeps non-Latin tokens like "中国", "العربية", "Москва",
+  // "café", and "elección".
+  if (!/[\p{L}\p{N}]/u.test(s)) return true;
+  return false;
+}
+
+// Social handle hygiene (MVP-pragmatic, not platform-strict):
+//   - must start with "@"
+//   - must contain at least one Unicode letter or number after "@"
+//   - the rest may only contain letters, numbers, "_", ".", or "-"
+// Rejects "@", "@!", "@ space", "@.", "@----", emails like "@dot@handle",
+// and non-prefixed strings. Accepts "@StateDept", "@dot.handle",
+// "@dash-handle", "@under_score", "@digits123", "@中国".
+function isWellFormedHandle(s) {
+  if (!s.startsWith("@")) return false;
+  const rest = s.slice(1);
+  if (!/[\p{L}\p{N}]/u.test(rest)) return false;
+  return /^[\p{L}\p{N}_.\-]+$/u.test(rest);
+}
+
+// ── Core hygiene pass ────────────────────────────────────────────────────────
+//
+// Per-axis trim, junk-drop, dedupe (case-insensitive, first occurrence wins).
+// `axis === "socialSources"` enforces the @-handle shape; other axes drop any
+// item that starts with "@" — those belong on socialSources, not here.
+function applyHygiene(items, axis) {
   const seen = new Set();
   const out = [];
   for (const item of items ?? []) {
     const s = typeof item === "string" ? item.trim() : "";
-    if (!s) continue;
+    if (isJunkValue(s)) continue;
+    if (axis === "socialSources") {
+      if (!isWellFormedHandle(s)) continue;
+    } else if (s.startsWith("@")) {
+      continue;
+    }
     const key = s.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -105,13 +154,17 @@ function uniqueStrings(items) {
   return out;
 }
 
-function sortCaseInsensitive(items) {
-  return [...items].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+// Stable case-insensitive sort + per-axis size cap. Applied last so the kept
+// subset is deterministic regardless of model output order.
+function finalizeAxis(items) {
+  return [...items]
+    .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+    .slice(0, MAX_LIST_SIZE);
 }
 
-// Topic labels coming from the model are normalized first, then nudged onto
-// the canonical "<thing> policy" form for the two cases the model frequently
-// emits as a bare word.
+// Topic labels are normalized first, then nudged onto the canonical
+// "<thing> policy" form for the two cases the model frequently emits as a
+// bare word.
 function canonicalizeTopic(topic) {
   const normalized = normalizeTopicLabel(topic);
   const lower = normalized.toLowerCase();
@@ -120,6 +173,10 @@ function canonicalizeTopic(topic) {
   return normalized;
 }
 
+// Additive topic enrichment: when the text plainly references a canonical
+// area, ensure that area is in the output even if the model omitted it.
+// Never used as a gate — model-emitted open-vocab topics flow through
+// untouched.
 function deriveTopicHints(text) {
   const lower = text.toLowerCase();
   const hints = [];
@@ -131,68 +188,27 @@ function deriveTopicHints(text) {
   if (/\bsecurity\b/i.test(text)) hints.push("Security policy");
   if (/\bpublic health\b/i.test(text)) hints.push("Public health");
   if (/\btariffs?\b/i.test(text) || /\btrade\b/i.test(text)) hints.push("Trade policy");
+  if (/\bhealth ngo\b/i.test(lower)) hints.push("Health policy");
+  if (/\boutbreak\b/i.test(lower) || /\bvaccine\b/i.test(lower)) {
+    hints.push("International health");
+  }
+  if (/\btrade\b/i.test(lower) && /\bacross\b/i.test(lower)) {
+    hints.push("International trade");
+  }
   return hints;
 }
 
 function sanitizeTopics(rawTopics, text) {
-  const lower = text.toLowerCase();
-  let fromModel = uniqueStrings(rawTopics)
-    .map(canonicalizeTopic)
-    .filter((topic) => ALLOWED_TOPICS.has(topic));
-
-  // Dataset-consistent strictness: sanctions usually surface as a keyword,
-  // not a top-level topic, unless the brief is sanctions/compliance-focused.
-  if (
-    fromModel.includes("Sanctions enforcement") &&
-    (fromModel.includes("Energy policy") || fromModel.includes("Migration policy"))
-  ) {
-    fromModel = fromModel.filter((t) => t !== "Sanctions enforcement");
-  }
-
-  // Humanitarian/migration narratives can mention deportation as a keyword
-  // without promoting it to a top-level topic.
-  if (fromModel.includes("Humanitarian aid") && fromModel.includes("Deportation policy")) {
-    fromModel = fromModel.filter((t) => t !== "Deportation policy");
-  }
-
-  let topics = uniqueStrings([...fromModel, ...deriveTopicHints(text)]);
-
-  const addIfMissing = (label) => {
-    if (!topics.includes(label)) topics.push(label);
-  };
-
-  if (/\bhealth ngo\b/i.test(lower)) addIfMissing("Health policy");
-  if (/\boutbreak\b/i.test(lower) || /\bvaccine\b/i.test(lower)) {
-    addIfMissing("International health");
-  }
-  if (/\btrade\b/i.test(lower) && /\bacross\b/i.test(lower)) {
-    addIfMissing("International trade");
-  }
-
-  // "Diplomatic relations" requires an explicit phrase — the bare word
-  // "diplomatic" alone isn't enough to keep the topic.
-  if (!/\b(diplomatic relations|bilateral relations)\b/i.test(lower)) {
-    topics = topics.filter((t) => t !== "Diplomatic relations");
-  }
-
-  // When the brief refers only to "public health policy" (and not bare
-  // "public health"), the International + Public pair is redundant — drop
-  // Public so the more specific International stands.
-  if (
-    topics.includes("International health") &&
-    topics.includes("Public health") &&
-    /\bpublic health policy\b/i.test(lower) &&
-    !/\bpublic health(?! policy)\b/i.test(lower)
-  ) {
-    topics = topics.filter((t) => t !== "Public health");
-  }
-
-  return sortCaseInsensitive(topics);
+  const fromModel = applyHygiene(rawTopics, "topics").map(canonicalizeTopic);
+  const merged = [...fromModel, ...deriveTopicHints(text)];
+  return finalizeAxis(applyHygiene(merged, "topics"));
 }
 
 // "WHO" is a high-frequency acronym that the @WHO handle alone shouldn't
-// promote into the keyword list — only count it when the bare word appears
-// outside of an @-prefix.
+// promote into the keyword list. KEYWORD_PATTERNS' /\bwho\b/i would otherwise
+// match inside "@WHO" (since `@` is a non-word boundary). The model can still
+// emit "WHO" directly when context warrants, but we filter it out when only
+// the bare-word @-handle context is present.
 function whoAppearsAsTextNotHandle(text) {
   return /(?:^|[^@])\bwho\b/i.test(text);
 }
@@ -200,44 +216,50 @@ function whoAppearsAsTextNotHandle(text) {
 function sanitizeKeywords(rawKeywords, text) {
   const lower = text.toLowerCase();
 
-  const fromModel = uniqueStrings(rawKeywords)
-    .map(normalizeKeywordLabel)
-    .filter((kw) => ALLOWED_KEYWORDS.has(kw.toLowerCase()));
+  const fromModel = applyHygiene(rawKeywords, "keywords").map(normalizeKeywordLabel);
 
   const fromText = KEYWORD_PATTERNS
     .filter(({ pattern }) => pattern.test(text))
     .map(({ value }) => value);
 
-  // Handle-derived keyword exceptions with explicit policy checks.
+  // Handle-derived keyword enrichment. These are additive; the model is free
+  // to surface its own keywords whether or not the handle hint fires.
   if (/@icegov\b/i.test(lower)) fromText.push("ICE");
-  if (/@diancolombia\b/i.test(lower) && /\bcustoms policy\b/i.test(lower)) fromText.push("DIAN");
+  if (/@diancolombia\b/i.test(lower) && /\bcustoms policy\b/i.test(lower)) {
+    fromText.push("DIAN");
+  }
 
   const keepWho = whoAppearsAsTextNotHandle(text);
-  const merged = uniqueStrings([...fromModel, ...fromText])
-    .filter((kw) => ALLOWED_KEYWORDS.has(kw.toLowerCase()))
+  const merged = applyHygiene([...fromModel, ...fromText], "keywords")
     .filter((kw) => keepWho || kw.toLowerCase() !== "who");
 
-  return sortCaseInsensitive(merged);
+  return finalizeAxis(merged);
 }
 
-function sanitizeSources(rawTraditional) {
-  return sortCaseInsensitive(
-    uniqueStrings(rawTraditional)
-      .map((name) => normalizeSourceName(name))
-      .filter((name) => !/\bbulletins?\b/i.test(name))
-      .filter((name) => name.toLowerCase() !== "who")
-  );
+function sanitizeTraditionalSources(rawSources) {
+  const cleaned = applyHygiene(rawSources, "traditionalSources").map(normalizeSourceName);
+  const filtered = applyHygiene(cleaned, "traditionalSources")
+    // "WHO bulletins" and similar bulletin-style entries are not publications.
+    .filter((name) => !/\bbulletins?\b/i.test(name))
+    // WHO itself is a body, not a traditional outlet — it belongs on the
+    // socialSources list when it surfaces as @WHO.
+    .filter((name) => name.toLowerCase() !== "who");
+  return finalizeAxis(filtered);
 }
 
 function sanitizeExtraction(raw, text) {
   return {
     topics: sanitizeTopics(raw.topics, text),
     keywords: sanitizeKeywords(raw.keywords, text),
-    geographies: sortCaseInsensitive(uniqueStrings(raw.geographies)),
-    traditionalSources: sanitizeSources(raw.traditionalSources),
-    socialSources: sortCaseInsensitive(uniqueStrings(raw.socialSources)),
+    geographies: finalizeAxis(applyHygiene(raw.geographies, "geographies")),
+    traditionalSources: sanitizeTraditionalSources(raw.traditionalSources),
+    socialSources: finalizeAxis(applyHygiene(raw.socialSources, "socialSources")),
   };
 }
+
+// Exported so tests can exercise the full hygiene + canonicalization pipeline
+// without round-tripping through a provider call.
+export { sanitizeExtraction };
 
 // System prompt kept here so prompt version can be bumped in one place.
 const SYSTEM_PROMPT = [
@@ -283,10 +305,9 @@ function parseExtractionJson(raw) {
 }
 
 // Deterministic mock extraction used by both mock-anthropic and mock-openai
-// providers.  The output passes through `sanitizeExtraction` like real-model
-// output, so we only need to surface the obvious signals — the sanitizer's
-// allow-lists, keyword patterns, and topic hints fill in the rest (and drop
-// anything the mock guesses incorrectly).
+// providers. The output passes through `sanitizeExtraction` like real-model
+// output, so we only need to surface the obvious signals — hygiene + topic
+// hints + KEYWORD_PATTERNS fill in the rest.
 function mockExtract(text) {
   const lower = text.toLowerCase();
 
@@ -310,7 +331,7 @@ function mockExtract(text) {
     if (text.includes(src)) traditionalSources.push(src);
   }
 
-  const socialSources = uniqueStrings(text.match(/@\w+/g) ?? []);
+  const socialSources = text.match(/@\w+/g) ?? [];
 
   return { topics, keywords, geographies, traditionalSources, socialSources };
 }
