@@ -23,7 +23,6 @@ export const topicSchema = z.enum([
 ]);
 export const sourceKindSchema = z.enum(["traditional", "social"]);
 export const storyPrioritySchema = z.enum(["top", "standard"]);
-export const trendSchema = z.enum(["rising", "steady", "falling"]);
 
 export const sourceSchema = z.object({
   id: z.string().min(1),
@@ -63,19 +62,6 @@ export const storySchema = z.object({
 export const dashboardPayloadSchema = z.object({
   contractVersion: z.literal(CONTRACT_VERSION),
   stories: z.array(storySchema),
-});
-
-export const dashboardSelectionMetaSchema = z.object({
-  sourceSelectionMode: z.enum(["strict", "fallback"]).optional(),
-  sourceFallbackUsed: z.boolean().optional(),
-  sourceFallbackReason: z.string().nullable().optional(),
-  matchedSourceCount: z.number().int().nonnegative().optional(),
-  selectedSourceCount: z.number().int().nonnegative().optional(),
-  unmatchedSelectedSources: z.array(z.string()).optional(),
-  unavailableConnectorCount: z.number().int().nonnegative().optional(),
-  unavailableConnectorSources: z.array(z.string()).optional(),
-  matchedFeedIds: z.array(z.string()).optional(),
-  relevantItemCount: z.number().int().nonnegative().optional(),
 });
 
 export const settingsPayloadSchema = z.object({

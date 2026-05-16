@@ -38,7 +38,7 @@ Implementation direction:
 2. **Parity tests:** add/extend tests asserting runtime schemas/normalizers match current contract behavior.
 3. **Preview deploy verification:** validate `/health`, `/api/settings`, `/api/dashboard` on preview before production.
 4. **Production deploy gate:** promote only after smoke checks pass and runtime logs show no module-resolution errors for 30-60 minutes.
-5. **Post-cutover cleanup:** remove tactical `postinstall` build workaround once Option A is verified in production.
+5. **Post-cutover cleanup:** the tactical `postinstall` workaround mentioned in Context was never applied — Option A made it unnecessary, so no rollback is needed.
 
 #### Consequences
 

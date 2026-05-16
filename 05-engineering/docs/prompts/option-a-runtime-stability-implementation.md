@@ -33,7 +33,7 @@ Eliminate `ERR_MODULE_NOT_FOUND` risk caused by API runtime imports that depend 
    - Assert runtime module outputs match existing behavior (schema acceptance/rejection, normalizer outputs).
    - Ensure no contract shape drift.
 5. **Remove temporary workaround** after Option A is complete:
-   - Remove `postinstall` package-build workaround from `05-engineering/package.json` if no longer needed.
+   - If a tactical `postinstall` package-build workaround was added to `05-engineering/package.json` before this slice, remove it.  (As implemented, no such workaround was ever applied — Option A landed directly.)
 6. **Run verification**:
    - API tests: `npm run test --workspace=@tempo/api`
    - (If needed) package tests impacted by moved logic.

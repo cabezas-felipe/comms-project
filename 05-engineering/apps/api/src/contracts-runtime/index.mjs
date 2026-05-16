@@ -11,12 +11,10 @@ export {
   topicSchema,
   sourceKindSchema,
   storyPrioritySchema,
-  trendSchema,
   sourceSchema,
   storyTagsSchema,
   storySchema,
   dashboardPayloadSchema,
-  dashboardSelectionMetaSchema,
   settingsPayloadSchema,
 } from "./schemas.mjs";
 

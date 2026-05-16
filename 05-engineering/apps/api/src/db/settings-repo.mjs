@@ -16,7 +16,7 @@ const PACKAGE_ROOT = path.resolve(__dirname, "../..");
 // nothing has been chosen yet and the pipeline operates against an empty
 // vocabulary until the user opts in.
 export const DEFAULT_SETTINGS = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: CONTRACT_VERSION,
   topics: [],
   keywords: [],
   geographies: [],
