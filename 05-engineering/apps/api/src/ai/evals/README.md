@@ -2,10 +2,11 @@
 
 Lightweight, local eval harnesses for AI pipeline components. Version-controlled gold dataset. No Supabase. No network dependencies beyond the AI providers.
 
-| Harness | What it measures | Run |
-|---|---|---|
-| Onboarding extraction | Per-field precision / recall / F1 / exact-match across 20 gold examples | `npm run eval:onboarding-extraction` |
-| Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` |
+| Harness | What it measures | Run | Gates release? |
+|---|---|---|---|
+| **Critical hard-fail suite (Phase 5b)** | 8 E2E presence-first scenarios; deterministic + advisory hybrid layers | `npm run eval:critical` | **Yes** — non-zero exit on any critical scenario failure |
+| Onboarding extraction | Per-field precision / recall / F1 / exact-match across 20 gold examples | `npm run eval:onboarding-extraction` | No — advisory, drift only |
+| Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` | Smoke gate (non-zero on contract violation) |
 
 ---
 
@@ -124,3 +125,57 @@ The smoke reads the clustering model via the same `getAiCapabilityMap().clusteri
 - `1` — schema violation, missing `meta_story_id`, hallucinated source ids, or a thrown error inside `clusterItems`. Diagnostics print the offending payload.
 
 When to run: before DC validation sessions on real-model config, or after touching `cluster-engine.mjs` / clustering prompts.
+
+---
+
+## Critical Hard-Fail Suite (Phase 5b)
+
+**The release gate** for the recall / refresh / extraction stack. Eight E2E scenarios run end-to-end against the actual refresh pipeline (`runRefreshPipeline`) with injected stubs — fully hermetic, no provider keys needed.
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:critical
+```
+
+Exits **non-zero** if any single scenario fails. Drift / judge findings are advisory only and never gate.
+
+### Scenarios
+
+| ID | Intent | Must pass |
+|---|---|---|
+| `critical-01-china-defense-trade` | US–China + defense + trade | Relevant story surfaces |
+| `critical-02-monitoring-migration-border` | Migration / border narrative | Migration item surfaces, off-topic doesn't leak |
+| `critical-03-source-scoped-relevance` | Narrow selected sources | On-source surfaces, off-source filtered |
+| `critical-04-empty-profile-lexical-path` | Sparse profile, lexical hits exist | Lexical-only items surface, no false strict-empty |
+| `critical-05-embedding-failure-with-lexical-hits` | Embedding fails, lexical hits present | Lexical fallback fires with diagnostics |
+| `critical-06-embedding-failure-without-lexical-hits` | Embedding fails, no lexical hits | Strict-empty is allowed AND explicitly diagnosed |
+| `critical-07-settings-save-refresh-propagation` | Settings change → refresh reflects new beat | Different settings → different stories (API contract behind the prototype trigger) |
+| `critical-08-grounding-trust-guard` | Ungrounded meta-story candidate | Story is dropped; `groundingDropReasons` populated |
+
+### Hybrid evaluator
+
+Per the Phase 5b policy, the suite combines **two advisory layers** on top of the hard-fail core:
+
+1. **Deterministic pre-checks** (`buildDeterministicChecks`) — always run, no API key needed. Surfaces `_meta.recall` shape contracts, funnel ↔ recall coherence, source-id presence.
+2. **Semantic judge** (`runSemanticJudge`) — **OPT-IN**, advisory only.
+   ```sh
+   TEMPO_CRITICAL_SUITE_JUDGE=1 npm run eval:critical
+   ```
+   Requires `TEMPO_ANTHROPIC_API_KEY`. Runs a Sonnet judge over the first two scenarios (China + migration), scores each on relevance / coverage / noise / source_reasonableness (0–3), and emits advisory findings. **Never gates release.**
+
+### Warning policy (locked Phase 5b)
+
+- Hard-fail = critical scenario failure ONLY.
+- Drift signals (recall-shape, funnel ↔ recall divergence, judge scores < 2) are **warnings** — printed in the report, exit code unchanged.
+- When a critical scenario fails AND advisory findings are present, the report emits a **causal correlation note** so operators can quickly see whether the drift correlates with the failure.
+
+### When to run
+
+- **Before opening a PR.** This is the release gate.
+- After touching `refresh-pipeline.mjs`, `embedding-recall.mjs`, `onboarding-extractor.mjs`, `cluster-engine.mjs`, or the prototype's `refresh-context.tsx` / `Settings.tsx`.
+- Whenever onboarding-extraction eval shows large drift — run the critical suite to confirm it's drift-only (advisory) vs. a real regression (critical scenario fails).
+
+### Exit codes
+
+- `0` — all 8 scenarios passed. Release gate PASS.
+- `1` — at least one scenario failed (or a runner error). Release gate FAIL; PR blocked.
