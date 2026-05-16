@@ -25,8 +25,14 @@ describe("settings-api", () => {
   it("loads default validated settings payload when API is unavailable", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const payload = await fetchSettingsPayload();
+    // Phase 1 trust cleanup: defaults are fully empty.  The bootstrap path
+    // returns a schema-valid payload with no fabricated taxonomy or sources.
     expect(payload.contractVersion).toBe(CONTRACT_VERSION);
-    expect(payload.topics.length).toBeGreaterThan(0);
+    expect(payload.topics).toEqual([]);
+    expect(payload.keywords).toEqual([]);
+    expect(payload.geographies).toEqual([]);
+    expect(payload.traditionalSources).toEqual([]);
+    expect(payload.socialSources).toEqual([]);
   });
 
   it("persists and reloads saved settings via API", async () => {
@@ -156,8 +162,14 @@ describe("fetchSettingsPayload — identity-bound fallback policy", () => {
     vi.mocked(getProtoSession).mockReturnValue(null);
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const payload = await fetchSettingsPayload();
+    // Phase 1 trust cleanup: default settings are fully empty.  The fallback
+    // returns the empty default rather than a fabricated baseline.
     expect(payload.contractVersion).toBe(CONTRACT_VERSION);
-    expect(payload.topics.length).toBeGreaterThan(0);
+    expect(payload.topics).toEqual([]);
+    expect(payload.keywords).toEqual([]);
+    expect(payload.geographies).toEqual([]);
+    expect(payload.traditionalSources).toEqual([]);
+    expect(payload.socialSources).toEqual([]);
   });
 });
 

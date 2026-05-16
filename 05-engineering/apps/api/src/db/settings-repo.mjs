@@ -9,13 +9,19 @@ const __dirname = path.dirname(__filename);
 // Resolve two levels up from src/db/ → package root
 const PACKAGE_ROOT = path.resolve(__dirname, "../..");
 
+// Phase 1 trust cleanup: defaults are fully empty.  The previous seed list
+// implied that taxonomy/source choices already existed for the user, which
+// then surfaced as real chips/filters before they had configured anything.
+// An empty default makes the unconfigured state honest — the UI shows that
+// nothing has been chosen yet and the pipeline operates against an empty
+// vocabulary until the user opts in.
 export const DEFAULT_SETTINGS = {
   contractVersion: "2026-04-22-slice1",
-  topics: ["Diplomatic relations", "Migration policy", "Security cooperation"],
-  keywords: ["OFAC", "sanctions", "deportation routing", "bilateral"],
-  geographies: ["US", "Colombia"],
-  traditionalSources: ["The New York Times", "Reuters", "El Tiempo"],
-  socialSources: ["@latamwatcher"],
+  topics: [],
+  keywords: [],
+  geographies: [],
+  traditionalSources: [],
+  socialSources: [],
 };
 
 const GLOBAL_KEY = "global_settings";

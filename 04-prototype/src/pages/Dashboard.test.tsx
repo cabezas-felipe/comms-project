@@ -284,16 +284,17 @@ describe("Phase 6: dynamic header pills", () => {
     expect(keywordPills).toEqual(["asylum", "OFAC", "sanctions"]);
   });
 
-  it("hides keyword section when no stories carry keyword tags", async () => {
-    // Stories without `tags` at all — keywords section must not render.
+  it("hides all sections when no stories carry tags (no fallback to root topic/geographies)", async () => {
+    // Stories without `tags` at all — every header-pill section must stay
+    // empty.  Tags are now the sole source of truth; root `story.topic` and
+    // `story.geographies` are never used to fabricate pills.
     renderWithStories([
       makeStoryDto({ id: "x", title: "X", topic: "Diplomatic relations", geographies: ["US"] }),
     ]);
     await waitFor(() => expect(screen.getByText("X")).toBeInTheDocument());
     expect(screen.queryByTestId(/pill-keyword-/)).toBeNull();
-    // Topics + geographies still present from canonical fields
-    expect(screen.getByTestId("pill-topic-Diplomatic relations")).toBeInTheDocument();
-    expect(screen.getByTestId("pill-geo-US")).toBeInTheDocument();
+    expect(screen.queryByTestId(/pill-topic-/)).toBeNull();
+    expect(screen.queryByTestId(/pill-geo-/)).toBeNull();
   });
 
   it("All clears active filters and returns full feed", async () => {

@@ -21,7 +21,12 @@ export interface Story {
   id: string;
   title: string;
   geographies: Geography[];
-  topic: Topic;
+  /**
+   * Phase 1 trust cleanup: `topic` is optional.  The pipeline no longer
+   * fabricates a default value, so legacy/empty payloads may omit it.  UI
+   * labels (header pills, scan-row chips) are driven by `tags` only.
+   */
+  topic?: Topic;
   /** one-line takeaway shown on the card */
   takeaway: string;
   summary: string;
@@ -31,12 +36,11 @@ export interface Story {
   outletCount: number;
   sources: Source[];
   /**
-   * Phase 6: optional tag arrays surfaced by clustering.  When present, drive
-   * the dashboard's dynamic header pills (topics / keywords / geographies).
-   * When absent (e.g. local fixture, legacy snapshots), the dashboard falls
-   * back to the canonical `topic` / `geographies` fields.  Keyword pills only
-   * render when this object provides them — keywords are NEVER inferred from
-   * free text.
+   * Phase 6: tag arrays surfaced by clustering.  Drives the dashboard's
+   * dynamic header pills (topics / keywords / geographies) and the scan-row
+   * chips.  Phase 1 trust cleanup: when this object is absent (legacy
+   * snapshots), all three axes are treated as empty — the root `topic` /
+   * `geographies` fields are NEVER used as a fallback to fabricate labels.
    */
   tags?: {
     topics: string[];

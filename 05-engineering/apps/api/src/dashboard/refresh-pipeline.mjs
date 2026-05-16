@@ -705,20 +705,25 @@ function buildStory(metaStory, sourceItems, settings) {
     .filter((g) => VALID_GEOGRAPHIES.has(g));
   const geographies = [...new Set(validGeos)];
 
+  // Phase 1 trust cleanup: never fabricate a topic.  The legacy fallback
+  // (`?? "Diplomatic relations"`) silently invented a canonical-looking label
+  // for stories whose sources carried no recognized topic, which then showed
+  // up as a real chip in the UI.  Now we emit `topic` only when at least one
+  // source item resolves to a canonical topic; otherwise the field is omitted
+  // (`storySchema.topic` is optional).  UI labels are driven by `tags` only.
   const rawTopics = sourceItems.map((i) => normalizeTopicLabel(i.topic));
-  const validTopic = rawTopics.find((t) => VALID_TOPICS.has(t)) ?? "Diplomatic relations";
+  const validTopic = rawTopics.find((t) => VALID_TOPICS.has(t));
 
   const maxWeight = Math.max(...sourceItems.map((i) => i.weight), 0);
   const priority = maxWeight >= 80 ? "top" : "standard";
   const freshestMinutesAgo = Math.min(...sourceItems.map((i) => i.minutesAgo));
 
-  return {
+  const story = {
     id: metaStory.meta_story_id,
     metaStoryId: metaStory.meta_story_id,
     title: metaStory.title,
     subtitle: metaStory.subtitle,
     geographies,
-    topic: validTopic,
     takeaway: metaStory.summary,
     summary: metaStory.summary,
     whyItMatters: metaStory.subtitle,
@@ -759,6 +764,11 @@ function buildStory(metaStory, sourceItems, settings) {
         body: item.body,
       })),
   };
+  // Only attach `topic` when we actually have a canonical value — omitting
+  // the field is the schema-honest signal for "no recognized topic" and
+  // prevents the legacy "Diplomatic relations" fabrication.
+  if (validTopic) story.topic = validTopic;
+  return story;
 }
 
 // ─── Main pipeline ────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { Geography, Topic } from "@/data/stories";
 
-export function TopicTag({ topic }: { topic: Topic }) {
+export function TopicTag({ topic }: { topic?: Topic }) {
+  if (!topic) return null;
   return (
     <span className="eyebrow rounded-sm border border-rule/50 bg-background px-1.5 py-0.5">
       {topic}

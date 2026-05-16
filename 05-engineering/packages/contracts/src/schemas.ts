@@ -37,7 +37,11 @@ export const storySchema = z.object({
   title: z.string().min(1),
   subtitle: z.string().optional(),
   geographies: z.array(geographySchema),
-  topic: topicSchema,
+  // Phase 1 trust cleanup: `topic` is no longer fabricated by the pipeline
+  // (the old "Diplomatic relations" default is gone).  When no source item
+  // carries a canonical topic, the field is omitted entirely — UI labels are
+  // driven by `tags` only.  See `04-prototype/src/lib/dashboard-filters.ts`.
+  topic: topicSchema.optional(),
   takeaway: z.string().min(1),
   summary: z.string().min(1),
   whyItMatters: z.string().min(1),
