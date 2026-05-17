@@ -2,6 +2,83 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-17 - D-064a - D-064 follow-ups: backfill, single-source synonyms, synonym-aware alias resolve
+
+#### Context
+
+Three review follow-ups to D-064, all minor and bounded:
+
+1. `stripKeywordsMatchingGeographies` ran only on new onboarding and on Settings PUT. Users who onboarded before D-064 still carried country names in both `settings.keywords` and `settings.geographies` until they manually re-saved.
+2. `beat-fit-scorer.mjs` still had a private `GEO_SYNONYMS` constant that duplicated `GEOGRAPHY_SYNONYMS` introduced by D-064 in `contracts-runtime/geography-aliases.mjs`.
+3. `GEOGRAPHY_ALIASES` maps city tokens to long-form canonicals (e.g. `washington` → `"United States"`). Users typically configure the short form `"US"`. `resolveGeographyAlias` only matched on `setting === canonical` (case-insensitive), so `washington` + geo `US` never resolved — beat-fit `geoTextMatches` step 3 and `assignGeographies` in `meta-story-tags.mjs` missed US evidence in URLs/text that only mentioned city aliases.
+
+#### Decision
+
+1. **Backfill on read.** New `backfillKeywordDedupe(payload, userId)` helper in `server.mjs` runs `stripKeywordsMatchingGeographies` on every settings read and persists exactly once when the keyword list changes (element-wise equality check — not length-only — so e.g. `["China","Russia"]` with geo `["China"]` still persists). Applied at `GET /api/settings` and at the dashboard refresh read. Subsequent reads on already-cleaned data are no-op write-skips. Persistence failures are non-fatal — the client still receives the cleaned payload.
+2. **Single source of truth.** `beat-fit-scorer.mjs` now imports `GEOGRAPHY_SYNONYMS` from `contracts-runtime/index.mjs`; the private duplicate is deleted.
+3. **Synonym-aware `resolveGeographyAlias`.** Extended (in both `apps/api/src/contracts-runtime/geography-aliases.mjs` and `packages/contracts/src/geography-aliases.ts`) so the gate accepts a configured setting when `GEOGRAPHY_SYNONYMS[setting]` contains the alias canonical (case-insensitive). `GEOGRAPHY_SYNONYMS` is now exported from `@tempo/contracts` as well; the contracts package was rebuilt. Synonym-key lookup is case-insensitive so a lowercase `"us"` setting still resolves.
+
+#### Why
+
+- Backfill: users can't be told "re-onboard to clean up your keywords." Idempotent on-read backfill is invisible to the user — one extra write per pre-D-064 account, then steady-state.
+- Single source: drift between two synonym tables would silently flow into wrong scoring or wrong dedupe.
+- Synonym-aware resolve: covers the common short-form-vs-long-form mismatch (`US` vs `United States`) without forcing operators to know the alias map's canonical spellings.
+
+#### Tradeoffs
+
+- Backfill writes from a read path is unusual; mitigated by the keyword-list equality guard (no writes after the first cleanup) and non-fatal error handling.
+- Synonym-aware match widens `stripKeywordsMatchingGeographies` too — a keyword `Washington` with geo `US` is now stripped (the helper calls `resolveGeographyAlias` internally). This is the intended behavior: `Washington` is geo evidence, not a thematic keyword.
+
+#### Rollback
+
+Each follow-up is independently reversible. Remove the `backfillKeywordDedupe` calls to disable the read-side cleanup; revert the `beat-fit-scorer.mjs` import to restore the local table; drop the synonym branch in `resolveGeographyAlias` (both runtime and contracts package) to restore the strict exact-canonical match.
+
+---
+
+### 2026-05-17 - D-064 - Geo/keyword dedupe + URL evidence + alias-aware beat-fit geo match
+
+#### Context
+
+After onboarding, country names (China, Russia, Ukraine, US) were appearing in both `settings.keywords` and `settings.geographies`. Dashboard header pills are built from story `tags`, not settings — but the duplication still polluted the Settings UI and produced "country-as-keyword" pills downstream.
+
+Separately, priority WaPo stories where the body avoids the country name but the URL path encodes it (e.g. `…/beijing/…` for a Xi/Trump piece) reached the dashboard via semantic beat-fit but carried no `China` geography tag. Two root causes:
+
+- The meta-story tag evidence bundle skipped `source.url`, so the `GEOGRAPHY_ALIASES` gate never saw `beijing`.
+- Beat-fit `joinText()` skipped `url`, and `geoTextMatches()` only consulted a small private `GEO_SYNONYMS` map (`US` / `Colombia` only) — `GEOGRAPHY_ALIASES` was not wired in here even though `meta-story-tags.mjs` already used it.
+
+#### Decision
+
+One focused PR with four slices:
+
+- **A — Geo/keyword dedupe.** New `stripKeywordsMatchingGeographies(keywords, geographies)` helper in `contracts-runtime/geography-aliases.mjs`. A keyword is stripped when it matches a configured geo (case-insensitive, trimmed) via (a) exact match, (b) `GEOGRAPHY_SYNONYMS` (e.g. `United States` ↔ `US`, `U.S.`, `USA`), or (c) `GEOGRAPHY_ALIASES` resolution (e.g. `Bogotá` + `Colombia`, `Moscow` + `Russia`). Applied at three layers: `sanitizeExtraction` in `onboarding-extractor.mjs`, the post-extraction merge in `server.mjs` PUT path, and the initial settings validation in the PUT path — so manual Settings edits cannot reintroduce duplicates. Onboarding system prompt gained a hygiene line ("Country and region names belong in geographies, not in keywords."), and `EXTRACT_PROMPT_VERSION` bumped to `extract-v5`.
+
+- **B1 — URL in tag evidence.** `buildMetaStoryEvidenceText` now appends each source's `url` (when present) to the join text. The downstream `assignGeographies` alias gate already used `phraseAppearsInText` with `\b` boundaries, which match URL path tokens like `/beijing/`.
+
+- **B2 — URL in beat-fit joinText.** `joinText(item)` in `beat-fit-scorer.mjs` appends `item.url` when present. Items with no URL are unchanged. Side-effect noted: the existing three-WaPo regression fixture had a default URL of `https://example.com/wapo-china`, which now matches the configured `China` keyword — the test was retargeted by overriding URL on the modified fixture.
+
+- **B3 — Alias-aware beat-fit geo matching.** `geoTextMatches(text, geo, settingsGeographies)` extended to consult `GEOGRAPHY_ALIASES`: for each alias key whose canonical resolves (via `resolveGeographyAlias`) to the configured `geo`, a whole-word hit in the text counts. Same rules as the `meta-story-tags` alias gate, so beat-fit and tag assignment treat alias evidence identically.
+
+#### Why
+
+- Settings hygiene: pills derived from story `tags` were correct, but country-as-keyword duplication in `settings.keywords` was a visible inconsistency and a foot-gun for any future surface that read keywords directly.
+- Recall: WaPo and similar outlets routinely encode the lead geo in the URL slug; ignoring it dropped genuinely on-beat stories from the beat-fit geo signal, which then cascaded into the `evaluateSemanticGeoRescue` `geo_gate` block.
+- Drift control: aligning beat-fit's geo-in-text rule with the tag-assignment rule removes a class of "alias works for tags but not for scoring" surprises.
+
+#### Tradeoffs
+
+- **URL false positives.** Path tokens that coincidentally match a configured keyword now count. Concrete example caught by tests: a fixture URL `https://example.com/wapo-china` matches keyword "China" because of the sourceId. Mitigation: keep keyword/alias regexes word-bounded (already true) so substrings inside larger slugs ("chinatown" inside `/chinatown-news/`) don't match — but path-segment matches still fire. Acceptable under the MVP recall-first posture (D-063); revisit if URL-driven false positives become noisy in user-visible data.
+- **No threshold / weight changes.** `TEMPO_BEAT_FIT_THRESHOLD` remains pinned at 0.20 (default) or per-env override; D-063 rescue paths and the semantic blend are untouched. This decision is purely about *what counts as evidence*, not how evidence is weighted.
+
+#### Rollback
+
+Each slice is independent and can be reverted alone if needed:
+- Remove `stripKeywordsMatchingGeographies` calls at the three sites (helper itself is dead-code-safe).
+- Drop the `url` push in `buildMetaStoryEvidenceText` to restore the old tag evidence bundle.
+- Drop the trailing `url` in `joinText` to restore the old beat-fit join.
+- Restore the original two-step `geoTextMatches` body (canonical + synonyms only).
+
+---
+
 ### 2026-05-17 - D-063 - Lower beat-fit threshold from 0.40 to 0.20 (MVP recall-first)
 
 #### Context

@@ -599,6 +599,112 @@ test("sanitizeExtraction keeps WHO keyword when bare 'who' appears in text", () 
   assert.ok(result.keywords.includes("WHO"));
 });
 
+// ── D-064: geo-keyword dedupe at sanitizeExtraction ──────────────────────────
+//
+// Country / region names that appear in `geographies` must not also appear in
+// `keywords`. The hygiene helper strips keywords that are equivalent to any
+// configured geography via (a) exact case-insensitive match, (b) GEOGRAPHY_SYNONYMS
+// (e.g. "United States" ↔ "US"), or (c) GEOGRAPHY_ALIASES resolution
+// (e.g. "Bogotá" + "Colombia"). Thematic keywords (war, trade, sanctions, OFAC)
+// must pass through untouched.
+
+test("sanitizeExtraction strips geographies from keywords (exact match)", () => {
+  const result = sanitizeExtraction(
+    {
+      topics: [],
+      keywords: ["China", "Russia", "Ukraine", "war", "trade"],
+      geographies: ["China", "Russia", "Ukraine", "US"],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    ""
+  );
+  assert.ok(!result.keywords.includes("China"));
+  assert.ok(!result.keywords.includes("Russia"));
+  assert.ok(!result.keywords.includes("Ukraine"));
+  assert.ok(result.keywords.includes("war"));
+  assert.ok(result.keywords.includes("trade"));
+});
+
+test("sanitizeExtraction strips synonyms of configured geographies (United States → US)", () => {
+  const result = sanitizeExtraction(
+    {
+      topics: [],
+      keywords: ["United States", "USA", "U.S.", "sanctions"],
+      geographies: ["US"],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    ""
+  );
+  assert.ok(!result.keywords.includes("United States"));
+  assert.ok(!result.keywords.includes("USA"));
+  assert.ok(!result.keywords.includes("U.S."));
+  assert.ok(result.keywords.includes("sanctions"));
+});
+
+test("sanitizeExtraction strips city aliases when canonical is configured (Bogotá + Colombia)", () => {
+  const result = sanitizeExtraction(
+    {
+      topics: [],
+      keywords: ["Bogotá", "diplomacy"],
+      geographies: ["Colombia"],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    ""
+  );
+  assert.ok(!result.keywords.includes("Bogotá"));
+  assert.ok(result.keywords.includes("diplomacy"));
+});
+
+test("sanitizeExtraction strips city aliases when canonical is configured (Moscow + Russia)", () => {
+  const result = sanitizeExtraction(
+    {
+      topics: [],
+      keywords: ["Moscow", "sanctions"],
+      geographies: ["Russia"],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    ""
+  );
+  assert.ok(!result.keywords.includes("Moscow"));
+  assert.ok(result.keywords.includes("sanctions"));
+});
+
+test("sanitizeExtraction leaves keywords untouched when they are not equivalent to any geo (OFAC, sanctions + US)", () => {
+  const result = sanitizeExtraction(
+    {
+      topics: [],
+      keywords: ["sanctions", "OFAC"],
+      geographies: ["US"],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    ""
+  );
+  assert.ok(result.keywords.includes("sanctions"));
+  assert.ok(result.keywords.includes("OFAC"));
+});
+
+test("sanitizeExtraction leaves keywords untouched when geographies is empty (no dedupe target)", () => {
+  const result = sanitizeExtraction(
+    {
+      topics: [],
+      keywords: ["China", "trade"],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    ""
+  );
+  // Without a configured geo, keywords stay as the model emitted them — the
+  // helper is direction-limited (keywords → geographies, not the reverse).
+  assert.ok(result.keywords.includes("China"));
+  assert.ok(result.keywords.includes("trade"));
+});
+
 // ── extractOnboarding — key-missing errors ────────────────────────────────────
 
 test("extractOnboarding throws when anthropic: model has no API key", async () => {

@@ -1497,3 +1497,111 @@ test("D-059 wiring: an above-threshold normal pass does NOT carry beatFitRescueR
   assert.equal(included[0].beatFitRescued, undefined);
   assert.equal(included[0].beatFitRescueReason, undefined);
 });
+
+// ─── D-064: URL in joinText + alias-aware geoTextMatches ─────────────────────
+
+const D064_SETTINGS = {
+  topics: ["Diplomatic relations"],
+  keywords: ["sanctions"],
+  geographies: ["China", "US"],
+  traditionalSources: ["The Washington Post"],
+  socialSources: [],
+};
+
+test("scoreBeatFit (B2): url-only keyword match contributes when headline/body do not mention it", () => {
+  // Body/headline are deliberately neutral; only the URL contains the keyword.
+  const item = makeRssItem({
+    sourceId: "url-only-kw",
+    headline: "Officials gather for talks",
+    body: ["Generic context, no keyword terms here."],
+    geographies: [],
+    topic: "",
+    url: "https://example.com/world/sanctions-update",
+  });
+  const settings = { ...D064_SETTINGS, geographies: ["US"], topics: [] };
+  const { breakdown, reasonCodes } = scoreBeatFit(item, settings);
+  assert.ok(breakdown.keyword > 0, "URL token 'sanctions' must contribute keyword score");
+  assert.ok(reasonCodes.some((c) => c.startsWith("keyword_match")));
+});
+
+test("scoreBeatFit (B3): url-only Beijing path drives geoMatch when China is configured", () => {
+  // No body/headline mention of China; geographies empty; only URL path
+  // contains "beijing". With alias-aware geoTextMatches the geoMatch fires.
+  const item = makeRssItem({
+    sourceId: "url-only-geo",
+    headline: "Trade talks resume in the region",
+    body: ["No country name in body."],
+    geographies: [],
+    topic: "",
+    url: "https://www.washingtonpost.com/world/2026/05/16/beijing-summit/",
+  });
+  const settings = { ...D064_SETTINGS, topics: [], keywords: [] };
+  const { breakdown, reasonCodes } = scoreBeatFit(item, settings);
+  assert.ok(breakdown.geoMatch > 0, "URL path /beijing/ must drive geoMatch via GEOGRAPHY_ALIASES");
+  assert.ok(reasonCodes.some((c) => c.startsWith("geo_text_match:china")));
+});
+
+test("scoreBeatFit (B3): existing US synonym path still works ('United States' in text + geo 'US')", () => {
+  const item = makeRssItem({
+    sourceId: "us-text",
+    headline: "United States announces measures",
+    body: ["Officials briefed allies on the response."],
+    geographies: [],
+    topic: "",
+    url: "https://example.com/article",
+  });
+  const settings = { ...D064_SETTINGS, topics: [], keywords: [], geographies: ["US"] };
+  const { breakdown, reasonCodes } = scoreBeatFit(item, settings);
+  assert.ok(breakdown.geoMatch > 0, "US synonym path must continue to fire");
+  assert.ok(reasonCodes.some((c) => c.startsWith("geo_text_match:us")));
+});
+
+test("scoreBeatFit (D-064a): URL token 'washington' lifts geoMatch when geo 'US' is configured", () => {
+  // Cross-check FU3: alias "washington" → canonical "United States" must
+  // resolve to configured short-form "US" via GEOGRAPHY_SYNONYMS so the
+  // beat-fit geo signal fires on city-only URL evidence.
+  const item = makeRssItem({
+    sourceId: "us-via-alias",
+    headline: "Officials gather",
+    body: ["Generic text."],
+    geographies: [],
+    topic: "",
+    url: "https://www.example.com/world/washington-summit/",
+  });
+  const settings = { ...D064_SETTINGS, geographies: ["US"], topics: [], keywords: [] };
+  const { breakdown, reasonCodes } = scoreBeatFit(item, settings);
+  assert.ok(breakdown.geoMatch > 0, "washington in URL must lift geoMatch when US is configured");
+  assert.ok(reasonCodes.some((c) => c.startsWith("geo_text_match:us")));
+});
+
+test("scoreBeatFit (B3): unconfigured alias canonical does NOT match (settings gate honored)", () => {
+  // Body mentions Beijing but China is NOT configured. The alias must not
+  // contribute via any configured geo.
+  const item = makeRssItem({
+    sourceId: "alias-no-gate",
+    headline: "Officials in Beijing meet",
+    body: ["Talks continue."],
+    geographies: [],
+    topic: "",
+    url: "https://example.com/article",
+  });
+  const settings = { ...D064_SETTINGS, geographies: ["US"], topics: [], keywords: [] };
+  const { breakdown } = scoreBeatFit(item, settings);
+  assert.equal(breakdown.geoMatch, 0, "Beijing must not lift geoMatch when China is absent from settings");
+});
+
+test("scoreBeatFit (B2 regression): item with no url behaves unchanged", () => {
+  // Pin: removing `url` from the fixture must not change deterministic score
+  // (URL is purely additive evidence when present).
+  const baseSettings = { ...D064_SETTINGS, topics: [], geographies: ["US"], keywords: ["sanctions"] };
+  const withoutUrl = makeRssItem({
+    sourceId: "no-url",
+    headline: "U.S. expands sanctions program",
+    body: ["Treasury announced new designations."],
+    geographies: [],
+    topic: "",
+    url: "",
+  });
+  const { deterministicScore } = scoreBeatFit(withoutUrl, baseSettings);
+  assert.ok(deterministicScore > 0, "non-URL signals still score");
+});

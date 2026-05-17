@@ -24,7 +24,9 @@ import {
   SOURCE_NAME_ALIASES,
   classifySources,
   GEOGRAPHY_ALIASES,
+  GEOGRAPHY_SYNONYMS,
   resolveGeographyAlias,
+  stripKeywordsMatchingGeographies,
 } from "./index.mjs";
 
 const minimalSource = {
@@ -221,4 +223,118 @@ test("resolveGeographyAlias gates emission on settings vocabulary", () => {
   assert.equal(resolveGeographyAlias("", ["China"]), null);
   assert.equal(resolveGeographyAlias(null, ["China"]), null);
   assert.equal(resolveGeographyAlias("Beijing", []), null);
+});
+
+test("resolveGeographyAlias (D-064a): canonical 'United States' resolves to configured 'US' via GEOGRAPHY_SYNONYMS", () => {
+  // The alias map points "washington" → "United States" but real users
+  // typically configure the short form "US". The resolver now matches via the
+  // synonym table and returns the user's spelling.
+  assert.equal(resolveGeographyAlias("washington", ["US"]), "US");
+  assert.equal(resolveGeographyAlias("Washington", ["us"]), "us");
+  assert.equal(resolveGeographyAlias("New York", ["US"]), "US");
+  assert.equal(resolveGeographyAlias("Los Angeles", ["US"]), "US");
+  // Existing exact-canonical path still wins ahead of the synonym path.
+  assert.equal(resolveGeographyAlias("Washington", ["United States", "US"]), "United States");
+});
+
+test("resolveGeographyAlias (D-064a): non-synonym configs still return null", () => {
+  // "Washington" → "United States"; "Colombia" has no synonym overlap with
+  // "United States", so the gate still fails when the user hasn't opted in.
+  assert.equal(resolveGeographyAlias("Washington", ["Colombia"]), null);
+  // Beijing → China; "US" synonyms don't include China.
+  assert.equal(resolveGeographyAlias("Beijing", ["US"]), null);
+});
+
+// ── stripKeywordsMatchingGeographies (D-064) ───────────────────────────────
+
+test("GEOGRAPHY_SYNONYMS includes the canonical MVP geographies", () => {
+  // Sanity: helper depends on these surface forms existing.
+  assert.ok(Array.isArray(GEOGRAPHY_SYNONYMS.US));
+  assert.ok(GEOGRAPHY_SYNONYMS.US.includes("United States"));
+  assert.ok(GEOGRAPHY_SYNONYMS.US.includes("USA"));
+  assert.ok(GEOGRAPHY_SYNONYMS.US.includes("U.S."));
+});
+
+test("stripKeywordsMatchingGeographies removes exact geo matches (case-insensitive)", () => {
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(
+      ["China", "russia", "Ukraine", "war", "trade"],
+      ["China", "Russia", "Ukraine", "US"]
+    ),
+    ["war", "trade"]
+  );
+});
+
+test("stripKeywordsMatchingGeographies removes GEOGRAPHY_SYNONYMS surface forms", () => {
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(
+      ["United States", "U.S.", "USA", "sanctions"],
+      ["US"]
+    ),
+    ["sanctions"]
+  );
+});
+
+test("stripKeywordsMatchingGeographies removes GEOGRAPHY_ALIASES that resolve to a configured geo", () => {
+  // City aliases are geo signal, not thematic keywords.
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(["Bogotá", "diplomacy"], ["Colombia"]),
+    ["diplomacy"]
+  );
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(["Moscow", "sanctions"], ["Russia"]),
+    ["sanctions"]
+  );
+});
+
+test("stripKeywordsMatchingGeographies leaves thematic keywords untouched", () => {
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(["sanctions", "OFAC"], ["US"]),
+    ["sanctions", "OFAC"]
+  );
+});
+
+test("stripKeywordsMatchingGeographies is a no-op when geographies is empty", () => {
+  // Direction is keywords → geographies only — never the reverse.
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(["China", "trade"], []),
+    ["China", "trade"]
+  );
+});
+
+test("stripKeywordsMatchingGeographies handles unconfigured aliases (Beijing keyword + no China geo)", () => {
+  // Alias whose canonical isn't configured → not stripped (helper is gated on
+  // settings.geographies, same as resolveGeographyAlias).
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(["Beijing", "trade"], ["US"]),
+    ["Beijing", "trade"]
+  );
+});
+
+test("stripKeywordsMatchingGeographies returns a fresh array (does not mutate input)", () => {
+  const input = ["China", "trade"];
+  const result = stripKeywordsMatchingGeographies(input, ["China"]);
+  assert.deepEqual(input, ["China", "trade"], "input must not be mutated");
+  assert.notEqual(result, input, "must return a new array");
+});
+
+test("stripKeywordsMatchingGeographies (D-064a): strips US-city aliases when settings use short-form 'US'", () => {
+  // Cross-check with synonym-aware resolveGeographyAlias — a user who
+  // configured short-form "US" still gets city aliases (Washington, New York)
+  // stripped from keywords, even though the alias canonical is "United States".
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(["Washington", "diplomacy"], ["US"]),
+    ["diplomacy"]
+  );
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(["New York", "trade"], ["US"]),
+    ["trade"]
+  );
+});
+
+test("stripKeywordsMatchingGeographies tolerates non-string / blank entries", () => {
+  assert.deepEqual(
+    stripKeywordsMatchingGeographies(["China", "", null, 42, "  ", "trade"], ["China"]),
+    ["trade"]
+  );
 });

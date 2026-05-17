@@ -99,6 +99,16 @@ export const GEOGRAPHY_ALIASES: Readonly<Record<string, string>> = {
  * single seam Phase 3 relies on for the "alias evidence term → canonical
  * settings geography term" rule.
  */
+// Synonym map used by `resolveGeographyAlias` so a configured short-form
+// geography (e.g. "US") still resolves long-form alias canonicals
+// ("United States") that come out of the alias table.  Kept tightly scoped
+// to canonical settings spellings; widen only when a new geography enters
+// the contract.  Mirrored verbatim in `apps/api/src/contracts-runtime/`.
+export const GEOGRAPHY_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
+  US: ["U.S.", "U.S", "USA", "U.S.A.", "U.S.A", "United States"],
+  Colombia: ["Colombia", "Colombian", "Bogota", "Bogotá"],
+};
+
 export function resolveGeographyAlias(
   token: string,
   settingsGeographies: readonly string[]
@@ -111,7 +121,28 @@ export function resolveGeographyAlias(
   const canonicalLower = canonical.toLowerCase();
   for (const setting of settingsGeographies ?? []) {
     if (typeof setting !== "string") continue;
-    if (setting.trim().toLowerCase() === canonicalLower) return setting;
+    const settingTrimmed = setting.trim();
+    const settingLower = settingTrimmed.toLowerCase();
+    // (a) Exact canonical match — e.g. alias "beijing" → "China" against
+    // configured "China".
+    if (settingLower === canonicalLower) return setting;
+    // (b) Synonym-aware match (D-064a). The alias map uses long-form
+    // canonicals ("United States"); users frequently configure short forms
+    // ("US"). Treat them as equivalent via GEOGRAPHY_SYNONYMS and return the
+    // user's configured spelling. Synonym-key lookup is case-insensitive so a
+    // lowercase "us" setting still resolves.
+    const synsKey = Object.keys(GEOGRAPHY_SYNONYMS).find(
+      (k) => k.toLowerCase() === settingLower
+    );
+    const syns = synsKey ? GEOGRAPHY_SYNONYMS[synsKey] : null;
+    if (
+      syns &&
+      syns.some(
+        (s) => typeof s === "string" && s.trim().toLowerCase() === canonicalLower
+      )
+    ) {
+      return setting;
+    }
   }
   return null;
 }

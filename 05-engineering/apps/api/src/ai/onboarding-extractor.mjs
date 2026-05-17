@@ -49,11 +49,18 @@
 
 import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
-import { normalizeKeywordLabel, normalizeSourceName, normalizeTopicLabel } from "../contracts-runtime/index.mjs";
+import {
+  normalizeKeywordLabel,
+  normalizeSourceName,
+  normalizeTopicLabel,
+  stripKeywordsMatchingGeographies,
+} from "../contracts-runtime/index.mjs";
 import { providerFor } from "./model-router.mjs";
 import { withTimeout } from "./guardrails.mjs";
 
-export const EXTRACT_PROMPT_VERSION = "extract-v4";
+// D-064: bumped from extract-v4 when the system prompt added the
+// "country names belong in geographies, not keywords" hygiene line.
+export const EXTRACT_PROMPT_VERSION = "extract-v5";
 
 export const extractionOutputSchema = z.object({
   topics: z.array(z.string().min(1)),
@@ -245,10 +252,18 @@ function sanitizeTraditionalSources(rawSources) {
 }
 
 function sanitizeExtraction(raw, text) {
+  const geographies = finalizeAxis(applyHygiene(raw.geographies, "geographies"));
+  // D-064: country/region names must not appear in both `keywords` and
+  // `geographies`. Strip geo-equivalent keywords (exact + GEOGRAPHY_SYNONYMS +
+  // GEOGRAPHY_ALIASES) after both axes are individually sanitized.
+  const keywords = stripKeywordsMatchingGeographies(
+    sanitizeKeywords(raw.keywords, text),
+    geographies
+  );
   return {
     topics: sanitizeTopics(raw.topics, text),
-    keywords: sanitizeKeywords(raw.keywords, text),
-    geographies: finalizeAxis(applyHygiene(raw.geographies, "geographies")),
+    keywords,
+    geographies,
     traditionalSources: sanitizeTraditionalSources(raw.traditionalSources),
     socialSources: finalizeAxis(applyHygiene(raw.socialSources, "socialSources")),
   };
@@ -275,6 +290,7 @@ const SYSTEM_PROMPT = [
   "                       Include high-signal nouns/acronyms when present (e.g. WHO, DHS, ICE, DIAN, migration, border, sanctions, vaccine, outbreak).",
   '                       Keep each entry short (1–3 words).',
   '  geographies        — country or region names mentioned (e.g. "US", "Colombia").',
+  "                       Country and region names belong in geographies, not in keywords. Do not duplicate a country across both fields.",
   '  traditionalSources — full outlet names without "The" prefix (e.g. "Reuters", "New York Times", "Wall Street Journal", "Associated Press", "BBC", "El Tiempo").',
   '                       Do NOT abbreviate: write "New York Times" not "NYT", "Associated Press" not "AP", "Wall Street Journal" not "WSJ".',
   '  socialSources      — social media accounts or platform-based sources (e.g. "@stateDept", "@latamwatcher").',

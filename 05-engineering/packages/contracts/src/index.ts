@@ -38,5 +38,6 @@ export {
 } from "./label-normalization.js";
 export {
   GEOGRAPHY_ALIASES,
+  GEOGRAPHY_SYNONYMS,
   resolveGeographyAlias,
 } from "./geography-aliases.js";

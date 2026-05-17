@@ -4728,6 +4728,9 @@ test("regression (three-story WaPo): if a candidate is excluded, decisionTrace e
     headline: "Commodity markets brace for fertilizer crunch",
     body: ["Farmers continue to face commodity stress across the region."],
     minutesAgo: 60,
+    // Override default URL so the path token "wapo-china" doesn't trigger the
+    // configured "China" keyword via the D-064 URL-as-evidence join.
+    url: "https://example.com/commodity-markets",
   });
 
   const { log } = await runRefreshPipeline({
