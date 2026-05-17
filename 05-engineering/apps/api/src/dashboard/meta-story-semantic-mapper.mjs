@@ -33,7 +33,7 @@
 //   TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED      — per-axis gate (default: false)
 //   TEMPO_TAG_SEMANTIC_TOPICS_THRESHOLD      — float in [0,1] (default: 0.75)
 //   TEMPO_TAG_SEMANTIC_KEYWORDS_THRESHOLD    — float in [0,1] (default: 0.75)
-//   TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS     — production scorer timeout (default: 1500)
+//   TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS     — production scorer timeout (default: 3000)
 //   TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS    — evidence text cap (default: 4000)
 //
 // An axis is ENABLED only when the kill switch is off AND the global flag
@@ -49,7 +49,7 @@ const DEFAULT_KEYWORD_THRESHOLD = 0.75;
 // `TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS`.  Picked so a single refresh of a
 // few stories with a few candidate labels stays well under the existing
 // pipeline budget even on cold-start embedding calls.
-const DEFAULT_SCORER_TIMEOUT_MS = 1500;
+const DEFAULT_SCORER_TIMEOUT_MS = 3000;
 const DEFAULT_MAX_EVIDENCE_CHARS = 4000;
 
 /**
