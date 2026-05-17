@@ -2,6 +2,7 @@ import express from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import {
   getAiCapabilityMap,
@@ -53,6 +54,57 @@ const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = process.env.TEMPO_DATA_DIR ?? path.join(ROOT, "data");
 const PORT = Number(process.env.TEMPO_API_PORT || 8787);
+
+let _envBootstrapAttempted = false;
+function bootstrapApiEnv() {
+  if (_envBootstrapAttempted || process.env.NODE_ENV === "test") return;
+  _envBootstrapAttempted = true;
+
+  const hasSupabaseEnv =
+    Boolean(process.env.SUPABASE_URL) &&
+    Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY);
+  if (!hasSupabaseEnv) {
+    // Defensive fallback: load env from common roots when the process was started
+    // from an unexpected entrypoint and missed main.mjs dotenv bootstrap.
+    const candidates = [
+      path.resolve(ROOT, ".env"),
+      path.resolve(ROOT, ".env.local"),
+      path.resolve(ROOT, "..", ".env"),
+      path.resolve(ROOT, "..", ".env.local"),
+      path.resolve(ROOT, "..", "..", ".env"),
+      path.resolve(ROOT, "..", "..", ".env.local"),
+    ];
+    for (const envPath of candidates) {
+      dotenv.config({ path: envPath });
+    }
+
+    const recovered =
+      Boolean(process.env.SUPABASE_URL) &&
+      Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY);
+    if (!recovered) {
+      console.warn(
+        "[api.env] Supabase env vars are still missing after dotenv bootstrap. " +
+          "Expected SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY)."
+      );
+    }
+  }
+
+  // Default semantic tag mapping ON for prototype runs. Explicit env values
+  // still win (including kill-switch=true in emergencies).
+  if (process.env.TEMPO_TAG_SEMANTIC_MAPPING_ENABLED == null) {
+    process.env.TEMPO_TAG_SEMANTIC_MAPPING_ENABLED = "true";
+  }
+  if (process.env.TEMPO_TAG_SEMANTIC_TOPICS_ENABLED == null) {
+    process.env.TEMPO_TAG_SEMANTIC_TOPICS_ENABLED = "true";
+  }
+  if (process.env.TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED == null) {
+    process.env.TEMPO_TAG_SEMANTIC_KEYWORDS_ENABLED = "true";
+  }
+  if (process.env.TEMPO_TAG_SEMANTIC_KILL_SWITCH == null) {
+    process.env.TEMPO_TAG_SEMANTIC_KILL_SWITCH = "false";
+  }
+}
+bootstrapApiEnv();
 
 const app = express();
 app.use(express.json());
