@@ -14,11 +14,19 @@
 //   - Scores are bounded to [0, 1] after clamping; reason codes are strings
 //     attached to each item for offline analysis (logs, _meta).
 //   - "Soft-geo" means a story can pass even when its primary geography is
-//     broader than the configured target — but core actor-fit stories score
-//     higher and off-beat-geo stories take a penalty unless other signals carry.
+//     broader than the configured target — text mention of a configured geo
+//     suffices alongside structural overlap.
 //   - Keyword + topic checks reuse the same canonical normalization + token
 //     boundaries used elsewhere in the pipeline so lexical behavior stays
 //     consistent across stages.
+//
+// D-060 (Point 7) cleanup: the prototype-era `POLICY_ACTOR_CUES` actor list
+// (Petro, Colombia, State Department, Treasury, …) and the
+// `OFF_BEAT_REGIONS` penalty (asia, africa, …) are removed. Both encoded a
+// single Colombia/US bilateral demo persona and produced wrong rankings for
+// any other user beat (an Africa-monitoring user was penalized for the word
+// "Africa"). The commodity-framing penalty is kept as a generic precision
+// filter. Core positive signals are now topic + keyword + geo + recency.
 
 import { normalizeTopicLabel } from "../contracts-runtime/index.mjs";
 import {
@@ -46,10 +54,11 @@ export const BEAT_FIT_THRESHOLD = 0.40;
 //   2. BEAT_FIT_RESCUE_LOWER_BOUND        (legacy fallback, kept for back-compat)
 //   3. DEFAULT_RESCUE_LOWER_BOUND
 // Rescue rule is intentionally strict (FP-first posture): require at least
-// RESCUE_MIN_STRONG_SIGNALS distinct CORE positive signals (topic / actor /
-// keyword / geo — recency is excluded) AND zero penalties, so global
-// precision stays intact while a narrow slice of borderline-but-well-
-// corroborated items survive.
+// RESCUE_MIN_STRONG_SIGNALS distinct CORE positive signals (topic / keyword /
+// geo — recency is excluded; actor was removed in D-060) AND zero penalties,
+// so global precision stays intact while a narrow slice of borderline-but-
+// well-corroborated items survive. The threshold is now 3-of-3 remaining
+// core signals.
 export const DEFAULT_RESCUE_LOWER_BOUND = 0.35;
 export const RESCUE_MIN_STRONG_SIGNALS = 3;
 export const BEAT_FIT_RESCUE_REASON = "rescue_borderline_multisignal";
@@ -58,7 +67,7 @@ export const BEAT_FIT_RESCUE_REASON = "rescue_borderline_multisignal";
 // 0.40 threshold can still pass when ALL of:
 //   - `semanticIntentScore >= SEMANTIC_GEO_RESCUE_MIN` (default 0.60)
 //   - the scoreBeatFit geo component fired (`breakdown.geoMatch > 0`)
-//   - no major penalty (offBeatGeo / pureCommodity / noConfiguredSignal)
+//   - no major penalty (pureCommodity / noConfiguredSignal — D-060 removed offBeatGeo)
 // **Uncapped** (D-062 amendment) — every eligible item is rescued.
 // Coexists with the older borderline-multisignal path; multisignal wins when
 // both qualify so prior rescues keep their original reason code.
@@ -71,39 +80,26 @@ export const DEFAULT_SEMANTIC_GEO_RESCUE_MIN = 0.60;
 export const SEMANTIC_GEO_RESCUE_REASON = "rescue_semantic_geo";
 
 // Component weights (sum > threshold so no single signal can carry alone, but
-// strong combinations clear comfortably).
+// strong combinations clear comfortably). D-060: actor component removed;
+// the freed weight (0.25) is redistributed into keyword (+0.05) and geoMatch
+// (+0.05) so a clean topic + keyword + geo combination still clears the
+// 0.40 threshold without leaning on the legacy actor cue list. Recency
+// unchanged.
 const W = Object.freeze({
   topic: 0.30,
-  actor: 0.25,
-  keyword: 0.20,
-  geoMatch: 0.15,
+  keyword: 0.25,
+  geoMatch: 0.20,
   recency: 0.10,
 });
 
-// Penalties subtract from the final score. Designed so a clearly off-beat
-// story (e.g. "Asia's farmers, global food supply") sinks below threshold
-// even when it incidentally hits a configured topic or geography.
+// Penalties subtract from the final score. D-060 removed the off-beat-region
+// penalty (penalized Africa-monitoring users for stories mentioning
+// "Africa"). The commodity-framing penalty stays as a generic precision
+// filter; the no-signal floor stays as the structural-misalignment guard.
 const P = Object.freeze({
-  offBeatGeo: 0.30,
   pureCommodity: 0.15,
   noConfiguredSignal: 0.20,
 });
-
-// Geographies treated as off-beat unless they appear in configured set.
-// Substring match on item.headline + body. Keep tight — only well-known
-// regional clusters; avoid country names that often co-occur with US foreign
-// policy (Iran, Russia, Ukraine, etc.) so we don't downrank "U.S. strikes
-// Iranian tankers" as a side effect.
-const OFF_BEAT_REGIONS = [
-  "asia",
-  "asian",
-  "africa",
-  "african",
-  "europe",
-  "european",
-  "australia",
-  "oceania",
-];
 
 // Pure-commodity / agricultural-economy framing, often a tell that the story
 // is about downstream economic effects rather than the policy beat itself.
@@ -120,29 +116,6 @@ const COMMODITY_TERMS = [
   "grain",
   "fertilizer",
   "livestock",
-];
-
-// Lightweight actor cue list. We do NOT try to do NER — instead we look for
-// proper-noun policy actors that strongly signal the item is about US/Colombia
-// foreign-policy / bilateral activity. Substring + word-boundary match.
-const POLICY_ACTOR_CUES = [
-  "u.s.",
-  "us ",
-  "united states",
-  "white house",
-  "state department",
-  "treasury",
-  "ofac",
-  "congress",
-  "senate",
-  "house of representatives",
-  "pentagon",
-  "department of defense",
-  "petro",
-  "colombia",
-  "colombian",
-  "bogota",
-  "bogotá",
 ];
 
 function escapeRegex(s) {
@@ -174,16 +147,6 @@ function geoTextMatches(text, geo) {
   return false;
 }
 
-function buildAnyTokenRegex(terms) {
-  const cleaned = (terms ?? []).map((t) => (typeof t === "string" ? t.trim() : "")).filter(Boolean);
-  if (cleaned.length === 0) return null;
-  // Use word boundaries; "u.s." has trailing period, so we relax the trailing
-  // boundary requirement for the actor list specifically by anchoring with
-  // \b at the start only.
-  const alternation = cleaned.map(escapeRegex).join("|");
-  return new RegExp(`\\b(?:${alternation})`, "i");
-}
-
 function buildPlainTokenRegex(terms) {
   const cleaned = (terms ?? []).map((t) => (typeof t === "string" ? t.trim() : "")).filter(Boolean);
   if (cleaned.length === 0) return null;
@@ -191,9 +154,7 @@ function buildPlainTokenRegex(terms) {
   return new RegExp(`\\b(?:${alternation})\\b`, "i");
 }
 
-const OFFBEAT_REGEX = buildPlainTokenRegex(OFF_BEAT_REGIONS);
 const COMMODITY_REGEX = buildPlainTokenRegex(COMMODITY_TERMS);
-const ACTOR_REGEX = buildAnyTokenRegex(POLICY_ACTOR_CUES);
 
 function joinText(item) {
   const headline = String(item?.headline ?? "");
@@ -231,9 +192,9 @@ function recencyScore(minutesAgo) {
  *                     `deterministicWeighted` = deterministic * 0.65
  *                     `semanticIntentWeighted` = semantic * 0.35
  *     reasonCodes:  string[] — internal-only codes describing why the score
- *                   landed where it did (e.g. "topic_match", "actor_us",
- *                   "geo_offbeat_asia", "commodity_framing",
- *                   "semantic_intent_blend:0.74")
+ *                   landed where it did (e.g. "topic_match:diplomatic relations",
+ *                   "keyword_match:sanctions", "geo_text_match:us",
+ *                   "commodity_framing:wheat", "semantic_intent_score:0.74").
  *   }
  *
  * Opts:
@@ -258,15 +219,6 @@ export function scoreBeatFit(item, settings, opts = {}) {
     reasonCodes.push(`topic_match:${itemTopic}`);
   } else {
     breakdown.topic = 0;
-  }
-
-  // Actor alignment — does the text mention a policy-actor cue?
-  if (ACTOR_REGEX && ACTOR_REGEX.test(text)) {
-    breakdown.actor = W.actor;
-    const match = text.match(ACTOR_REGEX);
-    reasonCodes.push(`actor_match:${match?.[0]?.toLowerCase().trim()}`);
-  } else {
-    breakdown.actor = 0;
   }
 
   // Keyword/context alignment — token-bound match against configured keywords.
@@ -305,22 +257,10 @@ export function scoreBeatFit(item, settings, opts = {}) {
   if (recScore >= 0.75) reasonCodes.push("recency_fresh");
   else if (recScore <= 0.25) reasonCodes.push("recency_stale");
 
-  // Penalties — off-beat geography (regional clusters not in configured set),
-  // pure-commodity framing, and "no signal at all" floor.
+  // Penalties — pure-commodity framing and "no signal at all" floor.
+  // D-060 removed the off-beat-region penalty.
   let penalty = 0;
-  if (OFFBEAT_REGEX && OFFBEAT_REGEX.test(text)) {
-    // Soft-geo: penalty applies only when the item has NO explicit geo overlap
-    // with configured set. A US-strikes-Iran story might mention "Asia" in
-    // body without being off-beat.
-    if (!geoHit) {
-      const match = text.match(OFFBEAT_REGEX);
-      const tag = match?.[0]?.toLowerCase();
-      breakdown.offBeatGeo = -P.offBeatGeo;
-      penalty += P.offBeatGeo;
-      reasonCodes.push(`geo_offbeat:${tag}`);
-    }
-  }
-  if (COMMODITY_REGEX && COMMODITY_REGEX.test(lower) && !breakdown.actor) {
+  if (COMMODITY_REGEX && COMMODITY_REGEX.test(lower)) {
     breakdown.pureCommodity = -P.pureCommodity;
     penalty += P.pureCommodity;
     const match = lower.match(COMMODITY_REGEX);
@@ -328,7 +268,7 @@ export function scoreBeatFit(item, settings, opts = {}) {
   }
   // No-signal floor — if the item triggered no positive signals at all, it's
   // off-beat by default.
-  const positiveSum = breakdown.topic + breakdown.actor + breakdown.keyword + breakdown.geoMatch;
+  const positiveSum = breakdown.topic + breakdown.keyword + breakdown.geoMatch;
   if (positiveSum === 0) {
     breakdown.noConfiguredSignal = -P.noConfiguredSignal;
     penalty += P.noConfiguredSignal;
@@ -404,27 +344,26 @@ export function readRescueLowerBound() {
 
 // Strong positive signals are derived from existing scorer outputs — no new
 // scoring logic, just a count of distinct evidence dimensions that fired.
-// Only the four core alignment signals (topic / actor / keyword / geo) count
-// here. Recency still contributes to the score itself, but freshness alone is
-// not evidence that an item is on the beat — letting recency_fresh count
-// toward the rescue tally would let a thinly-aligned breaking story slip
-// through the FP-first gate.
+// D-060: only the three remaining core alignment signals (topic / keyword /
+// geo) count here. Recency still contributes to the score itself, but
+// freshness alone is not evidence that an item is on the beat — letting
+// recency_fresh count toward the rescue tally would let a thinly-aligned
+// breaking story slip through the FP-first gate.
 function countStrongSignals(breakdown) {
   let count = 0;
   if ((breakdown?.topic ?? 0) > 0) count++;
-  if ((breakdown?.actor ?? 0) > 0) count++;
   if ((breakdown?.keyword ?? 0) > 0) count++;
   if ((breakdown?.geoMatch ?? 0) > 0) count++;
   return count;
 }
 
-// Any of the three penalty buckets disqualifies rescue. Penalties represent
-// structural misalignment (off-beat region, pure commodity framing, no
+// Any remaining penalty bucket disqualifies rescue. D-060 removed the
+// off-beat-region penalty; pureCommodity + noConfiguredSignal remain.
+// Penalties represent structural misalignment (pure commodity framing, no
 // configured signal at all) — letting a penalized item through the rescue
 // path would directly undo what the penalty was designed to catch.
 function hasMajorPenalty(breakdown) {
   return (
-    (breakdown?.offBeatGeo ?? 0) < 0 ||
     (breakdown?.pureCommodity ?? 0) < 0 ||
     (breakdown?.noConfiguredSignal ?? 0) < 0
   );
@@ -438,7 +377,8 @@ function hasMajorPenalty(breakdown) {
  *     rescued:       boolean — true only if in band, no penalty, ≥ N signals
  *     inBand:        boolean — score is in [lowerBound, threshold)
  *     strongSignals: number  — count of distinct CORE positive signals
- *                              (topic / actor / keyword / geo; recency excluded)
+ *                              (topic / keyword / geo; recency excluded; actor
+ *                              was removed in D-060)
  *     blockedBy:     null | "major_penalty" | "insufficient_signals"
  *   }
  *
@@ -786,9 +726,9 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
 // Pick the most informative single reason for the exclusion histogram. Order
 // matters — penalties and structural misses dominate over absence-of-bonus.
 // Derived from the breakdown alone; rescue-blocked annotations live on the
-// per-item reasonCodes (not the histogram).
+// per-item reasonCodes (not the histogram). D-060 removed the off-beat-region
+// bucket.
 function pickPrimaryExcludeReason(breakdown) {
-  if (breakdown.offBeatGeo) return "excluded_offbeat_geo";
   if (breakdown.pureCommodity) return "excluded_commodity_framing";
   if (breakdown.noConfiguredSignal) return "excluded_no_signal";
   // Item had some positive signals but didn't reach threshold — soft "low score".

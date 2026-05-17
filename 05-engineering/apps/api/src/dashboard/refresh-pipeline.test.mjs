@@ -1459,7 +1459,11 @@ test("Phase 1 strict-empty: pairwise mixed run produces only the include story",
   const exclude = makeItem({
     sourceId: "exclude",
     outlet: "The Washington Post — World",
-    geographies: ["US"],                  // forces past geo filter
+    // No structural geo — mockAssessGeoConfidence's 0.85 clears the implicit
+    // threshold (0.80) so the item still reaches beat-fit. With no geo bonus
+    // and no keyword, the commodity penalty drops it below 0.40 — the
+    // D-060-shape negative path.
+    geographies: [],
     topic: "Migration policy",            // forces past topic+keyword recall
     headline: "Iran war is crushing Asia's farmers, threatening global food supply",
     body: ["Wheat and grain prices have surged across Asia, hammering smallholder farmers."],
@@ -1489,18 +1493,21 @@ test("Phase 1 strict-empty: pairwise mixed run produces only the include story",
   assert.equal(log.beatFit.includedCount, 1);
   assert.equal(log.beatFit.excludedCount, 1);
   assert.ok(
-    log.beatFit.excludeReasonHistogram.excluded_offbeat_geo >= 1 ||
-      log.beatFit.excludeReasonHistogram.excluded_commodity_framing >= 1,
-    "exclude histogram must record either offbeat-geo or commodity-framing"
+    (log.beatFit.excludeReasonHistogram.excluded_commodity_framing ?? 0) >= 1,
+    "exclude histogram must record commodity-framing (D-060 removed off-beat penalty)"
   );
 });
 
 test("Phase 1 strict-empty: when nothing clears beat-fit, payload.stories is []", async () => {
-  // Single off-beat item that passes recall but fails beat-fit.
+  // Single commodity-noise item that passes recall (item.topic matches a
+  // configured topic) but fails beat-fit — D-060 keeps the commodity penalty.
+  // No structural geo so the geo filter accepts via implicit confidence and
+  // scoreBeatFit gets no geo bonus, letting commodity drop the score below
+  // threshold.
   const offbeat = makeItem({
     sourceId: "x",
     outlet: "The Washington Post — World",
-    geographies: ["US"],
+    geographies: [],
     topic: "Diplomatic relations",
     headline: "Asian commodity markets brace for fertilizer crunch",
     body: ["Farmers across Asia face commodity stress; harvest season looms."],
@@ -1659,15 +1666,15 @@ test("runRefreshPipeline: log.funnel.primaryDropStage flags the source_selection
 });
 
 test("runRefreshPipeline: log.funnel.primaryDropStage is beat_fit_precision when recall has items but beat-fit drops them", async () => {
-  // Item passes recall (topic match on "Diplomatic relations" + keyword
-  // match on "sanctions") but beat-fit drops it: no explicit geo overlap
-  // and no policy actor in the text, so the off-beat-geo + commodity-framing
-  // penalties pull the score below 0.40.
+  // Item passes recall (keyword match on "sanctions") but beat-fit drops it:
+  // no configured topic in text, no geo overlap, and the commodity-framing
+  // penalty pulls the score below 0.40. D-060 removed the off-beat-region
+  // penalty; commodity remains the precision filter for this shape.
   const items = [
     makeItem({
       sourceId: "x1",
       outlet: "Reuters",
-      topic: "Diplomatic relations",
+      topic: "Other",
       geographies: [],
       headline: "Asian farmers brace for new commodity sanctions",
       body: ["Wheat and grain commodity markets across Asia ripple."],
@@ -4347,14 +4354,16 @@ test("decisionTrace: beatFit counters are consistent with histogram totals (no d
 });
 
 test("decisionTrace: sampleExclusions is capped (≤ 5) and entries carry only minimal fields", async () => {
-  // Six recall-passing but beat-fit-failing items.  Each clears recall via
-  // a configured topic, then trips beat-fit (off-beat geo + commodity).
-  // Cap = 5 is enforced inside the pipeline.
+  // Six recall-passing but beat-fit-failing items. Each clears recall via the
+  // configured topic, then trips beat-fit on the commodity-framing penalty
+  // (D-060 kept commodity; off-beat-region penalty is gone). No structural
+  // geo → no geo bonus → topic alone + recency − commodity drops the score
+  // below 0.40. Cap = 5 is enforced inside the pipeline.
   const items = Array.from({ length: 6 }, (_, i) =>
     makeItem({
       sourceId: `off-${i}`,
       outlet: "The Washington Post — World",
-      geographies: ["US"],                  // pass geo filter
+      geographies: [],
       topic: "Diplomatic relations",        // pass topic+keyword recall
       headline: "Asia farmers face commodity squeeze on wheat and fertilizer",
       body: ["Farmers across Asia continue to face commodity stress."],
@@ -4695,18 +4704,20 @@ test("regression (three-story WaPo): all three candidates pass source/recall and
 });
 
 test("regression (three-story WaPo): if a candidate is excluded, decisionTrace explains it (no silent drops)", async () => {
-  // Same profile but the China story now has off-beat-geo framing (mentions
-  // "Asia" with no US/Colombia overlap), so beat-fit drops it. The other two
-  // still clear. The contract: the drop is NEVER silent — the trace surfaces
-  // the excluded item with a structured reason and counters.
+  // Same profile but the China story now has commodity-only framing with no
+  // geo overlap and no configured keyword in text — beat-fit drops it via
+  // the commodity-framing penalty (D-060 kept commodity; off-beat-region is
+  // gone). The other two still clear. The contract: the drop is NEVER
+  // silent — the trace surfaces the excluded item with a structured reason
+  // and counters.
   const candidates = makeWapoCandidates();
   candidates[2] = makeItem({
     sourceId: "wapo-china",
     outlet: "The Washington Post",
     topic: "Diplomatic relations",
     geographies: [],
-    headline: "Asia commodity markets brace for fertilizer crunch after trade dispute",
-    body: ["Farmers across Asia continue to face commodity stress."],
+    headline: "Commodity markets brace for fertilizer crunch",
+    body: ["Farmers continue to face commodity stress across the region."],
     minutesAgo: 60,
   });
 
@@ -4740,18 +4751,20 @@ test("regression (three-story WaPo): if a candidate is excluded, decisionTrace e
 // regression in shape/cap/counters surfaces with a single specific failure.
 
 test("trace invariants: cap, key-whitelist, and counter consistency hold on a mixed batch", async () => {
-  // Six off-beat candidates that all pass recall (via topic) but fail
-  // beat-fit (off-beat geo + commodity framing). Exercises the cap (6 → ≤5
+  // Six commodity-only candidates that pass recall (via topic) but fail
+  // beat-fit (commodity-framing penalty; no geo overlap → no geo bonus).
+  // D-060 removed the off-beat-region penalty; commodity remains the
+  // precision filter that catches this shape. Exercises the cap (6 → ≤5
   // samples), the key-whitelist, and the counter-vs-histogram identity in
   // one shot.
   const items = Array.from({ length: 6 }, (_, i) =>
     makeItem({
       sourceId: `off-${i}`,
       outlet: "The Washington Post",
-      geographies: ["US"],
+      geographies: [],
       topic: "Diplomatic relations",
-      headline: "Asia farmers brace for fertilizer and wheat commodity squeeze",
-      body: ["Farmers across Asia continue to face commodity stress."],
+      headline: "Farmers brace for fertilizer and wheat commodity squeeze",
+      body: ["Farmers continue to face commodity stress."],
       minutesAgo: 30,
     })
   );

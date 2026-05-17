@@ -63,13 +63,22 @@ test("BEAT_FIT_THRESHOLD reflects 'balanced' posture (between 0.3 and 0.6)", () 
 
 // ─── PAIRWISE REGRESSION (locked test pair from product spec) ────────────────
 //
-// The agreed canonical pair: an obvious INCLUDE (US foreign-policy actor on
-// the beat) and an obvious EXCLUDE (Asia-region farmer/commodity framing).
-// Whatever weight tuning is applied later, this pair MUST keep the directional
-// outcome intact — otherwise the relevance posture has regressed.
+// The agreed canonical pair: an obvious INCLUDE (US foreign-policy story on
+// the beat — sanctions + soft-geo) and an obvious EXCLUDE (Asia-region
+// farmer/commodity framing). Whatever weight tuning is applied later, this
+// pair MUST keep the directional outcome intact — otherwise the relevance
+// posture has regressed.
+//
+// D-060: the actor signal is gone; the INCLUDE body now anchors on a
+// configured keyword ("sanctions") so deterministic still clears 0.40
+// without leaning on the legacy actor-cue list.
 
 const INCLUDE_HEADLINE =
   "U.S. strikes two Iranian-flagged tankers as tensions continue amid ceasefire";
+const INCLUDE_BODY = [
+  "WASHINGTON — Officials confirmed two strikes on tankers in the Gulf of Oman.",
+  "Treasury rolled out new sanctions targeting tanker operators alongside the strike.",
+];
 const EXCLUDE_HEADLINE =
   "Iran war is crushing Asia's farmers, threatening global food supply";
 
@@ -77,18 +86,15 @@ test("pairwise regression: US strikes story scores at or above threshold (INCLUD
   const item = makeRssItem({
     sourceId: "include",
     headline: INCLUDE_HEADLINE,
-    body: [
-      "WASHINGTON — The Pentagon confirmed two strikes on tankers in the Gulf of Oman.",
-      "The State Department signaled the move was consistent with the existing ceasefire framework.",
-    ],
+    body: INCLUDE_BODY,
   });
   const { score, reasonCodes } = scoreBeatFit(item, COMMS_SETTINGS);
   assert.ok(
     score >= BEAT_FIT_THRESHOLD,
     `expected score ≥ ${BEAT_FIT_THRESHOLD}, got ${score} (codes: ${reasonCodes.join(",")})`
   );
-  // Sanity on which signals fired.
-  assert.ok(reasonCodes.some((c) => c.startsWith("actor_match")), "expected actor cue");
+  // Sanity on which signals fired (D-060: no actor cue; keyword + geo carry).
+  assert.ok(reasonCodes.some((c) => c.startsWith("keyword_match")), "expected keyword match");
   assert.ok(
     reasonCodes.some((c) => c.startsWith("geo_text_match") || c === "geo_explicit_match"),
     "expected soft-geo match for US/Colombia"
@@ -109,15 +115,17 @@ test("pairwise regression: Asia farmers/food-supply story scores below threshold
     score < BEAT_FIT_THRESHOLD,
     `expected score < ${BEAT_FIT_THRESHOLD}, got ${score} (codes: ${reasonCodes.join(",")})`
   );
+  // D-060: off-beat penalty is gone; commodity-framing or noConfiguredSignal
+  // remain the precision filters that catch this item.
   assert.ok(
-    reasonCodes.some((c) => c.startsWith("geo_offbeat") || c.startsWith("commodity_framing") || c === "no_configured_signal"),
-    "expected at least one penalty/floor reason code"
+    reasonCodes.some((c) => c.startsWith("commodity_framing") || c === "no_configured_signal"),
+    "expected commodity-framing or no-signal floor"
   );
 });
 
 test("applyBeatFitFilter: pairwise — included contains the strike story, excluded contains farmers story", () => {
   const items = [
-    makeRssItem({ sourceId: "include", headline: INCLUDE_HEADLINE }),
+    makeRssItem({ sourceId: "include", headline: INCLUDE_HEADLINE, body: INCLUDE_BODY }),
     makeRssItem({ sourceId: "exclude", headline: EXCLUDE_HEADLINE, body: ["Asia's farmers face commodity stress."] }),
   ];
   const { included, excluded, summary } = applyBeatFitFilter(items, COMMS_SETTINGS);
@@ -253,7 +261,7 @@ test("applyBeatFitFilter exposes threshold, includedCount, excludedCount, histog
 
 test("included items carry beatFitScore and beatFitReasonCodes for downstream use", () => {
   const items = [
-    makeRssItem({ sourceId: "i", headline: INCLUDE_HEADLINE }),
+    makeRssItem({ sourceId: "i", headline: INCLUDE_HEADLINE, body: INCLUDE_BODY }),
   ];
   const { included } = applyBeatFitFilter(items, COMMS_SETTINGS);
   assert.equal(included.length, 1);
@@ -277,7 +285,6 @@ test("included items carry beatFitScore and beatFitReasonCodes for downstream us
 function makeBreakdown(overrides = {}) {
   return {
     topic: 0,
-    actor: 0,
     keyword: 0,
     geoMatch: 0,
     recency: 0,
@@ -297,15 +304,14 @@ test("rescue constants are exported and consistent", () => {
   assert.ok(RESCUE_MIN_STRONG_SIGNALS >= 3, "rescue rule is FP-first: require at least 3 signals");
 });
 
-test("evaluateRescue: rescues when score is in band, ≥3 signals fire, and no penalty is present", () => {
-  // Synthetic: pretend the scorer produced a score of 0.38 with three positive
-  // signals (topic + actor + keyword) and zero penalties. Real-world scoring
-  // won't usually land here under current weights — the test isolates the
-  // rescue rule itself, not the scoring math.
-  const breakdown = makeBreakdown({ topic: 0.30, actor: 0.25, keyword: 0.20 });
-  const reasonCodes = ["topic_match:diplomatic relations", "actor_match:u.s.", "keyword_match:migration"];
+test("evaluateRescue: rescues when score is in band, all 3 core signals fire, and no penalty is present", () => {
+  // Synthetic: pretend the scorer produced a score of 0.38 with all three
+  // remaining core signals (topic + keyword + geo) firing and zero penalties.
+  // D-060 removed the actor signal; the rescue tally is now 3-of-3.
+  const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25, geoMatch: 0.20 });
+  const reasonCodes = ["topic_match:diplomatic relations", "keyword_match:migration", "geo_explicit_match"];
   const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
-  assert.equal(outcome.rescued, true, "in-band item with 3 signals and no penalty must rescue");
+  assert.equal(outcome.rescued, true, "in-band item with all 3 core signals and no penalty must rescue");
   assert.equal(outcome.inBand, true);
   assert.equal(outcome.strongSignals, 3);
   assert.equal(outcome.blockedBy, null);
@@ -313,7 +319,7 @@ test("evaluateRescue: rescues when score is in band, ≥3 signals fire, and no p
 
 test("evaluateRescue: does not rescue an in-band item with only 1–2 signals", () => {
   // Two strong signals (topic + keyword). Score in band but evidence too thin.
-  const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.20 });
+  const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25 });
   const reasonCodes = ["topic_match:diplomatic relations", "keyword_match:migration"];
   const outcome = evaluateRescue(0.37, breakdown, reasonCodes);
   assert.equal(outcome.rescued, false);
@@ -322,20 +328,21 @@ test("evaluateRescue: does not rescue an in-band item with only 1–2 signals", 
   assert.equal(outcome.blockedBy, "insufficient_signals");
 });
 
-test("evaluateRescue: does not rescue when any major penalty is present, even with ≥3 signals", () => {
-  // Three positive signals AND an off-beat-geo penalty. The penalty's whole
-  // job is to flag structural misalignment; rescue must respect that.
+test("evaluateRescue: does not rescue when any major penalty is present, even with all core signals", () => {
+  // All three remaining core signals AND a commodity-framing penalty. The
+  // penalty's whole job is to flag structural misalignment; rescue must
+  // respect that. (D-060 removed the off-beat-region penalty.)
   const breakdown = makeBreakdown({
     topic: 0.30,
-    actor: 0.25,
-    keyword: 0.20,
-    offBeatGeo: -0.30,
+    keyword: 0.25,
+    geoMatch: 0.20,
+    pureCommodity: -0.15,
   });
   const reasonCodes = [
     "topic_match:diplomatic relations",
-    "actor_match:u.s.",
     "keyword_match:migration",
-    "geo_offbeat:asia",
+    "geo_explicit_match",
+    "commodity_framing:wheat",
   ];
   const outcome = evaluateRescue(0.37, breakdown, reasonCodes);
   assert.equal(outcome.rescued, false);
@@ -346,8 +353,8 @@ test("evaluateRescue: does not rescue when any major penalty is present, even wi
 test("evaluateRescue: pureCommodity penalty also blocks rescue", () => {
   const breakdown = makeBreakdown({
     topic: 0.30,
-    keyword: 0.20,
-    geoMatch: 0.15,
+    keyword: 0.25,
+    geoMatch: 0.20,
     pureCommodity: -0.15,
   });
   const reasonCodes = [
@@ -369,25 +376,25 @@ test("evaluateRescue: noConfiguredSignal floor blocks rescue", () => {
 });
 
 test("evaluateRescue: score at or above threshold is reported as out-of-band (rescue not applicable)", () => {
-  const breakdown = makeBreakdown({ topic: 0.30, actor: 0.25, keyword: 0.20 });
-  const outcome = evaluateRescue(0.42, breakdown, ["topic_match", "actor_match", "keyword_match"]);
+  const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25, geoMatch: 0.20 });
+  const outcome = evaluateRescue(0.42, breakdown, ["topic_match", "keyword_match", "geo_explicit_match"]);
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.inBand, false);
 });
 
 test("evaluateRescue: score below the lower bound is reported as out-of-band", () => {
-  const breakdown = makeBreakdown({ topic: 0.30, actor: 0.25, keyword: 0.20 });
-  const outcome = evaluateRescue(0.20, breakdown, ["topic_match", "actor_match", "keyword_match"]);
+  const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25, geoMatch: 0.20 });
+  const outcome = evaluateRescue(0.20, breakdown, ["topic_match", "keyword_match", "geo_explicit_match"]);
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.inBand, false);
 });
 
 test("evaluateRescue: recency_fresh does NOT count toward the strong-signal tally (FP-first)", () => {
   // Two core signals (keyword + geo) plus recency_fresh — recency still
-  // contributes to the score, but rescue eligibility is based on the four
-  // core alignment signals only. A thinly-aligned breaking story must not
-  // sneak past the gate just because it is fresh.
-  const breakdown = makeBreakdown({ keyword: 0.20, geoMatch: 0.15, recency: 0.10 });
+  // contributes to the score, but rescue eligibility is based on the three
+  // core alignment signals only (D-060 removed actor). A thinly-aligned
+  // breaking story must not sneak past the gate just because it is fresh.
+  const breakdown = makeBreakdown({ keyword: 0.25, geoMatch: 0.20, recency: 0.10 });
   const reasonCodes = ["keyword_match:migration", "geo_explicit_match", "recency_fresh"];
   const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
   assert.equal(outcome.rescued, false, "recency_fresh must not push a 2-signal item over the rescue bar");
@@ -395,14 +402,15 @@ test("evaluateRescue: recency_fresh does NOT count toward the strong-signal tall
   assert.equal(outcome.blockedBy, "insufficient_signals");
 });
 
-test("evaluateRescue: three core signals with no penalty rescue even when recency is stale", () => {
-  // topic + actor + keyword fire; recency_fresh is absent (item is old).
-  // Proves the rescue tally depends only on the four core signals.
-  const breakdown = makeBreakdown({ topic: 0.30, actor: 0.25, keyword: 0.20 });
+test("evaluateRescue: all 3 core signals with no penalty rescue even when recency is stale", () => {
+  // topic + keyword + geo fire; recency_fresh is absent (item is old). Proves
+  // the rescue tally depends only on the three core signals (D-060 removed
+  // actor; the bar is now 3-of-3, not 3-of-4).
+  const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25, geoMatch: 0.20 });
   const reasonCodes = [
     "topic_match:diplomatic relations",
-    "actor_match:u.s.",
     "keyword_match:migration",
+    "geo_explicit_match",
     "recency_stale",
   ];
   const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
@@ -412,8 +420,8 @@ test("evaluateRescue: three core signals with no penalty rescue even when recenc
 });
 
 test("evaluateRescue: honors a custom rescueLowerBound and threshold via opts", () => {
-  const breakdown = makeBreakdown({ topic: 0.30, actor: 0.25, keyword: 0.20 });
-  const reasonCodes = ["topic_match", "actor_match", "keyword_match"];
+  const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25, geoMatch: 0.20 });
+  const reasonCodes = ["topic_match", "keyword_match", "geo_explicit_match"];
   const outcome = evaluateRescue(0.55, breakdown, reasonCodes, {
     threshold: 0.60,
     rescueLowerBound: 0.50,
@@ -499,7 +507,7 @@ test("readRescueLowerBound: invalid values across both env vars fall back to def
 test("applyBeatFitFilter: baseline above-threshold item passes normally (no rescue marker)", () => {
   // Pairwise INCLUDE story scores well above threshold — must NOT be flagged
   // as rescued.
-  const items = [makeRssItem({ sourceId: "include", headline: INCLUDE_HEADLINE })];
+  const items = [makeRssItem({ sourceId: "include", headline: INCLUDE_HEADLINE, body: INCLUDE_BODY })];
   const { included, summary } = applyBeatFitFilter(items, COMMS_SETTINGS);
   assert.equal(included.length, 1);
   assert.equal(included[0].beatFitRescued, undefined, "normal pass must not carry rescue flag");
@@ -527,18 +535,18 @@ test("applyBeatFitFilter: item well below the rescue band is still excluded", ()
 });
 
 test("applyBeatFitFilter: rescued item carries beatFitRescued flag and rescue reason code (synthetic band via opts)", () => {
-  // Fires THREE core signals — topic (Diplomatic relations) + keyword
-  // (migration) + geo (explicit Colombia). Recency may also fire (and
-  // contributes to the SCORE) but it is intentionally NOT part of the rescue
-  // tally — qualification rests on core signals alone. Threshold is pushed
-  // above the natural score so the item lands in the rescue band, exercising
-  // the rescue path end-to-end without monkey-patching the scorer.
+  // Fires the three remaining core signals (D-060 removed actor): topic
+  // (item.topic === "Diplomatic relations") + keyword (migration in headline)
+  // + geo (explicit Colombia). Recency contributes to the SCORE but is
+  // intentionally NOT part of the rescue tally. Threshold pushed above the
+  // natural score so the item lands in the rescue band, exercising the
+  // multisignal rescue end-to-end without monkey-patching the scorer.
   const item = makeRssItem({
     sourceId: "rescue-ok",
     headline: "Migration framework announced today",
     topic: "Diplomatic relations",
     geographies: ["Colombia"],
-    minutesAgo: 30,
+    minutesAgo: 1440,
   });
   const { included, summary } = applyBeatFitFilter(
     [item],
@@ -587,16 +595,18 @@ test("applyBeatFitFilter: in-band item with only 1–2 signals is excluded and a
 });
 
 test("applyBeatFitFilter: in-band item with major penalty is excluded and annotated as rescue-blocked-penalty", () => {
-  // Item triggers topic + actor + keyword cues but the only actor cue
-  // ("Treasury") is NOT a geo synonym, so geo never fires while "Asia"
-  // triggers the offBeatGeo penalty. Three strong signals fire but the
-  // penalty must veto rescue.
+  // Item triggers all three remaining core signals (topic + keyword + geo)
+  // but the commodity-framing penalty (D-060: kept by Point 7) vetoes the
+  // rescue. Threshold is pushed above the natural score so the item lands
+  // in the rescue band.
   const item = makeRssItem({
     sourceId: "penalized",
-    headline: "Treasury imposes migration sanctions across Asia",
-    body: ["Coverage continues across Asia."],
+    headline: "Migration sanctions across Colombian farmlands",
+    body: [
+      "Wheat and grain prices have surged; commodity stress continues among farmers.",
+    ],
     topic: "Diplomatic relations",
-    geographies: [],
+    geographies: ["Colombia"],
     minutesAgo: 5,
   });
   const { included, excluded, summary } = applyBeatFitFilter(
@@ -604,13 +614,14 @@ test("applyBeatFitFilter: in-band item with major penalty is excluded and annota
     COMMS_SETTINGS,
     { threshold: 0.80, rescueLowerBound: 0.30 }
   );
-  // Score will be well inside [0.30, 0.80) — topic + actor + keyword fire,
-  // offBeatGeo penalty applies because no US/Colombia overlap.
+  // Score will be well inside [0.30, 0.80) — three core signals fire, but
+  // the commodity-framing penalty triggers the veto. (D-060 removed the
+  // off-beat-region penalty.)
   assert.equal(included.length, 0, "penalty must block rescue");
   assert.equal(excluded.length, 1);
   assert.ok(
-    excluded[0].reasonCodes.some((c) => c.startsWith("geo_offbeat")),
-    "expected offbeat-geo penalty to have fired"
+    excluded[0].reasonCodes.some((c) => c.startsWith("commodity_framing")),
+    "expected commodity-framing penalty to have fired"
   );
   assert.ok(
     excluded[0].reasonCodes.includes("rescue_blocked_penalty"),
@@ -641,23 +652,22 @@ test("applyBeatFitFilter: summary exposes rescueLowerBound, rescuedCount, and re
 //
 //   I1. Rescue band is half-open [lowerBound, threshold). The lower edge
 //       qualifies; the upper edge does not.
-//   I2. The four CORE signals are exactly {topic, actor, keyword, geoMatch}.
-//       Any 3 of them with no penalty rescues, regardless of which one is
-//       missing. Score is held at a known in-band value to isolate the rule.
+//   I2. The three CORE signals are exactly {topic, keyword, geoMatch} (D-060
+//       removed actor). All 3 with no penalty rescue.
 //   I3. recency_fresh never substitutes for a core signal — 2 core + recency
 //       must NOT rescue, no matter how strong recency is.
-//   I4. Each major penalty (offBeatGeo / pureCommodity / noConfiguredSignal)
-//       independently blocks rescue even with 3+ core signals.
+//   I4. Each remaining major penalty (pureCommodity / noConfiguredSignal)
+//       independently blocks rescue even with all core signals. (D-060
+//       removed offBeatGeo.)
 //   I5. Above-threshold items take the normal pass path and never carry the
 //       rescue flag or reason code (baseline threshold behavior unchanged).
 
 const CORE_SIGNAL_WEIGHTS = Object.freeze({
   topic: 0.30,
-  actor: 0.25,
-  keyword: 0.20,
-  geoMatch: 0.15,
+  keyword: 0.25,
+  geoMatch: 0.20,
 });
-const CORE_SIGNALS = Object.freeze(["topic", "actor", "keyword", "geoMatch"]);
+const CORE_SIGNALS = Object.freeze(["topic", "keyword", "geoMatch"]);
 
 function breakdownWith(coreNames) {
   const b = makeBreakdown();
@@ -667,8 +677,8 @@ function breakdownWith(coreNames) {
 
 test("invariant I1: rescue band is half-open [lowerBound, threshold)", () => {
   // Three core signals + no penalty so the only thing under test is the band.
-  const breakdown = breakdownWith(["topic", "actor", "keyword"]);
-  const reasonCodes = ["topic_match", "actor_match", "keyword_match"];
+  const breakdown = breakdownWith(["topic", "keyword", "geoMatch"]);
+  const reasonCodes = ["topic_match", "keyword_match", "geo_explicit_match"];
   const opts = { threshold: 0.50, rescueLowerBound: 0.30 };
 
   // Lower edge: a score exactly at the lower bound qualifies as in-band.
@@ -698,27 +708,36 @@ test("invariant I1: rescue band is half-open [lowerBound, threshold)", () => {
   );
 });
 
-test("invariant I2: any 3-of-4 core signals rescue (no penalty, in band)", () => {
-  // Enumerate every 3-of-4 subset. Recency is intentionally omitted from the
-  // breakdown AND from the reason codes so the test isolates core-signal
-  // counting from the recency-exclusion rule (covered by I3).
+test("invariant I2: all 3-of-3 core signals rescue (no penalty, in band)", () => {
+  // D-060 collapsed the rescue tally from 3-of-4 to 3-of-3. All three core
+  // signals must fire for the rescue to admit.
+  const breakdown = breakdownWith(CORE_SIGNALS);
+  const reasonCodes = CORE_SIGNALS.map((s) => `${s}_match`);
+  const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+  assert.equal(outcome.rescued, true, "all 3 core signals must rescue when in band with no penalty");
+  assert.equal(outcome.strongSignals, 3);
+  assert.equal(outcome.blockedBy, null);
+
+  // Each 2-of-3 omission must fail (insufficient_signals).
   for (let omitIdx = 0; omitIdx < CORE_SIGNALS.length; omitIdx++) {
     const present = CORE_SIGNALS.filter((_, i) => i !== omitIdx);
-    const breakdown = breakdownWith(present);
-    const reasonCodes = present.map((s) => `${s}_match`);
-    const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
-    assert.equal(
-      outcome.rescued,
-      true,
-      `omitting ${CORE_SIGNALS[omitIdx]} — remaining 3 core signals must rescue`
+    const partial = breakdownWith(present);
+    const partialOutcome = evaluateRescue(
+      0.38,
+      partial,
+      present.map((s) => `${s}_match`)
     );
-    assert.equal(outcome.strongSignals, 3);
-    assert.equal(outcome.blockedBy, null);
+    assert.equal(
+      partialOutcome.rescued,
+      false,
+      `omitting ${CORE_SIGNALS[omitIdx]} — remaining 2 core signals must NOT rescue (3-of-3 contract)`
+    );
+    assert.equal(partialOutcome.blockedBy, "insufficient_signals");
   }
 });
 
 test("invariant I3: recency_fresh never substitutes for a missing core signal", () => {
-  // Every 2-of-4 core combination paired with recency_fresh must fail rescue.
+  // Every 2-of-3 core combination paired with recency_fresh must fail rescue.
   // Recency contributes to the SCORE (held in band here) but not to the tally.
   for (let i = 0; i < CORE_SIGNALS.length; i++) {
     for (let j = i + 1; j < CORE_SIGNALS.length; j++) {
@@ -739,13 +758,12 @@ test("invariant I3: recency_fresh never substitutes for a missing core signal", 
 });
 
 test("invariant I4: each major penalty independently blocks rescue", () => {
-  // Three core signals fire (would normally rescue). Each penalty in turn
-  // vetoes — proving the veto is independent and not coincidental on any one
-  // penalty type.
-  const baseBreakdown = breakdownWith(["topic", "actor", "keyword"]);
-  const baseCodes = ["topic_match", "actor_match", "keyword_match"];
+  // All core signals fire (would normally rescue). Each remaining penalty in
+  // turn vetoes — proving the veto is independent and not coincidental on any
+  // one penalty type. (D-060 removed the off-beat-region penalty.)
+  const baseBreakdown = breakdownWith(CORE_SIGNALS);
+  const baseCodes = CORE_SIGNALS.map((s) => `${s}_match`);
   const penalties = [
-    { name: "offBeatGeo", value: -0.30, code: "geo_offbeat:asia" },
     { name: "pureCommodity", value: -0.15, code: "commodity_framing:wheat" },
     { name: "noConfiguredSignal", value: -0.20, code: "no_configured_signal" },
   ];
@@ -768,9 +786,7 @@ test("invariant I5: above-threshold pass-through is unchanged (no rescue flag, n
   const item = makeRssItem({
     sourceId: "normal-pass",
     headline: INCLUDE_HEADLINE,
-    body: [
-      "WASHINGTON — The Pentagon confirmed two strikes on tankers in the Gulf of Oman.",
-    ],
+    body: INCLUDE_BODY,
   });
   const { included, summary } = applyBeatFitFilter([item], COMMS_SETTINGS);
   assert.equal(included.length, 1);
@@ -793,7 +809,7 @@ test("scoreBeatFit: no semanticIntentScore on item → deterministic score is un
   const item = makeRssItem({
     sourceId: "no-semantic",
     headline: INCLUDE_HEADLINE,
-    body: ["WASHINGTON — The Pentagon confirmed two strikes."],
+    body: INCLUDE_BODY,
   });
   const result = scoreBeatFit(item, COMMS_SETTINGS);
   assert.equal(result.blendApplied, false);
@@ -809,7 +825,7 @@ test("scoreBeatFit: blend = deterministic * 0.65 + semantic * 0.35 to within rou
   const item = makeRssItem({
     sourceId: "blended",
     headline: INCLUDE_HEADLINE,
-    body: ["WASHINGTON — The Pentagon confirmed two strikes."],
+    body: INCLUDE_BODY,
     semanticIntentScore: 0.5,
   });
   const result = scoreBeatFit(item, COMMS_SETTINGS);
@@ -906,7 +922,7 @@ test("applyBeatFitFilter: semantic blend rollup counts lift / missing across the
     makeRssItem({
       sourceId: "no-semantic",
       headline: INCLUDE_HEADLINE,
-      body: ["WASHINGTON — Pentagon confirms strikes."],
+      body: INCLUDE_BODY,
     }),
     // Single keyword (+0.20) + recency lift (~0.10) → ~0.30 deterministic
     // (below threshold). Strong semantic crosses the 0.40 line — counted as
@@ -958,11 +974,10 @@ test("applyBeatFitFilter: opts.semanticBlendEnabled=false short-circuits blendin
 // rescue (which still wins when both qualify so prior outcomes are stable).
 // **Uncapped** per the D-062 amendment.
 //
-// Settings tailored for these tests: configured geo is Nigeria — NOT in the
-// legacy POLICY_ACTOR_CUES list — so the actor component can't accidentally
-// lift the deterministic score above threshold and bypass the rescue path
-// we're trying to exercise. Topic + keyword choices avoid common words that
-// might bleed into the test item text.
+// Settings tailored for these tests: configured geo is Nigeria, with topic/
+// keyword terms intentionally chosen to avoid accidental lexical matches.
+// This keeps deterministic scoring low enough that semantic-geo rescue logic
+// is exercised directly instead of passing through normal threshold logic.
 const P4_SETTINGS = {
   topics: ["Terrorism"],
   keywords: ["sanctions"],
@@ -974,10 +989,9 @@ const P4_SETTINGS = {
 function makeBreakdownSG(overrides = {}) {
   // Minimal breakdown shape sufficient for evaluateSemanticGeoRescue; missing
   // bonus fields default to 0 (no signal), missing penalties default to 0
-  // (no penalty).
+  // (no penalty). D-060: actor field removed.
   return {
     topic: 0,
-    actor: 0,
     keyword: 0,
     geoMatch: 0,
     recency: 0,
@@ -1035,8 +1049,10 @@ test("D-059: evaluateSemanticGeoRescue blocked when geo did not fire (blockedBy:
 });
 
 test("D-059: evaluateSemanticGeoRescue blocked by major penalty even when semantic + geo qualify", () => {
-  // Each remaining major penalty independently vetoes the rescue.
-  for (const penalty of ["offBeatGeo", "pureCommodity", "noConfiguredSignal"]) {
+  // Each remaining major penalty independently vetoes the rescue. D-060
+  // removed the off-beat-region penalty; pureCommodity + noConfiguredSignal
+  // remain.
+  for (const penalty of ["pureCommodity", "noConfiguredSignal"]) {
     const outcome = evaluateSemanticGeoRescue({
       score: 0.32,
       semanticIntentScore: 0.70,
@@ -1136,16 +1152,15 @@ test("D-059: readSemanticGeoRescueMin honors valid override + falls back on bad 
 
 test("D-059 wiring: applyBeatFitFilter rescues an item via the semantic-geo path with rescueReason exposed", () => {
   // Item carries explicit geo Nigeria (so geoMatch fires) but no configured
-  // topic/keyword in text. Deterministic stays low (geo + recency only);
-  // semantic input is strong (0.66). Blended score lands below 0.40 → both
-  // rescue paths considered, only semantic-geo qualifies → rescued.
+  // topic/keyword in text. Deterministic = geo only (post-D-060 weight 0.20);
+  // stale recency so blended score stays below 0.40 with semantic 0.65.
   const item = makeRssItem({
     sourceId: "sg-rescue",
     headline: "Background piece on the Sahel region",
     body: ["A long-form analysis of regional dynamics in West Africa without any configured signal terms."],
     geographies: ["Nigeria"],
-    minutesAgo: 30,
-    semanticIntentScore: 0.66,
+    minutesAgo: 1440,
+    semanticIntentScore: 0.65,
   });
   const { included, summary } = applyBeatFitFilter([item], P4_SETTINGS);
   assert.equal(included.length, 1, "semantic-geo path must admit the item");
@@ -1215,7 +1230,9 @@ test("D-062 wiring: semantic-geo rescue is UNCAPPED — 3 eligible candidates al
       headline: `Analysis piece ${i} on the Sahel region`,
       body: [`Long-form regional analysis ${i} without configured signal terms.`],
       geographies: ["Nigeria"],
-      minutesAgo: 30,
+      // Stale recency keeps deterministic = 0.20 (geo only post-D-060) so
+      // blended score stays below 0.40 even at semantic 0.65.
+      minutesAgo: 1440,
       // Slightly different semantic scores so the items are distinguishable
       // but all clear the 0.60 floor.
       semanticIntentScore: 0.61 + i * 0.02,
@@ -1241,7 +1258,7 @@ test("D-062 wiring: scaling further does not exhibit any cap (10 eligible → 10
       headline: `Analysis piece ${i} on the Sahel region`,
       body: [`Long-form regional analysis ${i} without configured signal terms.`],
       geographies: ["Nigeria"],
-      minutesAgo: 30,
+      minutesAgo: 1440,
       semanticIntentScore: 0.65,
     })
   );
@@ -1251,16 +1268,17 @@ test("D-062 wiring: scaling further does not exhibit any cap (10 eligible → 10
 });
 
 test("D-059 wiring: borderline multisignal rescue still works and reports its own rescueReason", () => {
-  // Lift the threshold + drop the lower bound so the natural-score INCLUDE
-  // candidate (which fires topic + actor + keyword + soft geo + recency)
-  // lands inside the band; no semantic input on the item so the only path
-  // that admits is borderline-multisignal — confirming backward compatibility.
+  // Lift the threshold + drop the lower bound so the natural-score candidate
+  // (which fires topic + keyword + explicit geo) lands inside the band. No
+  // semantic input on the item so the only path that admits is borderline-
+  // multisignal — confirming backward compatibility. Stale recency keeps
+  // det < raised threshold (0.80) while still ≥ rescueLowerBound (0.30).
   const item = makeRssItem({
     sourceId: "borderline-still-works",
     headline: "Migration framework announced today",
     topic: "Diplomatic relations",
     geographies: ["Colombia"],
-    minutesAgo: 30,
+    minutesAgo: 1440,
   });
   const { included, summary } = applyBeatFitFilter(
     [item],
@@ -1285,7 +1303,7 @@ test("D-059 wiring: when both rescue paths qualify, borderline-multisignal wins 
     headline: "Migration framework announced today",
     topic: "Diplomatic relations",
     geographies: ["Colombia"],
-    minutesAgo: 30,
+    minutesAgo: 1440,
     semanticIntentScore: 0.75,
   });
   const { included } = applyBeatFitFilter(
@@ -1324,9 +1342,7 @@ test("D-059 wiring: an above-threshold normal pass does NOT carry beatFitRescueR
   const item = makeRssItem({
     sourceId: "normal-pass",
     headline: INCLUDE_HEADLINE,
-    body: [
-      "WASHINGTON — The Pentagon confirmed two strikes on tankers in the Gulf of Oman.",
-    ],
+    body: INCLUDE_BODY,
   });
   const { included } = applyBeatFitFilter([item], COMMS_SETTINGS);
   assert.equal(included.length, 1);
