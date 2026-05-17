@@ -3,8 +3,9 @@
 //
 // This script is the explicit, operator-driven control for the Supabase
 // manifest's `active` flag. The runtime ingestion guard in feed-reader.mjs
-// (TEMPO_INGESTION_ALLOWLIST, defaults to "washington post") provides
-// defense-in-depth; this script is the *primary* lever.
+// (TEMPO_RSS_ALLOWLIST — legacy alias TEMPO_INGESTION_ALLOWLIST — defaults
+// to "washington post") provides defense-in-depth; this script is the
+// *primary* lever.
 //
 // Modes (one per invocation):
 //   apply    — disable every non-WaPo manifest row that is currently active,

@@ -18,3 +18,7 @@ node_modules/
 
 # Local Claude / Cursor agent project memory (machine-specific paths)
 .claude/
+
+# Per-user file-adapter settings written by the API in dev (Supabase is the
+# real store; these are local dev artifacts only).
+05-engineering/apps/api/data/settings_user_*.json
