@@ -131,13 +131,42 @@ function cleanStrings(xs) {
     .filter((v) => v.length > 0);
 }
 
+// Ordered axis labels surfaced on diagnostics so an operator can tell which
+// segments composed the profile (and in what order) without reading the raw
+// text out of logs. Order matches `buildIntentProfileText`'s emission order
+// after D-058: narrative-first, then topics → keywords → geographies.
+export const PROFILE_AXIS_ORDER = Object.freeze([
+  "narrative",
+  "topics",
+  "keywords",
+  "geographies",
+]);
+
 /**
  * Build a single-paragraph user intent profile text from settings + onboarding
  * narrative. Phrased as a first-person beat description so the embedding model
  * picks up intent rather than treating it as a feature list.
  *
+ * D-058 (PR3): the narrative segment is emitted **first** so the embedding
+ * model anchors on user intent before the chip-list axes. Rationale is that
+ * text-embedding models tend to give more weight to leading tokens of the
+ * input; narrative-first is intended to increase semantic alignment for
+ * narrative-rich settings. Quantitative impact (cosine deltas, dashboard
+ * pass/fail, end-to-end precision/recall) should be validated against the
+ * frozen relevance-eval suite — see
+ * [`./relevance-precision-fixtures.mjs`](./relevance-precision-fixtures.mjs)
+ * and `npm run eval:relevance-precision`. Ordering is fixed
+ * (narrative → topics → keywords → geographies) so the profile is
+ * deterministic for the same inputs.
+ *
  * Falls back to an empty string when settings carry no usable signal — the
  * caller then skips semantic scoring entirely for the refresh.
+ *
+ * NOTE on cache key invariance: `profileCacheKey` hashes the cleaned settings
+ * fields directly (sorted lower-case sets per axis + raw narrative string),
+ * not the assembled profile text — so reordering segments here does NOT
+ * invalidate cached profile embeddings for the same settings. Tested by
+ * "profileCacheKey is stable across …" in semantic-beat-fit.test.mjs.
  */
 export function buildIntentProfileText(settings) {
   if (!settings || typeof settings !== "object") return "";
@@ -150,6 +179,10 @@ export function buildIntentProfileText(settings) {
       : "";
 
   const parts = [];
+  // Narrative-first (D-058): user intent leads, chip lists follow.
+  if (narrative) {
+    parts.push(`Beat narrative: ${narrative}`);
+  }
   if (topics.length > 0) {
     parts.push(`I monitor news about ${topics.join(", ")}.`);
   }
@@ -159,10 +192,31 @@ export function buildIntentProfileText(settings) {
   if (geos.length > 0) {
     parts.push(`Geographic focus: ${geos.join(", ")}.`);
   }
-  if (narrative) {
-    parts.push(`Beat narrative: ${narrative}`);
-  }
   return parts.join(" ");
+}
+
+/**
+ * Diagnostic helper: returns the ordered list of axis names that contributed
+ * a segment to `buildIntentProfileText(settings)`. Mirrors PROFILE_AXIS_ORDER
+ * but only includes axes whose input was non-empty.
+ *
+ * Used by unit tests and exposed as a building block for future observability
+ * wiring (e.g. surfacing `profileAxes` on `_meta.semanticBeatFit` or in a log
+ * line). NOT currently emitted on the runtime trace — operators calling this
+ * directly is the only path in this PR. Empty/missing settings → empty array.
+ */
+export function profileAxisNames(settings) {
+  if (!settings || typeof settings !== "object") return [];
+  const out = [];
+  const narrative =
+    typeof settings.onboardingNarrative === "string"
+      ? settings.onboardingNarrative.trim()
+      : "";
+  if (narrative) out.push("narrative");
+  if (cleanStrings(settings.topics).length > 0) out.push("topics");
+  if (cleanStrings(settings.keywords).length > 0) out.push("keywords");
+  if (cleanStrings(settings.geographies).length > 0) out.push("geographies");
+  return out;
 }
 
 /**

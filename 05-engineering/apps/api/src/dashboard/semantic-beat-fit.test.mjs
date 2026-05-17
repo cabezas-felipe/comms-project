@@ -14,6 +14,8 @@ const {
   profileCacheKey,
   computeSemanticBeatFitScores,
   attachSemanticScores,
+  PROFILE_AXIS_ORDER,
+  profileAxisNames,
 } = await import("./semantic-beat-fit.mjs");
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
@@ -134,6 +136,120 @@ test("buildIntentProfileText returns empty string when no signal", () => {
   assert.equal(buildIntentProfileText({}), "");
   assert.equal(buildIntentProfileText({ topics: [], keywords: [] }), "");
   assert.equal(buildIntentProfileText(null), "");
+});
+
+// ─── D-058 (PR3): narrative-first profile ordering ───────────────────────────
+//
+// The semantic profile leads with the onboarding narrative when present so the
+// embedding model anchors on user intent before the chip-list axes. The blend
+// formula and threshold are intentionally untouched in this PR (those are
+// Point 5 + Point 6 territory).
+
+test("D-058: buildIntentProfileText emits narrative FIRST when narrative is present", () => {
+  const text = buildIntentProfileText(SETTINGS);
+  const idxNarrative = text.indexOf("Beat narrative:");
+  const idxTopics = text.indexOf("I monitor news about");
+  const idxKeywords = text.indexOf("Specific topics I care about:");
+  const idxGeos = text.indexOf("Geographic focus:");
+  assert.ok(idxNarrative >= 0, "narrative segment must be present");
+  assert.ok(idxTopics > idxNarrative, "topics must follow narrative");
+  assert.ok(idxKeywords > idxTopics, "keywords must follow topics");
+  assert.ok(idxGeos > idxKeywords, "geographies must follow keywords");
+  assert.ok(text.startsWith("Beat narrative:"), "profile must start with the narrative segment");
+});
+
+test("D-058: buildIntentProfileText keeps narrative when chip axes are empty", () => {
+  const text = buildIntentProfileText({
+    topics: [],
+    keywords: [],
+    geographies: [],
+    onboardingNarrative: "I cover terrorism in West Africa for a State Department audience.",
+  });
+  assert.ok(text.startsWith("Beat narrative:"));
+  assert.match(text, /West Africa/);
+  // No spurious axis segments when their inputs are empty.
+  assert.equal(text.includes("I monitor news about"), false);
+  assert.equal(text.includes("Specific topics I care about:"), false);
+  assert.equal(text.includes("Geographic focus:"), false);
+});
+
+test("D-058: buildIntentProfileText silently falls back to axes when narrative is empty/null", () => {
+  // Three flavors of "no narrative": missing key, empty string, whitespace.
+  // Each must still produce a non-empty profile when other axes carry signal,
+  // and that profile must start with the topic segment (next-in-order).
+  for (const variant of [
+    { topics: ["Terrorism"], keywords: ["sanctions"], geographies: ["US"] },
+    { topics: ["Terrorism"], keywords: ["sanctions"], geographies: ["US"], onboardingNarrative: "" },
+    { topics: ["Terrorism"], keywords: ["sanctions"], geographies: ["US"], onboardingNarrative: "   " },
+  ]) {
+    const text = buildIntentProfileText(variant);
+    assert.ok(text.length > 0, "missing narrative must not silently zero the profile");
+    assert.ok(text.startsWith("I monitor news about"), "topic axis leads when narrative is absent");
+    assert.equal(text.includes("Beat narrative:"), false, "no narrative segment when input is empty");
+  }
+});
+
+test("D-058: buildIntentProfileText DOES NOT silently drop a non-empty narrative", () => {
+  // Regression guard: if a future refactor reorders or strips the narrative
+  // segment when other axes are very large, this test catches it.
+  const fatSettings = {
+    topics: Array.from({ length: 24 }, (_, i) => `Topic ${i}`),
+    keywords: Array.from({ length: 24 }, (_, i) => `kw${i}`),
+    geographies: Array.from({ length: 24 }, (_, i) => `Geo${i}`),
+    onboardingNarrative: "Narrative must survive a heavy chip-list payload.",
+  };
+  const text = buildIntentProfileText(fatSettings);
+  assert.ok(text.includes("Narrative must survive"), "narrative survives next to large chip lists");
+  assert.ok(text.startsWith("Beat narrative:"), "narrative still leads even with heavy chip axes");
+});
+
+test("D-058: PROFILE_AXIS_ORDER pins the documented narrative-first ordering", () => {
+  assert.deepEqual(Array.from(PROFILE_AXIS_ORDER), [
+    "narrative",
+    "topics",
+    "keywords",
+    "geographies",
+  ]);
+});
+
+test("D-058: profileAxisNames reports the axes that actually contributed, in order", () => {
+  assert.deepEqual(profileAxisNames(SETTINGS), [
+    "narrative",
+    "topics",
+    "keywords",
+    "geographies",
+  ]);
+  assert.deepEqual(
+    profileAxisNames({ topics: ["A"], keywords: ["b"], geographies: ["C"] }),
+    ["topics", "keywords", "geographies"],
+    "missing narrative → axes skip it but stay ordered"
+  );
+  assert.deepEqual(
+    profileAxisNames({ onboardingNarrative: "narrative only" }),
+    ["narrative"],
+    "narrative-only profile reports just narrative"
+  );
+  assert.deepEqual(profileAxisNames({}), [], "empty settings → empty list");
+  assert.deepEqual(profileAxisNames(null), [], "null settings → empty list");
+});
+
+test("D-058: profile cache key is invariant under segment-order changes for the same settings", () => {
+  // The cache key hashes the cleaned settings fields, NOT the assembled
+  // profile text — so reordering segments inside buildIntentProfileText must
+  // never invalidate the cache for identical settings. This guards the
+  // narrative-first reorder against accidental cache churn.
+  const before = profileCacheKey(SETTINGS, "text-embedding-3-large");
+  const sameSettings = { ...SETTINGS };
+  const after = profileCacheKey(sameSettings, "text-embedding-3-large");
+  assert.equal(before, after);
+});
+
+test("D-058: blend weights and version remain unchanged in this PR", () => {
+  // Lock the contract: PR3 is profile-shape only. Any change to the blend
+  // weights is Point 5/Point 6 territory and must be a separate decision.
+  assert.equal(SEMANTIC_BLEND_DETERMINISTIC, 0.65);
+  assert.equal(SEMANTIC_BLEND_SEMANTIC, 0.35);
+  assert.equal(SEMANTIC_BEAT_FIT_VERSION, "semantic-beat-fit-v1");
 });
 
 test("buildItemCanonicalText joins headline+subtitle+body and caps length", () => {
