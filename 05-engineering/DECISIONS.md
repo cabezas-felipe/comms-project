@@ -14,7 +14,7 @@ Three review follow-ups to D-064, all minor and bounded:
 
 #### Decision
 
-1. **Backfill on read.** New `backfillKeywordDedupe(payload, userId)` helper in `server.mjs` runs `stripKeywordsMatchingGeographies` on every settings read and persists exactly once when the keyword list changes (fast-path early-exit when no items were stripped). Applied at `GET /api/settings` and at the dashboard refresh read. Subsequent reads on already-cleaned data are no-op write-skips. Persistence failures are non-fatal — the client still receives the cleaned payload.
+1. **Backfill on read.** New `backfillKeywordDedupe(payload, userId)` helper in `server.mjs` runs `stripKeywordsMatchingGeographies` on every settings read and persists exactly once when the keyword list changes (element-wise equality check — not length-only — so e.g. `["China","Russia"]` with geo `["China"]` still persists). Applied at `GET /api/settings` and at the dashboard refresh read. Subsequent reads on already-cleaned data are no-op write-skips. Persistence failures are non-fatal — the client still receives the cleaned payload.
 2. **Single source of truth.** `beat-fit-scorer.mjs` now imports `GEOGRAPHY_SYNONYMS` from `contracts-runtime/index.mjs`; the private duplicate is deleted.
 3. **Synonym-aware `resolveGeographyAlias`.** Extended (in both `apps/api/src/contracts-runtime/geography-aliases.mjs` and `packages/contracts/src/geography-aliases.ts`) so the gate accepts a configured setting when `GEOGRAPHY_SYNONYMS[setting]` contains the alias canonical (case-insensitive). `GEOGRAPHY_SYNONYMS` is now exported from `@tempo/contracts` as well; the contracts package was rebuilt. Synonym-key lookup is case-insensitive so a lowercase `"us"` setting still resolves.
 
@@ -26,7 +26,7 @@ Three review follow-ups to D-064, all minor and bounded:
 
 #### Tradeoffs
 
-- Backfill writes from a read path is unusual; mitigated by the length-change guard (no writes after the first cleanup) and non-fatal error handling.
+- Backfill writes from a read path is unusual; mitigated by the keyword-list equality guard (no writes after the first cleanup) and non-fatal error handling.
 - Synonym-aware match widens `stripKeywordsMatchingGeographies` too — a keyword `Washington` with geo `US` is now stripped (the helper calls `resolveGeographyAlias` internally). This is the intended behavior: `Washington` is geo evidence, not a thematic keyword.
 
 #### Rollback

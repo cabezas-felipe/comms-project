@@ -163,6 +163,35 @@ test("GET /api/settings backfills pre-D-064 keyword/geography duplicates and per
   }
 });
 
+test("GET /api/settings backfills when dedupe changes keywords but length is unchanged", async () => {
+  const stale = {
+    contractVersion: "2026-04-22-slice1",
+    topics: ["Diplomatic relations"],
+    keywords: ["China", "Russia"],
+    geographies: ["China"],
+    traditionalSources: ["Reuters"],
+    socialSources: [],
+  };
+  const file = path.join(tmpDir, `settings_user_${TEST_USER_ID}.json`);
+  await writeFile(file, JSON.stringify(stale, null, 2), "utf8");
+
+  let writeCount = 0;
+  const prev = _writeSettings.write;
+  _writeSettings.write = async (payload, userId) => {
+    writeCount += 1;
+    return prev(payload, userId);
+  };
+  try {
+    const res = await request(app).get("/api/settings");
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.keywords, ["Russia"]);
+    assert.equal(writeCount, 1, "must persist when China is stripped but length stays 2");
+  } finally {
+    _writeSettings.write = prev;
+    await writeFile(file, JSON.stringify(VALID_BODY, null, 2), "utf8");
+  }
+});
+
 // ─── Source registry sync ─────────────────────────────────────────────────────
 
 test("PUT /api/settings returns 200 and registry sync is no-op when SUPABASE_URL is absent", async () => {

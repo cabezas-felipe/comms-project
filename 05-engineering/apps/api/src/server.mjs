@@ -492,14 +492,20 @@ app.get("/health", (_req, res) => {
 // are a no-op write-skip. Persistence failures are non-fatal — the client
 // still receives the cleaned payload so the UI is correct even if the write
 // hasn't landed yet.
+function keywordListsEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 async function backfillKeywordDedupe(payload, userId) {
   if (!payload || !Array.isArray(payload.keywords) || !Array.isArray(payload.geographies)) {
     return payload;
   }
   const cleanedKeywords = stripKeywordsMatchingGeographies(payload.keywords, payload.geographies);
-  if (cleanedKeywords.length === payload.keywords.length) {
-    // Fast path: same length means no items were stripped (helper preserves
-    // order). Avoid the JSON.stringify cost on the hot read path.
+  if (keywordListsEqual(cleanedKeywords, payload.keywords)) {
     return payload;
   }
   const next = { ...payload, keywords: cleanedKeywords };
