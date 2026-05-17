@@ -1,10 +1,12 @@
 // Runtime-local mirror of `@tempo/contracts/src/geography-aliases.ts`.
 //
-// `GEOGRAPHY_ALIASES` and `resolveGeographyAlias` are parity-checked against
-// the published `@tempo/contracts` module. `GEOGRAPHY_SYNONYMS` and
-// `stripKeywordsMatchingGeographies` are runtime-local helpers — settings
-// hygiene and beat-fit lexical matching live in the API, not the shared
-// contracts package, so they are intentionally outside the parity surface.
+// Parity-checked surface (must stay in lockstep with the contracts package):
+// `GEOGRAPHY_ALIASES`, `GEOGRAPHY_SYNONYMS` (added to the contracts package
+// in D-064a), and `resolveGeographyAlias`.
+//
+// Runtime-local only (no parity check): `stripKeywordsMatchingGeographies` —
+// it backs server-side settings hygiene + beat-fit lexical matching and lives
+// in the API, not the shared contracts package.
 
 export const GEOGRAPHY_ALIASES = Object.freeze({
   "beijing": "China",

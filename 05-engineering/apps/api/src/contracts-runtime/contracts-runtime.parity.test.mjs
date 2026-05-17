@@ -57,6 +57,11 @@ if (published) {
     assert.deepEqual(local.KEYWORD_SYNONYMS, published.KEYWORD_SYNONYMS);
     assert.deepEqual(local.SOURCE_NAME_ALIASES, published.SOURCE_NAME_ALIASES);
     assert.deepEqual(local.GEOGRAPHY_ALIASES, published.GEOGRAPHY_ALIASES);
+    // D-064a: GEOGRAPHY_SYNONYMS is now exported from `@tempo/contracts` and
+    // drives the synonym-aware branch of `resolveGeographyAlias`. Lock parity
+    // so the long-form↔short-form ("United States" ↔ "US") map cannot drift
+    // between the contracts package and the runtime mirror.
+    assert.deepEqual(local.GEOGRAPHY_SYNONYMS, published.GEOGRAPHY_SYNONYMS);
   });
 
   // ── normalizer parity (exhaustive on known synonym keys + a few extras) ───
@@ -130,6 +135,15 @@ if (published) {
     ["Beijing", []],
     ["Montevideo", ["Latin America"]],
     ["sao paulo", ["Brazil"]],
+    // D-064a: synonym-aware match — alias canonical "United States" should
+    // resolve when settings has the short form via GEOGRAPHY_SYNONYMS.
+    ["washington", ["US"]],
+    ["washington", ["us"]],
+    ["new york", ["US", "Colombia"]],
+    ["bogota", ["Colombia"]],
+    // Synonym map does not cover Japan, so a Tokyo alias should still NOT
+    // resolve against an unrelated short-form setting.
+    ["tokyo", ["US"]],
   ];
 
   for (const [token, settings] of geoFixtures) {
