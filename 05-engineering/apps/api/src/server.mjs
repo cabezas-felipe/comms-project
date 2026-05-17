@@ -45,6 +45,7 @@ import {
   normalizeTopicLabel,
   normalizeKeywordLabel,
   normalizeSourceName,
+  stripKeywordsMatchingGeographies,
   dashboardPayloadSchema,
   settingsPayloadSchema,
 } from "./contracts-runtime/index.mjs";
@@ -513,6 +514,13 @@ app.put("/api/settings", async (req, res) => {
     });
     return;
   }
+  // D-064: enforce geo-keyword dedupe on every persisted payload — manual
+  // Settings edits cannot reintroduce country names into the keywords axis
+  // after first onboarding.
+  result.data.keywords = stripKeywordsMatchingGeographies(
+    result.data.keywords,
+    result.data.geographies
+  );
   try {
     // Read previous before writing so the sync can diff new vs existing sources.
     // hasSettings avoids auto-creating a default file for first-time users.
@@ -598,6 +606,9 @@ app.put("/api/settings", async (req, res) => {
               ...(extractedTraditional.length > 0 && { traditionalSources: extractedTraditional }),
               ...(extractedSocial.length > 0 && { socialSources: extractedSocial }),
             };
+            // D-064: dedupe geo-equivalent keywords against the merged
+            // geographies (the post-extraction set, not the pre-merge baseline).
+            merged.keywords = stripKeywordsMatchingGeographies(merged.keywords, merged.geographies);
             const fieldsChanged = ["topics", "keywords", "geographies", "traditionalSources", "socialSources"]
               .some(f => JSON.stringify(merged[f]) !== JSON.stringify(result.data[f]));
             if (fieldsChanged) {

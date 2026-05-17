@@ -32,5 +32,7 @@ export { classifySources } from "./source-classification.mjs";
 
 export {
   GEOGRAPHY_ALIASES,
+  GEOGRAPHY_SYNONYMS,
   resolveGeographyAlias,
+  stripKeywordsMatchingGeographies,
 } from "./geography-aliases.mjs";

@@ -95,8 +95,14 @@ function dedupePreserveOrder(values) {
  *
  * Includes (in order, newline-separated):
  *   - meta-story `title`, `subtitle`, `summary`
- *   - each source's `headline` and `body` (body joined by space when it is the
- *     usual paragraph array shape; passed through when it is already a string)
+ *   - each source's `headline`, `body`, and `url` (body joined by space when it
+ *     is the usual paragraph array shape; passed through when it is already a
+ *     string).
+ *
+ * `url` is intentional evidence for path tokens and geo alias hits — e.g. a
+ * Washington Post China story whose body avoids the word "China" but whose
+ * URL contains `…/beijing/…` still emits the `China` geography tag via the
+ * GEOGRAPHY_ALIASES path (gated on `settings.geographies`).
  *
  * Missing or non-string fields are silently skipped — the assigner is
  * defensive against the legacy cluster output shape and against partial
@@ -120,6 +126,7 @@ export function buildMetaStoryEvidenceText(metaStory, sourceItems) {
     } else if (typeof it.body === "string") {
       parts.push(it.body);
     }
+    if (typeof it.url === "string" && it.url) parts.push(it.url);
   }
   return parts.join("\n");
 }

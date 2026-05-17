@@ -33,11 +33,20 @@
 // "Africa"). The commodity-framing penalty is kept as a generic precision
 // filter. Core positive signals are now topic + keyword + geo + recency.
 
-import { normalizeTopicLabel } from "../contracts-runtime/index.mjs";
+import {
+  GEOGRAPHY_ALIASES,
+  normalizeTopicLabel,
+  resolveGeographyAlias,
+} from "../contracts-runtime/index.mjs";
 import {
   SEMANTIC_BLEND_DETERMINISTIC,
   SEMANTIC_BLEND_SEMANTIC,
 } from "./semantic-beat-fit.mjs";
+
+// Precomputed alias entries for the per-item geo loop. Mirrors the structure
+// used in meta-story-tags.mjs so beat-fit and tag assignment share identical
+// alias-hit rules (D-064).
+const ALIAS_ENTRIES = Object.entries(GEOGRAPHY_ALIASES);
 
 export const BEAT_FIT_VERSION = "beat-fit-v1";
 
@@ -143,16 +152,30 @@ const GEO_SYNONYMS = Object.freeze({
   Colombia: ["Colombia", "Colombian", "Bogota", "Bogotá"],
 });
 
-function geoTextMatches(text, geo) {
+function geoTextMatches(text, geo, settingsGeographies) {
   // 1. Word-boundary token match on the canonical name itself.
   const canonicalRe = buildPlainTokenRegex([geo]);
   if (canonicalRe && canonicalRe.test(text)) return true;
   // 2. Synonym list (handles "U.S." which has a period that defeats \b on the
   //    trailing side).
   const synonyms = GEO_SYNONYMS[geo];
-  if (!synonyms) return false;
-  for (const syn of synonyms) {
-    const re = new RegExp(`\\b${escapeRegex(syn)}`, "i");
+  if (synonyms) {
+    for (const syn of synonyms) {
+      const re = new RegExp(`\\b${escapeRegex(syn)}`, "i");
+      if (re.test(text)) return true;
+    }
+  }
+  // 3. D-064: GEOGRAPHY_ALIASES gated on settings.geographies. Mirrors the
+  //    `assignGeographies` alias path in meta-story-tags.mjs so beat-fit and
+  //    tag-assignment treat alias evidence identically. For each alias key
+  //    that resolves (via `resolveGeographyAlias`) to this same `geo` in the
+  //    settings list, a whole-word hit in the joined text counts.
+  const geoLower = String(geo).trim().toLowerCase();
+  if (!geoLower) return false;
+  for (const [aliasLower] of ALIAS_ENTRIES) {
+    const resolved = resolveGeographyAlias(aliasLower, settingsGeographies);
+    if (!resolved || resolved.trim().toLowerCase() !== geoLower) continue;
+    const re = new RegExp(`\\b${escapeRegex(aliasLower)}\\b`, "i");
     if (re.test(text)) return true;
   }
   return false;
@@ -171,7 +194,10 @@ function joinText(item) {
   const headline = String(item?.headline ?? "");
   const body = Array.isArray(item?.body) ? item.body.join(" ") : String(item?.body ?? "");
   const subtitle = String(item?.subtitle ?? "");
-  return `${headline} ${subtitle} ${body}`.trim();
+  // D-064: `url` carries path-token evidence (e.g. `…/beijing/…` → China via
+  // GEOGRAPHY_ALIASES). Empty / missing url is unchanged behavior.
+  const url = typeof item?.url === "string" ? item.url : "";
+  return `${headline} ${subtitle} ${body} ${url}`.trim();
 }
 
 function recencyScore(minutesAgo) {
@@ -243,8 +269,10 @@ export function scoreBeatFit(item, settings, opts = {}) {
   }
 
   // Geo alignment — soft-geo policy. Explicit overlap on item.geographies
-  // first; fall back to text-based mention of a configured geography.
-  const configuredGeos = new Set(settings?.geographies ?? []);
+  // first; fall back to text-based mention of a configured geography (incl.
+  // GEOGRAPHY_ALIASES gated on the configured list — D-064).
+  const settingsGeographies = settings?.geographies ?? [];
+  const configuredGeos = new Set(settingsGeographies);
   let geoHit = false;
   if (configuredGeos.size > 0) {
     if ((item?.geographies ?? []).some((g) => configuredGeos.has(g))) {
@@ -252,7 +280,7 @@ export function scoreBeatFit(item, settings, opts = {}) {
       reasonCodes.push("geo_explicit_match");
     } else {
       for (const g of configuredGeos) {
-        if (geoTextMatches(text, g)) {
+        if (geoTextMatches(text, g, settingsGeographies)) {
           geoHit = true;
           reasonCodes.push(`geo_text_match:${g.toLowerCase()}`);
           break;

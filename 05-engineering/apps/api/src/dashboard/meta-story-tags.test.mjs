@@ -199,6 +199,41 @@ test("assignMetaStoryTags: alias hit does NOT emit when canonical target is abse
   assert.deepEqual(out.geographies, []);
 });
 
+test("buildMetaStoryEvidenceText includes source url (D-064)", () => {
+  // URL is intentional evidence so path tokens (e.g. `/beijing/`) feed the
+  // GEOGRAPHY_ALIASES gate even when headline/body don't mention the country.
+  const text = buildMetaStoryEvidenceText(
+    { title: "T" },
+    [{ headline: "h", body: ["b"], url: "https://www.example.com/world/beijing/article" }]
+  );
+  assert.match(text, /beijing/);
+});
+
+test("assignMetaStoryTags: url-only Beijing evidence emits China geography tag when China is configured (D-064)", () => {
+  // Headline and body intentionally omit "China" and "Beijing"; only the
+  // source URL carries the alias token. This exercises the B1 contract: URL
+  // is part of the evidence bundle for the alias gate.
+  const meta = { title: "Routine update", subtitle: "Sub.", summary: "Officials issued a statement late Tuesday." };
+  const sources = [makeSourceItem({
+    headline: "Officials meet for trade talks",
+    body: ["No mention of the capital."],
+    url: "https://www.washingtonpost.com/world/2026/05/16/beijing-summit/",
+  })];
+  const out = assignMetaStoryTags({ metaStory: meta, sourceItems: sources, settings: BASE_SETTINGS });
+  assert.ok(out.geographies.includes("China"), "URL token /beijing/ must drive China tag via alias gate");
+});
+
+test("assignMetaStoryTags: regression — body-only alias hits still work after URL was added to evidence", () => {
+  // Pin the pre-D-064 contract: alias hits in body text still emit even when
+  // no URL is supplied.
+  const meta = { title: "T", summary: "Officials in Moscow announced new measures; Kyiv responded swiftly." };
+  const sources = [makeSourceItem({ headline: "h", body: ["b"] /* no url */ })];
+  const settings = { ...BASE_SETTINGS, geographies: ["Russia", "Ukraine"] };
+  const out = assignMetaStoryTags({ metaStory: meta, sourceItems: sources, settings });
+  assert.ok(out.geographies.includes("Russia"), "Moscow → Russia via body alias");
+  assert.ok(out.geographies.includes("Ukraine"), "Kyiv → Ukraine via body alias");
+});
+
 test("assignMetaStoryTags: alias emission preserves the settings spelling (not the alias map literal)", () => {
   // Settings carries a lowercase "china"; the assigner must emit that exact
   // string rather than the map's Title-Case canonical.
