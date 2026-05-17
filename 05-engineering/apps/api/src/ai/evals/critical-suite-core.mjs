@@ -713,6 +713,10 @@ export const CRITICAL_SCENARIO_IDS = Object.freeze(SCENARIO_DEFS.map((d) => d.id
  *   tests to swap a scenario's run function for a deterministic stub.
  */
 export async function runCriticalSuite({ overrides = new Map() } = {}) {
+  // D-063: scenarios assert the legacy precision-first contract (e.g. critical-02
+  // mig-noise must not leak at ~0.30). MVP default is 0.20; pin here for CI/CLI.
+  process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
+
   const results = [];
   for (const def of SCENARIO_DEFS) {
     const run = overrides.get(def.id) ?? def.run;

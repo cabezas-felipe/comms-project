@@ -20,7 +20,11 @@ import {
   FALLBACK_REASON,
 } from "../ingestion/source-matcher.mjs";
 import { computeWatermark, watermarksMatch } from "./refresh-watermark.mjs";
-import { applyBeatFitFilter, BEAT_FIT_THRESHOLD, BEAT_FIT_VERSION } from "./beat-fit-scorer.mjs";
+import {
+  applyBeatFitFilter,
+  BEAT_FIT_VERSION,
+  readBeatFitThreshold,
+} from "./beat-fit-scorer.mjs";
 import {
   RECALL_MODE,
   resolveRecallConfig,
@@ -1162,8 +1166,9 @@ export async function runRefreshPipeline({
       (recallDiagnostics.keywordFallbackAfterEmbeddingFailure ? " keyword_fallback=true" : "")
   );
 
-  // 5a. Beat-fit scoring (Phase 1 relevance Stage 2) — precision stage with
-  //     "balanced" posture. Items below BEAT_FIT_THRESHOLD are dropped before
+  // 5a. Beat-fit scoring (Phase 1 relevance Stage 2) — recall-first MVP
+  //     posture (D-063). Items below the active threshold (default 0.20,
+  //     env-tunable via `TEMPO_BEAT_FIT_THRESHOLD`) are dropped before
   //     clustering. Strict-empty: if zero items clear, downstream produces an
   //     empty payload rather than a weak top-of-list fallback.
   //
@@ -1173,7 +1178,12 @@ export async function runRefreshPipeline({
   let beatFitResult;
   let relevantItems;
   if (beatFitEnabled) {
-    beatFitResult = applyBeatFitFilter(recallItems, settings);
+    // Pass the runtime threshold explicitly so `_meta` / decisionTrace surface
+    // the env-tuned value (D-063: default 0.20, override via
+    // `TEMPO_BEAT_FIT_THRESHOLD`) instead of the static constant.
+    beatFitResult = applyBeatFitFilter(recallItems, settings, {
+      threshold: readBeatFitThreshold(),
+    });
     relevantItems = beatFitResult.included;
     if (recallItems.length > 0) {
       const histogram = beatFitResult.summary.excludeReasonHistogram;
@@ -1196,7 +1206,7 @@ export async function runRefreshPipeline({
       included: recallItems,
       excluded: [],
       summary: {
-        threshold: BEAT_FIT_THRESHOLD,
+        threshold: readBeatFitThreshold(),
         includedCount: recallItems.length,
         excludedCount: 0,
         excludeReasonHistogram: {},

@@ -328,7 +328,7 @@ Items below threshold go to **`held`**. When hold read/write is wired, held item
 
 | # | Topic | Decision |
 |---|--------|----------|
-| **G1** | Default threshold | **G1a — Keep `BEAT_FIT_THRESHOLD` = `0.40`**. |
+| **G1** | Default threshold | **G1b — MVP recall-first default `0.20`** ([D-063](../DECISIONS.md)), env-tunable via `TEMPO_BEAT_FIT_THRESHOLD` (legacy alias `BEAT_FIT_THRESHOLD`). Set the env to `0.40` to roll back to the prior G1a precision-first posture. |
 | **G2** | Strict empty | **G2a — Keep** no weak fill: if recall had items but none pass threshold, **zero** proceed; log `beat_fit_strict_empty`. |
 | **G3** | Heuristic vs LLM ranker | **G3a — Heuristic `beat-fit-v1` is the v1 precision gate.** An LLM ranker is a **successor** only with explicit version, evals, and **Chunk N** model matrix — not v1 by default. |
 
@@ -340,7 +340,7 @@ Per item, `scoreBeatFit` combines **bounded** components (topic match, policy-ac
 
 ### Threshold & exclusion reasons
 
-Items with **`score >= 0.40`** included; else excluded with histogram bucket: `excluded_offbeat_geo`, `excluded_commodity_framing`, `excluded_no_signal`, `excluded_low_score`.
+Items with **`score >= threshold`** included (default `0.20` under G1b / [D-063](../DECISIONS.md); env-tunable, set `TEMPO_BEAT_FIT_THRESHOLD=0.40` for the legacy precision-first gate); else excluded with histogram bucket: `excluded_offbeat_geo`, `excluded_commodity_framing`, `excluded_no_signal`, `excluded_low_score`.
 
 ### `beatFitEnabled`
 
@@ -348,7 +348,7 @@ Default **true** in production pipeline; **`false`** only for **narrow tests** t
 
 ### Spec blurb (paste-friendly)
 
-> **Precision (v1):** After recall, **`beat-fit-v1`** scores each item on heuristic signals (topic, actor/keyword/geo/recency, penalties), threshold **0.40**. **Strict empty:** if nothing clears the bar, **no** weak fill. **`beatFitEnabled`** may be false in tests only. **No LLM ranker** at this stage in v1 (**G3a**); successor needs version + evals + **N**. Exclusions expose `excludeReason` histograms for ops.
+> **Precision (v1):** After recall, **`beat-fit-v1`** scores each item on heuristic signals (topic, actor/keyword/geo/recency, penalties), threshold **`0.20`** (G1b / [D-063](../DECISIONS.md) MVP recall-first; set `TEMPO_BEAT_FIT_THRESHOLD=0.40` to roll back to the precision-first posture). **Strict empty:** if nothing clears the bar, **no** weak fill. **`beatFitEnabled`** may be false in tests only. **No LLM ranker** at this stage in v1 (**G3a**); successor needs version + evals + **N**. Exclusions expose `excludeReason` histograms for ops.
 
 ---
 

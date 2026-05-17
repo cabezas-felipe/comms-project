@@ -544,10 +544,13 @@ export const RELEVANCE_PRECISION_CASES = Object.freeze([
       rescueBlockedReason: "geo_gate",
     },
     currentBaseline: {
-      // No semantic_geo path exists yet; multisignal rescue also fails (geo,
-      // topic, keyword all zero). Excluded with no rescue annotation today.
-      in_dashboard: false,
-      excluded: true,
+      // D-063: with the MVP threshold lowered to 0.20 the semantic-only blend
+      // contribution (det 0.00 + semantic 0.68 * 0.35 ≈ 0.238) now clears the
+      // gate, so this item is admitted via the normal pass path — no rescue
+      // path fires (geo, topic, keyword breakdown all 0) and no rescue-blocked
+      // annotation is emitted because the item was never excluded.
+      in_dashboard: true,
+      excluded: false,
       rescued: false,
       rescueReason: null,
       rescueBlockedReason: null,
