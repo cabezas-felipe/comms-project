@@ -13,6 +13,63 @@ The deterministic scorer, reason codes, rescue band, and threshold (`0.40`)
 are unchanged. Semantic blending only rewrites the final score and adds
 diagnostic reason codes.
 
+## Profile construction (D-058, narrative-first)
+
+`buildIntentProfileText(settings)` composes the intent paragraph that gets
+embedded as the user-side cosine input. Segments are emitted in this fixed
+order — **narrative first** — so the embedding model anchors on user intent
+before the chip-list axes:
+
+1. **Onboarding narrative** — `Beat narrative: <verbatim>` (only when non-empty)
+2. **Topics** — `I monitor news about <topics, joined by ", ">.`
+3. **Keywords** — `Specific topics I care about: <keywords, joined by ", ">.`
+4. **Geographies** — `Geographic focus: <geos, joined by ", ">.`
+
+Empty/missing axes drop their segment silently; the next non-empty segment
+slides up but order is preserved.
+
+**Diagnostic helpers (module exports — not yet on the runtime trace).**
+`buildIntentProfileText` is paired with two exports for tests and future
+diagnostics wiring:
+
+- `PROFILE_AXIS_ORDER` — frozen array of the four axis names in emission
+  order: `["narrative", "topics", "keywords", "geographies"]`.
+- `profileAxisNames(settings)` — returns the subset of axis names that
+  actually contributed a segment, in order. Useful as a building block for
+  later observability work (e.g. surfacing `profileAxes` on
+  `_meta.semanticBeatFit` or in a log line) so an operator could later
+  inspect which axes composed a refresh's profile.
+
+These exports are **not yet wired** into `_meta.semanticBeatFit` or the
+pipeline log block. They exist for the unit tests in this PR and as a
+deliberate seam for a follow-up diagnostics pass. Treat the runbook as
+describing what the **module API** exposes, not what production traces
+currently emit.
+
+**Why narrative-first.** Text-embedding models tend to give more weight to
+the leading tokens of the input, so leading with the user's narrative is
+intended to increase semantic alignment for narrative-rich settings (the
+WaPo Nigeria + China candidates in D-058's acceptance signal). The blend
+formula is unchanged. **Quantitative impact** — cosine deltas vs. the
+legacy axes-first ordering, dashboard pass/fail counts, end-to-end
+precision/recall — should be validated against the frozen relevance-eval
+suite ([`apps/api/src/dashboard/relevance-precision-fixtures.mjs`](../apps/api/src/dashboard/relevance-precision-fixtures.mjs)
+with `npm run eval:relevance-precision`) before any tuning. This runbook
+intentionally avoids hard numeric claims that aren't backed by a committed
+reproducible artifact.
+
+**Cache key invariance.** `profileCacheKey` hashes the cleaned settings
+fields (sorted lower-case sets per axis + raw narrative string) — NOT the
+assembled profile text. The narrative-first reorder therefore does not
+invalidate cached profile embeddings for unchanged settings. A unit test
+pins this invariant (`profile cache key is invariant under segment-order
+changes for the same settings`).
+
+**Scope (PR3 only).** The blend formula (`0.65 / 0.35`), the threshold
+(`0.40`), and the rescue contract are intentionally unchanged. Point 6
+rescue policy (D-059 + D-062: `rescue_semantic_geo`, uncapped) is a separate
+PR — this runbook section describes profile shape only.
+
 ## Files
 
 | Path | Purpose |
