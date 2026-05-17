@@ -37,7 +37,7 @@ Order in [`refresh-pipeline.mjs`](../apps/api/src/dashboard/refresh-pipeline.mjs
 | **Geo (F)** | Non-empty geo list → filter + holds; assessor **Haiku** when wired (**F3b**) |
 | **Lexical (D)** | Whole-word match (`\b<token>\b`), case-insensitive; topics/keywords **OR** when both configured; **noop** if both empty. Breadth comes from the embedding union, not from substring matching. |
 | **Embedding (E)** | `hybrid_strict`: union semantic top-K with lexical recall. **Empty profile** → **E3b** lexical-only pass-through (`degraded_reason: "empty_profile_text_lexical_only"`); **provider failure with lexical hits** → lexical fallback flagged `keywordFallbackAfterEmbeddingFailure: true`; **provider failure with no lexical hits** → strict-empty. |
-| **Beat-fit (G)** | Threshold **0.40**; strict-empty when no item passes |
+| **Beat-fit (G)** | Threshold **`0.20`** (MVP recall-first, [D-063](../DECISIONS.md)); env `TEMPO_BEAT_FIT_THRESHOLD` (set `0.40` to roll back). Strict-empty when no item passes |
 | **Dedupe (H)** | Cross-feed; survivors only become candidates |
 
 ---

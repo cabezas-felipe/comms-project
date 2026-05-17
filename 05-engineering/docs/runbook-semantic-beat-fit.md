@@ -9,9 +9,13 @@ stage adds an embedding-cosine signal blended into the final BeatFit score:
 finalBeatFit = deterministicBeatFit * 0.65 + semanticIntentScore * 0.35
 ```
 
-The deterministic scorer, reason codes, rescue band, and threshold (`0.40`)
-are unchanged. Semantic blending only rewrites the final score and adds
-diagnostic reason codes.
+The deterministic scorer, reason codes, and rescue band are unchanged.
+Semantic blending only rewrites the final score and adds diagnostic reason
+codes. The active beat-fit threshold is read at runtime from
+`TEMPO_BEAT_FIT_THRESHOLD` (legacy alias `BEAT_FIT_THRESHOLD`), default
+`0.20` under the MVP recall-first posture (D-063 — was `0.40` before; set
+the env back to `0.40` for instant rollback). See
+[`DECISIONS.md` D-063](../DECISIONS.md) for the rationale and rollback.
 
 ## Profile construction (D-058, narrative-first)
 
@@ -65,10 +69,11 @@ invalidate cached profile embeddings for unchanged settings. A unit test
 pins this invariant (`profile cache key is invariant under segment-order
 changes for the same settings`).
 
-**Scope (PR3 only).** The blend formula (`0.65 / 0.35`), the threshold
-(`0.40`), and the rescue contract are intentionally unchanged. Point 6
-rescue policy (D-059 + D-062: `rescue_semantic_geo`, uncapped) is a separate
-PR — this runbook section describes profile shape only.
+**Scope (PR3 only).** The blend formula (`0.65 / 0.35`) and the rescue
+contract are intentionally unchanged. Threshold was lowered to `0.20`
+under D-063 (env-tunable; see top of this runbook). Point 6 rescue policy
+(D-059 + D-062: `rescue_semantic_geo`, uncapped) is a separate PR — this
+runbook section describes profile shape only.
 
 ## Files
 
@@ -97,6 +102,7 @@ ships with the stage **enabled by default**.
 | `TEMPO_SEMANTIC_BEAT_FIT_TIMEOUT_MS` | `4000` | Per-batch timeout for the embedding call. Matches the initial SLO; tighten once observed latency is stable. |
 | `TEMPO_SEMANTIC_BEAT_FIT_MAX_ITEMS` | `250` | Caps items embedded per refresh; bounds cost and tail latency. |
 | `TEMPO_SEMANTIC_BEAT_FIT_MAX_TEXT_CHARS` | `2000` | Caps per-item canonical text length. |
+| `TEMPO_BEAT_FIT_THRESHOLD` | `0.20` | Active beat-fit threshold (D-063 MVP recall-first). Legacy alias `BEAT_FIT_THRESHOLD`. Set to `0.40` to roll back to the precision-first posture. |
 
 `OPENAI_API_KEY` / `TEMPO_OPENAI_API_KEY` already required by recall — no
 additional credential needed.
@@ -197,7 +203,7 @@ upward or upstream (Vercel function timeout) if this becomes frequent.
 The BeatFit summary log line gains additional fields:
 
 ```
-[pipeline.beat-fit] version=beat-fit-v1 threshold=0.4  recall=12  included=4  excluded=8  reasons=excluded_no_signal=5,excluded_low_score=3
+[pipeline.beat-fit] version=beat-fit-v1 threshold=0.2  recall=12  included=4  excluded=8  reasons=excluded_no_signal=5,excluded_low_score=3
 ```
 
 — this line is unchanged; the new counters live on `_meta.beatFit`:

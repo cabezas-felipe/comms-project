@@ -2,6 +2,43 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-17 - D-063 - Lower beat-fit threshold from 0.40 to 0.20 (MVP recall-first)
+
+#### Context
+
+Manual dashboard tests against priority Washington Post stories showed several genuinely on-beat items scoring just under the 0.40 "balanced" precision gate set by the original beat-fit scorer:
+
+- Ukraine ~0.38 (occasionally rescued via the borderline-multisignal / semantic-geo paths, but flaky)
+- China ~0.22 (when China was a configured geography)
+- Rwanda ~0.20 (when Rwanda was a configured geography, observed Run 1)
+
+The result: users saw an empty (or near-empty) dashboard for beats where relevant stories objectively existed in the candidate pool. The two existing rescue paths (`rescue_borderline_multisignal` D-054, `rescue_semantic_geo` D-059 / D-062) helped at the margin but did not consistently close the gap, especially for items below the 0.35 multisignal band.
+
+#### Decision
+
+Lower the default beat-fit threshold from **0.40 → 0.20**, with an env override for instant rollback:
+
+- `TEMPO_BEAT_FIT_THRESHOLD` (repo-convention primary) → `BEAT_FIT_THRESHOLD` (legacy alias) → constant default `0.20`.
+- New `readBeatFitThreshold()` runtime accessor; `applyBeatFitFilter`, `evaluateRescue`, `evaluateSemanticGeoRescue`, and `scoreBeatFit` semantic lift annotation all resolve the threshold through the reader, not the static constant.
+- `readRescueLowerBound()` is now threshold-aware: when the active threshold is at or below the historical `DEFAULT_RESCUE_LOWER_BOUND` (0.35), the fallback clamps to `max(0.05, threshold − 0.05)` (→ 0.15 at threshold 0.20) so the borderline band `[lowerBound, threshold)` stays non-empty.
+- Scope is still defined by configured `geographies` + `traditionalSources` / `socialSources` — the threshold change only adjusts the precision gate inside that scope (so e.g. Rwanda stories only surface when Rwanda is configured).
+
+#### Why
+
+The MVP product posture is **recall-first for learning**: surface borderline-relevant items so the operator can react and so we can observe what users do with them, then re-tighten once we have real usage signal. Precision-first is the right end state, but 0.40 was tuned against a single pairwise regression (`US strikes Iranian tankers` vs `Asia farmers food supply`), not against the breadth of priority stories users actually care about.
+
+#### Tradeoffs
+
+- **Precision drops.** Borderline items (geo-only matches, weak topic alignment) now reach clustering. Under the legacy posture an off-topic mig-noise item with only a geo match (~0.30) was excluded; at 0.20 it can leak. The critical eval suite and the strict-empty pipeline tests pin `TEMPO_BEAT_FIT_THRESHOLD=0.40` at the file level so they keep validating the precision contract they were written for.
+- **Rescue paths become near-redundant** under the default threshold (most items they would rescue now pass the gate outright). They remain in place for env-tuned higher thresholds and for the legacy posture.
+- **`relevance-precision` eval baseline shift (geo_mismatch_no_rescue).** Case 11 was written to prove `rescue_semantic_geo` does **not** fire when configured geos (US, Colombia) do not match a Sahel/ISIS story—even with strong semantic (≥ 0.60). At **0.40**, deterministic signals were zero (no topic/keyword/geo), so blended score ≈ 0.238 stayed below the gate and rescue was blocked at `geo_gate`. At **0.20**, that same blend clears via the **normal pass path** (not rescue): semantic weight alone lifts the item in, so geo-mismatch protection at the rescue layer is bypassed. `currentBaseline` updated (`in_dashboard: true`); `targetExpected` left unchanged so the eval gap documents this known recall-first leak.
+
+#### Rollback
+
+Set `TEMPO_BEAT_FIT_THRESHOLD=0.40` in the environment to restore the legacy precision-first behavior. No code change, no deploy required.
+
+---
+
 ### 2026-05-16 - D-053 - Vercel API runtime stability Option A: remove workspace-package runtime dependency
 
 #### Context

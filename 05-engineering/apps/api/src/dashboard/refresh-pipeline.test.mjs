@@ -20,6 +20,15 @@ process.env.TEMPO_RECALL_MODE = "keyword";
 // contract; the dedicated semantic tests below opt in via
 // `semanticBeatFitConfig: SEMANTIC_ON`.
 process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED = "false";
+// D-063: the MVP default beat-fit threshold dropped from 0.40 to 0.20
+// (recall-first). The strict-empty / decisionTrace / semantic-geo / critical-
+// eval fixtures here were tuned against the legacy 0.40 precision gate (e.g.
+// commodity-penalized items scoring ~0.25 still exclude). Pin the legacy
+// threshold for this file so each scenario keeps testing the precision
+// contract it was written for. Same isolation guarantee as
+// TEMPO_SEMANTIC_BEAT_FIT_ENABLED above: node --test runs each file in a
+// child process, so this does not leak across files.
+process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
 
 import {
   selectSourcePool,

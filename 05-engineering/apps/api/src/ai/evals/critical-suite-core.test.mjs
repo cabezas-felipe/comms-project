@@ -1,3 +1,11 @@
+// D-063: scenarios in this critical eval (e.g. critical-02 mig-noise leakage)
+// assert the legacy 0.40 precision-first contract — an off-topic item with
+// only a geo match (score ~0.30) must NOT leak. The MVP default lowered to
+// 0.20, which by design admits such borderline items. Pin the legacy
+// threshold here so the framework tests keep validating their contract;
+// node --test isolates env mutations to this file's child process.
+process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
 

@@ -6,6 +6,7 @@ const {
   applyBeatFitFilter,
   evaluateRescue,
   evaluateSemanticGeoRescue,
+  readBeatFitThreshold,
   readRescueLowerBound,
   readSemanticGeoRescueMin,
   BEAT_FIT_THRESHOLD,
@@ -55,10 +56,77 @@ test("BEAT_FIT_VERSION is a stable identifier", () => {
   assert.ok(BEAT_FIT_VERSION.length > 0);
 });
 
-test("BEAT_FIT_THRESHOLD reflects 'balanced' posture (between 0.3 and 0.6)", () => {
-  // Soft contract on the threshold so we notice if someone retunes it without
-  // updating the pairwise regression.
-  assert.ok(BEAT_FIT_THRESHOLD >= 0.3 && BEAT_FIT_THRESHOLD <= 0.6);
+test("BEAT_FIT_THRESHOLD defaults to MVP recall-first 0.20 (D-063)", () => {
+  // D-063 lowered the gate from the legacy "balanced" 0.40 to a recall-first
+  // 0.20 so priority WaPo stories (Ukraine ~0.38, China ~0.22, Rwanda ~0.20)
+  // surface during the MVP learning phase. Pin the constant so a future
+  // retune is intentional, not accidental.
+  assert.equal(BEAT_FIT_THRESHOLD, 0.20);
+});
+
+test("readBeatFitThreshold: returns the default when both env vars are unset", () => {
+  const prevTempo = process.env.TEMPO_BEAT_FIT_THRESHOLD;
+  const prevLegacy = process.env.BEAT_FIT_THRESHOLD;
+  delete process.env.TEMPO_BEAT_FIT_THRESHOLD;
+  delete process.env.BEAT_FIT_THRESHOLD;
+  try {
+    assert.equal(readBeatFitThreshold(), BEAT_FIT_THRESHOLD);
+  } finally {
+    if (prevTempo !== undefined) process.env.TEMPO_BEAT_FIT_THRESHOLD = prevTempo;
+    if (prevLegacy !== undefined) process.env.BEAT_FIT_THRESHOLD = prevLegacy;
+  }
+});
+
+test("readBeatFitThreshold: honors a valid TEMPO_BEAT_FIT_THRESHOLD override", () => {
+  const prev = process.env.TEMPO_BEAT_FIT_THRESHOLD;
+  process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
+  try {
+    assert.equal(readBeatFitThreshold(), 0.40);
+  } finally {
+    if (prev !== undefined) process.env.TEMPO_BEAT_FIT_THRESHOLD = prev;
+    else delete process.env.TEMPO_BEAT_FIT_THRESHOLD;
+  }
+});
+
+test("readBeatFitThreshold: falls back to legacy BEAT_FIT_THRESHOLD when TEMPO_* is unset", () => {
+  const prevTempo = process.env.TEMPO_BEAT_FIT_THRESHOLD;
+  const prevLegacy = process.env.BEAT_FIT_THRESHOLD;
+  delete process.env.TEMPO_BEAT_FIT_THRESHOLD;
+  process.env.BEAT_FIT_THRESHOLD = "0.30";
+  try {
+    assert.equal(readBeatFitThreshold(), 0.30);
+  } finally {
+    if (prevTempo !== undefined) process.env.TEMPO_BEAT_FIT_THRESHOLD = prevTempo;
+    if (prevLegacy !== undefined) process.env.BEAT_FIT_THRESHOLD = prevLegacy;
+    else delete process.env.BEAT_FIT_THRESHOLD;
+  }
+});
+
+test("readBeatFitThreshold: invalid values across both env vars fall back to default", () => {
+  const prevTempo = process.env.TEMPO_BEAT_FIT_THRESHOLD;
+  const prevLegacy = process.env.BEAT_FIT_THRESHOLD;
+  const bad = ["banana", "-0.1", "0", "1.5", "NaN", ""];
+  for (const v of bad) {
+    if (v === "") {
+      delete process.env.TEMPO_BEAT_FIT_THRESHOLD;
+      delete process.env.BEAT_FIT_THRESHOLD;
+    } else {
+      process.env.TEMPO_BEAT_FIT_THRESHOLD = v;
+      process.env.BEAT_FIT_THRESHOLD = v;
+    }
+    try {
+      assert.equal(
+        readBeatFitThreshold(),
+        BEAT_FIT_THRESHOLD,
+        `expected default for env value ${JSON.stringify(v)}`
+      );
+    } finally {
+      if (prevTempo !== undefined) process.env.TEMPO_BEAT_FIT_THRESHOLD = prevTempo;
+      else delete process.env.TEMPO_BEAT_FIT_THRESHOLD;
+      if (prevLegacy !== undefined) process.env.BEAT_FIT_THRESHOLD = prevLegacy;
+      else delete process.env.BEAT_FIT_THRESHOLD;
+    }
+  }
 });
 
 // ─── PAIRWISE REGRESSION (locked test pair from product spec) ────────────────
@@ -296,13 +364,43 @@ test("rescue constants are exported and consistent", () => {
   assert.equal(typeof BEAT_FIT_RESCUE_REASON, "string");
   assert.ok(BEAT_FIT_RESCUE_REASON.length > 0);
   assert.equal(typeof DEFAULT_RESCUE_LOWER_BOUND, "number");
-  assert.ok(
-    DEFAULT_RESCUE_LOWER_BOUND > 0 && DEFAULT_RESCUE_LOWER_BOUND < BEAT_FIT_THRESHOLD,
-    "default lower bound must be strictly inside (0, threshold)"
-  );
+  assert.ok(DEFAULT_RESCUE_LOWER_BOUND > 0, "default lower bound must be positive");
+  // D-063: with the default threshold lowered to 0.20, the static constant
+  // (0.35) is no longer strictly below the threshold. `readRescueLowerBound`
+  // is now threshold-aware and clamps to keep the band non-empty — covered by
+  // a dedicated test below.
   assert.equal(typeof RESCUE_MIN_STRONG_SIGNALS, "number");
   assert.ok(RESCUE_MIN_STRONG_SIGNALS >= 3, "rescue rule is FP-first: require at least 3 signals");
 });
+
+test("readRescueLowerBound: stays strictly below the active threshold when threshold is 0.20 (D-063)", () => {
+  // The historical DEFAULT_RESCUE_LOWER_BOUND (0.35) is no longer inside the
+  // band when the active threshold is 0.20. The reader must clamp the
+  // fallback to keep [lowerBound, threshold) non-empty, otherwise rescue
+  // becomes unreachable.
+  const prevTempo = process.env.TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND;
+  const prevLegacy = process.env.BEAT_FIT_RESCUE_LOWER_BOUND;
+  delete process.env.TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND;
+  delete process.env.BEAT_FIT_RESCUE_LOWER_BOUND;
+  try {
+    const bound = readRescueLowerBound(0.20);
+    assert.ok(bound > 0, "lower bound must be positive");
+    assert.ok(bound < 0.20, `lower bound ${bound} must be strictly less than threshold 0.20`);
+    // Specific clamp contract: max(0.05, threshold - 0.05) → 0.15 at 0.20
+    // (allowing for FP rounding on the subtraction).
+    assert.ok(Math.abs(bound - 0.15) < 1e-9, `expected ~0.15, got ${bound}`);
+  } finally {
+    if (prevTempo !== undefined) process.env.TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND = prevTempo;
+    if (prevLegacy !== undefined) process.env.BEAT_FIT_RESCUE_LOWER_BOUND = prevLegacy;
+  }
+});
+
+// The rescue-band evaluation tests exercise the FP-first rescue rule around a
+// 0.40 threshold + 0.35 lower bound (the legacy precision-first band).
+// D-063 lowered the default to 0.20, so these tests pass the explicit
+// threshold/rescueLowerBound opts to keep testing the rescue logic on the
+// band shape it was designed for.
+const LEGACY_BAND = Object.freeze({ threshold: 0.40, rescueLowerBound: 0.35 });
 
 test("evaluateRescue: rescues when score is in band, all 3 core signals fire, and no penalty is present", () => {
   // Synthetic: pretend the scorer produced a score of 0.38 with all three
@@ -310,7 +408,7 @@ test("evaluateRescue: rescues when score is in band, all 3 core signals fire, an
   // D-060 removed the actor signal; the rescue tally is now 3-of-3.
   const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25, geoMatch: 0.20 });
   const reasonCodes = ["topic_match:diplomatic relations", "keyword_match:migration", "geo_explicit_match"];
-  const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+  const outcome = evaluateRescue(0.38, breakdown, reasonCodes, LEGACY_BAND);
   assert.equal(outcome.rescued, true, "in-band item with all 3 core signals and no penalty must rescue");
   assert.equal(outcome.inBand, true);
   assert.equal(outcome.strongSignals, 3);
@@ -321,7 +419,7 @@ test("evaluateRescue: does not rescue an in-band item with only 1–2 signals", 
   // Two strong signals (topic + keyword). Score in band but evidence too thin.
   const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25 });
   const reasonCodes = ["topic_match:diplomatic relations", "keyword_match:migration"];
-  const outcome = evaluateRescue(0.37, breakdown, reasonCodes);
+  const outcome = evaluateRescue(0.37, breakdown, reasonCodes, LEGACY_BAND);
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.inBand, true);
   assert.equal(outcome.strongSignals, 2);
@@ -344,7 +442,7 @@ test("evaluateRescue: does not rescue when any major penalty is present, even wi
     "geo_explicit_match",
     "commodity_framing:wheat",
   ];
-  const outcome = evaluateRescue(0.37, breakdown, reasonCodes);
+  const outcome = evaluateRescue(0.37, breakdown, reasonCodes, LEGACY_BAND);
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.inBand, true);
   assert.equal(outcome.blockedBy, "major_penalty");
@@ -363,28 +461,28 @@ test("evaluateRescue: pureCommodity penalty also blocks rescue", () => {
     "geo_explicit_match",
     "commodity_framing:wheat",
   ];
-  const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+  const outcome = evaluateRescue(0.38, breakdown, reasonCodes, LEGACY_BAND);
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.blockedBy, "major_penalty");
 });
 
 test("evaluateRescue: noConfiguredSignal floor blocks rescue", () => {
   const breakdown = makeBreakdown({ noConfiguredSignal: -0.20 });
-  const outcome = evaluateRescue(0.38, breakdown, ["no_configured_signal"]);
+  const outcome = evaluateRescue(0.38, breakdown, ["no_configured_signal"], LEGACY_BAND);
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.blockedBy, "major_penalty");
 });
 
 test("evaluateRescue: score at or above threshold is reported as out-of-band (rescue not applicable)", () => {
   const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25, geoMatch: 0.20 });
-  const outcome = evaluateRescue(0.42, breakdown, ["topic_match", "keyword_match", "geo_explicit_match"]);
+  const outcome = evaluateRescue(0.42, breakdown, ["topic_match", "keyword_match", "geo_explicit_match"], LEGACY_BAND);
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.inBand, false);
 });
 
 test("evaluateRescue: score below the lower bound is reported as out-of-band", () => {
   const breakdown = makeBreakdown({ topic: 0.30, keyword: 0.25, geoMatch: 0.20 });
-  const outcome = evaluateRescue(0.20, breakdown, ["topic_match", "keyword_match", "geo_explicit_match"]);
+  const outcome = evaluateRescue(0.20, breakdown, ["topic_match", "keyword_match", "geo_explicit_match"], LEGACY_BAND);
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.inBand, false);
 });
@@ -396,7 +494,7 @@ test("evaluateRescue: recency_fresh does NOT count toward the strong-signal tall
   // breaking story must not sneak past the gate just because it is fresh.
   const breakdown = makeBreakdown({ keyword: 0.25, geoMatch: 0.20, recency: 0.10 });
   const reasonCodes = ["keyword_match:migration", "geo_explicit_match", "recency_fresh"];
-  const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+  const outcome = evaluateRescue(0.38, breakdown, reasonCodes, LEGACY_BAND);
   assert.equal(outcome.rescued, false, "recency_fresh must not push a 2-signal item over the rescue bar");
   assert.equal(outcome.strongSignals, 2);
   assert.equal(outcome.blockedBy, "insufficient_signals");
@@ -413,7 +511,7 @@ test("evaluateRescue: all 3 core signals with no penalty rescue even when recenc
     "geo_explicit_match",
     "recency_stale",
   ];
-  const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+  const outcome = evaluateRescue(0.38, breakdown, reasonCodes, LEGACY_BAND);
   assert.equal(outcome.rescued, true);
   assert.equal(outcome.strongSignals, 3);
   assert.equal(outcome.blockedBy, null);
@@ -459,33 +557,37 @@ function withRescueEnv(setup, fn) {
   }
 }
 
+// Env-precedence tests pass the legacy threshold (0.40) explicitly so the
+// (0, threshold) validation matches the bound values these cases were written
+// for. The threshold-aware fallback at the new 0.20 default has its own test
+// near the rescue-constants block above.
 test("readRescueLowerBound: returns default when both env vars are unset", () => {
   withRescueEnv({ primary: undefined, legacy: undefined }, () => {
-    assert.equal(readRescueLowerBound(), DEFAULT_RESCUE_LOWER_BOUND);
+    assert.equal(readRescueLowerBound(0.40), DEFAULT_RESCUE_LOWER_BOUND);
   });
 });
 
 test("readRescueLowerBound: honors a valid TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND override", () => {
   withRescueEnv({ primary: "0.33", legacy: undefined }, () => {
-    assert.equal(readRescueLowerBound(), 0.33);
+    assert.equal(readRescueLowerBound(0.40), 0.33);
   });
 });
 
 test("readRescueLowerBound: falls back to legacy BEAT_FIT_RESCUE_LOWER_BOUND when TEMPO_* is unset", () => {
   withRescueEnv({ primary: undefined, legacy: "0.32" }, () => {
-    assert.equal(readRescueLowerBound(), 0.32);
+    assert.equal(readRescueLowerBound(0.40), 0.32);
   });
 });
 
 test("readRescueLowerBound: TEMPO_* wins precedence when both are set", () => {
   withRescueEnv({ primary: "0.36", legacy: "0.32" }, () => {
-    assert.equal(readRescueLowerBound(), 0.36);
+    assert.equal(readRescueLowerBound(0.40), 0.36);
   });
 });
 
 test("readRescueLowerBound: invalid TEMPO_* with valid legacy falls through to legacy (no silent shadowing)", () => {
   withRescueEnv({ primary: "banana", legacy: "0.34" }, () => {
-    assert.equal(readRescueLowerBound(), 0.34);
+    assert.equal(readRescueLowerBound(0.40), 0.34);
   });
 });
 
@@ -494,7 +596,7 @@ test("readRescueLowerBound: invalid values across both env vars fall back to def
   for (const v of bad) {
     withRescueEnv({ primary: v, legacy: v }, () => {
       assert.equal(
-        readRescueLowerBound(),
+        readRescueLowerBound(0.40),
         DEFAULT_RESCUE_LOWER_BOUND,
         `expected default for env value ${JSON.stringify(v)}`
       );
@@ -710,10 +812,11 @@ test("invariant I1: rescue band is half-open [lowerBound, threshold)", () => {
 
 test("invariant I2: all 3-of-3 core signals rescue (no penalty, in band)", () => {
   // D-060 collapsed the rescue tally from 3-of-4 to 3-of-3. All three core
-  // signals must fire for the rescue to admit.
+  // signals must fire for the rescue to admit. Test under the legacy band
+  // so the score-vs-band setup remains stable (see LEGACY_BAND above).
   const breakdown = breakdownWith(CORE_SIGNALS);
   const reasonCodes = CORE_SIGNALS.map((s) => `${s}_match`);
-  const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+  const outcome = evaluateRescue(0.38, breakdown, reasonCodes, LEGACY_BAND);
   assert.equal(outcome.rescued, true, "all 3 core signals must rescue when in band with no penalty");
   assert.equal(outcome.strongSignals, 3);
   assert.equal(outcome.blockedBy, null);
@@ -725,7 +828,8 @@ test("invariant I2: all 3-of-3 core signals rescue (no penalty, in band)", () =>
     const partialOutcome = evaluateRescue(
       0.38,
       partial,
-      present.map((s) => `${s}_match`)
+      present.map((s) => `${s}_match`),
+      LEGACY_BAND
     );
     assert.equal(
       partialOutcome.rescued,
@@ -745,7 +849,7 @@ test("invariant I3: recency_fresh never substitutes for a missing core signal", 
       const breakdown = breakdownWith(present);
       breakdown.recency = 0.10; // maximum recency contribution
       const reasonCodes = [...present.map((s) => `${s}_match`), "recency_fresh"];
-      const outcome = evaluateRescue(0.38, breakdown, reasonCodes);
+      const outcome = evaluateRescue(0.38, breakdown, reasonCodes, LEGACY_BAND);
       assert.equal(
         outcome.rescued,
         false,
@@ -769,7 +873,7 @@ test("invariant I4: each major penalty independently blocks rescue", () => {
   ];
   for (const p of penalties) {
     const breakdown = { ...baseBreakdown, [p.name]: p.value };
-    const outcome = evaluateRescue(0.37, breakdown, [...baseCodes, p.code]);
+    const outcome = evaluateRescue(0.37, breakdown, [...baseCodes, p.code], LEGACY_BAND);
     assert.equal(
       outcome.rescued,
       false,
@@ -893,10 +997,13 @@ test("scoreBeatFit: weak-deterministic + strong semantic → 'semantic_intent_li
   // Sub-threshold deterministic baseline (single keyword hit + recency) gets
   // lifted across the threshold by a strong semantic input. Pinning the lift
   // arithmetic here so a refactor of either component surfaces immediately.
+  // D-063 lowered the default threshold to 0.20; pass the legacy 0.40 gate
+  // explicitly so the deterministic baseline ~0.30 remains sub-threshold and
+  // the lift mechanism is what's actually under test.
   const item = makeRssItem({
     sourceId: "weak-det-strong-sem",
-    // Single configured keyword fires (+0.20) and recency adds ~0.10 — total
-    // deterministic ~0.30, comfortably below the 0.40 threshold.
+    // Single configured keyword fires (+0.25) and recency adds ~0.10 — total
+    // deterministic ~0.35, below the legacy 0.40 threshold.
     headline: "Sanctions update issued today by an unnamed authority",
     body: [""],
     topic: "Other",
@@ -904,19 +1011,41 @@ test("scoreBeatFit: weak-deterministic + strong semantic → 'semantic_intent_li
     minutesAgo: 30,
     semanticIntentScore: 0.95,
   });
-  const result = scoreBeatFit(item, COMMS_SETTINGS);
+  const result = scoreBeatFit(item, COMMS_SETTINGS, { threshold: 0.40 });
   assert.ok(
-    result.deterministicScore < BEAT_FIT_THRESHOLD,
-    `expected deterministic ${result.deterministicScore} < ${BEAT_FIT_THRESHOLD}`
+    result.deterministicScore < 0.40,
+    `expected deterministic ${result.deterministicScore} < 0.40`
   );
   assert.ok(
-    result.score >= BEAT_FIT_THRESHOLD,
-    `expected blended ${result.score} >= ${BEAT_FIT_THRESHOLD}`
+    result.score >= 0.40,
+    `expected blended ${result.score} >= 0.40`
   );
   assert.ok(result.reasonCodes.includes("semantic_intent_lift_over_threshold"));
 });
 
+test("scoreBeatFit: lift reason code tracks the active runtime threshold (D-063)", () => {
+  // Same fixture, but at the new MVP default threshold of 0.20 the
+  // deterministic baseline already clears the gate — so semantic 'lift' is
+  // not over-threshold anymore and the reason code must NOT fire. This
+  // confirms the lift annotation compares against the active threshold, not
+  // the static BEAT_FIT_THRESHOLD constant alone.
+  const item = makeRssItem({
+    sourceId: "no-lift-at-low-threshold",
+    headline: "Sanctions update issued today by an unnamed authority",
+    body: [""],
+    topic: "Other",
+    geographies: [],
+    minutesAgo: 30,
+    semanticIntentScore: 0.95,
+  });
+  const result = scoreBeatFit(item, COMMS_SETTINGS, { threshold: 0.20 });
+  assert.ok(result.deterministicScore >= 0.20, "deterministic baseline already at/above 0.20");
+  assert.ok(!result.reasonCodes.includes("semantic_intent_lift_over_threshold"));
+});
+
 test("applyBeatFitFilter: semantic blend rollup counts lift / missing across the batch", () => {
+  // Lift mechanism is calibrated against the legacy 0.40 gate; pass the
+  // threshold explicitly so the rollup keeps testing what it was written for.
   const items = [
     // No semantic on the item → blend missing.
     makeRssItem({
@@ -924,9 +1053,9 @@ test("applyBeatFitFilter: semantic blend rollup counts lift / missing across the
       headline: INCLUDE_HEADLINE,
       body: INCLUDE_BODY,
     }),
-    // Single keyword (+0.20) + recency lift (~0.10) → ~0.30 deterministic
-    // (below threshold). Strong semantic crosses the 0.40 line — counted as
-    // both blend-applied and a lift.
+    // Single keyword (+0.25) + recency lift (~0.10) → ~0.35 deterministic
+    // (below 0.40 threshold). Strong semantic crosses the 0.40 line — counted
+    // as both blend-applied and a lift.
     makeRssItem({
       sourceId: "lift",
       headline: "Sanctions update issued today by an unnamed authority",
@@ -937,7 +1066,7 @@ test("applyBeatFitFilter: semantic blend rollup counts lift / missing across the
       semanticIntentScore: 0.98,
     }),
   ];
-  const { summary } = applyBeatFitFilter(items, COMMS_SETTINGS);
+  const { summary } = applyBeatFitFilter(items, COMMS_SETTINGS, { threshold: 0.40 });
   assert.equal(summary.semanticBlendEnabled, true);
   assert.equal(summary.semanticBlendMissingCount, 1);
   assert.equal(summary.semanticBlendAppliedCount, 1);
@@ -945,9 +1074,12 @@ test("applyBeatFitFilter: semantic blend rollup counts lift / missing across the
 });
 
 test("applyBeatFitFilter: opts.semanticBlendEnabled=false short-circuits blending across the batch", () => {
-  // Single keyword + recency = ~0.30 deterministic; semantic 0.99 would lift
-  // it past threshold under the default blend. With the kill-switch opt set,
-  // blending is bypassed and the item stays excluded.
+  // Single keyword + recency = ~0.35 deterministic; semantic 0.99 would lift
+  // it past the legacy 0.40 threshold under the default blend. With the
+  // kill-switch opt set, blending is bypassed and the item stays excluded.
+  // D-063: pass the legacy threshold explicitly — the new 0.20 default would
+  // admit the deterministic baseline outright, making the kill-switch a no-op
+  // for the inclusion check.
   const items = [
     makeRssItem({
       sourceId: "would-lift",
@@ -961,6 +1093,7 @@ test("applyBeatFitFilter: opts.semanticBlendEnabled=false short-circuits blendin
   ];
   const { included, summary } = applyBeatFitFilter(items, COMMS_SETTINGS, {
     semanticBlendEnabled: false,
+    threshold: 0.40,
   });
   assert.equal(summary.semanticBlendEnabled, false);
   assert.equal(summary.semanticBlendAppliedCount, 0);
@@ -1009,11 +1142,17 @@ test("D-059: rescue_semantic_geo constants are exported and consistent", () => {
   );
 });
 
+// D-063: helper tests below were authored against the legacy 0.40 threshold;
+// the path only fires for below-threshold scores, so pass it explicitly so
+// score 0.32 stays below-threshold under the new MVP default (0.20).
+const LEGACY_SG_THRESHOLD = 0.40;
+
 test("D-059: evaluateSemanticGeoRescue rescues when below threshold + semantic≥0.60 + geo + no penalty", () => {
   const outcome = evaluateSemanticGeoRescue({
     score: 0.32,
     semanticIntentScore: 0.65,
     breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+    threshold: LEGACY_SG_THRESHOLD,
   });
   assert.equal(outcome.rescued, true);
   assert.equal(outcome.belowThreshold, true);
@@ -1030,6 +1169,7 @@ test("D-059: evaluateSemanticGeoRescue does NOT require multisignal band — wor
     score: 0.32,
     semanticIntentScore: 0.65,
     breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+    threshold: LEGACY_SG_THRESHOLD,
   });
   assert.equal(outcome.rescued, true);
 });
@@ -1041,6 +1181,7 @@ test("D-059: evaluateSemanticGeoRescue blocked when geo did not fire (blockedBy:
     score: 0.32,
     semanticIntentScore: 0.68,
     breakdown: makeBreakdownSG({ keyword: 0.20 }),
+    threshold: LEGACY_SG_THRESHOLD,
   });
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.hasStrongSemantic, true);
@@ -1057,6 +1198,7 @@ test("D-059: evaluateSemanticGeoRescue blocked by major penalty even when semant
       score: 0.32,
       semanticIntentScore: 0.70,
       breakdown: makeBreakdownSG({ geoMatch: 0.15, [penalty]: -0.20 }),
+      threshold: LEGACY_SG_THRESHOLD,
     });
     assert.equal(outcome.rescued, false, `${penalty} must veto rescue`);
     assert.equal(outcome.blockedBy, "major_penalty");
@@ -1070,6 +1212,7 @@ test("D-059: evaluateSemanticGeoRescue blocked when semantic is below the config
     score: 0.32,
     semanticIntentScore: 0.55,
     breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+    threshold: LEGACY_SG_THRESHOLD,
   });
   assert.equal(outcome.rescued, false);
   assert.equal(outcome.hasGeoMatch, true);
@@ -1096,6 +1239,7 @@ test("D-059: evaluateSemanticGeoRescue treats null/missing semanticIntentScore a
       score: 0.32,
       semanticIntentScore: missing,
       breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+      threshold: LEGACY_SG_THRESHOLD,
     });
     assert.equal(outcome.rescued, false, `${String(missing)} must not rescue`);
     assert.equal(outcome.blockedBy, "weak_semantic");
@@ -1107,6 +1251,7 @@ test("D-059: evaluateSemanticGeoRescue honors a custom semantic floor via opts.m
     score: 0.32,
     semanticIntentScore: 0.55,
     breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+    threshold: LEGACY_SG_THRESHOLD,
     minSemantic: 0.50,
   });
   assert.equal(outcome.rescued, true, "lowering the floor below 0.55 must admit");
@@ -1154,6 +1299,9 @@ test("D-059 wiring: applyBeatFitFilter rescues an item via the semantic-geo path
   // Item carries explicit geo Nigeria (so geoMatch fires) but no configured
   // topic/keyword in text. Deterministic = geo only (post-D-060 weight 0.20);
   // stale recency so blended score stays below 0.40 with semantic 0.65.
+  // D-063: the new MVP default 0.20 would admit this item outright — the
+  // semantic-geo path only fires below-threshold, so pass the legacy 0.40
+  // threshold to keep the rescue mechanism under test.
   const item = makeRssItem({
     sourceId: "sg-rescue",
     headline: "Background piece on the Sahel region",
@@ -1162,7 +1310,7 @@ test("D-059 wiring: applyBeatFitFilter rescues an item via the semantic-geo path
     minutesAgo: 1440,
     semanticIntentScore: 0.65,
   });
-  const { included, summary } = applyBeatFitFilter([item], P4_SETTINGS);
+  const { included, summary } = applyBeatFitFilter([item], P4_SETTINGS, { threshold: 0.40 });
   assert.equal(included.length, 1, "semantic-geo path must admit the item");
   assert.equal(included[0].beatFitRescued, true);
   assert.equal(included[0].beatFitRescueReason, "rescue_semantic_geo");
@@ -1189,7 +1337,7 @@ test("D-059 wiring: applyBeatFitFilter blocks semantic-geo rescue on geo mismatc
     minutesAgo: 1440,
     semanticIntentScore: 0.65,
   });
-  const { included, excluded, summary } = applyBeatFitFilter([item], P4_SETTINGS);
+  const { included, excluded, summary } = applyBeatFitFilter([item], P4_SETTINGS, { threshold: 0.40 });
   assert.equal(included.length, 0);
   assert.equal(excluded.length, 1);
   assert.ok(
@@ -1211,7 +1359,7 @@ test("D-059 wiring: major penalty blocks semantic-geo rescue (does not slip past
     minutesAgo: 30,
     semanticIntentScore: 0.80,
   });
-  const { included, excluded } = applyBeatFitFilter([item], P4_SETTINGS);
+  const { included, excluded } = applyBeatFitFilter([item], P4_SETTINGS, { threshold: 0.40 });
   assert.equal(included.length, 0, "commodity penalty must veto semantic-geo rescue");
   assert.equal(excluded.length, 1);
   assert.ok(
@@ -1238,7 +1386,7 @@ test("D-062 wiring: semantic-geo rescue is UNCAPPED — 3 eligible candidates al
       semanticIntentScore: 0.61 + i * 0.02,
     })
   );
-  const { included, summary } = applyBeatFitFilter(items, P4_SETTINGS);
+  const { included, summary } = applyBeatFitFilter(items, P4_SETTINGS, { threshold: 0.40 });
   assert.equal(included.length, 3, "all three eligible candidates must rescue (uncapped)");
   assert.equal(summary.rescuedSemanticGeoCount, 3);
   assert.equal(summary.rescuedCount, 3);
@@ -1262,7 +1410,7 @@ test("D-062 wiring: scaling further does not exhibit any cap (10 eligible → 10
       semanticIntentScore: 0.65,
     })
   );
-  const { included, summary } = applyBeatFitFilter(items, P4_SETTINGS);
+  const { included, summary } = applyBeatFitFilter(items, P4_SETTINGS, { threshold: 0.40 });
   assert.equal(included.length, 10);
   assert.equal(summary.rescuedSemanticGeoCount, 10);
 });

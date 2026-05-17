@@ -2,9 +2,14 @@
 //
 // Stage 1 (selectSourcePool / 24h / geo / topic+keyword) is recall-oriented:
 // it cuts the global pool down to plausibly-relevant items using OR semantics.
-// Stage 2 (this module) is precision-oriented with the "balanced" posture:
-// each candidate is scored on a 0..1 scale combining several signals, and only
-// items above a threshold reach clustering. Strict-empty: if no candidate
+// Stage 2 (this module) is recall-first under the MVP posture (D-063): each
+// candidate is scored on a 0..1 scale combining several signals, and only
+// items at or above a low threshold (default 0.20) reach clustering. The
+// posture is intentionally permissive so manual dashboard tests can validate
+// that priority WaPo stories (Ukraine ~0.38, China ~0.22, Rwanda ~0.20)
+// surface. Scope is still defined by configured geographies + sources.
+// Threshold is env-tunable via `TEMPO_BEAT_FIT_THRESHOLD` for easy rollback
+// to the previous 0.40 precision-first posture. Strict-empty: if no candidate
 // clears, the pipeline returns an empty stories list rather than falling back
 // to a weak top-of-list pick.
 //
@@ -40,31 +45,36 @@ export const BEAT_FIT_VERSION = "beat-fit-v1";
 // into the semantic module.
 export { SEMANTIC_BLEND_DETERMINISTIC, SEMANTIC_BLEND_SEMANTIC };
 
-// Threshold tuned to the "balanced" product posture. Items at or above this
-// reach clustering. The pairwise regression (US strikes Iranian tankers vs.
-// Asia farmers food supply) calibrates this number.
-export const BEAT_FIT_THRESHOLD = 0.40;
+// MVP recall-first default (D-063). Items at or above this reach clustering.
+// The previous 0.40 "balanced" precision-first gate dropped priority WaPo
+// stories observed in manual tests (Ukraine ~0.38, China ~0.22, Rwanda
+// ~0.20); 0.20 keeps them surfaced so we can learn from real usage. Override
+// via `TEMPO_BEAT_FIT_THRESHOLD` (legacy alias `BEAT_FIT_THRESHOLD`) — set to
+// 0.40 to roll back to the precision posture. `readBeatFitThreshold()` is the
+// runtime accessor; this constant remains the default fallback.
+export const BEAT_FIT_THRESHOLD = 0.20;
 
 // Phase 1 borderline-rescue guardrail. Items that fall just below the main
 // threshold can still pass when they show strong multi-signal evidence and
-// carry no major penalty. The band is [rescueLowerBound, BEAT_FIT_THRESHOLD).
-// Default lower bound is 0.35. The bound is configurable via env, with
-// precedence:
+// carry no major penalty. The band is [rescueLowerBound, threshold).
+// Default lower bound is 0.35 (sized for the legacy 0.40 threshold). The
+// bound is configurable via env, with precedence:
 //   1. TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND  (repo-convention primary)
 //   2. BEAT_FIT_RESCUE_LOWER_BOUND        (legacy fallback, kept for back-compat)
 //   3. DEFAULT_RESCUE_LOWER_BOUND
-// Rescue rule is intentionally strict (FP-first posture): require at least
+// `readRescueLowerBound()` is threshold-aware: when the active threshold is
+// at or below the default, the effective lower bound collapses just under
+// the threshold (e.g. 0.15 at threshold 0.20) so the band stays non-empty
+// without re-tuning env each time. Rescue rule is intentionally strict
+// (FP-first posture inside the band): require at least
 // RESCUE_MIN_STRONG_SIGNALS distinct CORE positive signals (topic / keyword /
-// geo — recency is excluded; actor was removed in D-060) AND zero penalties,
-// so global precision stays intact while a narrow slice of borderline-but-
-// well-corroborated items survive. The threshold is now 3-of-3 remaining
-// core signals.
+// geo — recency is excluded; actor was removed in D-060) AND zero penalties.
 export const DEFAULT_RESCUE_LOWER_BOUND = 0.35;
 export const RESCUE_MIN_STRONG_SIGNALS = 3;
 export const BEAT_FIT_RESCUE_REASON = "rescue_borderline_multisignal";
 
 // D-059 + D-062 (PR4): narrow "rescue_semantic_geo" path. Items below the
-// 0.40 threshold can still pass when ALL of:
+// active beat-fit threshold can still pass when ALL of:
 //   - `semanticIntentScore >= SEMANTIC_GEO_RESCUE_MIN` (default 0.60)
 //   - the scoreBeatFit geo component fired (`breakdown.geoMatch > 0`)
 //   - no major penalty (pureCommodity / noConfiguredSignal — D-060 removed offBeatGeo)
@@ -79,12 +89,13 @@ export const BEAT_FIT_RESCUE_REASON = "rescue_borderline_multisignal";
 export const DEFAULT_SEMANTIC_GEO_RESCUE_MIN = 0.60;
 export const SEMANTIC_GEO_RESCUE_REASON = "rescue_semantic_geo";
 
-// Component weights (sum > threshold so no single signal can carry alone, but
-// strong combinations clear comfortably). D-060: actor component removed;
-// the freed weight (0.25) is redistributed into keyword (+0.05) and geoMatch
-// (+0.05) so a clean topic + keyword + geo combination still clears the
-// 0.40 threshold without leaning on the legacy actor cue list. Recency
-// unchanged.
+// Component weights (sum > legacy 0.40 gate so no single signal could carry
+// alone under the precision posture; combinations clear comfortably). D-060:
+// actor component removed; the freed weight (0.25) is redistributed into
+// keyword (+0.05) and geoMatch (+0.05) so a clean topic + keyword + geo
+// combination still clears the legacy 0.40 threshold without leaning on the
+// actor cue list. D-063 lowered the default gate to 0.20 (recall-first); a
+// single core signal can now suffice. Recency unchanged.
 const W = Object.freeze({
   topic: 0.30,
   keyword: 0.25,
@@ -286,6 +297,7 @@ export function scoreBeatFit(item, settings, opts = {}) {
   // behavior is preserved bit-for-bit when the semantic stage is off / failed
   // / not yet wired.
   const semanticBlendEnabled = opts.semanticBlendEnabled !== false;
+  const activeThreshold = opts.threshold ?? readBeatFitThreshold();
   const rawSemantic =
     typeof item?.semanticIntentScore === "number" && Number.isFinite(item.semanticIntentScore)
       ? Math.max(0, Math.min(1, item.semanticIntentScore))
@@ -303,7 +315,9 @@ export function scoreBeatFit(item, settings, opts = {}) {
     // operator reading the trace can answer "did semantic help or hurt?".
     reasonCodes.push(`semantic_intent_score:${rawSemantic.toFixed(3)}`);
     if (rawSemantic >= 0.7) reasonCodes.push("semantic_intent_strong");
-    if (deterministicScore < BEAT_FIT_THRESHOLD && score >= BEAT_FIT_THRESHOLD) {
+    // Compare against the active runtime threshold so the lift code stays
+    // truthful when the env override lowers (or raises) the gate.
+    if (deterministicScore < activeThreshold && score >= activeThreshold) {
       reasonCodes.push("semantic_intent_lift_over_threshold");
     }
   }
@@ -318,16 +332,45 @@ export function scoreBeatFit(item, settings, opts = {}) {
   };
 }
 
+// Read the configurable beat-fit threshold from the environment, with a safe
+// fallback to BEAT_FIT_THRESHOLD (default 0.20 under D-063). Precedence:
+//   1. TEMPO_BEAT_FIT_THRESHOLD  (current repo convention)
+//   2. BEAT_FIT_THRESHOLD        (legacy name, kept for back-compat)
+//   3. BEAT_FIT_THRESHOLD constant
+// Each candidate is independently validated (finite number, strictly inside
+// (0, 1]); invalid values are skipped so a typo in the new var doesn't
+// silently shadow a working legacy value.
+export function readBeatFitThreshold() {
+  const candidates = [
+    process.env.TEMPO_BEAT_FIT_THRESHOLD,
+    process.env.BEAT_FIT_THRESHOLD,
+  ];
+  for (const raw of candidates) {
+    if (raw === undefined || raw === "") continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) continue;
+    if (n <= 0 || n > 1) continue;
+    return n;
+  }
+  return BEAT_FIT_THRESHOLD;
+}
+
 // Read the configurable rescue band lower bound from the environment, with
 // a safe fallback. Precedence:
 //   1. TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND  (current repo convention)
 //   2. BEAT_FIT_RESCUE_LOWER_BOUND        (legacy name, kept for back-compat)
-//   3. DEFAULT_RESCUE_LOWER_BOUND
+//   3. DEFAULT_RESCUE_LOWER_BOUND, clamped to stay strictly below `threshold`
 // Each candidate is independently validated (finite number, strictly inside
-// (0, BEAT_FIT_THRESHOLD)); invalid values are skipped rather than aborting,
-// so a typo in the new var doesn't silently shadow a working legacy value.
+// (0, threshold)); invalid values are skipped rather than aborting, so a typo
+// in the new var doesn't silently shadow a working legacy value.
 // Equal-to-threshold collapses the band to empty, so it's rejected.
-export function readRescueLowerBound() {
+//
+// Threshold-aware fallback: D-063 lowered the default threshold to 0.20, which
+// is below the historical `DEFAULT_RESCUE_LOWER_BOUND` (0.35). When the active
+// threshold is at or below the default lower bound, the rescue band would
+// otherwise collapse; we clamp the fallback to `max(0.05, threshold - 0.05)`
+// (→ 0.15 at threshold 0.20) so the borderline band remains non-empty.
+export function readRescueLowerBound(threshold = readBeatFitThreshold()) {
   const candidates = [
     process.env.TEMPO_BEAT_FIT_RESCUE_LOWER_BOUND,
     process.env.BEAT_FIT_RESCUE_LOWER_BOUND,
@@ -336,8 +379,11 @@ export function readRescueLowerBound() {
     if (raw === undefined || raw === "") continue;
     const n = Number(raw);
     if (!Number.isFinite(n)) continue;
-    if (n <= 0 || n >= BEAT_FIT_THRESHOLD) continue;
+    if (n <= 0 || n >= threshold) continue;
     return n;
+  }
+  if (DEFAULT_RESCUE_LOWER_BOUND >= threshold) {
+    return Math.max(0.05, threshold - 0.05);
   }
   return DEFAULT_RESCUE_LOWER_BOUND;
 }
@@ -386,8 +432,8 @@ function hasMajorPenalty(breakdown) {
  * it with synthetic breakdown/reasonCodes without battling the scorer math.
  */
 export function evaluateRescue(score, breakdown, reasonCodes, opts = {}) {
-  const threshold = opts.threshold ?? BEAT_FIT_THRESHOLD;
-  const lowerBound = opts.rescueLowerBound ?? readRescueLowerBound();
+  const threshold = opts.threshold ?? readBeatFitThreshold();
+  const lowerBound = opts.rescueLowerBound ?? readRescueLowerBound(threshold);
   const inBand = score >= lowerBound && score < threshold;
   if (!inBand) {
     return { rescued: false, inBand: false, strongSignals: 0, blockedBy: null };
@@ -454,7 +500,7 @@ export function evaluateSemanticGeoRescue({
   score,
   semanticIntentScore,
   breakdown,
-  threshold = BEAT_FIT_THRESHOLD,
+  threshold = readBeatFitThreshold(),
   minSemantic = readSemanticGeoRescueMin(),
 } = {}) {
   if (typeof score !== "number" || !Number.isFinite(score)) {
@@ -537,8 +583,9 @@ export function evaluateSemanticGeoRescue({
  *   }
  */
 export function applyBeatFitFilter(items, settings, opts = {}) {
-  const threshold = opts.threshold ?? BEAT_FIT_THRESHOLD;
-  const rescueLowerBound = opts.rescueLowerBound ?? readRescueLowerBound();
+  const threshold = opts.threshold ?? readBeatFitThreshold();
+  const rescueLowerBound =
+    opts.rescueLowerBound ?? readRescueLowerBound(threshold);
   const semanticGeoRescueMin =
     opts.semanticGeoRescueMin ?? readSemanticGeoRescueMin();
   const semanticBlendEnabled = opts.semanticBlendEnabled !== false;
@@ -561,7 +608,10 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
   let excludedWithSemanticPresentCount = 0;
 
   for (const item of items ?? []) {
-    const result = scoreBeatFit(item, settings, { semanticBlendEnabled });
+    const result = scoreBeatFit(item, settings, {
+      semanticBlendEnabled,
+      threshold,
+    });
     const { score, deterministicScore, semanticIntentScore, breakdown, reasonCodes, blendApplied } = result;
     const normalPass = score >= threshold;
 
