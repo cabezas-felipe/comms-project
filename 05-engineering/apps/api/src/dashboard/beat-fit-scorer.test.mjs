@@ -5,11 +5,15 @@ const {
   scoreBeatFit,
   applyBeatFitFilter,
   evaluateRescue,
+  evaluateSemanticGeoRescue,
   readRescueLowerBound,
+  readSemanticGeoRescueMin,
   BEAT_FIT_THRESHOLD,
   BEAT_FIT_VERSION,
   BEAT_FIT_RESCUE_REASON,
+  SEMANTIC_GEO_RESCUE_REASON,
   DEFAULT_RESCUE_LOWER_BOUND,
+  DEFAULT_SEMANTIC_GEO_RESCUE_MIN,
   RESCUE_MIN_STRONG_SIGNALS,
 } = await import("./beat-fit-scorer.mjs");
 
@@ -945,4 +949,387 @@ test("applyBeatFitFilter: opts.semanticBlendEnabled=false short-circuits blendin
   assert.equal(summary.semanticBlendEnabled, false);
   assert.equal(summary.semanticBlendAppliedCount, 0);
   assert.equal(included.length, 0);
+});
+
+// ─── D-059 + D-062 (PR4): rescue_semantic_geo — uncapped, narrow ─────────────
+//
+// New rescue path for below-threshold items with strong semantic + configured
+// geo + no major penalty. Coexists with the existing borderline-multisignal
+// rescue (which still wins when both qualify so prior outcomes are stable).
+// **Uncapped** per the D-062 amendment.
+//
+// Settings tailored for these tests: configured geo is Nigeria — NOT in the
+// legacy POLICY_ACTOR_CUES list — so the actor component can't accidentally
+// lift the deterministic score above threshold and bypass the rescue path
+// we're trying to exercise. Topic + keyword choices avoid common words that
+// might bleed into the test item text.
+const P4_SETTINGS = {
+  topics: ["Terrorism"],
+  keywords: ["sanctions"],
+  geographies: ["Nigeria"],
+  traditionalSources: ["The Washington Post"],
+  socialSources: [],
+};
+
+function makeBreakdownSG(overrides = {}) {
+  // Minimal breakdown shape sufficient for evaluateSemanticGeoRescue; missing
+  // bonus fields default to 0 (no signal), missing penalties default to 0
+  // (no penalty).
+  return {
+    topic: 0,
+    actor: 0,
+    keyword: 0,
+    geoMatch: 0,
+    recency: 0,
+    ...overrides,
+  };
+}
+
+test("D-059: rescue_semantic_geo constants are exported and consistent", () => {
+  assert.equal(typeof SEMANTIC_GEO_RESCUE_REASON, "string");
+  assert.equal(SEMANTIC_GEO_RESCUE_REASON, "rescue_semantic_geo");
+  assert.equal(typeof DEFAULT_SEMANTIC_GEO_RESCUE_MIN, "number");
+  assert.ok(
+    DEFAULT_SEMANTIC_GEO_RESCUE_MIN > 0 && DEFAULT_SEMANTIC_GEO_RESCUE_MIN <= 1,
+    "semantic floor must sit inside (0, 1]"
+  );
+});
+
+test("D-059: evaluateSemanticGeoRescue rescues when below threshold + semantic≥0.60 + geo + no penalty", () => {
+  const outcome = evaluateSemanticGeoRescue({
+    score: 0.32,
+    semanticIntentScore: 0.65,
+    breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+  });
+  assert.equal(outcome.rescued, true);
+  assert.equal(outcome.belowThreshold, true);
+  assert.equal(outcome.hasStrongSemantic, true);
+  assert.equal(outcome.hasGeoMatch, true);
+  assert.equal(outcome.blockedBy, null);
+});
+
+test("D-059: evaluateSemanticGeoRescue does NOT require multisignal band — works below rescueLowerBound", () => {
+  // Crucial vs. borderline rescue: an item at 0.32 (below the 0.35 multisignal
+  // band) with strong semantic + geo + no penalty still qualifies. This is the
+  // canonical "Nigeria 0.32 + semantic 0.65" case from the strategy doc.
+  const outcome = evaluateSemanticGeoRescue({
+    score: 0.32,
+    semanticIntentScore: 0.65,
+    breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+  });
+  assert.equal(outcome.rescued, true);
+});
+
+test("D-059: evaluateSemanticGeoRescue blocked when geo did not fire (blockedBy: 'geo_gate')", () => {
+  // Strong semantic + below threshold + no penalty + no geo → geo-gate block.
+  // This is the exact diagnostic the eval suite (case 11) asserts on.
+  const outcome = evaluateSemanticGeoRescue({
+    score: 0.32,
+    semanticIntentScore: 0.68,
+    breakdown: makeBreakdownSG({ keyword: 0.20 }),
+  });
+  assert.equal(outcome.rescued, false);
+  assert.equal(outcome.hasStrongSemantic, true);
+  assert.equal(outcome.hasGeoMatch, false);
+  assert.equal(outcome.blockedBy, "geo_gate");
+});
+
+test("D-059: evaluateSemanticGeoRescue blocked by major penalty even when semantic + geo qualify", () => {
+  // Each remaining major penalty independently vetoes the rescue.
+  for (const penalty of ["offBeatGeo", "pureCommodity", "noConfiguredSignal"]) {
+    const outcome = evaluateSemanticGeoRescue({
+      score: 0.32,
+      semanticIntentScore: 0.70,
+      breakdown: makeBreakdownSG({ geoMatch: 0.15, [penalty]: -0.20 }),
+    });
+    assert.equal(outcome.rescued, false, `${penalty} must veto rescue`);
+    assert.equal(outcome.blockedBy, "major_penalty");
+  }
+});
+
+test("D-059: evaluateSemanticGeoRescue blocked when semantic is below the configured floor", () => {
+  // Geo fired but semantic was below 0.60 — flagged distinctly as "weak_semantic"
+  // so an operator tuning the floor knows which side of the gate hit.
+  const outcome = evaluateSemanticGeoRescue({
+    score: 0.32,
+    semanticIntentScore: 0.55,
+    breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+  });
+  assert.equal(outcome.rescued, false);
+  assert.equal(outcome.hasGeoMatch, true);
+  assert.equal(outcome.hasStrongSemantic, false);
+  assert.equal(outcome.blockedBy, "weak_semantic");
+});
+
+test("D-059: evaluateSemanticGeoRescue blocked when score is already above threshold", () => {
+  // Above-threshold items take the normal pass path elsewhere; the rescue
+  // helper reports them as out-of-scope rather than rescuing them.
+  const outcome = evaluateSemanticGeoRescue({
+    score: 0.42,
+    semanticIntentScore: 0.99,
+    breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+  });
+  assert.equal(outcome.rescued, false);
+  assert.equal(outcome.belowThreshold, false);
+  assert.equal(outcome.blockedBy, "above_threshold");
+});
+
+test("D-059: evaluateSemanticGeoRescue treats null/missing semanticIntentScore as weak", () => {
+  for (const missing of [null, undefined, Number.NaN]) {
+    const outcome = evaluateSemanticGeoRescue({
+      score: 0.32,
+      semanticIntentScore: missing,
+      breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+    });
+    assert.equal(outcome.rescued, false, `${String(missing)} must not rescue`);
+    assert.equal(outcome.blockedBy, "weak_semantic");
+  }
+});
+
+test("D-059: evaluateSemanticGeoRescue honors a custom semantic floor via opts.minSemantic", () => {
+  const outcome = evaluateSemanticGeoRescue({
+    score: 0.32,
+    semanticIntentScore: 0.55,
+    breakdown: makeBreakdownSG({ geoMatch: 0.15 }),
+    minSemantic: 0.50,
+  });
+  assert.equal(outcome.rescued, true, "lowering the floor below 0.55 must admit");
+});
+
+test("D-059: readSemanticGeoRescueMin returns the default when env is unset", () => {
+  const prevTempo = process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN;
+  const prevLegacy = process.env.BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN;
+  delete process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN;
+  delete process.env.BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN;
+  try {
+    assert.equal(readSemanticGeoRescueMin(), DEFAULT_SEMANTIC_GEO_RESCUE_MIN);
+  } finally {
+    if (prevTempo !== undefined)
+      process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN = prevTempo;
+    if (prevLegacy !== undefined)
+      process.env.BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN = prevLegacy;
+  }
+});
+
+test("D-059: readSemanticGeoRescueMin honors valid override + falls back on bad value", () => {
+  const prev = process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN;
+  process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN = "0.55";
+  try {
+    assert.equal(readSemanticGeoRescueMin(), 0.55);
+  } finally {
+    if (prev !== undefined)
+      process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN = prev;
+    else delete process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN;
+  }
+  const prev2 = process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN;
+  process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN = "banana";
+  try {
+    assert.equal(readSemanticGeoRescueMin(), DEFAULT_SEMANTIC_GEO_RESCUE_MIN);
+  } finally {
+    if (prev2 !== undefined)
+      process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN = prev2;
+    else delete process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN;
+  }
+});
+
+// ─── applyBeatFitFilter integration: rescue_semantic_geo ─────────────────────
+
+test("D-059 wiring: applyBeatFitFilter rescues an item via the semantic-geo path with rescueReason exposed", () => {
+  // Item carries explicit geo Nigeria (so geoMatch fires) but no configured
+  // topic/keyword in text. Deterministic stays low (geo + recency only);
+  // semantic input is strong (0.66). Blended score lands below 0.40 → both
+  // rescue paths considered, only semantic-geo qualifies → rescued.
+  const item = makeRssItem({
+    sourceId: "sg-rescue",
+    headline: "Background piece on the Sahel region",
+    body: ["A long-form analysis of regional dynamics in West Africa without any configured signal terms."],
+    geographies: ["Nigeria"],
+    minutesAgo: 30,
+    semanticIntentScore: 0.66,
+  });
+  const { included, summary } = applyBeatFitFilter([item], P4_SETTINGS);
+  assert.equal(included.length, 1, "semantic-geo path must admit the item");
+  assert.equal(included[0].beatFitRescued, true);
+  assert.equal(included[0].beatFitRescueReason, "rescue_semantic_geo");
+  assert.ok(
+    included[0].beatFitReasonCodes.includes("rescue_semantic_geo"),
+    "reasonCodes must include the rescue_semantic_geo annotation"
+  );
+  assert.equal(summary.rescuedSemanticGeoCount, 1);
+  assert.equal(summary.rescuedBorderlineCount, 0);
+  assert.equal(summary.rescuedCount, 1, "union count matches");
+});
+
+test("D-059 wiring: applyBeatFitFilter blocks semantic-geo rescue on geo mismatch and annotates rescue_blocked_geo_gate", () => {
+  // Same shape as above but the item's geo is NOT in settings.geographies
+  // and no configured geo phrase appears in text. We DO need a non-geo
+  // positive signal so the noConfiguredSignal penalty (a major penalty)
+  // doesn't preempt the geo-gate diagnosis. The "sanctions" keyword fires
+  // via headline; stale minutesAgo keeps blended score below threshold.
+  const item = makeRssItem({
+    sourceId: "sg-geo-mismatch",
+    headline: "Background piece on France sanctions enforcement",
+    body: ["A piece set entirely in France with no other configured signal terms."],
+    geographies: ["France"],
+    minutesAgo: 1440,
+    semanticIntentScore: 0.65,
+  });
+  const { included, excluded, summary } = applyBeatFitFilter([item], P4_SETTINGS);
+  assert.equal(included.length, 0);
+  assert.equal(excluded.length, 1);
+  assert.ok(
+    excluded[0].reasonCodes.includes("rescue_blocked_geo_gate"),
+    `geo-mismatch exclusion must carry rescue_blocked_geo_gate, got ${JSON.stringify(excluded[0].reasonCodes)}`
+  );
+  assert.equal(summary.rescueBlockedGeoGateCount, 1);
+  assert.equal(summary.rescuedSemanticGeoCount, 0);
+});
+
+test("D-059 wiring: major penalty blocks semantic-geo rescue (does not slip past commodity)", () => {
+  // Strong semantic + geo + commodity penalty → must fail. The penalty's job
+  // is to flag structural misalignment regardless of semantic confidence.
+  const item = makeRssItem({
+    sourceId: "sg-commodity-block",
+    headline: "Nigerian farmers face fertilizer crunch",
+    body: ["Wheat and grain prices have surged; commodity stress continues across the region."],
+    geographies: ["Nigeria"],
+    minutesAgo: 30,
+    semanticIntentScore: 0.80,
+  });
+  const { included, excluded } = applyBeatFitFilter([item], P4_SETTINGS);
+  assert.equal(included.length, 0, "commodity penalty must veto semantic-geo rescue");
+  assert.equal(excluded.length, 1);
+  assert.ok(
+    excluded[0].reasonCodes.some((c) => c.startsWith("commodity_framing")),
+    "commodity_framing reason code must be present"
+  );
+});
+
+test("D-062 wiring: semantic-geo rescue is UNCAPPED — 3 eligible candidates all rescue", () => {
+  // Three independent below-threshold items, each with strong semantic +
+  // explicit Nigeria geo + no penalty. Pre-amendment the cap was 2; D-062
+  // removed it so all 3 must admit.
+  const items = Array.from({ length: 3 }, (_, i) =>
+    makeRssItem({
+      sourceId: `sg-batch-${i}`,
+      headline: `Analysis piece ${i} on the Sahel region`,
+      body: [`Long-form regional analysis ${i} without configured signal terms.`],
+      geographies: ["Nigeria"],
+      minutesAgo: 30,
+      // Slightly different semantic scores so the items are distinguishable
+      // but all clear the 0.60 floor.
+      semanticIntentScore: 0.61 + i * 0.02,
+    })
+  );
+  const { included, summary } = applyBeatFitFilter(items, P4_SETTINGS);
+  assert.equal(included.length, 3, "all three eligible candidates must rescue (uncapped)");
+  assert.equal(summary.rescuedSemanticGeoCount, 3);
+  assert.equal(summary.rescuedCount, 3);
+  for (const it of included) {
+    assert.equal(it.beatFitRescued, true);
+    assert.equal(it.beatFitRescueReason, "rescue_semantic_geo");
+  }
+  // Negative regression guard: no cap-exceeded counter or reason code remains.
+  assert.equal("rescue_semantic_geo_cap_exceeded" in summary, false);
+  assert.equal("semanticGeoRescueCapExceededCount" in summary, false);
+});
+
+test("D-062 wiring: scaling further does not exhibit any cap (10 eligible → 10 rescued)", () => {
+  const items = Array.from({ length: 10 }, (_, i) =>
+    makeRssItem({
+      sourceId: `sg-many-${i}`,
+      headline: `Analysis piece ${i} on the Sahel region`,
+      body: [`Long-form regional analysis ${i} without configured signal terms.`],
+      geographies: ["Nigeria"],
+      minutesAgo: 30,
+      semanticIntentScore: 0.65,
+    })
+  );
+  const { included, summary } = applyBeatFitFilter(items, P4_SETTINGS);
+  assert.equal(included.length, 10);
+  assert.equal(summary.rescuedSemanticGeoCount, 10);
+});
+
+test("D-059 wiring: borderline multisignal rescue still works and reports its own rescueReason", () => {
+  // Lift the threshold + drop the lower bound so the natural-score INCLUDE
+  // candidate (which fires topic + actor + keyword + soft geo + recency)
+  // lands inside the band; no semantic input on the item so the only path
+  // that admits is borderline-multisignal — confirming backward compatibility.
+  const item = makeRssItem({
+    sourceId: "borderline-still-works",
+    headline: "Migration framework announced today",
+    topic: "Diplomatic relations",
+    geographies: ["Colombia"],
+    minutesAgo: 30,
+  });
+  const { included, summary } = applyBeatFitFilter(
+    [item],
+    COMMS_SETTINGS,
+    { threshold: 0.80, rescueLowerBound: 0.30 }
+  );
+  assert.equal(included.length, 1);
+  assert.equal(included[0].beatFitRescued, true);
+  assert.equal(included[0].beatFitRescueReason, BEAT_FIT_RESCUE_REASON);
+  assert.ok(included[0].beatFitReasonCodes.includes(BEAT_FIT_RESCUE_REASON));
+  assert.equal(summary.rescuedBorderlineCount, 1);
+  assert.equal(summary.rescuedSemanticGeoCount, 0);
+});
+
+test("D-059 wiring: when both rescue paths qualify, borderline-multisignal wins (back-compat)", () => {
+  // Same item as above but ALSO carrying a strong semantic score that would
+  // qualify for semantic-geo. The borderline path runs first so the older
+  // rescue reason persists — items that used to surface via multisignal stay
+  // labeled that way.
+  const item = makeRssItem({
+    sourceId: "both-paths-qualify",
+    headline: "Migration framework announced today",
+    topic: "Diplomatic relations",
+    geographies: ["Colombia"],
+    minutesAgo: 30,
+    semanticIntentScore: 0.75,
+  });
+  const { included } = applyBeatFitFilter(
+    [item],
+    COMMS_SETTINGS,
+    { threshold: 0.80, rescueLowerBound: 0.30 }
+  );
+  assert.equal(included.length, 1);
+  assert.equal(
+    included[0].beatFitRescueReason,
+    BEAT_FIT_RESCUE_REASON,
+    "borderline-multisignal must win when both qualify"
+  );
+});
+
+test("D-059 wiring: summary surfaces semanticGeoRescueMin + path-split rescue counts", () => {
+  const { summary } = applyBeatFitFilter(
+    [makeRssItem()],
+    COMMS_SETTINGS
+  );
+  // Shape pin so a future refactor doesn't silently drop the new fields.
+  assert.equal(typeof summary.semanticGeoRescueMin, "number");
+  assert.equal(typeof summary.rescuedBorderlineCount, "number");
+  assert.equal(typeof summary.rescuedSemanticGeoCount, "number");
+  assert.equal(typeof summary.rescueBlockedGeoGateCount, "number");
+  assert.equal(typeof summary.rescueBlockedWeakSemanticCount, "number");
+  // Default fixture is exclusionary, no rescues fire.
+  assert.equal(summary.rescuedBorderlineCount, 0);
+  assert.equal(summary.rescuedSemanticGeoCount, 0);
+});
+
+test("D-059 wiring: an above-threshold normal pass does NOT carry beatFitRescueReason", () => {
+  // Lock the contract: rescueReason is for rescue paths only. Normal passes
+  // must remain unmarked so a downstream consumer reading the field can use
+  // its presence as a rescued-vs-passed discriminator.
+  const item = makeRssItem({
+    sourceId: "normal-pass",
+    headline: INCLUDE_HEADLINE,
+    body: [
+      "WASHINGTON — The Pentagon confirmed two strikes on tankers in the Gulf of Oman.",
+    ],
+  });
+  const { included } = applyBeatFitFilter([item], COMMS_SETTINGS);
+  assert.equal(included.length, 1);
+  assert.equal(included[0].beatFitRescued, undefined);
+  assert.equal(included[0].beatFitRescueReason, undefined);
 });

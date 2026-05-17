@@ -54,6 +54,22 @@ export const DEFAULT_RESCUE_LOWER_BOUND = 0.35;
 export const RESCUE_MIN_STRONG_SIGNALS = 3;
 export const BEAT_FIT_RESCUE_REASON = "rescue_borderline_multisignal";
 
+// D-059 + D-062 (PR4): narrow "rescue_semantic_geo" path. Items below the
+// 0.40 threshold can still pass when ALL of:
+//   - `semanticIntentScore >= SEMANTIC_GEO_RESCUE_MIN` (default 0.60)
+//   - the scoreBeatFit geo component fired (`breakdown.geoMatch > 0`)
+//   - no major penalty (offBeatGeo / pureCommodity / noConfiguredSignal)
+// **Uncapped** (D-062 amendment) — every eligible item is rescued.
+// Coexists with the older borderline-multisignal path; multisignal wins when
+// both qualify so prior rescues keep their original reason code.
+//
+// Threshold is configurable via env, with precedence:
+//   1. TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN  (repo-convention primary)
+//   2. BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN        (legacy/short fallback)
+//   3. DEFAULT_SEMANTIC_GEO_RESCUE_MIN
+export const DEFAULT_SEMANTIC_GEO_RESCUE_MIN = 0.60;
+export const SEMANTIC_GEO_RESCUE_REASON = "rescue_semantic_geo";
+
 // Component weights (sum > threshold so no single signal can carry alone, but
 // strong combinations clear comfortably).
 const W = Object.freeze({
@@ -447,6 +463,120 @@ export function evaluateRescue(score, breakdown, reasonCodes, opts = {}) {
 }
 
 /**
+ * Read the configurable semantic-geo rescue floor from the environment. See
+ * `DEFAULT_SEMANTIC_GEO_RESCUE_MIN` for precedence. Invalid values (NaN, ≤ 0,
+ * > 1) fall back to the default rather than aborting, mirroring
+ * `readRescueLowerBound`'s defensive shape.
+ */
+export function readSemanticGeoRescueMin() {
+  const candidates = [
+    process.env.TEMPO_BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN,
+    process.env.BEAT_FIT_SEMANTIC_GEO_RESCUE_MIN,
+  ];
+  for (const raw of candidates) {
+    if (raw === undefined || raw === "") continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) continue;
+    if (n <= 0 || n > 1) continue;
+    return n;
+  }
+  return DEFAULT_SEMANTIC_GEO_RESCUE_MIN;
+}
+
+/**
+ * D-059 + D-062: decide whether a below-threshold item qualifies for the
+ * narrow `rescue_semantic_geo` path.
+ *
+ * Inputs are deliberately the scorer's own outputs so unit tests can drive
+ * synthetic combinations without re-running the scorer:
+ *   - `score`                  final blended score (post semantic blend)
+ *   - `semanticIntentScore`    raw semantic input (0..1) — null/missing => weak
+ *   - `breakdown`              per-component breakdown from scoreBeatFit
+ *
+ * Returns:
+ *   {
+ *     rescued:           boolean — true only if all criteria pass
+ *     belowThreshold:    boolean — score < threshold
+ *     hasStrongSemantic: boolean — semanticIntentScore >= minSemantic
+ *     hasGeoMatch:       boolean — breakdown.geoMatch > 0
+ *     blockedBy:         null
+ *                      | "above_threshold"
+ *                      | "major_penalty"
+ *                      | "weak_semantic"
+ *                      | "geo_gate"
+ *   }
+ *
+ * Block-order is fixed (penalty → semantic → geo) so the blockedBy value is
+ * deterministic for the same inputs; downstream diagnostics rely on the
+ * specific value (e.g. eval suite case 11 asserts `geo_gate`).
+ */
+export function evaluateSemanticGeoRescue({
+  score,
+  semanticIntentScore,
+  breakdown,
+  threshold = BEAT_FIT_THRESHOLD,
+  minSemantic = readSemanticGeoRescueMin(),
+} = {}) {
+  if (typeof score !== "number" || !Number.isFinite(score)) {
+    return {
+      rescued: false,
+      belowThreshold: false,
+      hasStrongSemantic: false,
+      hasGeoMatch: false,
+      blockedBy: "above_threshold",
+    };
+  }
+  if (score >= threshold) {
+    return {
+      rescued: false,
+      belowThreshold: false,
+      hasStrongSemantic: false,
+      hasGeoMatch: false,
+      blockedBy: "above_threshold",
+    };
+  }
+  const hasStrongSemantic =
+    typeof semanticIntentScore === "number" &&
+    Number.isFinite(semanticIntentScore) &&
+    semanticIntentScore >= minSemantic;
+  const hasGeoMatch = (breakdown?.geoMatch ?? 0) > 0;
+  if (hasMajorPenalty(breakdown)) {
+    return {
+      rescued: false,
+      belowThreshold: true,
+      hasStrongSemantic,
+      hasGeoMatch,
+      blockedBy: "major_penalty",
+    };
+  }
+  if (!hasStrongSemantic) {
+    return {
+      rescued: false,
+      belowThreshold: true,
+      hasStrongSemantic: false,
+      hasGeoMatch,
+      blockedBy: "weak_semantic",
+    };
+  }
+  if (!hasGeoMatch) {
+    return {
+      rescued: false,
+      belowThreshold: true,
+      hasStrongSemantic: true,
+      hasGeoMatch: false,
+      blockedBy: "geo_gate",
+    };
+  }
+  return {
+    rescued: true,
+    belowThreshold: true,
+    hasStrongSemantic: true,
+    hasGeoMatch: true,
+    blockedBy: null,
+  };
+}
+
+/**
  * Filter a candidate item pool down to those that meet the beat-fit threshold,
  * with a borderline-rescue path for items just below threshold that show
  * strong multi-signal evidence.
@@ -469,13 +599,19 @@ export function evaluateRescue(score, breakdown, reasonCodes, opts = {}) {
 export function applyBeatFitFilter(items, settings, opts = {}) {
   const threshold = opts.threshold ?? BEAT_FIT_THRESHOLD;
   const rescueLowerBound = opts.rescueLowerBound ?? readRescueLowerBound();
+  const semanticGeoRescueMin =
+    opts.semanticGeoRescueMin ?? readSemanticGeoRescueMin();
   const semanticBlendEnabled = opts.semanticBlendEnabled !== false;
   const included = [];
   const excluded = [];
   const histogram = {};
   let rescuedCount = 0;
+  let rescuedBorderlineCount = 0;     // D-059 + D-062: split by rescue path
+  let rescuedSemanticGeoCount = 0;    // so operators can see uncapped path uptake
   let rescueBlockedPenaltyCount = 0;
   let rescueBlockedInsufficientSignalsCount = 0;
+  let rescueBlockedGeoGateCount = 0;  // semantic strong + score < threshold + geo missed
+  let rescueBlockedWeakSemanticCount = 0; // geo + score < threshold + semantic < min
   // Semantic-blend counters: surfaced on _meta so an operator can answer
   // "how often did semantic actually move the needle?" without re-running.
   let semanticBlendAppliedCount = 0;
@@ -486,7 +622,7 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
 
   for (const item of items ?? []) {
     const result = scoreBeatFit(item, settings, { semanticBlendEnabled });
-    const { score, deterministicScore, breakdown, reasonCodes, blendApplied } = result;
+    const { score, deterministicScore, semanticIntentScore, breakdown, reasonCodes, blendApplied } = result;
     const normalPass = score >= threshold;
 
     if (blendApplied) {
@@ -516,33 +652,89 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
       continue;
     }
 
-    const rescue = evaluateRescue(score, breakdown, reasonCodes, {
+    // Below threshold. Try multisignal rescue first (preserves prior
+    // contract — items that qualified under D-054 still surface with the
+    // original reason code).
+    const borderlineOutcome = evaluateRescue(score, breakdown, reasonCodes, {
       threshold,
       rescueLowerBound,
     });
 
-    if (rescue.rescued) {
+    if (borderlineOutcome.rescued) {
       rescuedCount++;
+      rescuedBorderlineCount++;
       included.push({
         ...item,
         beatFitScore: score,
         beatFitDeterministicScore: deterministicScore,
         beatFitReasonCodes: [...reasonCodes, BEAT_FIT_RESCUE_REASON],
         beatFitRescued: true,
+        beatFitRescueReason: BEAT_FIT_RESCUE_REASON,
         beatFitBlendApplied: blendApplied,
       });
       continue;
     }
 
+    // D-059 + D-062: narrow semantic-geo rescue, uncapped. Considered for
+    // ANY below-threshold item (not just the [lowerBound, threshold) band)
+    // — an item at 0.32 with strong semantic + geo + no penalty still
+    // qualifies. No per-refresh cap.
+    const semanticGeoOutcome = evaluateSemanticGeoRescue({
+      score,
+      semanticIntentScore,
+      breakdown,
+      threshold,
+      minSemantic: semanticGeoRescueMin,
+    });
+
+    if (semanticGeoOutcome.rescued) {
+      rescuedCount++;
+      rescuedSemanticGeoCount++;
+      included.push({
+        ...item,
+        beatFitScore: score,
+        beatFitDeterministicScore: deterministicScore,
+        beatFitReasonCodes: [...reasonCodes, SEMANTIC_GEO_RESCUE_REASON],
+        beatFitRescued: true,
+        beatFitRescueReason: SEMANTIC_GEO_RESCUE_REASON,
+        beatFitBlendApplied: blendApplied,
+      });
+      continue;
+    }
+
+    // Excluded. Annotate with the most specific rescue-blocked code so the
+    // pipeline trace / sample-exclusions surface why each item failed both
+    // rescue paths.
     const annotatedCodes = [...reasonCodes];
-    if (rescue.inBand) {
-      if (rescue.blockedBy === "major_penalty") {
+    if (borderlineOutcome.inBand) {
+      if (borderlineOutcome.blockedBy === "major_penalty") {
         annotatedCodes.push("rescue_blocked_penalty");
         rescueBlockedPenaltyCount++;
-      } else if (rescue.blockedBy === "insufficient_signals") {
+      } else if (borderlineOutcome.blockedBy === "insufficient_signals") {
         annotatedCodes.push("rescue_blocked_insufficient_signals");
         rescueBlockedInsufficientSignalsCount++;
       }
+    }
+    // Annotate semantic-geo-specific blocks separately so an operator can
+    // tell "strong semantic but wrong geo" apart from "weak semantic." Major-
+    // penalty exclusion is already covered above; only annotate geo / weak-
+    // semantic here so the two annotations don't double-emit.
+    if (
+      semanticGeoOutcome.belowThreshold &&
+      semanticGeoOutcome.blockedBy === "geo_gate"
+    ) {
+      annotatedCodes.push("rescue_blocked_geo_gate");
+      rescueBlockedGeoGateCount++;
+    } else if (
+      semanticGeoOutcome.belowThreshold &&
+      semanticGeoOutcome.blockedBy === "weak_semantic" &&
+      semanticGeoOutcome.hasGeoMatch
+    ) {
+      // Only flag weak-semantic when geo would otherwise have passed — i.e.
+      // the item was a genuine semantic-geo near-miss, not a generic low-
+      // score exclusion.
+      annotatedCodes.push("rescue_blocked_weak_semantic");
+      rescueBlockedWeakSemanticCount++;
     }
     const excludeReason = pickPrimaryExcludeReason(breakdown);
     histogram[excludeReason] = (histogram[excludeReason] ?? 0) + 1;
@@ -568,12 +760,17 @@ export function applyBeatFitFilter(items, settings, opts = {}) {
     summary: {
       threshold,
       rescueLowerBound,
+      semanticGeoRescueMin,
       includedCount: included.length,
       rescuedCount,
+      rescuedBorderlineCount,
+      rescuedSemanticGeoCount,
       excludedCount: excluded.length,
       excludeReasonHistogram: histogram,
       rescueBlockedPenaltyCount,
       rescueBlockedInsufficientSignalsCount,
+      rescueBlockedGeoGateCount,
+      rescueBlockedWeakSemanticCount,
       // Semantic-blend rollup (always present so the shape is stable; counts
       // are zero when the semantic stage is off or no item carried a score).
       semanticBlendEnabled,

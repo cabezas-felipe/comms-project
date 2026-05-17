@@ -268,10 +268,31 @@ const DECISION_TRACE_SCORE_PRECISION = 4;
 // scorer attaches to excluded items.  Keeps the scorer's contract narrow (it
 // already emits these codes for compatibility); the pipeline just translates
 // them into a structured field for the trace.
+//
+// D-059 + D-062 (PR4): rescue-blocked codes now include semantic-geo paths.
+// Priority order (most actionable first):
+//   1. penalty           — structural misalignment; vetoes both rescue paths
+//   2. geo_gate          — strong semantic + below threshold + no penalty,
+//                           ONLY blocked because the geo gate didn't fire.
+//                           Operator-actionable: configuring the right geo
+//                           would admit this item.
+//   3. weak_semantic     — geo matched but semantic was below the floor;
+//                           pipeline-tuning-actionable.
+//   4. insufficient_signals — multisignal rescue floor (older path); less
+//                              actionable since the new semantic-geo path
+//                              is the primary near-miss recovery channel.
+// An excluded item may carry several codes simultaneously (one per rescue
+// path that ran); this picks the single most informative diagnosis.
 function deriveRescueContext(reasonCodes) {
   const codes = Array.isArray(reasonCodes) ? reasonCodes : [];
   if (codes.includes("rescue_blocked_penalty")) {
     return { inRescueBand: true, rescueBlockedBy: "penalty" };
+  }
+  if (codes.includes("rescue_blocked_geo_gate")) {
+    return { inRescueBand: false, rescueBlockedBy: "geo_gate" };
+  }
+  if (codes.includes("rescue_blocked_weak_semantic")) {
+    return { inRescueBand: false, rescueBlockedBy: "weak_semantic" };
   }
   if (codes.includes("rescue_blocked_insufficient_signals")) {
     return { inRescueBand: true, rescueBlockedBy: "insufficient_signals" };
@@ -303,6 +324,27 @@ function buildSampleExclusions(excluded) {
   return sample;
 }
 
+// D-059 + D-062: minimal per-rescue trace entries so an operator reading
+// `decisionTrace.sampleRescues` can answer "which path admitted this item,
+// and why" without joining logs by sourceId. Cap mirrors the exclusion
+// sample so the trace stays small.
+function buildSampleRescues(included) {
+  if (!Array.isArray(included) || included.length === 0) return [];
+  const sample = [];
+  for (const entry of included) {
+    if (!entry?.beatFitRescued) continue;
+    if (sample.length >= DECISION_TRACE_SAMPLE_CAP) break;
+    sample.push({
+      sourceId: entry?.sourceId ?? null,
+      stage: "beat_fit",
+      rescueReason: entry?.beatFitRescueReason ?? null,
+      score: roundForTrace(entry?.beatFitScore),
+      deterministicScore: roundForTrace(entry?.beatFitDeterministicScore),
+    });
+  }
+  return sample;
+}
+
 function buildDecisionTrace({ stageCounts, beatFitResult }) {
   const summary = beatFitResult?.summary ?? {};
   return {
@@ -310,15 +352,25 @@ function buildDecisionTrace({ stageCounts, beatFitResult }) {
     beatFit: {
       threshold: summary.threshold,
       rescueLowerBound: summary.rescueLowerBound,
+      // D-059 + D-062: configurable floor for the `rescue_semantic_geo`
+      // path (default 0.60). Surfaced so an operator tuning the env override
+      // can see the effective value alongside the path-split rescue counts.
+      semanticGeoRescueMin: summary.semanticGeoRescueMin,
       includedCount: summary.includedCount ?? 0,
       excludedCount: summary.excludedCount ?? 0,
       rescuedCount: summary.rescuedCount ?? 0,
+      rescuedBorderlineCount: summary.rescuedBorderlineCount ?? 0,
+      rescuedSemanticGeoCount: summary.rescuedSemanticGeoCount ?? 0,
       rescueBlockedPenaltyCount: summary.rescueBlockedPenaltyCount ?? 0,
       rescueBlockedInsufficientSignalsCount:
         summary.rescueBlockedInsufficientSignalsCount ?? 0,
+      rescueBlockedGeoGateCount: summary.rescueBlockedGeoGateCount ?? 0,
+      rescueBlockedWeakSemanticCount:
+        summary.rescueBlockedWeakSemanticCount ?? 0,
       excludeReasonHistogram: summary.excludeReasonHistogram ?? {},
     },
     sampleExclusions: buildSampleExclusions(beatFitResult?.excluded),
+    sampleRescues: buildSampleRescues(beatFitResult?.included),
   };
 }
 

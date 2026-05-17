@@ -4261,13 +4261,19 @@ test("decisionTrace: full-run log carries stageCounts, beatFit details, and a sa
   assert.equal(trace.stageCounts.afterBeatFit, log.funnel.afterBeatFit);
   assert.equal(trace.stageCounts.finalStories, log.funnel.finalStories);
 
-  // beatFit mirrors the scorer summary (incl. rescue counters added in P1).
+  // beatFit mirrors the scorer summary (incl. rescue counters added in P1 +
+  // the D-059 / D-062 path-split counters added in P4).
   assert.equal(typeof trace.beatFit.threshold, "number");
   assert.equal(typeof trace.beatFit.includedCount, "number");
   assert.equal(typeof trace.beatFit.excludedCount, "number");
   assert.equal(typeof trace.beatFit.rescuedCount, "number");
+  assert.equal(typeof trace.beatFit.rescuedBorderlineCount, "number");
+  assert.equal(typeof trace.beatFit.rescuedSemanticGeoCount, "number");
   assert.equal(typeof trace.beatFit.rescueBlockedPenaltyCount, "number");
   assert.equal(typeof trace.beatFit.rescueBlockedInsufficientSignalsCount, "number");
+  assert.equal(typeof trace.beatFit.rescueBlockedGeoGateCount, "number");
+  assert.equal(typeof trace.beatFit.rescueBlockedWeakSemanticCount, "number");
+  assert.equal(typeof trace.beatFit.semanticGeoRescueMin, "number");
   assert.equal(typeof trace.beatFit.excludeReasonHistogram, "object");
 
   // sampleExclusions is an array; entries (if any) carry the documented shape.
@@ -4281,11 +4287,18 @@ test("decisionTrace: full-run log carries stageCounts, beatFit details, and a sa
     assert.ok(
       sample.rescueBlockedBy === null ||
         sample.rescueBlockedBy === "penalty" ||
-        sample.rescueBlockedBy === "insufficient_signals",
-      "rescueBlockedBy must be null | 'penalty' | 'insufficient_signals'"
+        sample.rescueBlockedBy === "insufficient_signals" ||
+        sample.rescueBlockedBy === "geo_gate" ||
+        sample.rescueBlockedBy === "weak_semantic",
+      "rescueBlockedBy must be a known rescue-blocked code or null"
     );
     assert.equal(typeof sample.score, "number");
   }
+
+  // D-059 + D-062: sampleRescues is an array; rescued items carry an explicit
+  // machine-readable reason so an operator can answer "which path admitted
+  // this item" from the trace alone.
+  assert.ok(Array.isArray(trace.sampleRescues), "decisionTrace must include sampleRescues array");
 });
 
 test("decisionTrace: beatFit counters are consistent with histogram totals (no double-counting)", async () => {
@@ -4375,6 +4388,139 @@ test("decisionTrace: sampleExclusions is capped (≤ 5) and entries carry only m
       assert.ok(allowedKeys.has(k), `sample entry has unexpected key: ${k}`);
     }
   }
+});
+
+// ─── D-059 + D-062 (PR4): pipeline-level rescue diagnostics ──────────────────
+//
+// End-to-end: the pipeline must (1) admit an eligible item via the new
+// rescue_semantic_geo path, (2) surface the explicit machine-readable
+// rescue reason in `decisionTrace.sampleRescues`, (3) bump the path-split
+// counters in `decisionTrace.beatFit`, and (4) annotate exclusions with
+// rescue_blocked_geo_gate when the geo gate is what blocks rescue.
+//
+// The raw `semanticIntentScore` on the input items doesn't survive
+// `normalizeSourceItems` (which returns a fresh canonical-shape object). The
+// canonical injection point is the `semanticBeatFitEmbedFn` opt; the stub
+// below maps the profile text to one direction and items to a vector whose
+// cosine with the profile is 0.30 → `normalizeCosineToScore(0.30) = 0.65`.
+// That lands every item's semantic score at exactly 0.65 — comfortably above
+// the 0.60 rescue floor but not at 1.0 (which would push some shapes over
+// the 0.40 blend threshold).
+function p4SemanticGeoStub() {
+  return async (texts) =>
+    texts.map((_, i) => {
+      // texts[0] is the profile when the profile cache is cold (we always
+      // pass a fresh cache in these tests).
+      if (i === 0) return [1, 0];
+      return [0.30, Math.sqrt(1 - 0.09)];
+    });
+}
+
+test("decisionTrace: pipeline surfaces rescue_semantic_geo path in sampleRescues + counters (D-059 / D-062)", async () => {
+  // Settings have NO configured topic/keyword so recall is a no-op (admits
+  // the item) and scoreBeatFit fires ONLY the geo component — deterministic
+  // ≈ 0.15 (geo) + 0 (stale recency). With semantic ≈ 0.65 the blended
+  // score lands just under 0.40 → multisignal rescue fails (only 1 signal),
+  // semantic-geo rescue succeeds (geo + strong semantic + no penalty).
+  const settings = {
+    contractVersion: "2026-04-22-slice1",
+    topics: [],
+    keywords: [],
+    geographies: ["Nigeria"],
+    traditionalSources: ["The Washington Post — World"],
+    socialSources: [],
+  };
+  const item = makeItem({
+    sourceId: "sg-pipeline-rescue",
+    outlet: "The Washington Post — World",
+    geographies: ["Nigeria"],
+    topic: "",
+    headline: "Background piece on the Sahel region",
+    body: ["A long-form analysis of regional dynamics without any configured signal terms."],
+    minutesAgo: 1440,
+  });
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [item],
+    clusterFn: async (items) =>
+      items.map((i) => ({
+        title: "T",
+        subtitle: "S",
+        source_item_ids: [i.sourceId],
+        summary: "x",
+        tags: { topics: [], keywords: [], geographies: ["Nigeria"] },
+        factual_claims: ["A claim."],
+        claim_evidence_map: { "0": [i.sourceId] },
+      })),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticBeatFitConfig: SEMANTIC_ON,
+    semanticBeatFitEmbedFn: p4SemanticGeoStub(),
+    semanticBeatFitProfileCache: createProfileEmbeddingCache(),
+  });
+
+  const trace = log.decisionTrace;
+  assert.ok(trace, "decisionTrace must be present");
+  // Path-split counter: exactly one semantic-geo rescue.
+  assert.equal(trace.beatFit.rescuedSemanticGeoCount, 1);
+  assert.equal(trace.beatFit.rescuedBorderlineCount, 0);
+  assert.equal(trace.beatFit.rescuedCount, 1, "union counter matches");
+  // sampleRescues exposes the explicit machine-readable reason.
+  assert.ok(Array.isArray(trace.sampleRescues));
+  assert.equal(trace.sampleRescues.length, 1);
+  const sample = trace.sampleRescues[0];
+  assert.equal(sample.stage, "beat_fit");
+  assert.equal(sample.sourceId, "sg-pipeline-rescue");
+  assert.equal(sample.rescueReason, "rescue_semantic_geo");
+  assert.equal(typeof sample.score, "number");
+  assert.equal(typeof sample.deterministicScore, "number");
+});
+
+test("decisionTrace: geo mismatch is reported via rescueBlockedBy='geo_gate' in sampleExclusions (D-059)", async () => {
+  // Item has no structural geo (IMPLICIT_GEO) so the geo filter admits it at
+  // the mock-assess confidence (0.85 ≥ 0.80 implicit threshold). Beat-fit
+  // then sees zero configured-geo signal — strong semantic + below-threshold
+  // + keyword bonus (no noConfiguredSignal preempt) → rescue blocked at
+  // geo_gate, not at major_penalty.
+  const settings = {
+    contractVersion: "2026-04-22-slice1",
+    topics: [],
+    keywords: ["sanctions"],
+    geographies: ["Nigeria"],
+    traditionalSources: ["The Washington Post — World"],
+    socialSources: [],
+  };
+  const item = makeItem({
+    sourceId: "sg-pipeline-geo-gate",
+    outlet: "The Washington Post — World",
+    geographies: [],
+    topic: "",
+    headline: "Background piece on sanctions enforcement abroad",
+    // No structural geo and no configured-geo text mention — the soft-geo
+    // matcher would otherwise pick up a bare "Nigeria" mention and fire
+    // geoMatch, defeating the test.
+    body: ["A piece on sanctions context with no structural geo tag."],
+    minutesAgo: 1440,
+  });
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [item],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    semanticBeatFitConfig: SEMANTIC_ON,
+    semanticBeatFitEmbedFn: p4SemanticGeoStub(),
+    semanticBeatFitProfileCache: createProfileEmbeddingCache(),
+  });
+
+  const trace = log.decisionTrace;
+  assert.ok(trace);
+  assert.equal(trace.beatFit.rescuedSemanticGeoCount, 0);
+  assert.equal(trace.beatFit.rescueBlockedGeoGateCount, 1);
+  // sampleExclusions surfaces the geo_gate diagnosis for this candidate.
+  const entry = trace.sampleExclusions.find((e) => e.sourceId === "sg-pipeline-geo-gate");
+  assert.ok(entry, "sample entry for geo-gate candidate must be present");
+  assert.equal(entry.rescueBlockedBy, "geo_gate");
 });
 
 test("decisionTrace: watermark-skip branch still emits a trace with finalStories=null", async () => {
