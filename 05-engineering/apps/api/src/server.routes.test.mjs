@@ -121,6 +121,48 @@ test("GET /api/settings returns persisted data after valid PUT", async () => {
   assert.deepEqual(res.body.topics, VALID_BODY.topics);
 });
 
+// ─── D-064a: keyword-dedupe backfill on read ─────────────────────────────────
+
+test("GET /api/settings backfills pre-D-064 keyword/geography duplicates and persists once", async () => {
+  // Seed a stale file directly to bypass PUT hygiene — this is the shape a
+  // user who onboarded before D-064 still carries.
+  const stale = {
+    contractVersion: "2026-04-22-slice1",
+    topics: ["Diplomatic relations"],
+    keywords: ["China", "Russia", "war", "trade"],
+    geographies: ["China", "Russia", "US"],
+    traditionalSources: ["Reuters"],
+    socialSources: [],
+  };
+  const file = path.join(tmpDir, `settings_user_${TEST_USER_ID}.json`);
+  await writeFile(file, JSON.stringify(stale, null, 2), "utf8");
+
+  let writeCount = 0;
+  const prev = _writeSettings.write;
+  _writeSettings.write = async (payload, userId) => { writeCount += 1; return prev(payload, userId); };
+  try {
+    const res1 = await request(app).get("/api/settings");
+    assert.equal(res1.status, 200);
+    assert.ok(!res1.body.keywords.includes("China"), "China must be stripped from keywords");
+    assert.ok(!res1.body.keywords.includes("Russia"), "Russia must be stripped from keywords");
+    assert.ok(res1.body.keywords.includes("war"));
+    assert.ok(res1.body.keywords.includes("trade"));
+    assert.deepEqual(res1.body.geographies, ["China", "Russia", "US"]);
+    assert.equal(writeCount, 1, "backfill must persist exactly once when dedupe changes the list");
+
+    // Second read on the already-cleaned payload must NOT trigger another
+    // write — idempotence guard.
+    const res2 = await request(app).get("/api/settings");
+    assert.equal(res2.status, 200);
+    assert.deepEqual(res2.body.keywords, res1.body.keywords);
+    assert.equal(writeCount, 1, "second read on clean data must not re-persist");
+  } finally {
+    _writeSettings.write = prev;
+    // Restore the post-PUT state for downstream tests in this file.
+    await writeFile(file, JSON.stringify(VALID_BODY, null, 2), "utf8");
+  }
+});
+
 // ─── Source registry sync ─────────────────────────────────────────────────────
 
 test("PUT /api/settings returns 200 and registry sync is no-op when SUPABASE_URL is absent", async () => {

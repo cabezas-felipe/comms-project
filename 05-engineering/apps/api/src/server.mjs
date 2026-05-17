@@ -485,12 +485,41 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "@tempo/api" });
 });
 
+// D-064a: idempotent backfill for pre-D-064 settings. Users who onboarded
+// before the dedupe shipped still carry country names in both `keywords` and
+// `geographies`. We run the helper on every read and persist exactly once
+// when (and only when) the keywords list actually changes. Subsequent reads
+// are a no-op write-skip. Persistence failures are non-fatal — the client
+// still receives the cleaned payload so the UI is correct even if the write
+// hasn't landed yet.
+async function backfillKeywordDedupe(payload, userId) {
+  if (!payload || !Array.isArray(payload.keywords) || !Array.isArray(payload.geographies)) {
+    return payload;
+  }
+  const cleanedKeywords = stripKeywordsMatchingGeographies(payload.keywords, payload.geographies);
+  if (cleanedKeywords.length === payload.keywords.length) {
+    // Fast path: same length means no items were stripped (helper preserves
+    // order). Avoid the JSON.stringify cost on the hot read path.
+    return payload;
+  }
+  const next = { ...payload, keywords: cleanedKeywords };
+  try {
+    await _writeSettings.write(next, userId);
+  } catch (err) {
+    console.warn(
+      `[settings.backfill] dedupe write failed user=${userId} err=${err instanceof Error ? err.message : err}`
+    );
+  }
+  return next;
+}
+
 app.get("/api/settings", async (req, res) => {
   const identity = await requireIdentity(req, res);
   if (!identity) return;
   try {
     const payload = await readSettings(identity.userId);
-    res.json(payload);
+    const cleaned = await backfillKeywordDedupe(payload, identity.userId);
+    res.json(cleaned);
   } catch (error) {
     res.status(500).json({
       message: "Failed to read settings.",
@@ -853,7 +882,7 @@ async function executeRefreshFlow(identity) {
   }
 
   try {
-    const [settings, rawItems, manifestFeeds, priorSnapshot, narrative] = await Promise.all([
+    const [rawSettings, rawItems, manifestFeeds, priorSnapshot, narrative] = await Promise.all([
       readSettings(identity.userId),
       readFeedItems(DATA_DIR),
       loadManifestForSelection(),
@@ -863,6 +892,10 @@ async function executeRefreshFlow(identity) {
       // signal and the recall stage falls through to settings-only profile.
       _narrativeRepo.read(identity.userId).catch(() => null),
     ]);
+    // D-064a: apply the idempotent keyword-dedupe backfill so pipeline
+    // scoring uses clean keywords even if the user hasn't hit GET /api/settings
+    // since D-064 shipped. Write fires at most once per pre-D-064 user.
+    const settings = await backfillKeywordDedupe(rawSettings, identity.userId);
 
     const priorWatermark = priorSnapshot?._watermark ?? null;
     // Story count drives the trap-guard inside the pipeline: when the prior

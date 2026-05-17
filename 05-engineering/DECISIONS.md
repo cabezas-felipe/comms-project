@@ -2,6 +2,39 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-17 - D-064a - D-064 follow-ups: backfill, single-source synonyms, synonym-aware alias resolve
+
+#### Context
+
+Three review follow-ups to D-064, all minor and bounded:
+
+1. `stripKeywordsMatchingGeographies` ran only on new onboarding and on Settings PUT. Users who onboarded before D-064 still carried country names in both `settings.keywords` and `settings.geographies` until they manually re-saved.
+2. `beat-fit-scorer.mjs` still had a private `GEO_SYNONYMS` constant that duplicated `GEOGRAPHY_SYNONYMS` introduced by D-064 in `contracts-runtime/geography-aliases.mjs`.
+3. `GEOGRAPHY_ALIASES` maps city tokens to long-form canonicals (e.g. `washington` → `"United States"`). Users typically configure the short form `"US"`. `resolveGeographyAlias` only matched on `setting === canonical` (case-insensitive), so `washington` + geo `US` never resolved — beat-fit `geoTextMatches` step 3 and `assignGeographies` in `meta-story-tags.mjs` missed US evidence in URLs/text that only mentioned city aliases.
+
+#### Decision
+
+1. **Backfill on read.** New `backfillKeywordDedupe(payload, userId)` helper in `server.mjs` runs `stripKeywordsMatchingGeographies` on every settings read and persists exactly once when the keyword list changes (fast-path early-exit when no items were stripped). Applied at `GET /api/settings` and at the dashboard refresh read. Subsequent reads on already-cleaned data are no-op write-skips. Persistence failures are non-fatal — the client still receives the cleaned payload.
+2. **Single source of truth.** `beat-fit-scorer.mjs` now imports `GEOGRAPHY_SYNONYMS` from `contracts-runtime/index.mjs`; the private duplicate is deleted.
+3. **Synonym-aware `resolveGeographyAlias`.** Extended (in both `apps/api/src/contracts-runtime/geography-aliases.mjs` and `packages/contracts/src/geography-aliases.ts`) so the gate accepts a configured setting when `GEOGRAPHY_SYNONYMS[setting]` contains the alias canonical (case-insensitive). `GEOGRAPHY_SYNONYMS` is now exported from `@tempo/contracts` as well; the contracts package was rebuilt. Synonym-key lookup is case-insensitive so a lowercase `"us"` setting still resolves.
+
+#### Why
+
+- Backfill: users can't be told "re-onboard to clean up your keywords." Idempotent on-read backfill is invisible to the user — one extra write per pre-D-064 account, then steady-state.
+- Single source: drift between two synonym tables would silently flow into wrong scoring or wrong dedupe.
+- Synonym-aware resolve: covers the common short-form-vs-long-form mismatch (`US` vs `United States`) without forcing operators to know the alias map's canonical spellings.
+
+#### Tradeoffs
+
+- Backfill writes from a read path is unusual; mitigated by the length-change guard (no writes after the first cleanup) and non-fatal error handling.
+- Synonym-aware match widens `stripKeywordsMatchingGeographies` too — a keyword `Washington` with geo `US` is now stripped (the helper calls `resolveGeographyAlias` internally). This is the intended behavior: `Washington` is geo evidence, not a thematic keyword.
+
+#### Rollback
+
+Each follow-up is independently reversible. Remove the `backfillKeywordDedupe` calls to disable the read-side cleanup; revert the `beat-fit-scorer.mjs` import to restore the local table; drop the synonym branch in `resolveGeographyAlias` (both runtime and contracts package) to restore the strict exact-canonical match.
+
+---
+
 ### 2026-05-17 - D-064 - Geo/keyword dedupe + URL evidence + alias-aware beat-fit geo match
 
 #### Context

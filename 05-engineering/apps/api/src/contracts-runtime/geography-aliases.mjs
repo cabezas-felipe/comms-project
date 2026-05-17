@@ -60,7 +60,24 @@ export function resolveGeographyAlias(token, settingsGeographies) {
   const canonicalLower = canonical.toLowerCase();
   for (const setting of settingsGeographies ?? []) {
     if (typeof setting !== "string") continue;
-    if (setting.trim().toLowerCase() === canonicalLower) return setting;
+    const settingTrimmed = setting.trim();
+    const settingLower = settingTrimmed.toLowerCase();
+    // (a) Exact canonical match — e.g. alias "beijing" → "China" against
+    // configured "China".
+    if (settingLower === canonicalLower) return setting;
+    // (b) D-064a: synonym-aware match. The alias map uses long-form canonical
+    // names ("United States") but users frequently configure short-form
+    // geographies ("US"). Treat them as equivalent when GEOGRAPHY_SYNONYMS for
+    // the configured setting contains the alias canonical (case-insensitive),
+    // and return the configured setting spelling. Synonym-key lookup is
+    // case-insensitive so a lowercase "us" setting still resolves.
+    const synsKey = Object.keys(GEOGRAPHY_SYNONYMS).find(
+      (k) => k.toLowerCase() === settingLower
+    );
+    const syns = synsKey ? GEOGRAPHY_SYNONYMS[synsKey] : null;
+    if (syns && syns.some((s) => typeof s === "string" && s.trim().toLowerCase() === canonicalLower)) {
+      return setting;
+    }
   }
   return null;
 }

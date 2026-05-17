@@ -223,6 +223,32 @@ test("assignMetaStoryTags: url-only Beijing evidence emits China geography tag w
   assert.ok(out.geographies.includes("China"), "URL token /beijing/ must drive China tag via alias gate");
 });
 
+test("assignMetaStoryTags (D-064a): 'Washington' alias resolves to configured short-form 'US' via GEOGRAPHY_SYNONYMS", () => {
+  // Before D-064a the alias canonical was "United States" but settings carry
+  // the short form "US" — the alias hit was silently dropped. After D-064a
+  // the synonym-aware gate matches and emits the user's spelling.
+  const meta = { title: "T", summary: "Officials in Washington briefed allies on the response." };
+  const settings = { topics: [], keywords: [], geographies: ["US"] };
+  const out = assignMetaStoryTags({
+    metaStory: meta,
+    sourceItems: [makeSourceItem()],
+    settings,
+  });
+  assert.deepEqual(out.geographies, ["US"]);
+});
+
+test("assignMetaStoryTags (D-064a): URL-only 'washington' path drives US tag when US is configured", () => {
+  const meta = { title: "Routine update", summary: "No country name in summary." };
+  const sources = [makeSourceItem({
+    headline: "Officials gather for trade talks",
+    body: ["No country name in body."],
+    url: "https://www.example.com/world/2026/05/washington-summit/",
+  })];
+  const settings = { topics: [], keywords: [], geographies: ["US"] };
+  const out = assignMetaStoryTags({ metaStory: meta, sourceItems: sources, settings });
+  assert.ok(out.geographies.includes("US"), "URL token /washington/ must drive US tag via synonym-aware alias");
+});
+
 test("assignMetaStoryTags: regression — body-only alias hits still work after URL was added to evidence", () => {
   // Pin the pre-D-064 contract: alias hits in body text still emit even when
   // no URL is supplied.

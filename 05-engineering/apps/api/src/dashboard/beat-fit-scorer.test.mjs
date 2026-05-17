@@ -1556,6 +1556,24 @@ test("scoreBeatFit (B3): existing US synonym path still works ('United States' i
   assert.ok(reasonCodes.some((c) => c.startsWith("geo_text_match:us")));
 });
 
+test("scoreBeatFit (D-064a): URL token 'washington' lifts geoMatch when geo 'US' is configured", () => {
+  // Cross-check FU3: alias "washington" → canonical "United States" must
+  // resolve to configured short-form "US" via GEOGRAPHY_SYNONYMS so the
+  // beat-fit geo signal fires on city-only URL evidence.
+  const item = makeRssItem({
+    sourceId: "us-via-alias",
+    headline: "Officials gather",
+    body: ["Generic text."],
+    geographies: [],
+    topic: "",
+    url: "https://www.example.com/world/washington-summit/",
+  });
+  const settings = { ...D064_SETTINGS, geographies: ["US"], topics: [], keywords: [] };
+  const { breakdown, reasonCodes } = scoreBeatFit(item, settings);
+  assert.ok(breakdown.geoMatch > 0, "washington in URL must lift geoMatch when US is configured");
+  assert.ok(reasonCodes.some((c) => c.startsWith("geo_text_match:us")));
+});
+
 test("scoreBeatFit (B3): unconfigured alias canonical does NOT match (settings gate honored)", () => {
   // Body mentions Beijing but China is NOT configured. The alias must not
   // contribute via any configured geo.

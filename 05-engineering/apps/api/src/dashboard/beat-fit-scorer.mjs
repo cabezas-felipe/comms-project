@@ -35,6 +35,7 @@
 
 import {
   GEOGRAPHY_ALIASES,
+  GEOGRAPHY_SYNONYMS,
   normalizeTopicLabel,
   resolveGeographyAlias,
 } from "../contracts-runtime/index.mjs";
@@ -144,21 +145,16 @@ function escapeRegex(s) {
 
 // Soft-geo lexical synonyms used when item.geographies is empty (very common
 // for raw RSS items at the candidate stage). "US" should match "U.S.", "U.S",
-// "USA", "United States" in text without depending on NER. Keep this map
-// tightly scoped to MVP geographies (US, Colombia) — extend as new geos are
-// added to the contract enum.
-const GEO_SYNONYMS = Object.freeze({
-  US: ["U.S.", "U.S", "USA", "U.S.A.", "U.S.A", "United States"],
-  Colombia: ["Colombia", "Colombian", "Bogota", "Bogotá"],
-});
-
+// "USA", "United States" in text without depending on NER. The canonical
+// table lives in `contracts-runtime/geography-aliases.mjs` so this module and
+// `stripKeywordsMatchingGeographies` cannot drift (D-064a).
 function geoTextMatches(text, geo, settingsGeographies) {
   // 1. Word-boundary token match on the canonical name itself.
   const canonicalRe = buildPlainTokenRegex([geo]);
   if (canonicalRe && canonicalRe.test(text)) return true;
   // 2. Synonym list (handles "U.S." which has a period that defeats \b on the
   //    trailing side).
-  const synonyms = GEO_SYNONYMS[geo];
+  const synonyms = GEOGRAPHY_SYNONYMS[geo];
   if (synonyms) {
     for (const syn of synonyms) {
       const re = new RegExp(`\\b${escapeRegex(syn)}`, "i");
