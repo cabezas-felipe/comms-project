@@ -164,7 +164,7 @@ describe("storyScanLabels", () => {
     expect(storyScanLabels(story)).toEqual(["Diplomatic relations", "Migration policy"]);
   });
 
-  it("returns the two alphabetically first keywords when ≥2 keywords and <2 topics", () => {
+  it("returns the two alphabetically first keywords when 0 topics and ≥2 keywords", () => {
     const keywords = ["sanctions", "asylum", "OFAC"];
     const story = makeStory({
       tags: {
@@ -186,6 +186,30 @@ describe("storyScanLabels", () => {
       },
     });
     expect(storyScanLabels(story)).toEqual(["Migration policy", "sanctions"]);
+  });
+
+  it("prefers [topic, keyword] over [keyword, keyword] when 1 topic and ≥2 keywords", () => {
+    // Mixed (topic + keyword) beats keyword-only pairs so topical context
+    // always wins the eyebrow when any topic is present.
+    const story = makeStory({
+      tags: {
+        topics: ["Migration policy"],
+        keywords: ["sanctions", "asylum", "OFAC"],
+        geographies: ["US"],
+      },
+    });
+    expect(storyScanLabels(story)).toEqual(["Migration policy", "asylum"]);
+  });
+
+  it("still returns two topics when ≥2 topics regardless of keyword count", () => {
+    const story = makeStory({
+      tags: {
+        topics: ["Migration policy", "Diplomatic relations"],
+        keywords: ["sanctions", "asylum"],
+        geographies: ["US"],
+      },
+    });
+    expect(storyScanLabels(story)).toEqual(["Diplomatic relations", "Migration policy"]);
   });
 
   it("returns single topic when only one topic and no keywords", () => {

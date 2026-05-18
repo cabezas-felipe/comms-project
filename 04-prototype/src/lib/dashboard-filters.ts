@@ -42,10 +42,13 @@ function keywordsOf(story: Story): string[] {
  *
  * Priority — first match wins, max 2 strings:
  *   1. Two topics    → [T[0], T[1]]
- *   2. Two keywords  → [K[0], K[1]]
- *   3. Topic + kw    → [T[0], K[0]]  (fixed section order: topic left, keyword right)
+ *   2. Topic + kw    → [T[0], K[0]]  (fixed section order: topic left, keyword right)
+ *   3. Two keywords  → [K[0], K[1]]
  *   4. Single topic  → [T[0]]
  *   5. Single kw     → [K[0]]
+ *
+ * Mixed (topic+keyword) is preferred over keyword-only pairs so the eyebrow
+ * surfaces topical context whenever the story has any.
  *
  * Within a section, values are deduped and sorted A→Z (locale-aware) — same
  * order used by `aggregateTagSections`.
@@ -56,8 +59,8 @@ export function storyScanLabels(story: Story): string[] {
   const T = uniqSort(topicsOf(story));
   const K = uniqSort(keywordsOf(story));
   if (T.length >= 2) return [T[0], T[1]];
-  if (K.length >= 2) return [K[0], K[1]];
   if (T.length >= 1 && K.length >= 1) return [T[0], K[0]];
+  if (K.length >= 2) return [K[0], K[1]];
   if (T.length >= 1) return [T[0]];
   if (K.length >= 1) return [K[0]];
   return [];
