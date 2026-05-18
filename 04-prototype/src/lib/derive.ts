@@ -9,6 +9,13 @@ import { Source, Story } from "@/data/stories";
 export type Trend = "rising" | "steady" | "falling";
 export type Confidence = "high" | "medium" | "early";
 
+/**
+ * Freshness decays linearly over a 6-hour window. A story whose newest
+ * source is older than this scores 0 on the freshness axis, regardless of
+ * how much older.
+ */
+export const FRESHNESS_WINDOW_MINUTES = 6 * 60;
+
 export interface DerivedSignals {
   /** Median minutes since publication across sources */
   medianMinutes: number;
@@ -36,7 +43,8 @@ export function deriveSignals(story: Story): DerivedSignals {
   // Activity: more coverage + fresher = higher. Volume uses total pieces
   // (sources.length) so the bar reflects "how much coverage" while the
   // collapsed chip separately reports unique source identities.
-  const freshnessScore = Math.max(0, 100 - freshestMinutes); // 0-100
+  const freshnessRatio = Math.min(1, freshestMinutes / FRESHNESS_WINDOW_MINUTES);
+  const freshnessScore = Math.round(Math.max(0, 100 * (1 - freshnessRatio))); // 0-100
   const volumeScore = Math.min(100, story.sources.length * 7);
   const activityScore = Math.round(freshnessScore * 0.55 + volumeScore * 0.45);
 
