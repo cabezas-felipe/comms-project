@@ -210,6 +210,33 @@ test("readSnapshot: legacy snapshot with both `takeaway` and `subtitle` keeps su
   assert.equal(Object.prototype.hasOwnProperty.call(result.stories[0], "takeaway"), false);
 });
 
+test("readSnapshot: legacy root contractVersion 2026-04-22-slice1 lifts to current on load", async () => {
+  const userId = "legacy-contract-version-user";
+  const legacyPayload = {
+    contractVersion: "2026-04-22-slice1",
+    stories: [
+      {
+        id: "legacy-cv-1",
+        title: "Story",
+        subtitle: "Deck line.",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        summary: "Summary.",
+        whyItMatters: "Why.",
+        whatChanged: "Changed.",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: [] },
+        sources: [],
+      },
+    ],
+  };
+  await writeSnapshot(userId, legacyPayload);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result.contractVersion, "2026-05-19-meta-story-fields");
+});
+
 test("readSnapshot: result includes _meta.hasSnapshot = true", async () => {
   const result = await readSnapshot(USER_ID);
   assert.ok(result !== null);

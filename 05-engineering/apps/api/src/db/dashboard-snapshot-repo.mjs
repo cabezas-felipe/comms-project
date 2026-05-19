@@ -1,7 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CONTRACT_VERSION } from "../contracts-runtime/index.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./client.mjs";
+
+/** Dashboard contract versions we lift to `CONTRACT_VERSION` on read. */
+const LEGACY_DASHBOARD_CONTRACT_VERSIONS = new Set(["2026-04-22-slice1"]);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -87,8 +91,25 @@ function normalizeStoriesForLoad(stories) {
   });
 }
 
+/**
+ * Lift legacy dashboard snapshot root `contractVersion` so persisted blobs
+ * written before the meta-story fields PR still pass strict validation on GET.
+ * Story-level `takeaway` → `subtitle` is handled separately in
+ * `migrateLegacyTakeaway`.
+ */
+function migrateLegacyContractVersion(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const version = payload.contractVersion;
+  if (version === CONTRACT_VERSION) return payload;
+  if (typeof version === "string" && LEGACY_DASHBOARD_CONTRACT_VERSIONS.has(version)) {
+    return { ...payload, contractVersion: CONTRACT_VERSION };
+  }
+  return payload;
+}
+
 function liftSnapshotMeta(payload, refreshed_at) {
-  const { _lastCheckedAt, _lastRunMeta, stories, ...rest } = payload ?? {};
+  const migratedPayload = migrateLegacyContractVersion(payload);
+  const { _lastCheckedAt, _lastRunMeta, stories, ...rest } = migratedPayload ?? {};
   const meta = { refreshedAt: refreshed_at, hasSnapshot: true };
   if (typeof _lastCheckedAt === "string") meta.lastCheckedAt = _lastCheckedAt;
   if (_lastRunMeta && typeof _lastRunMeta === "object") {
