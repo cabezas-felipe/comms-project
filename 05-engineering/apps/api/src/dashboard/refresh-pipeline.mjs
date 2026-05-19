@@ -776,19 +776,14 @@ function buildStory(metaStory, sourceItems, settings) {
     id: metaStory.meta_story_id,
     metaStoryId: metaStory.meta_story_id,
     title: metaStory.title,
-    // Meta-story fields PR (Prompt 1): `subtitle` carries clustering semantics
-    // (one-sentence contextual placement) and `summary` is the narrative join
-    // of grounded claims — both already populated by `verifyGrounding` under
-    // the C0 policy.  The legacy `takeaway` field is gone from the emitted
-    // contract; companion PRs (Prompt 2: prototype UI; Prompt 3: whyItMatters
-    // writer) follow.  Until Prompt 2 lands, the prototype may still read
-    // `takeaway` from this response — expected.
+    // `subtitle` carries clustering context (one-sentence placement) and
+    // `summary` is the narrative join of grounded claims — both populated by
+    // `verifyGrounding` under the C0 policy.
     subtitle: metaStory.subtitle,
     geographies,
     summary: metaStory.summary,
-    // NOTE: `whyItMatters` continues to mirror `metaStory.subtitle` in this
-    // PR by design — Prompt 3 will introduce a dedicated implications writer.
-    // Do NOT change this mapping or introduce a placeholder string here.
+    // `whyItMatters` mirrors `subtitle` by design until a dedicated
+    // implications writer ships — do not substitute a placeholder string.
     whyItMatters: metaStory.subtitle,
     // Phase 4 (what-changed): set to a schema-valid placeholder here and
     // overwritten by the per-story `resolveWhatChanged` loop further down

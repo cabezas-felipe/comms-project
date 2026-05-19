@@ -1227,10 +1227,10 @@ test("POST /api/dashboard/refresh: applies title lock — second refresh preserv
   const firstTitle = "First Run Title";
   const secondTitle = "Different Second Title";
   const MS_ID = "locked-meta-story";
-  const makeStory = (title, subtitle = "Sub.") => ({
+  const makeStory = (title) => ({
     contractVersion: "2026-05-19-meta-story-fields",
     stories: [{
-      id: MS_ID, metaStoryId: MS_ID, title, subtitle,
+      id: MS_ID, metaStoryId: MS_ID, title, subtitle: "Sub.",
       geographies: ["US"], topic: "Diplomatic relations",
       summary: "S", whyItMatters: "W", whatChanged: "C",
       priority: "standard", outletCount: 1,

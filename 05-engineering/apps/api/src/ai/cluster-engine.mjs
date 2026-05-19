@@ -215,14 +215,10 @@ function capSummary(text, maxChars = SUMMARY_MAX_CHARS) {
  * claim is expected to be a verified sentence — callers should pass only
  * claims that have already passed the evidence-map gate.
  *
- * Exposed as an extension hook so a future LLM summary writer (C1) can
- * swap this implementation without changing the grounding stage.
- *
- * @param {object} _metaStory — meta-story carrying `factual_claims`
- * @param {Array} _sourceItems — sourceItems backing the meta-story
+ * @param {object} metaStory — meta-story carrying `factual_claims`
  * @returns {string} summary text (already capped)
  */
-export function synthesizeSummary(metaStory, _sourceItems) {
+export function synthesizeSummary(metaStory) {
   const claims = Array.isArray(metaStory?.factual_claims)
     ? metaStory.factual_claims
         .map((c) => normalizeWhitespace(c))
@@ -314,15 +310,11 @@ export function verifyGrounding(metaStories, sourceItemsById) {
     // claim text so ungrounded sentences cannot reach the publish path.  The
     // subtitle takes the first claim (one-sentence contextual placement);
     // the summary is the deterministic join of all claims (narrative across
-    // sources), produced by the `synthesizeSummary` extension hook so a
-    // future LLM writer (C1) can replace this stage in isolation.
+    // sources) via `synthesizeSummary`.
     const groundedSubtitle =
       claims.length > 0 ? normalizeWhitespace(claims[0]) : ms.subtitle;
-    const sourceItemsForSummary = ms.source_item_ids
-      .map((id) => sourceItemsById.get(id))
-      .filter((it) => it != null);
     const groundedSummary =
-      claims.length > 0 ? synthesizeSummary(ms, sourceItemsForSummary) : ms.summary;
+      claims.length > 0 ? synthesizeSummary(ms) : ms.summary;
 
     valid.push({ ...ms, summary: groundedSummary, subtitle: groundedSubtitle });
   }

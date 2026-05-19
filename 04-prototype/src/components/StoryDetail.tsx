@@ -46,9 +46,6 @@ export default function StoryDetail({ story, onClose }: Props) {
           <h2 className="font-display text-3xl font-semibold leading-[1.08] tracking-tight">
             {story.title}
           </h2>
-          {/* Meta-story fields PR (Prompt 2): one-sentence contextual deck
-              line under the title. Sourced from `story.subtitle` (clustering
-              context, not the expanded narrative — that's `summary` below). */}
           <p
             className="text-[15px] leading-relaxed text-muted-foreground"
             data-testid="story-detail-subtitle"
