@@ -13,7 +13,7 @@
 
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "2026-04-22-slice1";
+export const CONTRACT_VERSION = "2026-05-19-meta-story-fields";
 
 export const geographySchema = z.enum(["US", "Colombia"]);
 export const topicSchema = z.enum([
@@ -46,10 +46,11 @@ export const storySchema = z.object({
   id: z.string().min(1),
   metaStoryId: z.string().optional(),
   title: z.string().min(1),
-  subtitle: z.string().optional(),
+  // Meta-story fields PR (Prompt 1): subtitle required, takeaway removed.
+  // See packages/contracts/src/schemas.ts for full rationale.
+  subtitle: z.string().min(1),
   geographies: z.array(geographySchema),
   topic: topicSchema.optional(),
-  takeaway: z.string().min(1),
   summary: z.string().min(1),
   whyItMatters: z.string().min(1),
   whatChanged: z.string().min(1),

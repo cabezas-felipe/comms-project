@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /** API / persistence contract version for migrations and clients. */
-export const CONTRACT_VERSION = "2026-04-22-slice1" as const;
+export const CONTRACT_VERSION = "2026-05-19-meta-story-fields" as const;
 
 export const geographySchema = z.enum(["US", "Colombia"]);
 export const topicSchema = z.enum([
@@ -35,7 +35,12 @@ export const storySchema = z.object({
   id: z.string().min(1),
   metaStoryId: z.string().optional(),
   title: z.string().min(1),
-  subtitle: z.string().optional(),
+  // Meta-story fields PR (Prompt 1): `subtitle` is now required (one-sentence
+  // contextual placement of the story).  Replaces the legacy `takeaway` field
+  // which has been removed from the emitted contract.  Legacy snapshots that
+  // still carry `takeaway` are migrated at the snapshot read boundary (see
+  // `dashboard-snapshot-repo.mjs`).
+  subtitle: z.string().min(1),
   // Phase 2 trust cleanup: root `geographies` and `topic` are retained on the
   // wire for historic clients but are NOT authoritative for UI labels/filters.
   // The dashboard reads all topic/keyword/geography pills out of `tags`; these
@@ -45,7 +50,6 @@ export const storySchema = z.object({
   // `05-engineering/docs/dashboard-story-pool-spec.md` (Chunk K).
   geographies: z.array(geographySchema),
   topic: topicSchema.optional(),
-  takeaway: z.string().min(1),
   summary: z.string().min(1),
   whyItMatters: z.string().min(1),
   whatChanged: z.string().min(1),

@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS settings (
   data             JSONB       NOT NULL,
   -- data contains only: topics, keywords, geographies, traditionalSources, socialSources
   -- contractVersion was extracted to contract_version via migration 003
-  contract_version TEXT        NOT NULL DEFAULT '2026-04-22-slice1',
+  contract_version TEXT        NOT NULL DEFAULT '2026-05-19-meta-story-fields',
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

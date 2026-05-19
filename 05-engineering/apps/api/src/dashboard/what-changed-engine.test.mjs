@@ -44,7 +44,6 @@ function story({
     title,
     subtitle,
     summary,
-    takeaway: summary,
     whyItMatters: subtitle,
     whatChanged: "(placeholder)",
     geographies: [],

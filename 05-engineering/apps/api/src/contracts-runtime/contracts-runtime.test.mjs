@@ -43,9 +43,10 @@ const minimalSource = {
 const minimalStory = {
   id: "s1",
   title: "Title",
+  // Meta-story fields PR (Prompt 1): `subtitle` required; `takeaway` removed.
+  subtitle: "Subtitle.",
   geographies: ["US"],
   topic: "Diplomatic relations",
-  takeaway: "Take",
   summary: "Sum",
   whyItMatters: "Why",
   whatChanged: "What",
@@ -55,8 +56,8 @@ const minimalStory = {
   sources: [minimalSource],
 };
 
-test("CONTRACT_VERSION pins the slice-1 string", () => {
-  assert.equal(CONTRACT_VERSION, "2026-04-22-slice1");
+test("CONTRACT_VERSION pins the meta-story-fields PR string", () => {
+  assert.equal(CONTRACT_VERSION, "2026-05-19-meta-story-fields");
 });
 
 test("geographySchema accepts US and Colombia, rejects others", () => {

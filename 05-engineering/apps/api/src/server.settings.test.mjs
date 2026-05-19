@@ -3,7 +3,7 @@ import test from "node:test";
 import { settingsPayloadSchema } from "./contracts-runtime/index.mjs";
 
 const VALID_BODY = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: "2026-05-19-meta-story-fields",
   topics: ["Diplomatic relations"],
   keywords: ["OFAC"],
   geographies: ["US"],

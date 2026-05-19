@@ -58,11 +58,32 @@ function normalizeStoryTags(tags) {
   };
 }
 
+// Meta-story fields PR (Prompt 1): the emitted contract removed `takeaway`
+// and made `subtitle` required.  Legacy snapshots (pre-bump) carry a
+// `takeaway` string and may not carry `subtitle`.  Migrate at the load
+// boundary so the strict display schema can assume the new shape:
+//   - If `subtitle` is missing/empty and `takeaway` is present, lift
+//     `takeaway` into `subtitle`.
+//   - Always drop the `takeaway` key on load so it never round-trips back
+//     to disk (writes already omit it; this prevents it leaking out via
+//     intermediate updates).
+function migrateLegacyTakeaway(story) {
+  if (!story || typeof story !== "object") return story;
+  const { takeaway, subtitle, ...rest } = story;
+  const hasSubtitle = typeof subtitle === "string" && subtitle.length > 0;
+  if (hasSubtitle) return { ...rest, subtitle };
+  if (typeof takeaway === "string" && takeaway.length > 0) {
+    return { ...rest, subtitle: takeaway };
+  }
+  return { ...rest, subtitle };
+}
+
 function normalizeStoriesForLoad(stories) {
   if (!Array.isArray(stories)) return [];
   return stories.map((s) => {
     if (!s || typeof s !== "object") return s;
-    return { ...s, tags: normalizeStoryTags(s.tags) };
+    const migrated = migrateLegacyTakeaway(s);
+    return { ...migrated, tags: normalizeStoryTags(migrated.tags) };
   });
 }
 
@@ -134,17 +155,27 @@ async function writeSnapshotMetaFile(userId, { lastCheckedAt }) {
 async function readLocksFileRaw(userId) {
   try {
     const raw = await fs.readFile(locksFile(userId), "utf8");
-    return JSON.parse(raw); // { [metaStoryId]: { title, subtitle } }
+    return JSON.parse(raw); // { [metaStoryId]: { title } } — legacy rows may also carry `subtitle`
   } catch {
     return {};
   }
+}
+
+// Meta-story fields PR (Prompt 1): locks are title-only.  Legacy rows may
+// still carry a `subtitle` key from before this PR; strip it on read so the
+// server-side apply path can't accidentally re-freeze subtitle copy.
+function projectTitleLock(row) {
+  if (!row || typeof row !== "object") return null;
+  if (typeof row.title !== "string" || row.title.length === 0) return null;
+  return { title: row.title };
 }
 
 async function getLockedTitlesFile(userId, metaStoryIds) {
   const all = await readLocksFileRaw(userId);
   const result = new Map();
   for (const id of metaStoryIds) {
-    if (all[id]) result.set(id, all[id]);
+    const lock = projectTitleLock(all[id]);
+    if (lock) result.set(id, lock);
   }
   return result;
 }
@@ -152,9 +183,9 @@ async function getLockedTitlesFile(userId, metaStoryIds) {
 async function insertTitleLocksFile(userId, newLocks) {
   const existing = await readLocksFileRaw(userId);
   let changed = false;
-  for (const { metaStoryId, title, subtitle } of newLocks) {
+  for (const { metaStoryId, title } of newLocks) {
     if (!existing[metaStoryId]) {
-      existing[metaStoryId] = { title, subtitle };
+      existing[metaStoryId] = { title };
       changed = true;
     }
   }
@@ -226,15 +257,21 @@ async function writeSnapshotMetaSupabase(userId, { lastCheckedAt }) {
 async function getLockedTitlesSupabase(userId, metaStoryIds) {
   if (!metaStoryIds.length) return new Map();
   const supabase = getSupabaseClient();
+  // Title-only locks (meta-story fields PR — Prompt 1).  We only `SELECT title`
+  // so legacy rows whose `subtitle` column still carries data are silently
+  // ignored on read.  Migration 016 makes the column nullable so future
+  // writes can stop populating it.
   const { data, error } = await supabase
     .from("meta_story_locks")
-    .select("meta_story_id, title, subtitle")
+    .select("meta_story_id, title")
     .eq("user_id", userId)
     .in("meta_story_id", metaStoryIds);
   if (error) throw new Error(`[snapshot-repo] locks read failed: ${error.message}`);
   const result = new Map();
   for (const row of data ?? []) {
-    result.set(row.meta_story_id, { title: row.title, subtitle: row.subtitle });
+    if (typeof row.title === "string" && row.title.length > 0) {
+      result.set(row.meta_story_id, { title: row.title });
+    }
   }
   return result;
 }
@@ -261,11 +298,13 @@ async function writeHoldBucketSupabase(userId, items) {
 async function insertTitleLocksSupabase(userId, newLocks) {
   if (!newLocks.length) return;
   const supabase = getSupabaseClient();
-  const rows = newLocks.map(({ metaStoryId, title, subtitle }) => ({
+  // Title-only insert (meta-story fields PR — Prompt 1).  Migration 016
+  // drops the NOT NULL constraint on `subtitle` so it can stay unset for
+  // new rows.  Legacy rows are not rewritten.
+  const rows = newLocks.map(({ metaStoryId, title }) => ({
     user_id: userId,
     meta_story_id: metaStoryId,
     title,
-    subtitle,
   }));
   const { error } = await supabase
     .from("meta_story_locks")
@@ -309,11 +348,13 @@ export async function writeSnapshotMeta(userId, meta) {
 }
 
 /**
- * Returns a Map of existing title/subtitle locks for the given meta-story IDs.
- * IDs without a lock are absent from the returned Map.
+ * Returns a Map of existing title locks for the given meta-story IDs.
+ * Title-only locks (meta-story fields PR — Prompt 1): legacy rows that also
+ * stored a `subtitle` are projected to `{ title }` on read.  IDs without a
+ * lock are absent from the returned Map.
  * @param {string} userId
  * @param {string[]} metaStoryIds
- * @returns {Promise<Map<string, { title: string, subtitle: string }>>}
+ * @returns {Promise<Map<string, { title: string }>>}
  */
 export async function getLockedTitles(userId, metaStoryIds) {
   if (isSupabaseEnabled()) return getLockedTitlesSupabase(userId, metaStoryIds);
@@ -321,10 +362,12 @@ export async function getLockedTitles(userId, metaStoryIds) {
 }
 
 /**
- * Inserts title/subtitle locks for new meta-stories.
- * Uses ON CONFLICT DO NOTHING semantics — existing locks are never overwritten.
+ * Inserts title locks for new meta-stories.  Title-only since the meta-story
+ * fields PR — subtitle is intentionally NOT locked so clustering context can
+ * re-render every refresh.  Uses ON CONFLICT DO NOTHING semantics — existing
+ * locks are never overwritten.
  * @param {string} userId
- * @param {Array<{ metaStoryId: string, title: string, subtitle: string }>} newLocks
+ * @param {Array<{ metaStoryId: string, title: string }>} newLocks
  */
 export async function insertTitleLocks(userId, newLocks) {
   if (isSupabaseEnabled()) return insertTitleLocksSupabase(userId, newLocks);

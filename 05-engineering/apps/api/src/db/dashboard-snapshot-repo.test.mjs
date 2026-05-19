@@ -23,7 +23,7 @@ after(async () => {
 const USER_ID = "test-user-snapshot";
 
 const SAMPLE_PAYLOAD = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: "2026-05-19-meta-story-fields",
   stories: [
     {
       id: "story-1",
@@ -32,7 +32,6 @@ const SAMPLE_PAYLOAD = {
       subtitle: "A subtitle.",
       geographies: ["US"],
       topic: "Diplomatic relations",
-      takeaway: "Takeaway",
       summary: "Summary.",
       whyItMatters: "Why.",
       whatChanged: "Changed.",
@@ -69,7 +68,7 @@ test("writeSnapshot + readSnapshot: persists and retrieves payload", async () =>
 test("readSnapshot: legacy snapshot without story.tags loads with normalized empty tags", async () => {
   const userId = "legacy-no-tags-user";
   const legacyPayload = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [
       {
         id: "legacy-1",
@@ -78,7 +77,6 @@ test("readSnapshot: legacy snapshot without story.tags loads with normalized emp
         subtitle: "Sub.",
         geographies: ["US"],
         topic: "Diplomatic relations",
-        takeaway: "T",
         summary: "S",
         whyItMatters: "W",
         whatChanged: "C",
@@ -98,13 +96,13 @@ test("readSnapshot: legacy snapshot without story.tags loads with normalized emp
 test("readSnapshot: partial story.tags axes are filled in with empty arrays", async () => {
   const userId = "legacy-partial-tags-user";
   const partialPayload = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [
       {
         id: "partial-1",
         title: "Partial Tags",
+        subtitle: "Partial sub.",
         geographies: ["US"],
-        takeaway: "T",
         summary: "S",
         whyItMatters: "W",
         whatChanged: "C",
@@ -129,13 +127,13 @@ test("readSnapshot: partial story.tags axes are filled in with empty arrays", as
 test("readSnapshot: non-object story.tags coerces to empty three-axis shape", async () => {
   const userId = "legacy-bogus-tags-user";
   const bogusPayload = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [
       {
         id: "bogus-1",
         title: "Bogus Tags",
+        subtitle: "Bogus sub.",
         geographies: [],
-        takeaway: "T",
         summary: "S",
         whyItMatters: "W",
         whatChanged: "C",
@@ -150,6 +148,66 @@ test("readSnapshot: non-object story.tags coerces to empty three-axis shape", as
   const result = await readSnapshot(userId);
   assert.ok(result !== null);
   assert.deepEqual(result.stories[0].tags, { topics: [], keywords: [], geographies: [] });
+});
+
+// ─── Meta-story fields PR (Prompt 1): legacy takeaway → subtitle adapter ─────
+
+test("readSnapshot: legacy snapshot with `takeaway` and no `subtitle` lifts takeaway into subtitle on load", async () => {
+  const userId = "legacy-takeaway-user";
+  const legacyPayload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "legacy-takeaway-1",
+        title: "Old Story",
+        // No subtitle on disk — legacy shape.  `takeaway` carried the
+        // one-liner that has since been renamed to `subtitle`.
+        takeaway: "Old takeaway used as headline preview.",
+        geographies: ["US"],
+        summary: "Summary.",
+        whyItMatters: "Why.",
+        whatChanged: "Changed.",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: [] },
+        sources: [],
+      },
+    ],
+  };
+  await writeSnapshot(userId, legacyPayload);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result.stories[0].subtitle, "Old takeaway used as headline preview.");
+  // Read adapter must strip `takeaway` so it never leaks back out.
+  assert.equal(Object.prototype.hasOwnProperty.call(result.stories[0], "takeaway"), false);
+});
+
+test("readSnapshot: legacy snapshot with both `takeaway` and `subtitle` keeps subtitle and drops takeaway", async () => {
+  const userId = "legacy-both-user";
+  const legacyPayload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "legacy-both-1",
+        title: "Coexisting Story",
+        subtitle: "Real subtitle.",
+        takeaway: "Old leftover takeaway — should be dropped.",
+        geographies: ["US"],
+        summary: "Summary.",
+        whyItMatters: "Why.",
+        whatChanged: "Changed.",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: [] },
+        sources: [],
+      },
+    ],
+  };
+  await writeSnapshot(userId, legacyPayload);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result.stories[0].subtitle, "Real subtitle.");
+  assert.equal(Object.prototype.hasOwnProperty.call(result.stories[0], "takeaway"), false);
 });
 
 test("readSnapshot: result includes _meta.hasSnapshot = true", async () => {
@@ -174,23 +232,24 @@ test("getLockedTitles: returns empty map when no locks exist", async () => {
   assert.equal(locks.size, 0);
 });
 
-test("insertTitleLocks + getLockedTitles: inserts and retrieves locks", async () => {
+test("insertTitleLocks + getLockedTitles: inserts and retrieves title-only locks", async () => {
   const userId = "lock-test-user";
   await insertTitleLocks(userId, [
-    { metaStoryId: "ms-alpha", title: "Alpha Title", subtitle: "Alpha subtitle." },
-    { metaStoryId: "ms-beta", title: "Beta Title", subtitle: "Beta subtitle." },
+    { metaStoryId: "ms-alpha", title: "Alpha Title" },
+    { metaStoryId: "ms-beta", title: "Beta Title" },
   ]);
   const locks = await getLockedTitles(userId, ["ms-alpha", "ms-beta"]);
   assert.equal(locks.size, 2);
-  assert.deepEqual(locks.get("ms-alpha"), { title: "Alpha Title", subtitle: "Alpha subtitle." });
-  assert.deepEqual(locks.get("ms-beta"), { title: "Beta Title", subtitle: "Beta subtitle." });
+  // Title-only locks: `subtitle` must not appear on the returned shape.
+  assert.deepEqual(locks.get("ms-alpha"), { title: "Alpha Title" });
+  assert.deepEqual(locks.get("ms-beta"), { title: "Beta Title" });
 });
 
 test("getLockedTitles: only returns locks for requested IDs", async () => {
   const userId = "lock-partial-user";
   await insertTitleLocks(userId, [
-    { metaStoryId: "ms-1", title: "Story 1", subtitle: "Sub 1." },
-    { metaStoryId: "ms-2", title: "Story 2", subtitle: "Sub 2." },
+    { metaStoryId: "ms-1", title: "Story 1" },
+    { metaStoryId: "ms-2", title: "Story 2" },
   ]);
   const locks = await getLockedTitles(userId, ["ms-1"]);
   assert.equal(locks.size, 1);
@@ -198,20 +257,36 @@ test("getLockedTitles: only returns locks for requested IDs", async () => {
   assert.ok(!locks.has("ms-2"));
 });
 
-test("title/subtitle lock: second insertTitleLocks does not overwrite existing lock (ON CONFLICT DO NOTHING)", async () => {
+test("title lock: second insertTitleLocks does not overwrite existing lock (ON CONFLICT DO NOTHING)", async () => {
   const userId = "lock-immutable-user";
-  await insertTitleLocks(userId, [
-    { metaStoryId: "ms-locked", title: "Original Title", subtitle: "Original subtitle." },
-  ]);
+  await insertTitleLocks(userId, [{ metaStoryId: "ms-locked", title: "Original Title" }]);
   // Attempt to overwrite with a different title — must be silently ignored
-  await insertTitleLocks(userId, [
-    { metaStoryId: "ms-locked", title: "New Title", subtitle: "New subtitle." },
-  ]);
+  await insertTitleLocks(userId, [{ metaStoryId: "ms-locked", title: "New Title" }]);
   const locks = await getLockedTitles(userId, ["ms-locked"]);
-  assert.deepEqual(locks.get("ms-locked"), {
-    title: "Original Title",
-    subtitle: "Original subtitle.",
-  });
+  assert.deepEqual(locks.get("ms-locked"), { title: "Original Title" });
+});
+
+test("getLockedTitles: legacy lock rows with `subtitle` are projected to title-only on read", async () => {
+  // Simulate a lock row written under the old shape (when subtitle was also
+  // locked).  The file adapter's read path must strip subtitle so the
+  // server-side apply path can't re-freeze it.
+  const userId = "legacy-lock-shape-user";
+  const fs = await import("node:fs/promises");
+  const dataPath = path.join(tmpDir, `meta_story_locks_${userId}.json`);
+  await fs.writeFile(
+    dataPath,
+    JSON.stringify({
+      "ms-legacy": { title: "Legacy Title", subtitle: "Legacy Subtitle — should not surface." },
+    }),
+    "utf8"
+  );
+  const locks = await getLockedTitles(userId, ["ms-legacy"]);
+  assert.deepEqual(locks.get("ms-legacy"), { title: "Legacy Title" });
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(locks.get("ms-legacy"), "subtitle"),
+    false,
+    "legacy subtitle must be stripped on read so it can't be applied to refreshed stories"
+  );
 });
 
 test("insertTitleLocks: no-op for empty array", async () => {

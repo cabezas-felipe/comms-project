@@ -21,9 +21,11 @@ const minimalSource = {
 const minimalStory = {
   id: "s1",
   title: "Title",
+  // Meta-story fields PR (Prompt 1): `subtitle` is now required; `takeaway`
+  // has been removed from the contract.
+  subtitle: "Subtitle.",
   geographies: ["US" as const],
   topic: "Diplomatic relations" as const,
-  takeaway: "Take",
   summary: "Sum",
   whyItMatters: "Why",
   whatChanged: "What",
@@ -55,6 +57,24 @@ describe("storySchema", () => {
   it("accepts a minimal valid story", () => {
     const parsed = storySchema.parse(minimalStory);
     expect(parsed.id).toBe("s1");
+  });
+
+  // Meta-story fields PR (Prompt 1): `subtitle` is now required on the
+  // emitted contract.  Snapshot read adapters lift legacy `takeaway` into
+  // `subtitle` before validation, so the strict schema can refuse missing
+  // subtitle outright.
+  it("rejects a story that omits the subtitle field", () => {
+    const { subtitle: _omitted, ...withoutSubtitle } = minimalStory;
+    expect(() => storySchema.parse(withoutSubtitle)).toThrow();
+  });
+
+  it("strips the legacy takeaway field from emitted payloads", () => {
+    const parsed = storySchema.parse({
+      ...minimalStory,
+      // Extra/legacy key — Zod's default object mode strips unknown fields.
+      takeaway: "Should be stripped",
+    } as unknown as typeof minimalStory);
+    expect(Object.prototype.hasOwnProperty.call(parsed, "takeaway")).toBe(false);
   });
 
   // Phase 2 trust cleanup: emitted payloads must always carry `tags`.

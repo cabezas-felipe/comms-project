@@ -1051,21 +1051,27 @@ async function executeRefreshFlow(identity) {
       };
     }
 
-    // Apply title/subtitle locks
+    // Apply title-only locks (meta-story fields PR — Prompt 1).
+    // Product rule: on first publish, freeze the meta-story's `title` per
+    // `metaStoryId` so it never silently renames across refreshes.  The
+    // `subtitle` field intentionally re-renders every run — it carries
+    // clustering context (one-sentence placement) which must reflect the
+    // current evidence.  Legacy lock rows that stored a `subtitle` value are
+    // ignored on read; we never write `subtitle` on new locks.
     const metaStoryIds = payload.stories.map((s) => s.metaStoryId).filter(Boolean);
     const lockedTitles = await _snapshotRepo.getLocks(identity.userId, metaStoryIds);
 
     const lockedStories = payload.stories.map((story) => {
       const lock = story.metaStoryId ? lockedTitles.get(story.metaStoryId) : undefined;
       if (lock) {
-        return { ...story, title: lock.title, subtitle: lock.subtitle };
+        return { ...story, title: lock.title };
       }
       return story;
     });
 
     const newLocks = lockedStories
       .filter((s) => s.metaStoryId && !lockedTitles.has(s.metaStoryId))
-      .map((s) => ({ metaStoryId: s.metaStoryId, title: s.title, subtitle: s.subtitle }));
+      .map((s) => ({ metaStoryId: s.metaStoryId, title: s.title }));
     await _snapshotRepo.insertLocks(identity.userId, newLocks);
 
     const finalPayload = { ...payload, stories: lockedStories };
