@@ -211,7 +211,7 @@ These are deferred to a follow-up implementation phase. This section specifies t
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `TEMPO_AI_DELTA_ENABLED` | `false` (until Phase 2 ships) | Global gate. Off → engine returns `first-seen` / `unchanged` from deterministic gate only; LLM stages never run. |
+| `TEMPO_AI_DELTA_ENABLED` | `false` (default remains off through Phase 3; flipped on as part of Phase 4 pipeline wiring) | Global gate. Truthy values: `"true"` or `"1"` (case-insensitive). Off → engine returns `first-seen` / `unchanged` from deterministic gate only; LLM stages never run. |
 | `TEMPO_AI_DELTA_CLASSIFY_MODEL` | `anthropic:claude-haiku-4-5-20251001` | Haiku model id. |
 | `TEMPO_AI_DELTA_WRITE_MODEL` | `anthropic:claude-sonnet-4-6` | Sonnet model id. |
 | `TEMPO_AI_DELTA_TIMEOUT_MS` | `2500` | Per-call timeout for either stage. |
