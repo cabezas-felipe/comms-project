@@ -1,17 +1,22 @@
 {
-  "contractVersion": "2026-04-22-slice1",
+  "contractVersion": "2026-05-19-meta-story-fields",
   "stories": [
     {
       "id": "ofac-colombia",
       "title": "OFAC scrutiny expands around Colombia leadership narrative",
       "geographies": ["US", "Colombia"],
       "topic": "Diplomatic relations",
-      "takeaway": "Story is moving from policy reporting into political reaction — response cycle likely within the day.",
+      "subtitle": "Story is moving from policy reporting into political reaction — response cycle likely within the day.",
       "summary": "Coverage across US and Colombian outlets frames possible sanctions implications and response pressure. Narrative is widening from policy reporting to political reaction.",
       "whyItMatters": "A pivot from policy framing to political reaction signals the story is moving toward a response cycle — comms posture should be prepared, not reactive.",
       "whatChanged": "Two major outlets added legal-context framing in the last hour.",
       "priority": "top",
       "outletCount": 14,
+      "tags": {
+        "topics": ["Diplomatic relations"],
+        "keywords": ["OFAC", "sanctions"],
+        "geographies": ["US", "Colombia"]
+      },
       "sources": [
         {
           "id": "ofac-nyt",
@@ -49,12 +54,17 @@
       "title": "US deportation-routing discussion involving Rwanda resurfaces",
       "geographies": ["US", "Colombia"],
       "topic": "Migration policy",
-      "takeaway": "Bilateral framing is back; expect inbound press questions for Colombia-adjacent statements within 24h.",
+      "subtitle": "Bilateral framing is back; expect inbound press questions for Colombia-adjacent statements within 24h.",
       "summary": "Early signals from policy and regional outlets suggest renewed attention on deportation routing and bilateral implications.",
       "whyItMatters": "Bilateral framing creates exposure for Colombia-adjacent statements; expect inbound questions within 24h.",
       "whatChanged": "Local coverage volume increased and one new government statement appeared.",
       "priority": "top",
       "outletCount": 9,
+      "tags": {
+        "topics": ["Migration policy"],
+        "keywords": ["deportation routing"],
+        "geographies": ["US", "Colombia"]
+      },
       "sources": [
         {
           "id": "dep-reuters",
