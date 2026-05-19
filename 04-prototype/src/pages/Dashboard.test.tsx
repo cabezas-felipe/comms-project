@@ -178,7 +178,7 @@ function makeStoryDto(overrides: Partial<StoryDto> = {}): StoryDto {
     title: "T",
     geographies: ["US"],
     topic: "Diplomatic relations",
-    takeaway: "k",
+    subtitle: "k",
     summary: "s",
     whyItMatters: "w",
     whatChanged: "c",

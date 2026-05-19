@@ -24,7 +24,7 @@ function makeStory(
     id: overrides.id ?? "story-1",
     title: overrides.title ?? "Story",
     geographies: overrides.geographies ?? ["US"],
-    takeaway: overrides.takeaway ?? "",
+    subtitle: overrides.subtitle ?? "",
     summary: overrides.summary ?? "",
     whyItMatters: overrides.whyItMatters ?? "",
     whatChanged: overrides.whatChanged ?? "",

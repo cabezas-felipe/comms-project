@@ -104,6 +104,15 @@ function bootstrapApiEnv() {
   if (process.env.TEMPO_TAG_SEMANTIC_KILL_SWITCH == null) {
     process.env.TEMPO_TAG_SEMANTIC_KILL_SWITCH = "false";
   }
+
+  // Meta-story fields PR (Prompt 2): default the what-changed delta engine ON
+  // for prototype runs.  Explicit env values still win; `TEMPO_AI_MOCK_ONLY=true`
+  // continues to disable the LLM-bound stages via `resolveDeltaConfig()`.
+  // The early-return on `NODE_ENV === "test"` above keeps the test suite's
+  // legacy "delta off unless explicitly set" assumption intact.
+  if (process.env.TEMPO_AI_DELTA_ENABLED == null) {
+    process.env.TEMPO_AI_DELTA_ENABLED = "true";
+  }
 }
 bootstrapApiEnv();
 

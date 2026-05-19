@@ -27,8 +27,8 @@ export interface Story {
    * labels (header pills, scan-row chips) are driven by `tags` only.
    */
   topic?: Topic;
-  /** one-line takeaway shown on the card */
-  takeaway: string;
+  /** one-line contextual subtitle shown under the title (deck line) */
+  subtitle: string;
   summary: string;
   whyItMatters: string;
   whatChanged: string;
@@ -60,7 +60,7 @@ export const STORIES: Story[] = [
       keywords: ["OFAC", "sanctions"],
       geographies: ["US", "Colombia"],
     },
-    takeaway:
+    subtitle:
       "Story is moving from policy reporting into political reaction — response cycle likely within the day.",
     summary:
       "Coverage across US and Colombian outlets frames possible sanctions implications and response pressure. Narrative is widening from policy reporting to political reaction.",
@@ -168,7 +168,7 @@ export const STORIES: Story[] = [
       keywords: ["deportation routing"],
       geographies: ["US", "Colombia"],
     },
-    takeaway:
+    subtitle:
       "Bilateral framing is back; expect inbound press questions for Colombia-adjacent statements within 24h.",
     summary:
       "Early signals from policy and regional outlets suggest renewed attention on deportation routing and bilateral implications.",
@@ -259,7 +259,7 @@ export const STORIES: Story[] = [
       keywords: ["bilateral"],
       geographies: ["US"],
     },
-    takeaway:
+    subtitle:
       "Debate framing — not policy framing — typically precedes opinion-page cycles. Worth tracking.",
     summary:
       "Commentary has shifted from isolated remarks to broader debate about diplomatic and security alignment.",
@@ -321,7 +321,7 @@ export const STORIES: Story[] = [
       keywords: [],
       geographies: ["Colombia"],
     },
-    takeaway:
+    subtitle:
       "Procedural framing now means political framing later. Establish a baseline summary before the cycle turns.",
     summary:
       "Regional outlets are previewing trade corridor working groups ahead of next month's bilateral schedule. Tone is procedural, not political.",
@@ -383,7 +383,7 @@ export const STORIES: Story[] = [
       keywords: ["bilateral"],
       geographies: ["US"],
     },
-    takeaway:
+    subtitle:
       "Cross-spectrum citation usually predicts the dataset becoming a fixture in next-cycle coverage.",
     summary:
       "Same dataset is being used in opinion writing across the political spectrum, suggesting it will recur in next-cycle coverage.",

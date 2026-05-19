@@ -23,7 +23,7 @@ function makeStory(overrides: Partial<Story> = {}): Story {
     title: "Title",
     geographies: ["US"],
     topic: "Diplomatic relations",
-    takeaway: "k",
+    subtitle: "k",
     summary: "Summary text",
     whyItMatters: "Why",
     whatChanged: "What changed",
@@ -110,6 +110,17 @@ describe("StoryDetail: Phase 6 chip row is tags-only", () => {
     expect(screen.getByText("Diplomatic relations")).toBeInTheDocument();
     expect(screen.getByText("US")).toBeInTheDocument();
     expect(screen.getByText("|")).toBeInTheDocument();
+  });
+
+  it("renders story.subtitle under the title (meta-story fields PR)", () => {
+    const story = makeStory({
+      title: "Headline title",
+      subtitle: "One-sentence context placing the story.",
+    });
+    renderDetail(story);
+    const subtitle = screen.getByTestId("story-detail-subtitle");
+    expect(subtitle).toBeInTheDocument();
+    expect(subtitle).toHaveTextContent("One-sentence context placing the story.");
   });
 
   it("does NOT surface any semantic diagnostic field in the rendered output", () => {
