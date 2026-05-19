@@ -148,6 +148,10 @@ Any `groundingFailure` → **not shipped** (no salvage). Reasons: `no_valid_sour
 - **Per-axis adaptive thresholds at runtime.** Phase 7 advises via the calibration harness; runtime adaptation (the system automatically nudges its own thresholds based on its own diagnostics) is a larger commitment we have not validated.
 - **Cross-run scorer cache.** Phase 5/7 cache is per-pipeline-call. Persisting label embeddings across runs (settings keywords rarely change) would save provider calls; defer until cost matters.
 
+### What changed (story-level delta engine)
+
+The `story.whatChanged` value set inside [`buildStory`](../apps/api/src/dashboard/refresh-pipeline.mjs) as `` `Latest update ${freshestMinutesAgo} min ago.` `` is **deprecated** pending implementation of the 3-state hybrid delta engine (first-seen / unchanged / changed). The replacement is a deterministic gate + optional Haiku classify + optional Sonnet write that compares the current story against the immediately prior persisted snapshot. See [`what-changed-spec.md`](what-changed-spec.md) for the full contract — state machine, ever-seen persistence on the snapshot blob, gate rules, LLM stage env vars, pipeline integration point, mock/CI behavior, observability counters, and the 12-row test scenario table. The API field shape on [`storySchema.whatChanged`](../packages/contracts/src/schemas.ts) and the frontend ([`StoryCard.tsx`](../../04-prototype/src/components/StoryCard.tsx)) are unchanged.
+
 ---
 
 ## Models (prod SKUs — **N2**)
