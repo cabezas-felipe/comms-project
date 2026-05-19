@@ -142,10 +142,10 @@ test("hasSettings does not create a settings file as a side effect", async () =>
 test("mergeSettingsRow uses contract_version column value for contractVersion", () => {
   const row = {
     data: { topics: ["T"], keywords: [], geographies: [], traditionalSources: [], socialSources: [] },
-    contract_version: "2026-04-22-slice1",
+    contract_version: "2026-05-19-meta-story-fields",
   };
   const result = mergeSettingsRow(row);
-  assert.equal(result.contractVersion, "2026-04-22-slice1");
+  assert.equal(result.contractVersion, "2026-05-19-meta-story-fields");
   assert.deepEqual(result.topics, ["T"]);
 });
 
@@ -159,25 +159,25 @@ test("mergeSettingsRow strips stale contractVersion from data JSON so column alw
       traditionalSources: [],
       socialSources: [],
     },
-    contract_version: "2026-04-22-slice1",
+    contract_version: "2026-05-19-meta-story-fields",
   };
   const result = mergeSettingsRow(row);
-  assert.equal(result.contractVersion, "2026-04-22-slice1");
+  assert.equal(result.contractVersion, "2026-05-19-meta-story-fields");
   // Exactly one contractVersion key — no duplicate from the stale JSON
   assert.equal(Object.keys(result).filter((k) => k === "contractVersion").length, 1);
 });
 
 test("mergeSettingsRow handles null data without throwing", () => {
-  const result = mergeSettingsRow({ data: null, contract_version: "2026-04-22-slice1" });
-  assert.equal(result.contractVersion, "2026-04-22-slice1");
+  const result = mergeSettingsRow({ data: null, contract_version: "2026-05-19-meta-story-fields" });
+  assert.equal(result.contractVersion, "2026-05-19-meta-story-fields");
 });
 
 test("mergeSettingsRow handles missing data property without throwing", () => {
-  const result = mergeSettingsRow({ contract_version: "2026-04-22-slice1" });
-  assert.equal(result.contractVersion, "2026-04-22-slice1");
+  const result = mergeSettingsRow({ contract_version: "2026-05-19-meta-story-fields" });
+  assert.equal(result.contractVersion, "2026-05-19-meta-story-fields");
 });
 
 test("mergeSettingsRow handles non-object data (string) without throwing", () => {
-  const result = mergeSettingsRow({ data: "corrupt", contract_version: "2026-04-22-slice1" });
-  assert.equal(result.contractVersion, "2026-04-22-slice1");
+  const result = mergeSettingsRow({ data: "corrupt", contract_version: "2026-05-19-meta-story-fields" });
+  assert.equal(result.contractVersion, "2026-05-19-meta-story-fields");
 });

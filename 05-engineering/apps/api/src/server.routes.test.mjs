@@ -74,7 +74,7 @@ after(async () => {
 });
 
 const VALID_BODY = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: "2026-05-19-meta-story-fields",
   topics: ["Diplomatic relations"],
   keywords: ["OFAC"],
   geographies: ["US"],
@@ -127,7 +127,7 @@ test("GET /api/settings backfills pre-D-064 keyword/geography duplicates and per
   // Seed a stale file directly to bypass PUT hygiene — this is the shape a
   // user who onboarded before D-064 still carries.
   const stale = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations"],
     keywords: ["China", "Russia", "war", "trade"],
     geographies: ["China", "Russia", "US"],
@@ -165,7 +165,7 @@ test("GET /api/settings backfills pre-D-064 keyword/geography duplicates and per
 
 test("GET /api/settings backfills when dedupe changes keywords but length is unchanged", async () => {
   const stale = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations"],
     keywords: ["China", "Russia"],
     geographies: ["China"],
@@ -271,7 +271,7 @@ test("GET /api/dashboard returns empty stories with hasSnapshot=false when no sn
   try {
     const res = await request(app).get("/api/dashboard");
     assert.equal(res.status, 200);
-    assert.equal(res.body.contractVersion, "2026-04-22-slice1");
+    assert.equal(res.body.contractVersion, "2026-05-19-meta-story-fields");
     assert.ok(Array.isArray(res.body.stories));
     assert.equal(res.body.stories.length, 0);
     assert.equal(res.body._meta?.hasSnapshot, false);
@@ -282,7 +282,7 @@ test("GET /api/dashboard returns empty stories with hasSnapshot=false when no sn
 
 test("GET /api/dashboard returns persisted snapshot when one exists", async () => {
   const SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [
       {
         id: "snap-story-1",
@@ -291,7 +291,6 @@ test("GET /api/dashboard returns persisted snapshot when one exists", async () =
         subtitle: "A subtitle.",
         geographies: ["US"],
         topic: "Diplomatic relations",
-        takeaway: "Takeaway",
         summary: "Summary.",
         whyItMatters: "Why.",
         // Match the post–Phase 4 unchanged copy so fixtures don't carry the
@@ -310,7 +309,7 @@ test("GET /api/dashboard returns persisted snapshot when one exists", async () =
   try {
     const res = await request(app).get("/api/dashboard");
     assert.equal(res.status, 200);
-    assert.equal(res.body.contractVersion, "2026-04-22-slice1");
+    assert.equal(res.body.contractVersion, "2026-05-19-meta-story-fields");
     assert.equal(res.body.stories.length, 1);
     assert.equal(res.body.stories[0].id, "snap-story-1");
     const parsed = dashboardPayloadSchema.safeParse(res.body);
@@ -685,7 +684,6 @@ test("POST /api/dashboard/refresh: ever-seen merge across two runs preserves pri
     subtitle: "S",
     geographies: ["US"],
     topic: "Diplomatic relations",
-    takeaway: "T",
     summary: "S",
     whyItMatters: "W",
     whatChanged: "C",
@@ -880,7 +878,6 @@ test("POST /api/dashboard/refresh: persists log.whatChanged onto _lastRunMeta (P
     subtitle: "S",
     geographies: ["US"],
     topic: "Diplomatic relations",
-    takeaway: "T",
     summary: "S",
     whyItMatters: "W",
     whatChanged: "First appearance in your feed.",
@@ -965,7 +962,6 @@ test("POST /api/dashboard/refresh: pipeline receives ever-seen + priorStoriesByI
         subtitle: "S",
         geographies: ["US"],
         topic: "Diplomatic relations",
-        takeaway: "T",
         summary: "S",
         whyItMatters: "W",
         whatChanged: "C",
@@ -981,7 +977,6 @@ test("POST /api/dashboard/refresh: pipeline receives ever-seen + priorStoriesByI
         subtitle: "S",
         geographies: ["US"],
         topic: "Diplomatic relations",
-        takeaway: "T",
         summary: "S",
         whyItMatters: "W",
         whatChanged: "C",
@@ -1130,7 +1125,7 @@ test("POST /api/dashboard/refresh: embedFn throws WITHOUT lexical hits → stric
   // surfaces `degraded_reason` without `keywordFallbackAfterEmbeddingFailure`.
   // Use a settings payload with disjoint topics/keywords from the fixture.
   const NO_MATCH_BODY = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Migration policy"],          // fixture topic is "Diplomatic relations"
     keywords: ["asylum"],                  // fixture body/headline have no asylum
     geographies: ["US"],
@@ -1198,7 +1193,7 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
 
 test("GET /api/dashboard surfaces persisted _selectionMeta as _meta.selection", async () => {
   const SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: new Date().toISOString() },
     _selectionMeta: {
@@ -1232,12 +1227,12 @@ test("POST /api/dashboard/refresh: applies title lock — second refresh preserv
   const firstTitle = "First Run Title";
   const secondTitle = "Different Second Title";
   const MS_ID = "locked-meta-story";
-  const makeStory = (title) => ({
-    contractVersion: "2026-04-22-slice1",
+  const makeStory = (title, subtitle = "Sub.") => ({
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [{
-      id: MS_ID, metaStoryId: MS_ID, title, subtitle: "Sub.",
+      id: MS_ID, metaStoryId: MS_ID, title, subtitle,
       geographies: ["US"], topic: "Diplomatic relations",
-      takeaway: "T", summary: "S", whyItMatters: "W", whatChanged: "C",
+      summary: "S", whyItMatters: "W", whatChanged: "C",
       priority: "standard", outletCount: 1,
       tags: { topics: [], keywords: [], geographies: [] },
       sources: [],
@@ -1251,8 +1246,10 @@ test("POST /api/dashboard/refresh: applies title lock — second refresh preserv
   const prevRun = _refreshPipeline.run;
   _snapshotRepo.write = async () => {};
   _snapshotRepo.getLocks = async () => new Map(locks);
+  // Meta-story fields PR (Prompt 1): title-only locks — stub mirrors the
+  // production insert path which only persists `title`.
   _snapshotRepo.insertLocks = async (_uid, newLocks) => {
-    for (const l of newLocks) locks.set(l.metaStoryId, { title: l.title, subtitle: l.subtitle });
+    for (const l of newLocks) locks.set(l.metaStoryId, { title: l.title });
   };
   _refreshPipeline.run = async () => ({ payload: makeStory(firstTitle), log: { poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0 } });
   const res1 = await request(app).post("/api/dashboard/refresh");
@@ -1270,9 +1267,111 @@ test("POST /api/dashboard/refresh: applies title lock — second refresh preserv
   }
 });
 
+test("POST /api/dashboard/refresh: title lock does NOT freeze subtitle across refresh (meta-story fields PR)", async () => {
+  // Product rule: only `title` is locked on first publish.  `subtitle` carries
+  // clustering context (one-sentence placement of the story) and must
+  // re-render every refresh as evidence shifts.  This guards against a
+  // regression of the prior title+subtitle lock behavior.
+  const MS_ID = "subtitle-rerender-meta-story";
+  const firstSubtitle = "First-run placement of the story.";
+  const secondSubtitle = "Refined placement after new evidence arrived.";
+  const makeStory = (subtitle) => ({
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [{
+      id: MS_ID, metaStoryId: MS_ID, title: "Stable Title", subtitle,
+      geographies: ["US"], topic: "Diplomatic relations",
+      summary: "S", whyItMatters: "W", whatChanged: "C",
+      priority: "standard", outletCount: 1,
+      tags: { topics: [], keywords: [], geographies: [] },
+      sources: [],
+    }],
+  });
+
+  const locks = new Map();
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map(locks);
+  _snapshotRepo.insertLocks = async (_uid, newLocks) => {
+    for (const l of newLocks) {
+      // Regression guard: production insert path must not include subtitle.
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(l, "subtitle"),
+        false,
+        "insertLocks payload must not include subtitle (title-only locks)"
+      );
+      locks.set(l.metaStoryId, { title: l.title });
+    }
+  };
+  _refreshPipeline.run = async () => ({ payload: makeStory(firstSubtitle), log: { poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0 } });
+  await request(app).post("/api/dashboard/refresh");
+
+  _refreshPipeline.run = async () => ({ payload: makeStory(secondSubtitle), log: { poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0 } });
+  const res2 = await request(app).post("/api/dashboard/refresh");
+  try {
+    assert.equal(res2.body.stories[0].title, "Stable Title");
+    assert.equal(
+      res2.body.stories[0].subtitle,
+      secondSubtitle,
+      "subtitle must reflect the current refresh, not the first-run value"
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
+test("POST /api/dashboard/refresh: legacy lock row with subtitle does NOT override fresh story subtitle", async () => {
+  // Regression: lock rows persisted before the meta-story fields PR carried a
+  // `subtitle` value.  The server must apply `title` only — the legacy
+  // subtitle must not freeze the rendered story subtitle.
+  const MS_ID = "legacy-lock-row-meta-story";
+  const FRESH_SUBTITLE = "Fresh subtitle from current clustering.";
+  const STORY = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [{
+      id: MS_ID, metaStoryId: MS_ID, title: "LLM Title", subtitle: FRESH_SUBTITLE,
+      geographies: ["US"], topic: "Diplomatic relations",
+      summary: "S", whyItMatters: "W", whatChanged: "C",
+      priority: "standard", outletCount: 1,
+      tags: { topics: [], keywords: [], geographies: [] },
+      sources: [],
+    }],
+  };
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _snapshotRepo.write = async () => {};
+  // Simulate a legacy lock row that still carries `subtitle` — production
+  // adapters now strip it on read, so the server should never see this key.
+  // We assert behavior against the post-strip shape: `{ title }` only.
+  _snapshotRepo.getLocks = async () => new Map([[MS_ID, { title: "Locked Title" }]]);
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({ payload: STORY, log: { poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0 } });
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.body.stories[0].title, "Locked Title");
+    assert.equal(
+      res.body.stories[0].subtitle,
+      FRESH_SUBTITLE,
+      "fresh subtitle must survive — legacy lock subtitle never overrides"
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+  }
+});
+
 test("POST /api/dashboard/refresh: on failure, returns last good snapshot with fallback=true", async () => {
   const LAST_SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: new Date().toISOString() },
   };
@@ -1318,7 +1417,7 @@ test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior snaps
   const prevInsertLocks = _snapshotRepo.insertLocks;
 
   const PRIOR_SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _watermark: "wm-stable-123",
     _selectionMeta: {
@@ -1406,7 +1505,6 @@ test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior whatC
         subtitle: "Sub A",
         geographies: ["US"],
         topic: "Diplomatic relations",
-        takeaway: "T",
         summary: "S",
         whyItMatters: "W",
         whatChanged: PRIOR_WHAT_CHANGED_A,
@@ -1424,7 +1522,6 @@ test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior whatC
         subtitle: "Sub B",
         geographies: ["US"],
         topic: "Diplomatic relations",
-        takeaway: "T",
         summary: "S",
         whyItMatters: "W",
         whatChanged: PRIOR_WHAT_CHANGED_B,
@@ -1536,7 +1633,7 @@ test("POST /api/dashboard/refresh: watermark unchanged → _meta.recall and _met
   };
 
   _snapshotRepo.read = async () => ({
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _watermark: "wm-stable-xyz",
     _selectionMeta: {
@@ -1779,7 +1876,7 @@ test("M3: POST /api/dashboard/refresh watermark-skip returns _meta.clusterModel 
   const prevRead = _snapshotRepo.read;
   const prevWrite = _snapshotRepo.write;
   _snapshotRepo.read = async () => ({
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _watermark: "wm-m3",
     _selectionMeta: null,
@@ -1879,7 +1976,7 @@ test("M3b: POST /api/dashboard/refresh full run persists _lastRunMeta with funne
     excludeReasonHistogram: {},
   };
   const PAYLOAD = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
   };
 
@@ -1943,7 +2040,7 @@ test("M3b: GET /api/dashboard surfaces persisted _meta.funnel/recall/beatFit/clu
     excludeReasonHistogram: { below_threshold: 2 },
   };
   const SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: {
       hasSnapshot: true,
@@ -1985,7 +2082,7 @@ test("POST /api/dashboard/refresh: route forwards priorStoryCount from prior sna
   let priorStoryCountSeen = "not-passed";
   let priorWatermarkSeen = "not-passed";
   _snapshotRepo.read = async () => ({
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [], // 0 stories — guard input
     _watermark: "wm-prior-empty",
   });
@@ -1996,7 +2093,7 @@ test("POST /api/dashboard/refresh: route forwards priorStoryCount from prior sna
     priorStoryCountSeen = opts.priorStoryCount;
     priorWatermarkSeen = opts.priorWatermark;
     return {
-      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
       log: {
         poolCount: 0, relevantCount: 0,
         usedFallbackClustering: false, groundingFailures: 0,
@@ -2035,10 +2132,10 @@ test("POST /api/dashboard/refresh: route forwards priorStoryCount > 0 when prior
 
   let priorStoryCountSeen = "not-passed";
   _snapshotRepo.read = async () => ({
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [
-      { id: "s1", metaStoryId: "s1", title: "T1", subtitle: "Sub.", geographies: ["US"], topic: "Diplomatic relations", takeaway: "T", summary: "S", whyItMatters: "W", whatChanged: "C", priority: "standard", outletCount: 1, tags: { topics: [], keywords: [], geographies: [] }, sources: [] },
-      { id: "s2", metaStoryId: "s2", title: "T2", subtitle: "Sub.", geographies: ["US"], topic: "Diplomatic relations", takeaway: "T", summary: "S", whyItMatters: "W", whatChanged: "C", priority: "standard", outletCount: 1, tags: { topics: [], keywords: [], geographies: [] }, sources: [] },
+      { id: "s1", metaStoryId: "s1", title: "T1", subtitle: "Sub.", geographies: ["US"], topic: "Diplomatic relations", summary: "S", whyItMatters: "W", whatChanged: "C", priority: "standard", outletCount: 1, tags: { topics: [], keywords: [], geographies: [] }, sources: [] },
+      { id: "s2", metaStoryId: "s2", title: "T2", subtitle: "Sub.", geographies: ["US"], topic: "Diplomatic relations", summary: "S", whyItMatters: "W", whatChanged: "C", priority: "standard", outletCount: 1, tags: { topics: [], keywords: [], geographies: [] }, sources: [] },
     ],
     _watermark: "wm-prior-healthy",
   });
@@ -2083,7 +2180,7 @@ test("POST /api/dashboard/refresh: watermark changed → full run executes, resp
 
   let priorWatermarkSeen = "not-passed";
   _snapshotRepo.read = async () => ({
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _watermark: "old-wm",
   });
@@ -2093,7 +2190,7 @@ test("POST /api/dashboard/refresh: watermark changed → full run executes, resp
   _refreshPipeline.run = async (opts) => {
     priorWatermarkSeen = opts.priorWatermark;
     return {
-      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
       log: {
         poolCount: 1,
         relevantCount: 1,
@@ -2145,7 +2242,7 @@ test("POST /api/dashboard/refresh: concurrent refresh for same user is skipped w
     pipelineCalls++;
     await new Promise((r) => setTimeout(r, 60));
     return {
-      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
       log: {
         poolCount: 0, relevantCount: 0, usedFallbackClustering: false, groundingFailures: 0,
         droppedUngroundedStoryCount: 0, groundingDropReasons: {},
@@ -2193,7 +2290,7 @@ test("POST /api/dashboard/refresh: in-flight slot is released after pipeline com
   _refreshPipeline.run = async () => {
     count++;
     return {
-      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
       log: {
         poolCount: 0, relevantCount: 0, usedFallbackClustering: false, groundingFailures: 0,
         droppedUngroundedStoryCount: 0, groundingDropReasons: {},
@@ -2237,7 +2334,7 @@ test("POST /api/dashboard/bootstrap: fresh snapshot (<= 60 min) → served_fresh
   const prevRun = _refreshPipeline.run;
   let pipelineCalls = 0;
   const FRESH_SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 5 * 60_000).toISOString() }, // 5 min ago
     _selectionMeta: { sourceSelectionMode: "strict", sourceFallbackUsed: false, matchedSourceCount: 1, selectedSourceCount: 1, unmatchedSelectedSources: [], unavailableConnectorCount: 0, relevantItemCount: 1 },
@@ -2269,7 +2366,7 @@ test("POST /api/dashboard/bootstrap: stale snapshot (> 60 min) → ran_refresh, 
   const prevInsertLocks = _snapshotRepo.insertLocks;
 
   const STALE_SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 90 * 60_000).toISOString() }, // 90 min ago
     _watermark: "wm-stale",
@@ -2283,7 +2380,7 @@ test("POST /api/dashboard/bootstrap: stale snapshot (> 60 min) → ran_refresh, 
     pipelineCalls++;
     assert.equal(opts.priorWatermark, "wm-stale", "stale snapshot's watermark forwarded");
     return {
-      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
       log: {
         poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0,
         droppedUngroundedStoryCount: 0, groundingDropReasons: {},
@@ -2321,7 +2418,7 @@ test("POST /api/dashboard/bootstrap: no prior snapshot + refresh produces snapsh
   _snapshotRepo.getLocks = async () => new Map();
   _snapshotRepo.insertLocks = async () => {};
   _refreshPipeline.run = async () => ({
-    payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+    payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
     log: {
       poolCount: 1, relevantCount: 1, usedFallbackClustering: false, groundingFailures: 0,
       droppedUngroundedStoryCount: 0, groundingDropReasons: {},
@@ -2368,7 +2465,7 @@ test("POST /api/dashboard/bootstrap: snapshot at exactly 60 min boundary is trea
   let pipelineCalls = 0;
   // 60 min - 1s — comfortably within the 60 min threshold (<= cutoff is fresh)
   const SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - (60 * 60_000 - 1000)).toISOString() },
   };
@@ -2393,7 +2490,7 @@ test("POST /api/dashboard/bootstrap: snapshot just over 60 min triggers refresh"
 
   // 61 minutes ago — past the cutoff
   const SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 61 * 60_000).toISOString() },
   };
@@ -2405,7 +2502,7 @@ test("POST /api/dashboard/bootstrap: snapshot just over 60 min triggers refresh"
   _refreshPipeline.run = async () => {
     pipelineCalls++;
     return {
-      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
       log: {
         poolCount: 0, relevantCount: 0, usedFallbackClustering: false, groundingFailures: 0,
         droppedUngroundedStoryCount: 0, groundingDropReasons: {},
@@ -2436,7 +2533,7 @@ test("POST /api/dashboard/bootstrap: malformed FRESH snapshot fails validation �
   const prevRun = _refreshPipeline.run;
   let pipelineCalls = 0;
   const MALFORMED_FRESH = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [
       {
         // Missing required `id`, `topic`, `summary`, etc. — schema must reject
@@ -2478,7 +2575,7 @@ test("POST /api/dashboard/bootstrap: in_flight body with hasSnapshot=true → ra
       kind: "in_flight",
       httpStatus: 200,
       body: {
-        contractVersion: "2026-04-22-slice1",
+        contractVersion: "2026-05-19-meta-story-fields",
         stories: [],
         _meta: { hasSnapshot: true, refreshSkippedReason: "in_flight", unchanged: false },
       },
@@ -2511,7 +2608,7 @@ test("POST /api/dashboard/bootstrap: in_flight body with hasSnapshot=false → n
     // Stale (90 min) — bypasses the fresh-snapshot branch so we proceed to the
     // executor.  But this stale snapshot exists, so naive "snapshot ? ran : no"
     // logic would WRONGLY return ran_refresh.  The fix routes through body.
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: new Date(Date.now() - 90 * 60_000).toISOString() },
   });
@@ -2519,7 +2616,7 @@ test("POST /api/dashboard/bootstrap: in_flight body with hasSnapshot=false → n
     kind: "in_flight",
     httpStatus: 200,
     body: {
-      contractVersion: "2026-04-22-slice1",
+      contractVersion: "2026-05-19-meta-story-fields",
       stories: [],
       _meta: { hasSnapshot: false, refreshSkippedReason: "in_flight", unchanged: false },
     },
@@ -2542,7 +2639,7 @@ test("POST /api/dashboard/bootstrap: in_flight body with hasSnapshot=false → n
 test("GET /api/dashboard does NOT include bootstrapDecision (Phase 5: bootstrap-only field)", async () => {
   const prev = _snapshotRepo.read;
   _snapshotRepo.read = async () => ({
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: new Date().toISOString() },
   });
@@ -3159,7 +3256,7 @@ test("extraction trigger: failure with empty AI-derivable arrays in baseline doe
 
   try {
     const firstOnboardingBody = {
-      contractVersion: "2026-04-22-slice1",
+      contractVersion: "2026-05-19-meta-story-fields",
       topics: ["Colombia–US bilateral"],
       keywords: [],
       geographies: [],
@@ -3522,7 +3619,7 @@ test("POST /api/dashboard/refresh: watermark unchanged → lastCheckedAt advance
   // latter past it.
   const PRIOR_AT = new Date(Date.now() - 60_000).toISOString();
   const PRIOR_SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _watermark: "wm-stable",
     _meta: { hasSnapshot: true, refreshedAt: PRIOR_AT, lastCheckedAt: PRIOR_AT },
@@ -3612,7 +3709,7 @@ test("POST /api/dashboard/refresh: error_fallback → lastCheckedAt advances, re
   const prevGetLocks = _snapshotRepo.getLocks;
   const PRIOR_AT = new Date(Date.now() - 120_000).toISOString();
   const LAST_SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: PRIOR_AT, lastCheckedAt: PRIOR_AT },
   };
@@ -3647,7 +3744,7 @@ test("GET /api/dashboard surfaces persisted _meta.lastCheckedAt", async () => {
   const LAST_AT = "2026-05-10T09:00:00.000Z";
   const REFRESHED_AT = "2026-05-10T08:00:00.000Z";
   const SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: REFRESHED_AT, lastCheckedAt: LAST_AT },
   };
@@ -3670,7 +3767,7 @@ test("POST /api/dashboard/bootstrap: served_fresh_snapshot returns persisted las
   const REFRESHED_AT = new Date(Date.now() - 5 * 60_000).toISOString();
   const LAST_AT = new Date(Date.now() - 2 * 60_000).toISOString();
   const FRESH_SNAPSHOT = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [],
     _meta: { hasSnapshot: true, refreshedAt: REFRESHED_AT, lastCheckedAt: LAST_AT },
   };
@@ -3822,7 +3919,7 @@ test("POST /api/dashboard/refresh: TEMPO_DC_VALIDATION_MODE + ready providers �
   const prevRun = _refreshPipeline.run;
   _refreshPipeline.run = async () => ({
     payload: {
-      contractVersion: "2026-04-22-slice1",
+      contractVersion: "2026-05-19-meta-story-fields",
       stories: [],
     },
     log: {
@@ -3872,7 +3969,7 @@ test("POST /api/dashboard/refresh: validation mode OFF + mock-only → does NOT 
   _refreshPipeline.run = async () => {
     pipelineCalls += 1;
     return {
-      payload: { contractVersion: "2026-04-22-slice1", stories: [] },
+      payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
       log: {
         unchanged: false,
         watermark: "wm-0",
@@ -3945,7 +4042,7 @@ test("GET /api/_debug/dashboard-tags: returns _meta.tags when both gates pass + 
   // Stub the snapshot to carry a `_meta.tags` payload as the dashboard
   // pipeline would have written it.
   _snapshotRepo.read = async () => ({
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [
       {
         id: "story-A",

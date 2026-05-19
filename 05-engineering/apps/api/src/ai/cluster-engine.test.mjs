@@ -158,7 +158,7 @@ test("verifyGrounding: empty factual_claims bypasses claim-level check", () => {
   assert.equal(invalid.length, 0);
 });
 
-test("verifyGrounding: replaces summary with first factual_claim only — J3b (closes ungrounded-prose bypass)", () => {
+test("verifyGrounding: single claim → subtitle and summary both use that claim (C0)", () => {
   const sourceItemsById = new Map([["id-1", makeItem()]]);
   const story = {
     meta_story_id: "x",
@@ -170,14 +170,13 @@ test("verifyGrounding: replaces summary with first factual_claim only — J3b (c
   };
   const { valid } = verifyGrounding([story], sourceItemsById);
   assert.equal(valid.length, 1);
-  assert.equal(
-    valid[0].summary,
-    "Grounded claim from source.",
-    "summary must be replaced with first verified claim only (J3b)"
-  );
+  assert.equal(valid[0].subtitle, "Grounded claim from source.");
+  // With a single claim, the joined summary equals that claim.  Closes the
+  // ungrounded-prose bypass that J3b originally addressed.
+  assert.equal(valid[0].summary, "Grounded claim from source.");
 });
 
-test("verifyGrounding: replaces subtitle with first factual_claim", () => {
+test("verifyGrounding: C0 — subtitle is first claim, summary joins all claims (≥2 → subtitle ≠ summary)", () => {
   const sourceItemsById = new Map([["id-1", makeItem()]]);
   const story = {
     meta_story_id: "x",
@@ -188,11 +187,57 @@ test("verifyGrounding: replaces subtitle with first factual_claim", () => {
     claim_evidence_map: { "0": ["id-1"], "1": ["id-1"] },
   };
   const { valid } = verifyGrounding([story], sourceItemsById);
-  assert.equal(valid[0].subtitle, "First grounded claim.", "subtitle must be replaced with first claim");
+  assert.equal(valid[0].subtitle, "First grounded claim.");
   assert.equal(
     valid[0].summary,
-    "First grounded claim.",
-    "J3b: summary uses first claim only, not a join of all claims"
+    "First grounded claim. Second grounded claim.",
+    "summary must be a deterministic join of all grounded claims"
+  );
+  assert.notEqual(
+    valid[0].subtitle,
+    valid[0].summary,
+    "with ≥2 claims, subtitle and summary must differ"
+  );
+});
+
+test("verifyGrounding: C0 summary normalizes whitespace and appends terminal punctuation", () => {
+  const sourceItemsById = new Map([["id-1", makeItem()]]);
+  const story = {
+    meta_story_id: "x",
+    source_item_ids: ["id-1"],
+    summary: "ignored",
+    subtitle: "ignored",
+    factual_claims: ["  First   claim  ", "Second claim has period."],
+    claim_evidence_map: { "0": ["id-1"], "1": ["id-1"] },
+  };
+  const { valid } = verifyGrounding([story], sourceItemsById);
+  assert.equal(valid[0].subtitle, "First claim");
+  assert.equal(
+    valid[0].summary,
+    "First claim. Second claim has period.",
+    "joiner normalizes whitespace and ensures each claim ends with terminal punctuation"
+  );
+});
+
+test("verifyGrounding: C0 summary is capped near 500 chars without breaking mid-word", () => {
+  const sourceItemsById = new Map([["id-1", makeItem()]]);
+  const longClaim = "This is a long grounded sentence that fills space. ".repeat(20).trim();
+  const story = {
+    meta_story_id: "x",
+    source_item_ids: ["id-1"],
+    summary: "ignored",
+    subtitle: "ignored",
+    factual_claims: [longClaim],
+    claim_evidence_map: { "0": ["id-1"] },
+  };
+  const { valid } = verifyGrounding([story], sourceItemsById);
+  assert.ok(
+    valid[0].summary.length <= 500,
+    `summary should be capped, got ${valid[0].summary.length} chars`
+  );
+  assert.ok(
+    !/\w$/.test(valid[0].summary) || valid[0].summary.endsWith("."),
+    "summary should not end mid-word"
   );
 });
 

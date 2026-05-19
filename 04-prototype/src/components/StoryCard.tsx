@@ -61,14 +61,14 @@ export default function StoryCard({ story, sig, expanded, onToggle, onOpenSource
           )}
         </div>
 
-        {/* Two-column: headline + takeaway · activity meta */}
+        {/* Two-column: headline + subtitle (deck line) · activity meta */}
         <div className="flex items-start gap-6">
           <div className="min-w-0 flex-1">
             <h2 className={`font-display text-[19px] font-semibold leading-[1.2] tracking-tight ${titleColor}`}>
               {story.title}
             </h2>
             <p className="mt-1 truncate text-[13px] leading-relaxed text-muted-foreground">
-              {story.takeaway}
+              {story.subtitle}
             </p>
           </div>
 

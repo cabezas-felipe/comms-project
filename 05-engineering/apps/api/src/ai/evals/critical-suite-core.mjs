@@ -154,7 +154,7 @@ function passthroughClusterFn(idPrefix = "ms") {
 
 async function scenarioChinaDefenseTrade() {
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Trade policy", "Security policy"],
     keywords: ["China", "defense", "trade"],
     geographies: ["US", "China"],
@@ -176,7 +176,7 @@ async function scenarioChinaDefenseTrade() {
     rawItems,
     clusterFn: passthroughClusterFn("china"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: HYBRID,
     embedFn: makeStubEmbedder(["china", "defense", "trade"]),
   });
@@ -206,7 +206,7 @@ async function scenarioChinaDefenseTrade() {
 
 async function scenarioMonitoringMigrationBorder() {
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Migration policy", "Border policy"],
     keywords: ["migration", "border", "deportation"],
     geographies: ["US", "Mexico"],
@@ -237,7 +237,7 @@ async function scenarioMonitoringMigrationBorder() {
     rawItems,
     clusterFn: passthroughClusterFn("mig"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: HYBRID,
     embedFn: makeStubEmbedder(["migration", "border", "deportation"]),
   });
@@ -260,7 +260,7 @@ async function scenarioMonitoringMigrationBorder() {
 
 async function scenarioSourceScopedRelevance() {
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations"],
     keywords: ["bilateral"],
     geographies: ["US", "Colombia"],
@@ -292,7 +292,7 @@ async function scenarioSourceScopedRelevance() {
     rawItems,
     clusterFn: passthroughClusterFn("scoped"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: HYBRID,
     embedFn: makeStubEmbedder(["bilateral", "colombia"]),
   });
@@ -323,7 +323,7 @@ async function scenarioEmptyProfileLexicalPath() {
   // axis contributed text) doesn't matter, as long as the run is NOT an
   // embedding-failure cliff.
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: [],
     keywords: ["bilateral"], // gives lexical recall something to find
     geographies: [],
@@ -345,7 +345,7 @@ async function scenarioEmptyProfileLexicalPath() {
     rawItems,
     clusterFn: passthroughClusterFn("lex"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: HYBRID,
     embedFn: makeStubEmbedder(["bilateral"]),
     // Scenario focus is the recall-level lexical path; beat-fit's heuristic
@@ -381,7 +381,7 @@ async function scenarioEmptyProfileLexicalPath() {
 
 async function scenarioEmbeddingFailureWithLexicalHits() {
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations"],
     keywords: ["sanctions"],
     geographies: ["US"],
@@ -403,7 +403,7 @@ async function scenarioEmbeddingFailureWithLexicalHits() {
     rawItems,
     clusterFn: passthroughClusterFn("ef-lex"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: HYBRID,
     embedFn: async () => {
       throw new Error("provider 500 simulated failure");
@@ -440,7 +440,7 @@ async function scenarioEmbeddingFailureWithLexicalHits() {
 
 async function scenarioEmbeddingFailureWithoutLexicalHits() {
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations"],
     keywords: ["sanctions"],
     geographies: ["US"],
@@ -463,7 +463,7 @@ async function scenarioEmbeddingFailureWithoutLexicalHits() {
     rawItems,
     clusterFn: passthroughClusterFn("ef-empty"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: HYBRID,
     embedFn: async () => {
       throw new Error("provider 503 simulated failure");
@@ -522,7 +522,7 @@ async function scenarioSettingsSaveRefreshPropagation() {
     }),
   ];
   const tradeSettings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Trade policy"],
     keywords: ["china", "trade"],
     geographies: ["US", "China"],
@@ -539,7 +539,7 @@ async function scenarioSettingsSaveRefreshPropagation() {
     rawItems,
     clusterFn: passthroughClusterFn("prop"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     // Use KEYWORD mode for this scenario. The propagation contract under
     // test is "settings change → refresh output changes" — a lexical-only
     // recall makes the dependency on `settings.topics` + `settings.keywords`
@@ -592,7 +592,7 @@ async function scenarioGroundingTrustGuard() {
   // The must-pass: payload contains NO ungrounded story; rejection metadata
   // explains the drop.
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations"],
     keywords: ["bilateral"],
     geographies: ["US"],
@@ -630,7 +630,7 @@ async function scenarioGroundingTrustGuard() {
     rawItems,
     clusterFn: hallucinatingClusterFn,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: KEYWORD, // bypass embeddings — focus is grounding
   });
 

@@ -78,7 +78,7 @@ function makeItem(overrides = {}) {
 }
 
 const BASE_SETTINGS = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: "2026-05-19-meta-story-fields",
   topics: ["Diplomatic relations", "Migration policy"],
   keywords: ["OFAC", "sanctions"],
   geographies: ["US", "Colombia"],
@@ -270,9 +270,9 @@ test("runRefreshPipeline: returns payload with stories from cluster output", asy
     rawItems: [rawItems[0]],
     clusterFn: async () => MOCK_META_STORIES,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
-  assert.equal(payload.contractVersion, "2026-04-22-slice1");
+  assert.equal(payload.contractVersion, "2026-05-19-meta-story-fields");
   assert.equal(payload.stories.length, 1);
   assert.equal(payload.stories[0].id, "diplomatic-relations-developments");
   assert.equal(log.metaStoryCount, 1);
@@ -287,7 +287,7 @@ test("runRefreshPipeline: returns empty stories when relevant pool is empty", as
     rawItems,
     clusterFn: async () => { clusterCalled = true; return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0);
   assert.equal(clusterCalled, false, "cluster should not be called when pool is empty");
@@ -300,7 +300,7 @@ test("runRefreshPipeline: uses graceful fallback when cluster throws", async () 
     rawItems,
     clusterFn: async () => { throw new Error("model unavailable"); },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(log.usedFallbackClustering, true);
   assert.ok(payload.stories.length > 0, "fallback must produce at least one story");
@@ -317,7 +317,7 @@ test("runRefreshPipeline: applies 24h filter before clustering", async () => {
     rawItems,
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.ok(seenIds.includes("recent"), "recent item must reach cluster");
   assert.ok(!seenIds.includes("old"), "item older than 24h must not reach cluster");
@@ -340,7 +340,7 @@ test("runRefreshPipeline: rejects meta-story with fully hallucinated source IDs 
     rawItems,
     clusterFn: async () => [hallucinatedStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0, "story with all hallucinated IDs must be discarded");
   assert.equal(log.groundingFailures, 1);
@@ -361,7 +361,7 @@ test("runRefreshPipeline: Phase 3 strict drop — partial_source_ids stories are
     rawItems,
     clusterFn: async () => [partialStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0, "partial_source_ids must be dropped under strict grounding");
   assert.equal(log.groundingFailures, 1);
@@ -386,7 +386,7 @@ test("runRefreshPipeline: geo held items are not included in stories", async () 
       return [];
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     geoAssessFn: async () => ({ confidence: 0.5 }),
     writeHeldFn: async (items) => { heldItems.push(...items); },
   });
@@ -404,7 +404,7 @@ test("runRefreshPipeline: explicit_match items always included regardless of geo
     rawItems,
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     geoAssessFn: async () => ({ confidence: 0.0 }),
   });
   assert.ok(seenIds.includes("src-match"), "explicit_match must reach cluster even when assessor returns 0");
@@ -421,7 +421,7 @@ test("runRefreshPipeline: all items included when configured geographies is empt
     rawItems,
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     beatFitEnabled: false, // this test targets geo filter only; bypass relevance gate
   });
   assert.ok(seenIds.includes("src-any"), "no configured geos → all items pass geo filter");
@@ -444,7 +444,7 @@ test("runRefreshPipeline: story geographies are never fabricated — empty when 
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     beatFitEnabled: false, // narrow test on geo-fabrication guard; bypass relevance gate
   });
   assert.equal(payload.stories.length, 1);
@@ -468,14 +468,14 @@ test("runRefreshPipeline: meta_story_id is stable across equal titles (hardcoded
     rawItems,
     clusterFn: async () => [story1],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const { payload: p2 } = await runRefreshPipeline({
     settings: BASE_SETTINGS,
     rawItems,
     clusterFn: async () => [story2],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.equal(p1.stories[0].metaStoryId, p2.stories[0].metaStoryId, "metaStoryId must be stable for same title");
@@ -502,7 +502,7 @@ test("runRefreshPipeline: meta_story_id derived from evidence — stable when ti
     rawItems,
     clusterFn: async () => makeResult("Original Title"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   const { payload: p2 } = await runRefreshPipeline({
@@ -510,7 +510,7 @@ test("runRefreshPipeline: meta_story_id derived from evidence — stable when ti
     rawItems,
     clusterFn: async () => makeResult("Completely Different Title"),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.ok(typeof p1.stories[0].metaStoryId === "string" && p1.stories[0].metaStoryId.length > 0);
@@ -540,7 +540,7 @@ test("runRefreshPipeline: different evidence clusters produce different meta_sto
       claim_evidence_map: { "0": ["src-A"] },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   const { payload: p2 } = await runRefreshPipeline({
@@ -556,7 +556,7 @@ test("runRefreshPipeline: different evidence clusters produce different meta_sto
       claim_evidence_map: { "0": ["src-B"] },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.notEqual(
@@ -580,7 +580,7 @@ test("runRefreshPipeline: previously held item is promoted when confidence rises
     rawItems,
     clusterFn: async (items) => { promoted.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     readHeldFn: async () => [{ ...heldItem, geoCategory: "implicit_geo", geoConfidence: 0.5 }],
     geoAssessFn: async () => ({ confidence: 0.90 }),
     writeHeldFn: async () => {},
@@ -601,7 +601,7 @@ test("runRefreshPipeline: previously held item remains held when confidence stay
     rawItems,
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     readHeldFn: async () => [{ ...heldItem, geoCategory: "implicit_geo", geoConfidence: 0.3 }],
     geoAssessFn: async () => ({ confidence: 0.3 }),
     writeHeldFn: async (items) => { writtenHeld = items; },
@@ -623,7 +623,7 @@ test("runRefreshPipeline: metaStoryId reused from prior when source set evolves 
 
   // Prior snapshot has the same narrative built from [A, B] only
   const priorSnapshot = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [{
       id: "lineage-id-1",
       metaStoryId: "lineage-id-1",
@@ -647,7 +647,7 @@ test("runRefreshPipeline: metaStoryId reused from prior when source set evolves 
       claim_evidence_map: { "0": ["src-A"] },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     readPriorSnapshotFn: async () => priorSnapshot,
   });
 
@@ -662,7 +662,7 @@ test("runRefreshPipeline: metaStoryId reused from prior when a source ages out (
   const rawItems = [makeItem({ sourceId: "src-A", outlet: "Reuters", minutesAgo: 30 })];
   // Prior had [A, B]; new cluster has [A] only — Jaccard = 1/2 = 0.5 → match
   const priorSnapshot = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [{
       id: "lineage-id-2",
       metaStoryId: "lineage-id-2",
@@ -685,7 +685,7 @@ test("runRefreshPipeline: metaStoryId reused from prior when a source ages out (
       claim_evidence_map: { "0": ["src-A"] },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     readPriorSnapshotFn: async () => priorSnapshot,
   });
 
@@ -701,7 +701,7 @@ test("runRefreshPipeline: distinct narratives with overlapping sources get DIFFE
 
   // Prior story: Diplomatic with [A, B, C]
   const priorSnapshot = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [{
       id: "diplomatic-id",
       metaStoryId: "diplomatic-id",
@@ -726,7 +726,7 @@ test("runRefreshPipeline: distinct narratives with overlapping sources get DIFFE
       claim_evidence_map: { "0": ["src-A"] },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     readPriorSnapshotFn: async () => priorSnapshot,
   });
 
@@ -744,7 +744,7 @@ test("runRefreshPipeline: low-overlap source sets get fresh metaStoryId (no fals
   ];
   // Prior had [A, B, C]; new has [X, Y] — Jaccard = 0/5 = 0 → no match
   const priorSnapshot = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [{
       id: "old-id",
       metaStoryId: "old-id",
@@ -767,7 +767,7 @@ test("runRefreshPipeline: low-overlap source sets get fresh metaStoryId (no fals
       claim_evidence_map: { "0": ["src-X"] },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     readPriorSnapshotFn: async () => priorSnapshot,
   });
 
@@ -783,7 +783,7 @@ test("runRefreshPipeline: reused metaStoryId from prior snapshot enables title-l
     makeItem({ sourceId: "src-B", outlet: "Reuters", minutesAgo: 30 }),
   ];
   const priorSnapshot = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     stories: [{
       id: "stable-lineage",
       metaStoryId: "stable-lineage",
@@ -806,7 +806,7 @@ test("runRefreshPipeline: reused metaStoryId from prior snapshot enables title-l
       claim_evidence_map: { "0": ["src-A"] },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     readPriorSnapshotFn: async () => priorSnapshot,
   });
 
@@ -819,6 +819,82 @@ test("runRefreshPipeline: reused metaStoryId from prior snapshot enables title-l
 // ─── Finding 2 (re-asserted under Phase 3 strict grounding) ──────────────────
 // Under Phase 3, partial_source_ids stories are dropped entirely — there is no
 // publish path that could leak ungrounded subtitle/summary text.
+
+// ─── Meta-story fields PR (Prompt 1): subtitle vs summary contract ──────────
+
+test("runRefreshPipeline: emitted stories carry subtitle + summary and never the legacy takeaway field", async () => {
+  const rawItems = [makeItem({ sourceId: "src-meta-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [{
+      title: "Story",
+      subtitle: "Original LLM subtitle.",
+      source_item_ids: ["src-meta-1"],
+      summary: "Original LLM summary.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      factual_claims: ["Reuters reports a verified development."],
+      claim_evidence_map: { "0": ["src-meta-1"] },
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1);
+  const s = payload.stories[0];
+  assert.equal(typeof s.subtitle, "string");
+  assert.ok(s.subtitle.length > 0);
+  assert.equal(typeof s.summary, "string");
+  assert.ok(s.summary.length > 0);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(s, "takeaway"),
+    false,
+    "emitted story shape must not carry the legacy `takeaway` field"
+  );
+});
+
+test("runRefreshPipeline: ≥2 grounded factual_claims → subtitle ≠ summary (C0 split)", async () => {
+  // Regression for the prior J3b behavior where subtitle and summary both
+  // collapsed to the first claim.  After the meta-story fields PR, summary
+  // joins ALL grounded claims while subtitle stays as the first claim.
+  const rawItems = [
+    makeItem({ sourceId: "src-c0-a", outlet: "Reuters", minutesAgo: 30 }),
+    makeItem({ sourceId: "src-c0-b", outlet: "El Tiempo", minutesAgo: 31 }),
+  ];
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [{
+      title: "Multi-claim story",
+      subtitle: "Original LLM subtitle (will be replaced).",
+      source_item_ids: ["src-c0-a", "src-c0-b"],
+      summary: "Original LLM summary (will be replaced).",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+      factual_claims: [
+        "Reuters reports the first verified claim.",
+        "El Tiempo reports an independently verified second claim.",
+      ],
+      claim_evidence_map: { "0": ["src-c0-a"], "1": ["src-c0-b"] },
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1);
+  const s = payload.stories[0];
+  assert.equal(s.subtitle, "Reuters reports the first verified claim.");
+  assert.ok(
+    s.summary.startsWith("Reuters reports the first verified claim."),
+    "summary should begin with the first claim"
+  );
+  assert.ok(
+    s.summary.includes("El Tiempo reports an independently verified second claim"),
+    "summary should include all grounded claims, not just the first"
+  );
+  assert.notEqual(
+    s.subtitle,
+    s.summary,
+    "C0: with ≥2 claims, subtitle and summary must differ"
+  );
+});
 
 test("runRefreshPipeline: poison subtitle on partial_source_ids cannot reach output (strict drop)", async () => {
   const rawItems = [
@@ -837,7 +913,7 @@ test("runRefreshPipeline: poison subtitle on partial_source_ids cannot reach out
     rawItems,
     clusterFn: async () => [partialStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.equal(payload.stories.length, 0, "strict grounding drops the story entirely");
@@ -863,7 +939,7 @@ test("runRefreshPipeline: dedup prevents duplicate processing of current-pool + 
     rawItems,
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     readHeldFn: async () => [{ ...sharedItem, geoCategory: "explicit_match", geoConfidence: 1.0 }],
     writeHeldFn: async () => {},
   });
@@ -942,7 +1018,7 @@ test("runRefreshPipeline: time window runs before source selection (24h drops st
     manifestFeeds,
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.ok(seenIds.includes("fresh"));
   assert.ok(!seenIds.includes("stale"), "items older than 24h must be filtered before source matching");
@@ -961,7 +1037,7 @@ test("runRefreshPipeline: strict mode populates selection metadata when manifest
     manifestFeeds,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(log.selection.sourceSelectionMode, "strict");
   assert.equal(log.selection.sourceFallbackUsed, false);
@@ -985,7 +1061,7 @@ test("runRefreshPipeline: fallback mode kicks in when all selected sources unmat
     fallbackEnabled: true,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(log.selection.sourceSelectionMode, "fallback");
   assert.equal(log.selection.sourceFallbackUsed, true);
@@ -1006,7 +1082,7 @@ test("runRefreshPipeline: empty matched feeds + fallback disabled → strict emp
     fallbackEnabled: false,
     clusterFn: async () => { clusterCalled = true; return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0);
   assert.equal(clusterCalled, false);
@@ -1034,7 +1110,7 @@ test("runRefreshPipeline: relevantItemCount surfaced in selection metadata (zero
     manifestFeeds,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(log.selection.relevantItemCount, 0);
   assert.equal(payload.stories.length, 0);
@@ -1060,7 +1136,7 @@ test("runRefreshPipeline: ungrounded_claims drops the story (strict trust postur
     rawItems,
     clusterFn: async () => [story],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0, "ungrounded_claims must drop story under strict policy");
   assert.equal(log.droppedUngroundedStoryCount, 1);
@@ -1105,7 +1181,7 @@ test("runRefreshPipeline: mixed batch — valid stories survive, failed stories 
     rawItems,
     clusterFn: async () => stories,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 1, "only the valid story survives");
   assert.equal(payload.stories[0].metaStoryId, "valid");
@@ -1140,7 +1216,7 @@ test("runRefreshPipeline: dropped stories are written to rejection log via write
     rawItems,
     clusterFn: async () => stories,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     writeRejectionsFn: async (recs) => { captured = recs; },
   });
   assert.ok(Array.isArray(captured), "writeRejectionsFn must be called with rejection records");
@@ -1172,7 +1248,7 @@ test("runRefreshPipeline: writeRejectionsFn not invoked when there are zero fail
     rawItems,
     clusterFn: async () => [story],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     writeRejectionsFn: async () => { calls += 1; },
   });
   assert.equal(calls, 0);
@@ -1193,7 +1269,7 @@ test("runRefreshPipeline: writeRejectionsFn errors are non-fatal (refresh still 
     rawItems,
     clusterFn: async () => [story],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     writeRejectionsFn: async () => { throw new Error("DB down"); },
   });
   assert.equal(payload.stories.length, 0);
@@ -1217,7 +1293,7 @@ test("runRefreshPipeline: rejection records never appear in payload.stories (no 
     rawItems,
     clusterFn: async () => stories,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.deepEqual(payload.stories, [], "no rejected story may leak into stories array");
   assert.ok(Array.isArray(log.rejectionRecords));
@@ -1240,7 +1316,7 @@ test("runRefreshPipeline: full run emits a watermark in log + candidateCount + s
     manifestFeeds,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(log.unchanged, false);
   assert.equal(log.refreshSkippedReason, null);
@@ -1264,7 +1340,7 @@ test("runRefreshPipeline: priorWatermark match → short-circuit, payload null, 
     manifestFeeds,
     clusterFn: async () => { clusterCalls++; return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const wm = first.log.watermark;
   assert.equal(clusterCalls, 1);
@@ -1276,7 +1352,7 @@ test("runRefreshPipeline: priorWatermark match → short-circuit, payload null, 
     manifestFeeds,
     clusterFn: async () => { clusterCalls++; return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     priorWatermark: wm,
   });
   assert.equal(second.payload, null, "short-circuit returns payload=null");
@@ -1298,7 +1374,7 @@ test("runRefreshPipeline: priorWatermark mismatch → full run executes (cluster
     manifestFeeds,
     clusterFn: async () => { calls++; return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     priorWatermark: "stale-watermark-from-yesterday",
   });
   assert.notEqual(payload, null);
@@ -1320,7 +1396,7 @@ test("runRefreshPipeline: priorWatermark match + writeRejectionsFn → no reject
     manifestFeeds,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const wm = first.log.watermark;
 
@@ -1341,7 +1417,7 @@ test("runRefreshPipeline: priorWatermark match + writeRejectionsFn → no reject
       tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     priorWatermark: wm,
     writeRejectionsFn: async () => { rejectionWrites++; },
   });
@@ -1368,7 +1444,7 @@ test("runRefreshPipeline: rejection records carry watermark stamp for dedup", as
     manifestFeeds,
     clusterFn: async () => [story],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     writeRejectionsFn: async (recs) => { captured = recs; },
   });
   assert.ok(Array.isArray(captured) && captured.length === 1);
@@ -1382,7 +1458,7 @@ test("runRefreshPipeline: rejection records carry watermark stamp for dedup", as
 // end. Settings reflect the real post-extraction shape for our pilot user.
 
 const PHASE1_SETTINGS = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: "2026-05-19-meta-story-fields",
   topics: ["Diplomatic relations", "Migration policy"],
   keywords: ["migration", "sanctions"],
   geographies: ["US", "Colombia"],
@@ -1415,7 +1491,7 @@ test("Phase 1 pairwise: include candidate clears the beat-fit gate", async () =>
       },
     ],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 1, "include candidate must reach a story");
   assert.equal(log.beatFit.includedCount, 1);
@@ -1441,7 +1517,7 @@ test("Phase 1 pairwise: exclude candidate is filtered before clustering", async 
       return [];
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0, "off-beat candidate must not become a story");
   // Note: the exclude candidate carries no configured topic/keyword either, so
@@ -1495,7 +1571,7 @@ test("Phase 1 strict-empty: pairwise mixed run produces only the include story",
       }));
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.deepEqual(seenIds.sort(), ["include"], "only the include candidate should reach clustering");
   assert.equal(payload.stories.length, 1);
@@ -1531,7 +1607,7 @@ test("Phase 1 strict-empty: when nothing clears beat-fit, payload.stories is []"
       return [];
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0, "strict-empty must NOT fall back to a weak top story");
   assert.equal(clusterCalled, false, "no clustering when zero candidates clear beat-fit");
@@ -1634,7 +1710,7 @@ test("runRefreshPipeline: log.funnel populated on full-run path with all per-sta
       },
     ],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.ok(log.funnel, "log.funnel must be present on every refresh");
   for (const field of [
@@ -1667,7 +1743,7 @@ test("runRefreshPipeline: log.funnel.primaryDropStage flags the source_selection
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0);
   assert.equal(log.funnel.afterSourceSelection, 0);
@@ -1695,7 +1771,7 @@ test("runRefreshPipeline: log.funnel.primaryDropStage is beat_fit_precision when
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 0);
   assert.equal(log.funnel.afterTopicKeyword, 1);
@@ -1721,7 +1797,7 @@ test("runRefreshPipeline: log.funnel present on watermark-skip branch too", asyn
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     beatFitEnabled: false, // keep this test focused on watermark+funnel, not beat-fit
   });
   assert.ok(first.log.watermark);
@@ -1730,7 +1806,7 @@ test("runRefreshPipeline: log.funnel present on watermark-skip branch too", asyn
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     beatFitEnabled: false,
     priorWatermark: first.log.watermark,
   });
@@ -1865,7 +1941,7 @@ test("runRefreshPipeline: hybrid_strict widens recall — item without exact key
       return [];
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
     beatFitEnabled: false, // recall-stage test; precision filters bypassed for narrowness
@@ -1894,7 +1970,7 @@ test("runRefreshPipeline: hybrid_strict embedding timeout WITH no lexical hits �
     rawItems: [item],
     clusterFn: async () => { clusterCalled = true; return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(new Error("request timed out after 8000ms")),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -1919,7 +1995,7 @@ test("runRefreshPipeline: hybrid_strict embedding error WITH no lexical hits →
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(new Error("provider 503 service unavailable")),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -1956,7 +2032,7 @@ test("runRefreshPipeline: hybrid_strict embedding timeout WITH lexical hits → 
       claim_evidence_map: { "0": [i.sourceId] },
     })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(new Error("request timed out after 8000ms")),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -1989,7 +2065,7 @@ test("runRefreshPipeline: keyword mode bypasses embedFn entirely (legacy preserv
       claim_evidence_map: { "0": [i.sourceId] },
     })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: async () => { embedCalls++; return []; },
     recallConfig: KEYWORD_RECALL_CONFIG,
   });
@@ -2029,7 +2105,7 @@ test("runRefreshPipeline: source safety — inactive manifest feeds never surfac
       return [];
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
     beatFitEnabled: false,
@@ -2059,7 +2135,7 @@ test("runRefreshPipeline: no fabrication — every published story source has a 
       claim_evidence_map: { "0": items.map((i) => i.sourceId) },
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -2088,7 +2164,7 @@ test("runRefreshPipeline: log.recall populated on full-run path with mode + coun
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -2137,7 +2213,7 @@ test("runRefreshPipeline: hybrid_strict + missing embedFn WITH lexical hits → 
       claim_evidence_map: { "0": [i.sourceId] },
     })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: HYBRID_RECALL_CONFIG,
     // no embedFn → lexical fallback with degraded flag
   });
@@ -2162,7 +2238,7 @@ test("runRefreshPipeline: hybrid_strict + missing embedFn WITH no lexical hits �
     rawItems: [item],
     clusterFn: async () => { clusterCalled = true; return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: HYBRID_RECALL_CONFIG,
   });
   assert.equal(payload.stories.length, 0);
@@ -2187,7 +2263,7 @@ test("runRefreshPipeline: zero configured sources → C2 fail-closed at source-s
     headline: "OFAC ruling",
   });
   const settingsNoProfile = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: [],
     keywords: [],
     geographies: [],
@@ -2200,7 +2276,7 @@ test("runRefreshPipeline: zero configured sources → C2 fail-closed at source-s
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: async () => { embedCalled = true; return []; },
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -2301,7 +2377,7 @@ test("runRefreshPipeline: log.recall.topicKeywordBreakdown surfaces stage diagno
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: KEYWORD_RECALL_CONFIG,
   });
   const b = log.recall.topicKeywordBreakdown;
@@ -2336,7 +2412,7 @@ test("runRefreshPipeline: priorWatermark match + priorStoryCount=0 + items prese
     rawItems: [item],
     clusterFn: async () => { clusterCalls++; return []; }, // produces 0 stories deliberately
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: KEYWORD_RECALL_CONFIG,
   });
   assert.equal(clusterCalls, 1);
@@ -2362,7 +2438,7 @@ test("runRefreshPipeline: priorWatermark match + priorStoryCount=0 + items prese
       }));
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: KEYWORD_RECALL_CONFIG,
     priorWatermark: first.log.watermark,
     priorStoryCount: 0,
@@ -2399,7 +2475,7 @@ test("runRefreshPipeline: priorWatermark match + priorStoryCount > 0 → short-c
       }));
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: KEYWORD_RECALL_CONFIG,
   });
 
@@ -2408,7 +2484,7 @@ test("runRefreshPipeline: priorWatermark match + priorStoryCount > 0 → short-c
     rawItems: [item],
     clusterFn: async () => { clusterCalls++; return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     recallConfig: KEYWORD_RECALL_CONFIG,
     priorWatermark: first.log.watermark,
     priorStoryCount: first.payload.stories.length, // > 0
@@ -2429,7 +2505,7 @@ test("WaPo Iran/oil regression: pipeline does not collapse to zero when lexical 
   // manifestFeeds) matches exactly.  Production resolves "Washington Post" →
   // section feeds via the source-matcher; that path is exercised separately.
   const wapoSettings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations", "Trade policy", "Energy trade", "Agricultural trade"],
     keywords: ["oil", "petroleum", "agriculture", "sanctions", "trade"],
     geographies: ["US", "Iran"],
@@ -2464,7 +2540,7 @@ test("WaPo Iran/oil regression: pipeline does not collapse to zero when lexical 
       claim_evidence_map: { "0": [i.sourceId] },
     })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(new Error("embeddings provider 503")),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -2524,7 +2600,7 @@ test("runRefreshPipeline regression: live WaPo items pass source-selection via f
     manifestFeeds,
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   // Funnel must NOT collapse at source_selection.
   assert.equal(log.funnel.totalNormalized, 5);
@@ -2559,7 +2635,7 @@ test("runRefreshPipeline regression: strict-empty preserved — items with no ma
     manifestFeeds,
     clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.ok(seenIds.includes("wapo-real"), "matched-id item must reach clustering");
   assert.ok(!seenIds.includes("bbc-strange"), "non-matched-id item with non-matching outlet must NOT survive source-selection");
@@ -2685,7 +2761,7 @@ test("runRefreshPipeline: model-provided 'General' topic is excluded from story 
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 1);
   assert.ok(
@@ -2717,7 +2793,7 @@ test("runRefreshPipeline: every story tag axis is a subset of settings", async (
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const tags = payload.stories[0].tags;
   const settingsTopics = new Set(BASE_SETTINGS.topics);
@@ -2759,7 +2835,7 @@ test("runRefreshPipeline: story.tags.geographies is never fabricated even when s
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.deepEqual(payload.stories[0].tags.geographies, ["US"], "France must not appear — not in settings.geographies");
 });
@@ -2882,7 +2958,7 @@ test("runRefreshPipeline: in-settings model tag without source evidence is dropp
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const tags = payload.stories[0].tags;
   assert.deepEqual(tags.topics, ["Diplomatic relations"], "Migration policy must be dropped — no source evidence");
@@ -2919,7 +2995,7 @@ test("runRefreshPipeline: model omits tags but source evidence supports them —
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const tags = payload.stories[0].tags;
   assert.deepEqual(tags.topics, ["Diplomatic relations"], "topic must be recovered from source.topic");
@@ -2964,7 +3040,7 @@ test("runRefreshPipeline: multi-source story aggregates evidence across all sour
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const tags = payload.stories[0].tags;
   assert.deepEqual(tags.topics, ["Diplomatic relations"]);
@@ -2978,7 +3054,7 @@ test("runRefreshPipeline: repeated out-of-settings entities in story text do not
   // echoes them into tags, they must never reach the output.  This also
   // verifies that settings itself is never expanded.
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations"],
     keywords: ["OFAC"],
     geographies: ["US"],
@@ -3014,7 +3090,7 @@ test("runRefreshPipeline: repeated out-of-settings entities in story text do not
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const tags = payload.stories[0].tags;
   assert.deepEqual(tags.topics, ["Diplomatic relations"], "no new topic should appear");
@@ -3076,7 +3152,7 @@ test("runRefreshPipeline: outletCount reflects unique outlet identities, not row
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 3, "all 3 source pieces remain on the story");
@@ -3156,7 +3232,7 @@ test("runRefreshPipeline: outletCount collapses casing/whitespace variants of th
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 4, "all 4 source pieces remain on the story");
@@ -3244,7 +3320,7 @@ test("runRefreshPipeline: outletCount excludes blank/whitespace-only outlets", a
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 4, "all 4 source pieces remain on the story");
@@ -3306,7 +3382,7 @@ test("runRefreshPipeline: outletCount is 0 when every outlet is blank", async ()
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 2);
@@ -3390,7 +3466,7 @@ test("cross-feed dedupe: canonical URL + exact headline + time within window col
     rawItems,
     clusterFn: captureClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   // Direct proof: clustering received exactly one candidate, and that one
@@ -3442,7 +3518,7 @@ test("cross-feed dedupe: canonical URL match but headline mismatch does NOT merg
     rawItems,
     clusterFn: captureClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.equal(capture.input.length, 2, "headline mismatch must keep both candidates");
@@ -3484,7 +3560,7 @@ test("cross-feed dedupe: canonical URL + headline match but |Δ minutesAgo| > PU
     rawItems,
     clusterFn: captureClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.equal(capture.input.length, 2, "items outside the time window must stay distinct");
@@ -3520,7 +3596,7 @@ test("cross-feed dedupe: similar headlines but different URLs do NOT merge", asy
     rawItems,
     clusterFn: captureClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(capture.input.length, 2);
   assert.equal(log.dedupe.collapsedCount, 0, "different URLs must not merge");
@@ -3560,7 +3636,7 @@ test("cross-feed dedupe: no-URL items merge on exact normalized headline", async
     rawItems,
     clusterFn: captureClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(capture.input.length, 1, "no-URL exact-headline duplicates must collapse to one");
   assert.equal(
@@ -3620,7 +3696,7 @@ test("cross-feed dedupe: deterministic winner under the strict tie-break order",
     rawItems,
     clusterFn: captureClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.equal(capture.input.length, 1);
@@ -3662,7 +3738,7 @@ test("cross-feed dedupe: same input across runs picks the same canonical winner 
     rawItems,
     clusterFn: captureClusterFn(cap1),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   };
   const opts2 = { ...opts1, clusterFn: captureClusterFn(cap2) };
   const { payload: run1 } = await runRefreshPipeline(opts1);
@@ -3716,7 +3792,7 @@ test("cross-feed dedupe: denominator-driving semantics — sources.length reflec
     rawItems: items,
     clusterFn: captureClusterFn(capture, 5),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.equal(
@@ -3758,7 +3834,7 @@ test("cross-feed dedupe: response payload never exposes internal _duplicates / _
     rawItems,
     clusterFn: captureClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   // Sanity: dedupe ran and collapsed the pair (otherwise the no-leak assertion
   // is trivial because no winner carried provenance to begin with).
@@ -3826,7 +3902,7 @@ test("cross-feed dedupe: stage runs before clustering — clusterFn sees deduped
     rawItems,
     clusterFn: captureClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   // Cluster saw exactly the two deduped survivors.
   assert.equal(capture.input.length, 2);
@@ -3915,7 +3991,7 @@ test("runRefreshPipeline: T1 applied — story.sources[] sorted by weight/minute
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const ids = payload.stories[0].sources.map((s) => s.id);
   // Expected order:
@@ -4003,7 +4079,7 @@ test("runRefreshPipeline: R1 applied — stories[] sorted by max beatFitScore / 
     rawItems,
     clusterFn,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   // `hi-1` has the strongest topic+keyword+geo match → highest beat-fit;
   // it must lead even though it's the OLDEST (R1 prioritizes beat-fit over
@@ -4045,7 +4121,7 @@ test("runRefreshPipeline: R1 stable tie-break by metaStoryId when beat-fit + fre
     rawItems,
     clusterFn,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   // Each item is identical for beat-fit/freshness purposes; expect lexicographic
   // metaStoryId order regardless of input order.
@@ -4131,7 +4207,7 @@ test("runRefreshPipeline: log.funnel.afterTopicKeyword === log.recall.finalRelev
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -4155,7 +4231,7 @@ test("runRefreshPipeline: log.recall.profileAxes surfaces on full-run hybrid_str
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -4176,7 +4252,7 @@ test("runRefreshPipeline: log.recall.profileAxes surfaces on keyword-mode bypass
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: async () => [],
     recallConfig: KEYWORD_RECALL_CONFIG,
   });
@@ -4210,7 +4286,7 @@ test("runRefreshPipeline: hybrid_strict + sparse multi-axis profile → runs, no
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
   });
@@ -4264,7 +4340,7 @@ test("decisionTrace: full-run log carries stageCounts, beatFit details, and a sa
         claim_evidence_map: { "0": [i.sourceId] },
       })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.ok(log.decisionTrace, "full-run log must carry decisionTrace");
@@ -4343,7 +4419,7 @@ test("decisionTrace: beatFit counters are consistent with histogram totals (no d
     rawItems: [include, offbeat],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const t = log.decisionTrace.beatFit;
   const histTotal = Object.values(t.excludeReasonHistogram).reduce(
@@ -4384,7 +4460,7 @@ test("decisionTrace: sampleExclusions is capped (≤ 5) and entries carry only m
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const trace = log.decisionTrace;
   assert.ok(trace.beatFit.excludedCount >= 6);
@@ -4441,7 +4517,7 @@ test("decisionTrace: pipeline surfaces rescue_semantic_geo path in sampleRescues
   // score lands just under 0.40 → multisignal rescue fails (only 1 signal),
   // semantic-geo rescue succeeds (geo + strong semantic + no penalty).
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: [],
     keywords: [],
     geographies: ["Nigeria"],
@@ -4471,7 +4547,7 @@ test("decisionTrace: pipeline surfaces rescue_semantic_geo path in sampleRescues
         claim_evidence_map: { "0": [i.sourceId] },
       })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticBeatFitConfig: SEMANTIC_ON,
     semanticBeatFitEmbedFn: p4SemanticGeoStub(),
     semanticBeatFitProfileCache: createProfileEmbeddingCache(),
@@ -4501,7 +4577,7 @@ test("decisionTrace: geo mismatch is reported via rescueBlockedBy='geo_gate' in 
   // + keyword bonus (no noConfiguredSignal preempt) → rescue blocked at
   // geo_gate, not at major_penalty.
   const settings = {
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     topics: [],
     keywords: ["sanctions"],
     geographies: ["Nigeria"],
@@ -4525,7 +4601,7 @@ test("decisionTrace: geo mismatch is reported via rescueBlockedBy='geo_gate' in 
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticBeatFitConfig: SEMANTIC_ON,
     semanticBeatFitEmbedFn: p4SemanticGeoStub(),
     semanticBeatFitProfileCache: createProfileEmbeddingCache(),
@@ -4560,7 +4636,7 @@ test("decisionTrace: watermark-skip branch still emits a trace with finalStories
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     beatFitEnabled: false, // skip-branch + bypassed beat-fit: trace must still be safe
   });
   assert.ok(first.log.decisionTrace, "full-run trace must be present even when beat-fit is bypassed");
@@ -4571,7 +4647,7 @@ test("decisionTrace: watermark-skip branch still emits a trace with finalStories
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     beatFitEnabled: false,
     priorWatermark: first.log.watermark,
   });
@@ -4601,7 +4677,7 @@ test("decisionTrace: watermark-skip branch still emits a trace with finalStories
 // and bodies). topics/keywords/sources are wide enough that all three
 // candidate stories below clear source-selection + topic+keyword recall.
 const WAPO_REGRESSION_SETTINGS = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: "2026-05-19-meta-story-fields",
   topics: ["Diplomatic relations", "Security cooperation"],
   keywords: ["war", "gang", "trade", "Ukraine", "Haiti", "China", "sanctions"],
   geographies: ["US"],
@@ -4668,7 +4744,7 @@ test("regression (three-story WaPo): all three candidates pass source/recall and
       return buildOneClusterPerItem(items);
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   // Source + recall stages: all three reach clustering. Stage counts hold a
@@ -4738,7 +4814,7 @@ test("regression (three-story WaPo): if a candidate is excluded, decisionTrace e
     rawItems: candidates,
     clusterFn: async (items) => buildOneClusterPerItem(items),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
 
   assert.equal(log.decisionTrace.beatFit.includedCount, 2);
@@ -4785,7 +4861,7 @@ test("trace invariants: cap, key-whitelist, and counter consistency hold on a mi
     rawItems: items,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const trace = log.decisionTrace;
   const bf = trace.beatFit;
@@ -4875,7 +4951,7 @@ test("Phase 3 wiring: topic tag derived from meta-story summary even when source
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 1);
   assert.ok(
@@ -4916,7 +4992,7 @@ test("Phase 3 wiring: 'Beijing' in evidence with 'China' added to settings emits
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 1);
   assert.ok(
@@ -4958,7 +5034,7 @@ test("Phase 3 wiring: alias hit is silently dropped when canonical target is NOT
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 1);
   assert.ok(
@@ -5006,7 +5082,7 @@ test("Phase 3 wiring: 'petroleum' in text + 'oil' in settings emits NO keyword t
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.equal(payload.stories.length, 1);
   assert.ok(
@@ -5073,7 +5149,7 @@ test("Phase 4 wiring: keyword semantic uplift — 'petroleum' evidence + 'oil' i
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE4_SEMANTIC_ON,
     semanticTagScorer: makePhase4Scorer({ oil: { petroleum: 0.9 } }),
   });
@@ -5122,7 +5198,7 @@ test("Phase 4 wiring: topic semantic uplift — bundle text + scorer adds settin
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE4_SEMANTIC_ON,
     semanticTagScorer: scorer,
   });
@@ -5165,7 +5241,7 @@ test("Phase 4 wiring: semantic ON cannot emit an out-of-settings keyword (closed
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE4_SEMANTIC_ON,
     semanticTagScorer: makePhase4Scorer({ oil: { petroleum: 0.99 } }),
   });
@@ -5206,7 +5282,7 @@ test("Phase 4 wiring: geography axis is unchanged when semantic is ON (determini
     rawItems,
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE4_SEMANTIC_ON,
     semanticTagScorer: async () => 0.99, // would accept anything semantically
   });
@@ -5245,7 +5321,7 @@ test("Phase 4 wiring: semantic uplift does NOT change funnel / admission counts 
       rawItems,
       clusterFn: async () => [metaStory],
       clusterModel: "mock-anthropic-haiku",
-      contractVersion: "2026-04-22-slice1",
+      contractVersion: "2026-05-19-meta-story-fields",
       semanticTagConfig: semanticConfig,
       semanticTagScorer: scorer,
     });
@@ -5320,7 +5396,7 @@ test("Phase 5 wiring: scorer timeout degrades gracefully — deterministic tags 
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE5_SEMANTIC_ON,
     semanticTagScorer: timeoutScorer,
   });
@@ -5344,7 +5420,7 @@ test("Phase 5 wiring: scorer generic error degrades gracefully — runtimeState 
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE5_SEMANTIC_ON,
     semanticTagScorer: errorScorer,
   });
@@ -5361,7 +5437,7 @@ test("Phase 5 wiring: enabled but no scorer wired → runtimeState = enabled_no_
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE5_SEMANTIC_ON,
     semanticTagScorer: null, // production scorer not wired
   });
@@ -5383,7 +5459,7 @@ test("Phase 5 wiring: scorer-ready run sets runtimeState = enabled_scorer_ready 
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE5_SEMANTIC_ON,
     semanticTagScorer: readyScorer,
   });
@@ -5400,7 +5476,7 @@ test("Phase 5 wiring: funnel counts identical for scorer-OFF vs scorer-FAIL (K1a
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     // semantic OFF
   });
   const failScorer = async () => {
@@ -5411,7 +5487,7 @@ test("Phase 5 wiring: funnel counts identical for scorer-OFF vs scorer-FAIL (K1a
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE5_SEMANTIC_ON,
     semanticTagScorer: failScorer,
   });
@@ -5447,7 +5523,7 @@ test("Phase 5 wiring: geographies stay deterministic when scorer ready (no seman
       summary: "Beijing pushed back on the measures.",
     }],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE5_SEMANTIC_ON,
     semanticTagScorer: aggressiveScorer,
   });
@@ -5474,7 +5550,7 @@ test("Phase 7 wiring: log.tags carries schemaVersion + killSwitchActive on every
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     // semantic OFF — schema version + killSwitchActive must still surface.
   });
   assert.equal(typeof log.tags.schemaVersion, "string");
@@ -5490,7 +5566,7 @@ test("Phase 7 wiring: kill switch forces semantic OFF and surfaces killSwitchAct
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: {
       killSwitch: true,
       enabled: false, // kill switch already forces global to false
@@ -5532,14 +5608,14 @@ test("Phase 7 wiring: K1a invariant under abort cancellation — funnel counts i
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   const onAbort = await runRefreshPipeline({
     settings: fixture.settings,
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE5_SEMANTIC_ON,
     semanticTagScorer: abortingScorer,
   });
@@ -5564,7 +5640,7 @@ test("Phase 7 wiring: log.tags surfaces scorerCallCount + scorerLatencyMaxMs", a
     rawItems: fixture.rawItems,
     clusterFn: async () => [fixture.metaStory],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     semanticTagConfig: PHASE5_SEMANTIC_ON,
     semanticTagScorer: readyScorer,
   });
@@ -5592,7 +5668,7 @@ import {
 } from "./semantic-beat-fit.mjs";
 
 const TERRORISM_SETTINGS = {
-  contractVersion: "2026-04-22-slice1",
+  contractVersion: "2026-05-19-meta-story-fields",
   topics: ["Terrorism"],
   keywords: ["terrorism"],
   geographies: ["US", "Nigeria"],
@@ -5661,7 +5737,7 @@ test("Semantic BeatFit: rescues ISIS/Nigeria-style lexical miss when stage is en
       }));
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
     semanticBeatFitConfig: SEMANTIC_ON,
@@ -5698,7 +5774,7 @@ test("Semantic BeatFit: same ISIS/Nigeria item is excluded when semantic is OFF 
       claim_evidence_map: { "0": [i.sourceId] },
     })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
     semanticBeatFitConfig: SEMANTIC_OFF,
@@ -5733,7 +5809,7 @@ test("Semantic BeatFit: irrelevant story still excluded under precision-first po
       return [];
     },
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
     semanticBeatFitConfig: SEMANTIC_ON,
@@ -5771,7 +5847,7 @@ test("Semantic BeatFit: embedding failure → deterministic-only, refresh comple
       claim_evidence_map: { "0": [i.sourceId] },
     })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
     semanticBeatFitConfig: SEMANTIC_ON,
@@ -5812,7 +5888,7 @@ test("Semantic BeatFit: kill switch active → stage disabled, deterministic-onl
       claim_evidence_map: { "0": [i.sourceId] },
     })),
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
     semanticBeatFitConfig: SEMANTIC_KILL,
@@ -5840,7 +5916,7 @@ test("Semantic BeatFit: log surfaces version, model, latency, and score buckets"
     rawItems: [item],
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     embedFn: stubEmbedFn(),
     recallConfig: HYBRID_RECALL_CONFIG,
     semanticBeatFitConfig: SEMANTIC_ON,
@@ -5901,7 +5977,7 @@ test("Phase 4 — first refresh (empty ever-seen): every shipped story gets firs
     rawItems,
     clusterFn: async () => MOCK_META_STORIES,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     everSeenMetaStoryIds: [],
     priorStoriesById: new Map(),
   });
@@ -5940,7 +6016,7 @@ test("Phase 4 — second refresh (same metaStoryId, no structural change): uncha
     rawItems,
     clusterFn: async () => MOCK_META_STORIES,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     everSeenMetaStoryIds: [metaStoryId],
     priorStoriesById: new Map([[metaStoryId, priorStory]]),
   });
@@ -5975,7 +6051,7 @@ test("Phase 4 — strong gate + deltaConfig enabled + classify/write stubs → s
     rawItems,
     clusterFn: async () => MOCK_META_STORIES,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     everSeenMetaStoryIds: [metaStoryId],
     priorStoriesById: new Map([[metaStoryId, priorStory]]),
     deltaConfig: PHASE4_ENABLED_CONFIG,
@@ -6013,7 +6089,7 @@ test("Phase 4 — deltaConfig disabled + strong gate → unchanged copy + classi
     rawItems,
     clusterFn: async () => MOCK_META_STORIES,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     everSeenMetaStoryIds: [metaStoryId],
     priorStoriesById: new Map([[metaStoryId, priorStory]]),
     deltaConfig: { ...PHASE4_ENABLED_CONFIG, enabled: false },
@@ -6037,7 +6113,7 @@ test("Phase 4 — watermark short-circuit: log.whatChanged.watermarkShortCircuit
     rawItems,
     clusterFn: async () => MOCK_META_STORIES,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     everSeenMetaStoryIds: [],
     priorStoriesById: new Map(),
   });
@@ -6046,7 +6122,7 @@ test("Phase 4 — watermark short-circuit: log.whatChanged.watermarkShortCircuit
     rawItems,
     clusterFn: async () => MOCK_META_STORIES,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
     priorWatermark: first.log.watermark,
     priorStoryCount: first.payload.stories.length,
     everSeenMetaStoryIds: [first.payload.stories[0].metaStoryId],
@@ -6074,7 +6150,7 @@ test("Phase 4 — no story ever ships the legacy `Latest update … min ago.` te
     rawItems,
     clusterFn: async () => MOCK_META_STORIES,
     clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-04-22-slice1",
+    contractVersion: "2026-05-19-meta-story-fields",
   });
   assertNoFreshnessTemplate(payload.stories);
 });

@@ -61,7 +61,11 @@ function dtoToStory(dto: StoryDto): Story {
     title: dto.title,
     geographies: dto.geographies,
     topic: dto.topic,
-    takeaway: dto.takeaway,
+    // Meta-story fields PR (Prompt 2): the contract now ships `subtitle` as
+    // the deck line under the title.  API legacy adapter (Prompt 1) lifts
+    // any stale `takeaway` value into `subtitle` at the snapshot read
+    // boundary, so the client can read `subtitle` strictly.
+    subtitle: dto.subtitle,
     summary: dto.summary,
     whyItMatters: dto.whyItMatters,
     whatChanged: dto.whatChanged,

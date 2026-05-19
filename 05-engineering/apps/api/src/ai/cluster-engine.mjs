@@ -185,6 +185,56 @@ export function extractiveSubtitle(sourceItems) {
 
 // ─── Grounding verifier ───────────────────────────────────────────────────────
 
+// C0 summary cap — meta-story summary is a deterministic join of grounded
+// claims, soft-capped at SUMMARY_MAX_CHARS.  Truncation appends an ellipsis
+// at the nearest sentence boundary so we never ship a half-word.  The number
+// is a product call (~400–500 chars keeps the card readable).  See Prompt 1.
+const SUMMARY_MAX_CHARS = 500;
+
+function normalizeWhitespace(s) {
+  return String(s ?? "").replace(/\s+/g, " ").trim();
+}
+
+function capSummary(text, maxChars = SUMMARY_MAX_CHARS) {
+  if (text.length <= maxChars) return text;
+  const head = text.slice(0, maxChars).trimEnd();
+  // Try to clip at the last sentence boundary so we never end mid-word.
+  const lastSentence = head.lastIndexOf(". ");
+  if (lastSentence >= Math.floor(maxChars * 0.6)) {
+    return head.slice(0, lastSentence + 1);
+  }
+  // Otherwise clip at last space and add ellipsis.
+  const lastSpace = head.lastIndexOf(" ");
+  if (lastSpace > 0) return head.slice(0, lastSpace) + "…";
+  return head + "…";
+}
+
+/**
+ * Joins grounded factual claims into a single summary string, separated by
+ * a space; normalizes whitespace and caps length per C0 policy.  Each input
+ * claim is expected to be a verified sentence — callers should pass only
+ * claims that have already passed the evidence-map gate.
+ *
+ * Exposed as an extension hook so a future LLM summary writer (C1) can
+ * swap this implementation without changing the grounding stage.
+ *
+ * @param {object} _metaStory — meta-story carrying `factual_claims`
+ * @param {Array} _sourceItems — sourceItems backing the meta-story
+ * @returns {string} summary text (already capped)
+ */
+export function synthesizeSummary(metaStory, _sourceItems) {
+  const claims = Array.isArray(metaStory?.factual_claims)
+    ? metaStory.factual_claims
+        .map((c) => normalizeWhitespace(c))
+        .filter((c) => c.length > 0)
+    : [];
+  if (claims.length === 0) return normalizeWhitespace(metaStory?.summary ?? "");
+  // Ensure each claim ends with terminal punctuation so the join reads as
+  // a sequence of sentences rather than run-on prose.
+  const normalized = claims.map((c) => (/[.!?]$/.test(c) ? c : `${c}.`));
+  return capSummary(normalizeWhitespace(normalized.join(" ")));
+}
+
 /**
  * Verifies grounding in two gates:
  *
@@ -197,9 +247,15 @@ export function extractiveSubtitle(sourceItems) {
  *   claim_evidence_map["i"]. A single claim with no valid backing rejects the
  *   entire story ("ungrounded_claims").  Stories with empty factual_claims pass.
  *
- * Gate 3 (valid path): when factual_claims is non-empty, summary and subtitle are
- *   set to the **first** claim only (**J3b** — shorter card; additional claims
- *   remain for evidence / future copy stages but are not concatenated into summary).
+ * Gate 3 (valid path — C0 grounding policy for the meta-story fields PR):
+ *   when `factual_claims.length > 0`:
+ *     - `subtitle` is set to the **first** verified claim (clustering semantics
+ *       — one sentence placing the story in context).
+ *     - `summary` is a deterministic join of **all** verified claims (narrative
+ *       across sources), whitespace-normalized and capped (~500 chars).  This
+ *       guarantees `subtitle !== summary` whenever ≥2 claims are present.
+ *   When `factual_claims.length === 0`, the model's `summary` / `subtitle`
+ *   pass through unchanged.
  * @param {Array} metaStories
  * @param {Map<string, object>} sourceItemsById — keyed by sourceId
  * @returns {{ valid: Array, invalid: Array }}
@@ -254,11 +310,19 @@ export function verifyGrounding(metaStories, sourceItemsById) {
       continue;
     }
 
-    // Gate 3 (summary/subtitle): replace model-prose with verified-claim text so
-    // ungrounded sentences in summary/subtitle cannot reach the publish path.
-    // J3b: first claim only for both fields (shorter card; not join of all claims).
-    const groundedSummary = claims.length > 0 ? claims[0] : ms.summary;
-    const groundedSubtitle = claims.length > 0 ? claims[0] : ms.subtitle;
+    // Gate 3 (summary/subtitle — C0 policy): replace model-prose with verified-
+    // claim text so ungrounded sentences cannot reach the publish path.  The
+    // subtitle takes the first claim (one-sentence contextual placement);
+    // the summary is the deterministic join of all claims (narrative across
+    // sources), produced by the `synthesizeSummary` extension hook so a
+    // future LLM writer (C1) can replace this stage in isolation.
+    const groundedSubtitle =
+      claims.length > 0 ? normalizeWhitespace(claims[0]) : ms.subtitle;
+    const sourceItemsForSummary = ms.source_item_ids
+      .map((id) => sourceItemsById.get(id))
+      .filter((it) => it != null);
+    const groundedSummary =
+      claims.length > 0 ? synthesizeSummary(ms, sourceItemsForSummary) : ms.summary;
 
     valid.push({ ...ms, summary: groundedSummary, subtitle: groundedSubtitle });
   }

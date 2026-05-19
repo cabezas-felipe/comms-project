@@ -169,9 +169,10 @@ if (published) {
   const validStory = {
     id: "s1",
     title: "Title",
+    // Meta-story fields PR (Prompt 1): `subtitle` required; `takeaway` removed.
+    subtitle: "Subtitle.",
     geographies: ["US"],
     topic: "Diplomatic relations",
-    takeaway: "Take",
     summary: "Sum",
     whyItMatters: "Why",
     whatChanged: "What",

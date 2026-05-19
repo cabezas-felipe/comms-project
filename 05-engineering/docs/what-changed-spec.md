@@ -244,7 +244,7 @@ These are deferred to a follow-up implementation phase. This section specifies t
 
 ### Operator notes
 
-- **Default is off.** `TEMPO_AI_DELTA_ENABLED` is unset (or `false`) in every committed `.env` file. Production refreshes ship only deterministic first-seen / unchanged copy until an operator explicitly opts in per-environment.
+- **Default is off at the engine layer, on for prototype dev.** `TEMPO_AI_DELTA_ENABLED` is unset (or `false`) in every committed `.env` file, so `resolveDeltaConfig()` defaults the engine off. The prototype API's `bootstrapApiEnv()` in [`server.mjs`](../apps/api/src/server.mjs) flips it to `"true"` when unset and `NODE_ENV !== "test"`, so local `npm run dev` runs with delta on by default. Production refreshes inherit whatever explicit value the deployment environment sets — committed `.env` files still ship `false`.
 
 - **`TEMPO_AI_MOCK_ONLY=true` vetoes the LLM path.** CI runs and any developer who flips mock-only mode for cost control will never emit `changed` prose, even with `DELTA_ENABLED=true`. The engine fail-closes to `unchanged` copy and increments `classifySkipped` in `_meta.whatChanged`.
 
