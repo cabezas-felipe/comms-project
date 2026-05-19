@@ -558,10 +558,6 @@ test("resolveDeltaConfig: invalid TEMPO_AI_DELTA_TIMEOUT_MS falls back to 2500",
 
 // ── buildDeltaPayload ───────────────────────────────────────────────────────
 
-function gateForAddedSource(priorStory, currentStory) {
-  return compareStructuralGate(priorStory, currentStory);
-}
-
 test("buildDeltaPayload: classify stage — NO body excerpts (spec §6: bodies not sent to Haiku)", () => {
   const prior = story({
     sources: [src("src-1", "Reuters", "Headline A")],
@@ -572,7 +568,7 @@ test("buildDeltaPayload: classify stage — NO body excerpts (spec §6: bodies n
       { ...src("src-2", "Bloomberg", "Headline B"), body: ["A long body paragraph that should NOT be sent to Haiku."] },
     ],
   });
-  const gate = gateForAddedSource(prior, current);
+  const gate = compareStructuralGate(prior, current);
   const payload = buildDeltaPayload({
     metaStoryId: "ms-1",
     priorStory: prior,

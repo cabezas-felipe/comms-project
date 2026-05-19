@@ -725,12 +725,20 @@ app.get("/api/ingestion/sources", async (_req, res) => {
 
 function stripPersistedFields(snapshot) {
   // `_lastRunMeta` is consumed by `liftSnapshotMeta` on subsequent reads
-  // and lifted into `_meta.{funnel,recall,tags,whatChanged,…}`; it must not
-  // leak into the immediate refresh-response body (the manually-built
-  // `_meta` on that branch is the only surface clients should see).  The
-  // refresh route was inadvertently passing it through via `...body` until
-  // Phase 4 added an integration test that caught the leak.
-  const { _meta = {}, _selectionMeta, _watermark, _everSeenMetaStoryIds: _stripped, _lastRunMeta: _strippedLastRunMeta, ...body } = snapshot ?? {};
+  // and lifted into `_meta.{funnel,recall,tags,whatChanged,…}`; it must
+  // not leak into the immediate refresh-response body (the manually-built
+  // `_meta` on that branch is the only surface clients should see).
+  // `_everSeenMetaStoryIds` is internal-only history state.  Both are
+  // destructured out below; the rename aliases (`_unused*`) just satisfy
+  // the lint convention for intentionally-discarded keys.
+  const {
+    _meta = {},
+    _selectionMeta,
+    _watermark,
+    _everSeenMetaStoryIds: _unusedEverSeen,
+    _lastRunMeta: _unusedLastRunMeta,
+    ...body
+  } = snapshot ?? {};
   return { body, baseMeta: _meta, selectionMeta: _selectionMeta, watermark: _watermark };
 }
 
@@ -1067,11 +1075,11 @@ async function executeRefreshFlow(identity) {
     // /api/dashboard, bootstrap served_fresh_snapshot) surface the same value
     // the refresh response carries.  On a full run, this equals refreshedAt.
     finalPayload._lastCheckedAt = lastCheckedAt;
-    // What-changed Phase 1: union prior ever-seen with the current run's
-    // shipped metaStoryIds, preserving oldest-first insertion order. Only
-    // advanced when a fresh snapshot is actually written (watermark-skip /
-    // in-flight / error-fallback all skip this branch and inherit the prior
-    // snapshot's array verbatim).
+    // What-changed: union prior ever-seen with the current run's shipped
+    // metaStoryIds, preserving oldest-first insertion order. Only advanced
+    // when a fresh snapshot is actually written (watermark-skip /
+    // in-flight / error-fallback all skip this branch and inherit the
+    // prior snapshot's array verbatim).
     finalPayload._everSeenMetaStoryIds = mergeEverSeenMetaStoryIds(
       priorEverSeenMetaStoryIds,
       lockedStories.map((s) => s.metaStoryId)

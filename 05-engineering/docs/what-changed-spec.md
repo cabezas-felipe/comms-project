@@ -1,6 +1,30 @@
-# What changed — engineer spec (v1, Phase 0)
+# What changed — engineer spec (v1, implemented)
 
-**Status:** Specification only. No code in this phase. Implementation is split across later phases (engine module → pipeline wiring → LLM stages → observability).
+**Status:** **Implemented (v1).** Shipped across five commits on branch `feat/what-changed-delta-engine`:
+
+| Commit | Phase | What landed |
+|--------|-------|-------------|
+| `3a9803f` | 0 — spec | This document. |
+| `70b4734` | 1 — persistence | `_everSeenMetaStoryIds` on snapshot blob + pipeline pass-through. |
+| `7230b5b` | 2 — gate | Deterministic `compareStructuralGate` + `resolveWhatChangedDeterministic`. |
+| `3c90cef` | 3 — LLM | Haiku classify + Sonnet write + async `resolveWhatChanged` + env config. |
+| `0f75206` | 4 — wiring | Engine integrated into `runRefreshPipeline`; freshness template retired; `log.whatChanged` → `_meta.whatChanged`. |
+
+**Default off:** `TEMPO_AI_DELTA_ENABLED=false` keeps LLM stages dormant. Until an operator opts in, the pipeline emits only deterministic `first-seen` / `unchanged` copy.
+
+**Implementation map:**
+
+| Concern | Module |
+|---------|--------|
+| Static copy strings | [`WHAT_CHANGED_COPY`](../apps/api/src/dashboard/what-changed-engine.mjs) |
+| Structural gate | [`compareStructuralGate`](../apps/api/src/dashboard/what-changed-engine.mjs) |
+| LLM stages + async resolver | [`classifyDeltaMaterial`, `writeDeltaProse`, `resolveWhatChanged`](../apps/api/src/dashboard/what-changed-engine.mjs) |
+| Env config | [`resolveDeltaConfig`, `isDeltaLlmEnabled`](../apps/api/src/dashboard/what-changed-engine.mjs) |
+| Run-level diagnostics | [`aggregateWhatChangedDiagnostics`, `WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION`](../apps/api/src/dashboard/what-changed-engine.mjs) |
+| Pipeline call site | [`runRefreshPipeline` → "Phase 4: compute whatChanged per story"](../apps/api/src/dashboard/refresh-pipeline.mjs) |
+| Ever-seen merge / strip | [`mergeEverSeenMetaStoryIds`, `extractEverSeenFromSnapshot`, `liftSnapshotMeta`](../apps/api/src/db/dashboard-snapshot-repo.mjs) |
+| Route plumbing + persistence | [`executeRefreshFlow`, `stripPersistedFields`](../apps/api/src/server.mjs) |
+| Handoff doc | [`what-changed-handoff.md`](what-changed-handoff.md) |
 
 **Posture:** False-positive–first. Prefer **unchanged** copy over inventing a delta. The dashboard is a trust surface; a wrong "Updated:" line is worse than a quiet "no material update".
 
@@ -218,6 +242,20 @@ These are deferred to a follow-up implementation phase. This section specifies t
 
 `TEMPO_AI_MOCK_ONLY=true` continues to force every LLM-routing layer to the mock providers (existing pattern in [`providerFor`](../apps/api/src/ai/model-router.mjs)).
 
+### Operator notes
+
+- **Default is off.** `TEMPO_AI_DELTA_ENABLED` is unset (or `false`) in every committed `.env` file. Production refreshes ship only deterministic first-seen / unchanged copy until an operator explicitly opts in per-environment.
+
+- **`TEMPO_AI_MOCK_ONLY=true` vetoes the LLM path.** CI runs and any developer who flips mock-only mode for cost control will never emit `changed` prose, even with `DELTA_ENABLED=true`. The engine fail-closes to `unchanged` copy and increments `classifySkipped` in `_meta.whatChanged`.
+
+- **Cost and latency posture.** The pipeline runs the engine **serially** per shipped story (typical dashboard ≤ 10 stories). Worst-case latency per refresh when fully enabled is `N × (Haiku + Sonnet)`, where `N` ≤ shipped story count; `gate=none` stories skip both calls. The per-call timeout defaults to 2.5 s, shared by classify and write — bump `TEMPO_AI_DELTA_TIMEOUT_MS` if tail latency dominates.
+
+- **When to enable.** Validate first in staging with a real Anthropic key, `TEMPO_AI_MOCK_ONLY` unset, and `TEMPO_AI_DELTA_ENABLED=true`. Watch `_meta.whatChanged` for a few refreshes; high `llmFailed.classify` / `llmFailed.write` / `llmFailed.hallucination` means the timeout or grounding is tighter than the writer can handle. Roll back with `TEMPO_AI_DELTA_ENABLED=false`.
+
+- **Rollback is one flag.** Setting `TEMPO_AI_DELTA_ENABLED=false` immediately reverts every shipped story to the deterministic first-seen / unchanged branch. No code change required.
+
+- **`/api/ai/models` readiness — deferred.** [`getProviderReadiness()`](../apps/api/src/ai/model-router.mjs) reports clustering / geoAssess / embedding via a single boolean (`readyForRealRun` = every capability ready). Adding informational-only delta capabilities (Haiku + Sonnet) would require bucketing capabilities so `readyForRealRun` doesn't flip to false when delta is intentionally off — past the small-diff ceiling for this phase. Operators read delta health from `_meta.whatChanged` instead: `classifyCalled` / `writeCalled` / `llmFailed.*` already expose model availability. Revisit if a separate "AI surface health" panel ever needs a single endpoint.
+
 ---
 
 ## 7. Pipeline integration points
@@ -336,20 +374,20 @@ One `[pipeline.whatChanged]` log line per refresh, mirroring the `[pipeline.tags
 
 Minimum coverage for the engine module (unit tests) and pipeline integration (integration tests). All assertions are on the produced `story.whatChanged` value AND the `log.whatChanged` counters.
 
-| # | Scenario | Setup | Expected `whatChanged` | Expected counters |
-|---|----------|-------|------------------------|-------------------|
-| 1 | **First-seen** | `metaStoryId="msX"` not in ever-seen set; prior snapshot may or may not exist | `First appearance in your feed.` | `firstSeen=1`, `gate*=0`, `classify*=0`, `write*=0` |
-| 2 | **Unchanged, same sources** | `msX` ∈ ever-seen; prior story exists; current `sources[].id` set = prior's; headlines identical; summary/subtitle identical | `No material update since your last refresh.` | `unchanged=1`, `gateNone=1`, `classifySkipped=1` |
-| 3 | **New source only (strong gate → classify true → write OK)** | `msX` ∈ ever-seen; one new `sourceId` from a new outlet; classify stub returns `{material:true}`; write stub returns valid prose | Sonnet prose, 1–2 sentences, no `Update:` prefix, ≤ 300 chars | `changed=1`, `gateStrong=1`, `classifyCalled=1`, `classifyMaterialTrue=1`, `writeCalled=1`, `writeOk=1` |
-| 4 | **Re-entry after absence** | `msX` ∈ ever-seen; but absent from prior snapshot (off-dashboard last refresh); current story exists | `No material update since your last refresh.` | `unchanged=1`, `gateNone=1` (no prior story to diff against — see [State machine](#3-state-machine) re-entry note) |
-| 5 | **LLM failure (Sonnet times out)** | Strong gate → Haiku returns `material:true` → Sonnet stub throws timeout | `No material update since your last refresh.` | `gateStrong=1`, `classifyMaterialTrue=1`, `writeCalled=1`, `llmFailed.write=1`, `unchanged=1` |
-| 6 | **Watermark short-circuit** | Prior snapshot has stories with their own `whatChanged` strings; current watermark matches prior; pipeline returns `payload: null` | Each story's `whatChanged` from prior snapshot, re-served unchanged | Engine never invoked; `_meta.whatChanged.watermarkShortCircuited=true` (set by the short-circuit return branch) |
-| 7 | **Mock mode (TEMPO_AI_MOCK_ONLY=true)** | Strong gate fires; mock-only env | `No material update since your last refresh.` (gate fires but classify is skipped → fail-closed unchanged) | `gateStrong=1`, `classifySkipped=1`, `unchanged=1` |
-| 8 | **Strong gate + Haiku rejects** | New source added; classify stub returns `{material:false, reasonCode:"syndication_duplicate"}` | `No material update since your last refresh.` | `gateStrong=1`, `classifyCalled=1`, `classifyMaterialFalse=1`, `writeCalled=0`, `unchanged=1` |
-| 9 | **Headline change on overlapping source** | Same `sourceId` set; one `source.headline` differs from prior | Sonnet prose (if classify=true) OR unchanged (if classify=false). Asserts gate=`strong`, classify is called. | `gateStrong=1`, `classifyCalled=1` |
-| 10 | **Engine disabled (TEMPO_AI_DELTA_ENABLED=false)** | Strong gate fires; engine globally disabled | `No material update since your last refresh.` | `gateStrong=1`, `classifySkipped=1`, `unchanged=1` |
-| 11 | **Reorder-only change** | Same `sources[].id` set; same headlines; only T1 ordering differs (e.g. weight tie broken differently) | `No material update since your last refresh.` | `gateNone=1`, `classifySkipped=1`, `unchanged=1` |
-| 12 | **Hallucination guard trips** | Strong gate; classify=true; Sonnet writes a sentence naming an outlet not in the diff | `No material update since your last refresh.` | `writeCalled=1`, `llmFailed.hallucination=1`, `unchanged=1` |
+| # | Scenario | Setup | Expected `whatChanged` | Expected counters | Coverage |
+|---|----------|-------|------------------------|-------------------|----------|
+| 1 | **First-seen** | `metaStoryId="msX"` not in ever-seen set; prior snapshot may or may not exist | `First appearance in your feed.` | `firstSeen=1`, `gate*=0`, `classify*=0`, `write*=0` | pipeline: `refresh-pipeline.test.mjs` *"Phase 4 — first refresh (empty ever-seen)…"* |
+| 2 | **Unchanged, same sources** | `msX` ∈ ever-seen; prior story exists; current `sources[].id` set = prior's; headlines identical; summary/subtitle identical | `No material update since your last refresh.` | `unchanged=1`, `gateNone=1`, `classifySkipped=1` | engine: `what-changed-engine.test.mjs` *"resolver: ever-seen + prior + gate none → unchanged copy (spec §10 row 2)"* · pipeline: `refresh-pipeline.test.mjs` *"Phase 4 — second refresh (same metaStoryId, no structural change)…"* |
+| 3 | **New source only (strong gate → classify true → write OK)** | `msX` ∈ ever-seen; one new `sourceId` from a new outlet; classify stub returns `{material:true}`; write stub returns valid prose | Sonnet prose, 1–2 sentences, no `Update:` prefix, ≤ 300 chars | `changed=1`, `gateStrong=1`, `classifyCalled=1`, `classifyMaterialTrue=1`, `writeCalled=1`, `writeOk=1` | engine: `what-changed-engine.test.mjs` *"spec §10 row 3 — strong gate + classify:true + write OK…"* · pipeline: *"Phase 4 — strong gate + deltaConfig enabled + classify/write stubs…"* |
+| 4 | **Re-entry after absence** | `msX` ∈ ever-seen; but absent from prior snapshot (off-dashboard last refresh); current story exists | `No material update since your last refresh.` | `unchanged=1`, `gateNone=1` | engine: `what-changed-engine.test.mjs` *"resolver: ever-seen but priorStory absent → unchanged copy (re-entry)…"* · *"resolveWhatChanged: re-entry (ever-seen + no priorStory) → unchanged + classifySkipped"* |
+| 5 | **LLM failure (Sonnet times out)** | Strong gate → Haiku returns `material:true` → Sonnet stub throws timeout | `No material update since your last refresh.` | `gateStrong=1`, `classifyMaterialTrue=1`, `writeCalled=1`, `llmFailed.write=1`, `unchanged=1` | engine: `what-changed-engine.test.mjs` *"spec §10 row 5 — classify:true but write throws…"* |
+| 6 | **Watermark short-circuit** | Prior snapshot has stories with their own `whatChanged` strings; current watermark matches prior; pipeline returns `payload: null` | Each story's `whatChanged` from prior snapshot, re-served unchanged | Engine never invoked; `_meta.whatChanged.watermarkShortCircuited=true` (set by the short-circuit return branch) | pipeline: `refresh-pipeline.test.mjs` *"Phase 4 — watermark short-circuit: log.whatChanged.watermarkShortCircuited=true…"* · route: `server.routes.test.mjs` *"POST /api/dashboard/refresh: watermark unchanged → re-serves prior whatChanged strings verbatim (spec §10 row 6)"* |
+| 7 | **Mock mode (TEMPO_AI_MOCK_ONLY=true)** | Strong gate fires; mock-only env | `No material update since your last refresh.` (gate fires but classify is skipped → fail-closed unchanged) | `gateStrong=1`, `classifySkipped=1`, `unchanged=1` | engine: `what-changed-engine.test.mjs` *"spec §10 row 7 — TEMPO_AI_MOCK_ONLY=true + strong gate…"* |
+| 8 | **Strong gate + Haiku rejects** | New source added; classify stub returns `{material:false, reasonCode:"syndication_duplicate"}` | `No material update since your last refresh.` | `gateStrong=1`, `classifyCalled=1`, `classifyMaterialFalse=1`, `writeCalled=0`, `unchanged=1` | engine: `what-changed-engine.test.mjs` *"spec §10 row 8 — strong gate + classify:false…"* |
+| 9 | **Headline change on overlapping source** | Same `sourceId` set; one `source.headline` differs from prior | Sonnet prose (if classify=true) OR unchanged (if classify=false). Asserts gate=`strong`, classify is called. | `gateStrong=1`, `classifyCalled=1` | engine: `what-changed-engine.test.mjs` *"spec §10 row 9 — headline_change on overlapping id…"* |
+| 10 | **Engine disabled (TEMPO_AI_DELTA_ENABLED=false)** | Strong gate fires; engine globally disabled | `No material update since your last refresh.` | `gateStrong=1`, `classifySkipped=1`, `unchanged=1` | engine: `what-changed-engine.test.mjs` *"spec §10 row 10 — TEMPO_AI_DELTA_ENABLED=false…"* · pipeline: *"Phase 4 — deltaConfig disabled + strong gate…"* |
+| 11 | **Reorder-only change** | Same `sources[].id` set; same headlines; only T1 ordering differs (e.g. weight tie broken differently) | `No material update since your last refresh.` | `gateNone=1`, `classifySkipped=1`, `unchanged=1` | engine: `what-changed-engine.test.mjs` *"resolver: ever-seen + prior + reorder only → unchanged copy + gate none (spec §10 row 11)"* · *"resolveWhatChanged: gate:'none' (reorder only) → unchanged + classifySkipped, no LLM call"* |
+| 12 | **Hallucination guard trips** | Strong gate; classify=true; Sonnet writes a sentence naming an outlet not in the diff | `No material update since your last refresh.` | `writeCalled=1`, `llmFailed.hallucination=1`, `unchanged=1` | engine: `what-changed-engine.test.mjs` *"spec §10 row 12 — classify:true + write returns hallucinated outlet…"* |
 
 Tests 1–8 are the locked minimum. 9–12 are recommended to add at engine implementation time; locking them now in the spec keeps the contract honest about edge cases.
 

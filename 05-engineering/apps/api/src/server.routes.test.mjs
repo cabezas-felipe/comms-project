@@ -1381,6 +1381,124 @@ test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior snaps
   }
 });
 
+test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior whatChanged strings verbatim (spec §10 row 6)", async () => {
+  // Spec alignment #6 + §10 row 6: on a watermark match the pipeline
+  // returns `payload: null` and the route re-serves the prior snapshot's
+  // stories untouched — including their `whatChanged` strings.  This test
+  // pins the HTTP-response surface of that contract: a prior snapshot
+  // with two stories carrying distinct, non-default `whatChanged` strings
+  // must come through res.body.stories verbatim, with no recomputation.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  const PRIOR_WHAT_CHANGED_A = "Reuters joined coverage with a new diplomatic angle.";
+  const PRIOR_WHAT_CHANGED_B = "First appearance in your feed.";
+  const PRIOR_SNAPSHOT = {
+    contractVersion: VALID_BODY.contractVersion,
+    stories: [
+      {
+        id: "ms-1",
+        metaStoryId: "ms-1",
+        title: "Prior story A",
+        subtitle: "Sub A",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        takeaway: "T",
+        summary: "S",
+        whyItMatters: "W",
+        whatChanged: PRIOR_WHAT_CHANGED_A,
+        priority: "standard",
+        outletCount: 2,
+        tags: { topics: [], keywords: [], geographies: [] },
+        sources: [
+          { id: "src-a-1", outlet: "Reuters", kind: "traditional", weight: 60, url: "https://example.com/a1", minutesAgo: 10, headline: "H1", body: ["B1"] },
+        ],
+      },
+      {
+        id: "ms-2",
+        metaStoryId: "ms-2",
+        title: "Prior story B",
+        subtitle: "Sub B",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        takeaway: "T",
+        summary: "S",
+        whyItMatters: "W",
+        whatChanged: PRIOR_WHAT_CHANGED_B,
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: [] },
+        sources: [
+          { id: "src-b-1", outlet: "NYT", kind: "traditional", weight: 55, url: "https://example.com/b1", minutesAgo: 20, headline: "H2", body: ["B2"] },
+        ],
+      },
+    ],
+    _watermark: "wm-stable-row6",
+    _selectionMeta: {
+      sourceSelectionMode: "strict",
+      sourceFallbackUsed: false,
+      sourceFallbackReason: null,
+      matchedSourceCount: 1,
+      selectedSourceCount: 1,
+      unmatchedSelectedSources: [],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: ["reuters-world"],
+      relevantItemCount: 0,
+    },
+  };
+
+  let writeCalls = 0;
+  _snapshotRepo.read = async () => PRIOR_SNAPSHOT;
+  _snapshotRepo.write = async () => { writeCalls++; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-stable-row6",
+      candidateCount: 0,
+      selectedFeedCount: 1,
+      selection: PRIOR_SNAPSHOT._selectionMeta,
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.unchanged, true);
+    assert.equal(res.body._meta.refreshSkippedReason, "unchanged_watermark");
+    // The two stories must come through verbatim, in the same order, with
+    // their original `whatChanged` strings — no recomputation, no engine
+    // call, no default unchanged-copy override.
+    assert.equal(res.body.stories.length, 2);
+    assert.equal(res.body.stories[0].metaStoryId, "ms-1");
+    assert.equal(res.body.stories[0].whatChanged, PRIOR_WHAT_CHANGED_A);
+    assert.equal(res.body.stories[1].metaStoryId, "ms-2");
+    assert.equal(res.body.stories[1].whatChanged, PRIOR_WHAT_CHANGED_B);
+    // Idempotency: no snapshot write, no lock churn on a watermark skip.
+    assert.equal(writeCalls, 0);
+    // No story carries the legacy freshness template.
+    for (const s of res.body.stories) {
+      assert.ok(
+        !/Latest update .* min ago\./.test(s.whatChanged ?? ""),
+        `story "${s.metaStoryId}" must not carry the legacy freshness template`
+      );
+    }
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
 test("POST /api/dashboard/refresh: watermark unchanged → _meta.recall and _meta.funnel surface from pipeline log", async () => {
   // Diagnostics-visibility contract: when the pipeline short-circuits on a
   // matching watermark it still computes recall + funnel before the skip

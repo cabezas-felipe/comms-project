@@ -86,11 +86,11 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // shipped.
     if (_lastRunMeta.whatChanged !== undefined) meta.whatChanged = _lastRunMeta.whatChanged;
   }
-  // `_everSeenMetaStoryIds` (what-changed Phase 1) passes through `...rest` so
-  // the route handler can read it off the returned snapshot for the next
-  // merge. It is intentionally NOT lifted into `_meta` — history scope must
-  // not leak into client responses. `stripPersistedFields` in server.mjs is
-  // the gate that strips it before responding.
+  // `_everSeenMetaStoryIds` (what-changed history set) passes through via
+  // `...rest` so the route handler can read it off the returned snapshot
+  // for the next merge.  Intentionally NOT lifted into `_meta` — history
+  // scope must not leak into client responses; `stripPersistedFields` in
+  // server.mjs is the gate that strips it before responding.
   return { ...rest, stories: normalizeStoriesForLoad(stories), _meta: meta };
 }
 
@@ -352,14 +352,14 @@ export async function writeHoldBucket(userId, items) {
   return writeHoldBucketFile(userId, items);
 }
 
-// ─── What-changed (Phase 1): ever-seen meta-story id set ─────────────────────
+// ─── What-changed: ever-seen meta-story id set ───────────────────────────────
 //
 // The persisted snapshot payload carries `_everSeenMetaStoryIds: string[]` —
 // the union of every `metaStoryId` ever shipped on this user's dashboard.
-// It drives the "first-seen" branch of the upcoming delta engine. The field
-// lives on the payload alongside `_watermark` / `_selectionMeta` / `_lastCheckedAt`;
-// `stripPersistedFields` in server.mjs strips it before responding to clients
-// so history scope never leaks. See `docs/what-changed-spec.md` §4.
+// Drives the "first-seen" branch of the delta engine.  The field lives on
+// the payload alongside `_watermark` / `_selectionMeta` / `_lastCheckedAt`;
+// `stripPersistedFields` in server.mjs strips it before responding to
+// clients so history scope never leaks.  See `docs/what-changed-spec.md` §4.
 
 /**
  * Reads the ever-seen `metaStoryId` array off a loaded snapshot. Defensive:

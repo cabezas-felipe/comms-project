@@ -932,13 +932,13 @@ export async function runRefreshPipeline({
   semanticBeatFitConfig = null,
   semanticBeatFitEmbedFn = null,
   semanticBeatFitProfileCache = null,
-  // What-changed (Phase 1 plumbing + Phase 4 engine wiring).  The route
-  // handler reads the prior snapshot and supplies both pre-built priors
-  // (the ever-seen id set + a `metaStoryId → priorStory` Map) so the
-  // pipeline doesn't double-read.  `classifyFn` / `writeFn` / `deltaConfig`
-  // are test injection points — production reads env at call time via
-  // `resolveDeltaConfig()` and stays disabled by default until an operator
-  // sets `TEMPO_AI_DELTA_ENABLED=true`.
+  // What-changed engine inputs.  The route handler reads the prior snapshot
+  // once and hands both priors in: `everSeenMetaStoryIds` drives the
+  // first-seen branch; `priorStoriesById` is the per-`metaStoryId` map the
+  // structural gate diffs against.  `classifyFn` / `writeFn` / `deltaConfig`
+  // are test injection points — production reads env via
+  // `resolveDeltaConfig()` and stays disabled until an operator sets
+  // `TEMPO_AI_DELTA_ENABLED=true`.
   everSeenMetaStoryIds = null,
   priorStoriesById = null,
   classifyFn = null,
@@ -953,14 +953,12 @@ export async function runRefreshPipeline({
     typeof semanticBeatFitEmbedFn === "function"
       ? semanticBeatFitEmbedFn
       : embedFn;
-  // What-changed pass-through counts.  Folded into `log.whatChanged` on
+  // What-changed pass-through counts, folded into `log.whatChanged` on
   // both the watermark short-circuit and the full-run branch so operators
-  // can confirm the engine saw its priors.  In Phase 1 this lived on
-  // `log.whatChangedPrep`; Phase 4 consolidates everything under a single
-  // `log.whatChanged` key (no separate `whatChangedPrep` is emitted).
-  // Renamed away from `priorStoryCount` to avoid shadowing the
-  // watermark-trap option of the same name (which counts the prior
-  // *snapshot's* stories, not the size of the lookup map used here).
+  // can confirm the engine saw its priors.  Local names are prefixed to
+  // avoid shadowing the unrelated `priorStoryCount` option above (which
+  // counts the prior *snapshot's* stories for the watermark trap-guard,
+  // not the size of the lookup map used here).
   const whatChangedEverSeenCount = Array.isArray(everSeenMetaStoryIds) ? everSeenMetaStoryIds.length : 0;
   const whatChangedPriorStoryCount =
     priorStoriesById && typeof priorStoriesById.size === "number"
@@ -1815,13 +1813,11 @@ export async function runRefreshPipeline({
       },
       beatFitResult,
     }),
-    // What-changed (Phase 4): run-level diagnostics aggregated from the
-    // per-story `resolveWhatChanged` results above.  Persisted via
+    // Run-level what-changed diagnostics aggregated from the per-story
+    // `resolveWhatChanged` results above.  Persisted via
     // `_lastRunMeta.whatChanged` and surfaced under `_meta.whatChanged` so
     // operators can answer "how often did the engine fire and what did it
-    // decide?" without re-running refresh.  The Phase 1 `whatChangedPrep`
-    // surface was folded into this object's `everSeenCount` /
-    // `priorStoryCount` keys (no separate `whatChangedPrep` is emitted).
+    // decide?" without re-running refresh.
     whatChanged: whatChangedDiagnostics,
   };
 
