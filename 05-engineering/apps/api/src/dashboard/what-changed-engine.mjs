@@ -1,0 +1,1104 @@
+// What-changed delta engine.  Spec: docs/what-changed-spec.md.
+//
+// Two layers:
+//   1. Deterministic structural gate + sync `resolveWhatChangedDeterministic`.
+//      Pure — no I/O, no Anthropic, no env reads.  Always available.
+//   2. Async `resolveWhatChanged` orchestrator that layers Haiku classify +
+//      Sonnet write over the gate.  Default OFF — `TEMPO_AI_DELTA_ENABLED`
+//      must be truthy AND `TEMPO_AI_MOCK_ONLY` must NOT be `"true"` for the
+//      LLM stages to fire; otherwise the orchestrator behaves like the
+//      deterministic resolver.
+//
+// The gate is the cheap structural filter (spec §5).  LLM stages only see
+// stories whose gate signal is weak or strong — `none` short-circuits to
+// the static `unchanged` copy.  Failures everywhere fail-closed to the
+// static `unchanged` copy: we never invent a "something probably happened"
+// sentence (spec §1 trust contract, alignment #2).
+
+import Anthropic from "@anthropic-ai/sdk";
+
+import { normalizeSourceIdentity } from "../contracts-runtime/index.mjs";
+import { providerFor } from "../ai/model-router.mjs";
+import { withTimeout } from "../ai/guardrails.mjs";
+
+/**
+ * Static copy strings for the deterministic states (spec §3).
+ *
+ * `changed` prose is produced by the writer LLM (`writeDeltaProse`) and has
+ * no canonical copy entry — `whatChanged` for the `changed` state is the
+ * validated writer output (or, on fail-closed fallback, the `unchanged`
+ * string).
+ */
+export const WHAT_CHANGED_COPY = Object.freeze({
+  firstSeen: "First appearance in your feed.",
+  unchanged: "No material update since your last refresh.",
+});
+
+const SIGNAL_NONE = "none";
+const SIGNAL_WEAK = "weak";
+const SIGNAL_STRONG = "strong";
+
+const SIGNAL_RANK = { [SIGNAL_NONE]: 0, [SIGNAL_WEAK]: 1, [SIGNAL_STRONG]: 2 };
+
+/**
+ * Whitespace-collapsed, trimmed, lowercase comparison key.  Used for
+ * summary / subtitle / title / headline equality checks so trivial
+ * formatting drift ("  Headline " vs "headline") doesn't trip the gate.
+ *
+ * @param {string|null|undefined} value
+ * @returns {string}
+ */
+export function trivialNormalizeText(value) {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function sourceArray(story) {
+  return Array.isArray(story?.sources) ? story.sources : [];
+}
+
+/**
+ * Set of non-empty `sources[].id` values on a story.  Defensive: sources
+ * lacking an id are skipped (cannot participate in any per-id comparison).
+ *
+ * @param {object|null} story
+ * @returns {Set<string>}
+ */
+export function sourceIdSet(story) {
+  const out = new Set();
+  for (const src of sourceArray(story)) {
+    if (src && typeof src.id === "string" && src.id.length > 0) out.add(src.id);
+  }
+  return out;
+}
+
+/**
+ * Set of normalized outlet identities on a story (lowercased, whitespace
+ * collapsed via `normalizeSourceIdentity`).  Empty / missing outlets are
+ * excluded so blank rows never trip the "new outlet" signal.
+ *
+ * @param {object|null} story
+ * @returns {Set<string>}
+ */
+export function outletSet(story) {
+  const out = new Set();
+  for (const src of sourceArray(story)) {
+    if (!src || typeof src.outlet !== "string") continue;
+    const norm = normalizeSourceIdentity(src.outlet);
+    if (norm.length > 0) out.add(norm);
+  }
+  return out;
+}
+
+// Build `normalizedOutlet → Set<normalizedHeadline>` so we can detect
+// syndication duplicates: a current source whose id is new BUT whose
+// outlet+headline pair already exists on the prior story is treated as
+// noise (cross-feed dedupe usually catches these upstream; this is the
+// belt-and-suspenders rule from spec §5).
+function priorHeadlinesByOutlet(story) {
+  const out = new Map();
+  for (const src of sourceArray(story)) {
+    if (!src || typeof src.outlet !== "string") continue;
+    const normOutlet = normalizeSourceIdentity(src.outlet);
+    if (normOutlet.length === 0) continue;
+    const normHeadline = trivialNormalizeText(src.headline);
+    if (normHeadline.length === 0) continue;
+    let set = out.get(normOutlet);
+    if (!set) {
+      set = new Set();
+      out.set(normOutlet, set);
+    }
+    set.add(normHeadline);
+  }
+  return out;
+}
+
+// `id → normalizedHeadline` map for the prior story so the gate can flag
+// `headline_change:<id>` on overlapping ids.
+function headlinesById(story) {
+  const out = new Map();
+  for (const src of sourceArray(story)) {
+    if (!src || typeof src.id !== "string" || src.id.length === 0) continue;
+    out.set(src.id, trivialNormalizeText(src.headline));
+  }
+  return out;
+}
+
+function escalate(current, candidate) {
+  return SIGNAL_RANK[candidate] > SIGNAL_RANK[current] ? candidate : current;
+}
+
+/**
+ * Pure structural gate (spec §5).  Compares a prior story against a current
+ * one and returns a max-strength signal plus the list of firing reasons.
+ *
+ * Rules summary:
+ *   - new sourceId        → strong   (`added_source:<id>`)
+ *   - new outlet          → strong   (`new_outlet:<normOutlet>`) — once per outlet
+ *   - removed sourceId    → weak     (`removed_source:<id>`)
+ *   - headline change on overlapping id → strong (`headline_change:<id>`)
+ *   - summary change beyond trivial normalize → weak (`summary_change`)
+ *   - subtitle change beyond trivial normalize → weak (`subtitle_change`)
+ *   - title change (defensive; titles are locked) → weak (`title_change`)
+ *
+ * Suppressed (return no signal for those rules):
+ *   - reorder only — same id set, same per-id headlines, just different order
+ *   - freshness tick — only `minutesAgo` differs (the gate never reads it)
+ *   - syndication duplicate — new id whose normalized outlet+headline
+ *     already exists on the prior story
+ *   - tag-only changes — the gate reads only structural fields
+ *
+ * Defensive: returns `{ signal: "none", reasons: [] }` when priorStory is
+ * null / missing — callers (e.g. resolveWhatChangedDeterministic) decide
+ * whether that's first-seen or re-entry.
+ *
+ * @param {object|null} priorStory
+ * @param {object} currentStory
+ * @returns {{ signal: "none" | "weak" | "strong", reasons: string[] }}
+ */
+export function compareStructuralGate(priorStory, currentStory) {
+  const reasons = [];
+  let signal = SIGNAL_NONE;
+  if (!priorStory || typeof priorStory !== "object") {
+    return { signal, reasons };
+  }
+
+  const priorIds = sourceIdSet(priorStory);
+  const priorOutlets = outletSet(priorStory);
+  const priorHeadlinesByOut = priorHeadlinesByOutlet(priorStory);
+  const priorHeadlinesByIdMap = headlinesById(priorStory);
+  const currentIds = sourceIdSet(currentStory);
+
+  // Walk current sources in original order so reasons[] is stable across
+  // runs that just reorder the array — and so syndication suppression is
+  // applied per source as we go.
+  const emittedNewOutletNorms = new Set();
+  for (const src of sourceArray(currentStory)) {
+    if (!src || typeof src.id !== "string" || src.id.length === 0) continue;
+    const id = src.id;
+    const normOutlet = typeof src.outlet === "string" ? normalizeSourceIdentity(src.outlet) : "";
+    const normHeadline = trivialNormalizeText(src.headline);
+
+    if (!priorIds.has(id)) {
+      // Syndication duplicate: same normalized outlet already on the prior
+      // story AND the prior story has this exact normalized headline under
+      // that outlet → suppress both `added_source` and `new_outlet` for
+      // this source.  Cross-feed dedupe usually catches this upstream; we
+      // re-check here so a missed dedupe doesn't spuriously fire `strong`.
+      const isSyndication =
+        normOutlet.length > 0 &&
+        priorOutlets.has(normOutlet) &&
+        priorHeadlinesByOut.get(normOutlet)?.has(normHeadline) === true;
+      if (isSyndication) continue;
+
+      reasons.push(`added_source:${id}`);
+      signal = escalate(signal, SIGNAL_STRONG);
+
+      if (
+        normOutlet.length > 0 &&
+        !priorOutlets.has(normOutlet) &&
+        !emittedNewOutletNorms.has(normOutlet)
+      ) {
+        reasons.push(`new_outlet:${normOutlet}`);
+        emittedNewOutletNorms.add(normOutlet);
+        signal = escalate(signal, SIGNAL_STRONG);
+      }
+    } else {
+      // Overlapping id: compare headlines under trivial normalize.  Same
+      // outlet revising its own headline is high-signal because it's not
+      // duplication noise — the outlet itself changed its framing.
+      const priorHeadline = priorHeadlinesByIdMap.get(id) ?? "";
+      if (priorHeadline !== normHeadline) {
+        reasons.push(`headline_change:${id}`);
+        signal = escalate(signal, SIGNAL_STRONG);
+      }
+    }
+  }
+
+  // Removed sources — walk prior in its original order so reason ordering
+  // is deterministic.
+  for (const src of sourceArray(priorStory)) {
+    if (!src || typeof src.id !== "string" || src.id.length === 0) continue;
+    if (!currentIds.has(src.id)) {
+      reasons.push(`removed_source:${src.id}`);
+      signal = escalate(signal, SIGNAL_WEAK);
+    }
+  }
+
+  // Summary / subtitle / title diffs under trivial normalize.  Title is
+  // locked in production but we check defensively — a lock miss is real
+  // signal worth surfacing, just not strong (editorial framing only).
+  const summaryChanged =
+    trivialNormalizeText(priorStory.summary) !== trivialNormalizeText(currentStory.summary);
+  if (summaryChanged) {
+    reasons.push("summary_change");
+    signal = escalate(signal, SIGNAL_WEAK);
+  }
+  const subtitleChanged =
+    trivialNormalizeText(priorStory.subtitle) !== trivialNormalizeText(currentStory.subtitle);
+  if (subtitleChanged) {
+    reasons.push("subtitle_change");
+    signal = escalate(signal, SIGNAL_WEAK);
+  }
+  const titleChanged =
+    trivialNormalizeText(priorStory.title) !== trivialNormalizeText(currentStory.title);
+  if (titleChanged) {
+    reasons.push("title_change");
+    signal = escalate(signal, SIGNAL_WEAK);
+  }
+
+  return { signal, reasons };
+}
+
+/**
+ * Sync deterministic resolver.  Decides between the two
+ * deterministically-resolvable states (first-seen, unchanged) and runs the
+ * gate for the rest.  Weak/strong gate signals always resolve to the
+ * static `unchanged` copy here — LLM uplift is the async `resolveWhatChanged`
+ * orchestrator below.  The returned `gate` is the unmodified gate output so
+ * callers can branch on it independently.
+ *
+ * Per spec §3:
+ *   - metaStoryId ∉ everSeenMetaStoryIds → first-seen
+ *   - everSeen + priorStory absent       → unchanged (re-entry)
+ *   - everSeen + priorStory present      → gate.signal drives state
+ *
+ * @param {{
+ *   metaStoryId: string,
+ *   currentStory: object,
+ *   priorStory: object|null,
+ *   everSeenMetaStoryIds: string[],
+ * }} input
+ * @returns {{
+ *   state: "first-seen" | "unchanged",
+ *   whatChanged: string,
+ *   gate: { signal: "none" | "weak" | "strong", reasons: string[] },
+ * }}
+ */
+export function resolveWhatChangedDeterministic(input) {
+  const { metaStoryId, currentStory, priorStory, everSeenMetaStoryIds } = input ?? {};
+  const everSeen = Array.isArray(everSeenMetaStoryIds)
+    ? new Set(everSeenMetaStoryIds)
+    : new Set();
+
+  if (typeof metaStoryId !== "string" || metaStoryId.length === 0 || !everSeen.has(metaStoryId)) {
+    return {
+      state: "first-seen",
+      whatChanged: WHAT_CHANGED_COPY.firstSeen,
+      gate: { signal: SIGNAL_NONE, reasons: ["first_seen"] },
+    };
+  }
+
+  if (!priorStory || typeof priorStory !== "object") {
+    // Re-entry: ever-seen but absent from the immediately prior snapshot.
+    // Spec §3 routes this to unchanged — we cannot diff without a prior.
+    return {
+      state: "unchanged",
+      whatChanged: WHAT_CHANGED_COPY.unchanged,
+      gate: { signal: SIGNAL_NONE, reasons: ["no_prior_story"] },
+    };
+  }
+
+  const gate = compareStructuralGate(priorStory, currentStory);
+  // Sync resolver intentionally stops here — weak/strong always return the
+  // static `unchanged` copy.  The async `resolveWhatChanged` orchestrator
+  // below is the LLM-aware entry (`runRefreshPipeline` calls it); the gate
+  // value is returned unchanged so callers can branch on it independently.
+  return {
+    state: "unchanged",
+    whatChanged: WHAT_CHANGED_COPY.unchanged,
+    gate,
+  };
+}
+
+// ─── LLM stages + async orchestrator ────────────────────────────────────────
+//
+// Below this line, the module reads env and (when enabled) calls Anthropic.
+// All entry points fail-closed: any error, timeout, parse failure, length
+// overflow, or hallucination guard trip → unchanged copy.  Mock-only and
+// disabled envs short-circuit before any network call.
+
+const DEFAULT_DELTA_CLASSIFY_MODEL = "anthropic:claude-haiku-4-5-20251001";
+const DEFAULT_DELTA_WRITE_MODEL = "anthropic:claude-sonnet-4-6";
+const DEFAULT_DELTA_TIMEOUT_MS = 2500;
+const DELTA_ENABLED_TRUTHY = new Set(["true", "1"]);
+
+const MAX_CHANGED_PROSE_CHARS = 300;
+const MAX_CHANGED_PROSE_SENTENCES = 2;
+const EXCERPT_MAX_CHARS = 400;
+
+/**
+ * Resolve `TEMPO_AI_DELTA_*` env vars at call time.  Defaults match spec
+ * §6.  `enabled` is the conjunction of the global flag being truthy AND
+ * `TEMPO_AI_MOCK_ONLY !== "true"` — mock-mode CI must never emit `changed`
+ * prose (spec §8, alignment #7).
+ *
+ * @returns {{
+ *   enabled: boolean,
+ *   mockOnly: boolean,
+ *   classifyModel: string,
+ *   writeModel: string,
+ *   timeoutMs: number,
+ * }}
+ */
+export function resolveDeltaConfig() {
+  const enabledRaw = String(process.env.TEMPO_AI_DELTA_ENABLED ?? "").trim().toLowerCase();
+  const mockOnly = String(process.env.TEMPO_AI_MOCK_ONLY ?? "").trim().toLowerCase() === "true";
+  const classifyModel = (process.env.TEMPO_AI_DELTA_CLASSIFY_MODEL ?? "").trim() || DEFAULT_DELTA_CLASSIFY_MODEL;
+  const writeModel = (process.env.TEMPO_AI_DELTA_WRITE_MODEL ?? "").trim() || DEFAULT_DELTA_WRITE_MODEL;
+  const timeoutRaw = Number(process.env.TEMPO_AI_DELTA_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : DEFAULT_DELTA_TIMEOUT_MS;
+  return {
+    enabled: DELTA_ENABLED_TRUTHY.has(enabledRaw) && !mockOnly,
+    mockOnly,
+    classifyModel,
+    writeModel,
+    timeoutMs,
+  };
+}
+
+/**
+ * Convenience boolean — true iff `resolveDeltaConfig().enabled` is true.
+ * Useful for callers that want to short-circuit before constructing a
+ * payload they won't actually send.
+ */
+export function isDeltaLlmEnabled() {
+  return resolveDeltaConfig().enabled;
+}
+
+function resolveModelName(model) {
+  const i = model.indexOf(":");
+  return i !== -1 ? model.slice(i + 1) : model;
+}
+
+function clampConfidence(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+// ── Compact payload builder ─────────────────────────────────────────────────
+//
+// One pure shape feeds both classify and write.  `stage: "classify"` omits
+// per-source body excerpts (spec §6: "Bodies are NOT sent" for Haiku).
+// `stage: "write"` adds an `excerpts` map keyed by added sourceId so Sonnet
+// can quote without seeing the full body (spec §6 / alignment #5: headline
+// + 400-char excerpt is the grounding ceiling).
+
+function joinBody(body) {
+  if (Array.isArray(body)) return body.join(" ");
+  if (typeof body === "string") return body;
+  return "";
+}
+
+function shapeSourcesForPayload(sources) {
+  return (Array.isArray(sources) ? sources : [])
+    .filter((s) => s && typeof s === "object")
+    .map((s) => ({
+      id: typeof s.id === "string" ? s.id : "",
+      outlet: typeof s.outlet === "string" ? s.outlet : "",
+      headline: typeof s.headline === "string" ? s.headline : "",
+    }));
+}
+
+function headlinesOf(sources) {
+  return shapeSourcesForPayload(sources)
+    .map((s) => s.headline)
+    .filter((h) => h.length > 0);
+}
+
+/**
+ * Build the compact payload the classify and write stages share.  Pure —
+ * reads only from the gate output + the two story objects.  Reuses the
+ * gate's reason strings (`added_source:<id>`, `removed_source:<id>`,
+ * `headline_change:<id>`) to derive the structural diff so we don't
+ * re-implement the rules.
+ *
+ * @param {{
+ *   metaStoryId: string,
+ *   priorStory: object|null,
+ *   currentStory: object,
+ *   gate: { signal: string, reasons: string[] },
+ *   stage?: "classify" | "write",
+ * }} input
+ */
+export function buildDeltaPayload({ metaStoryId, priorStory, currentStory, gate, stage = "classify" }) {
+  const reasons = Array.isArray(gate?.reasons) ? gate.reasons : [];
+  const addedSourceIds = [];
+  const removedSourceIds = [];
+  const headlineChangeIds = [];
+  for (const r of reasons) {
+    if (typeof r !== "string") continue;
+    if (r.startsWith("added_source:")) addedSourceIds.push(r.slice("added_source:".length));
+    else if (r.startsWith("removed_source:")) removedSourceIds.push(r.slice("removed_source:".length));
+    else if (r.startsWith("headline_change:")) headlineChangeIds.push(r.slice("headline_change:".length));
+  }
+
+  const priorById = new Map();
+  for (const s of Array.isArray(priorStory?.sources) ? priorStory.sources : []) {
+    if (s && typeof s.id === "string" && s.id.length > 0) priorById.set(s.id, s);
+  }
+  const currentById = new Map();
+  for (const s of Array.isArray(currentStory?.sources) ? currentStory.sources : []) {
+    if (s && typeof s.id === "string" && s.id.length > 0) currentById.set(s.id, s);
+  }
+
+  const headlineChanges = headlineChangeIds.map((id) => ({
+    id,
+    priorHeadline: typeof priorById.get(id)?.headline === "string" ? priorById.get(id).headline : "",
+    currentHeadline: typeof currentById.get(id)?.headline === "string" ? currentById.get(id).headline : "",
+  }));
+
+  const payload = {
+    metaStoryId: typeof metaStoryId === "string" ? metaStoryId : "",
+    gateSignal: gate?.signal ?? "none",
+    gateReasons: reasons.slice(),
+    prior: {
+      headlines: headlinesOf(priorStory?.sources),
+      summary: typeof priorStory?.summary === "string" ? priorStory.summary : "",
+      subtitle: typeof priorStory?.subtitle === "string" ? priorStory.subtitle : "",
+      sources: shapeSourcesForPayload(priorStory?.sources).map(({ outlet, headline }) => ({ outlet, headline })),
+    },
+    current: {
+      headlines: headlinesOf(currentStory?.sources),
+      summary: typeof currentStory?.summary === "string" ? currentStory.summary : "",
+      subtitle: typeof currentStory?.subtitle === "string" ? currentStory.subtitle : "",
+      sources: shapeSourcesForPayload(currentStory?.sources).map(({ outlet, headline }) => ({ outlet, headline })),
+    },
+    diff: {
+      addedSourceIds,
+      removedSourceIds,
+      headlineChanges,
+    },
+  };
+
+  if (stage === "write") {
+    // 400-char excerpt per added source, sliced from the start of the
+    // joined body. Omitted when no body is present so Sonnet doesn't see
+    // an empty string masquerading as evidence.
+    const excerpts = {};
+    for (const id of addedSourceIds) {
+      const src = currentById.get(id);
+      const text = joinBody(src?.body).trim();
+      if (text.length > 0) excerpts[id] = text.slice(0, EXCERPT_MAX_CHARS);
+    }
+    payload.excerpts = excerpts;
+  }
+
+  return payload;
+}
+
+// ── Haiku classify ──────────────────────────────────────────────────────────
+
+function buildClassifyPrompt(payload) {
+  return [
+    "You decide whether a news cluster carries a MATERIAL update compared to its prior snapshot.",
+    "Material = a real change in the substance of coverage (new outlet, new source, new factual angle, or a meaningfully different framing of a previously-covered source).",
+    "NOT material = re-ordering, freshness ticks, duplicate syndication, tag-only differences.",
+    "",
+    "Compact diff (already filtered by a structural gate — `material:true` means you confirm the gate's suspicion):",
+    JSON.stringify(payload),
+    "",
+    'Reply with JSON only — no markdown, no commentary — of shape: {"material": <true|false>, "confidence": <0..1>, "reasonCode": "<short_snake_case_reason>"}',
+  ].join("\n");
+}
+
+/**
+ * Parse a Haiku classify response.  Tolerates ```json``` code fences.
+ * Throws on malformed / missing `material` so the caller can route to
+ * fail-closed unchanged copy.
+ *
+ * @param {string} raw
+ * @returns {{ material: boolean, confidence: number, reasonCode: string }}
+ */
+export function parseClassifyResponse(raw) {
+  const clean = String(raw ?? "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
+  const parsed = JSON.parse(clean);
+  if (parsed === null || typeof parsed !== "object") {
+    throw new Error("classify response: not a JSON object");
+  }
+  if (typeof parsed.material !== "boolean") {
+    throw new Error("classify response: `material` missing or non-boolean");
+  }
+  return {
+    material: parsed.material,
+    confidence: clampConfidence(typeof parsed.confidence === "number" ? parsed.confidence : 0),
+    reasonCode: typeof parsed.reasonCode === "string" ? parsed.reasonCode : "",
+  };
+}
+
+/**
+ * Test hook for the Haiku call.  Production code never sets `create`;
+ * tests assign a function returning a stub `{ messages: { create: ... } }`
+ * client.  Mirrors `_geoAssessClient` in `geo-filter.mjs`.
+ */
+export const _deltaClassifyClient = { create: null };
+
+/**
+ * Anthropic-backed material-delta classifier.  Spec §6.
+ *
+ * Reads model + key + timeout from env at call time.  Fail-closed: any
+ * error / timeout / parse failure resolves to `{ material: false,
+ * confidence: 0, reasonCode: "classify_failed", ok: false }`.  The
+ * orchestrator treats `material: false` and `ok: false` identically (route
+ * to unchanged), but the diagnostics distinguish them so operators can see
+ * "Haiku rejected" vs "Haiku failed".
+ *
+ * @param {object} payload — output of `buildDeltaPayload({stage:"classify"})`
+ * @param {{ classifyFn?: Function, config?: object }} [opts]
+ */
+export async function classifyDeltaMaterial(payload, opts = {}) {
+  // Test path: direct stub bypasses provider/env entirely.  Most unit tests
+  // take this path so they don't have to set TEMPO_ANTHROPIC_API_KEY.
+  if (typeof opts.classifyFn === "function") {
+    try {
+      const stubbed = await opts.classifyFn(payload);
+      return { ...stubbed, ok: true };
+    } catch (err) {
+      return { material: false, confidence: 0, reasonCode: "classify_failed", ok: false, error: err };
+    }
+  }
+
+  const config = opts.config ?? resolveDeltaConfig();
+  const model = config.classifyModel;
+  const provider = providerFor(model);
+  const modelName = resolveModelName(model);
+  const timeoutMs = config.timeoutMs;
+
+  if (provider === "mock-anthropic" || provider === "mock-openai") {
+    // Mock provider → fail-closed unchanged.  We never invent classify
+    // verdicts in mock mode.  Returning material=false routes the
+    // orchestrator to the static `unchanged` copy without ever calling
+    // Sonnet.
+    return { material: false, confidence: 0, reasonCode: "mock_provider_skip", ok: false };
+  }
+  if (provider !== "anthropic") {
+    console.warn(`[what-changed.classify] unsupported provider="${provider}" for model="${model}"`);
+    return { material: false, confidence: 0, reasonCode: "unsupported_provider", ok: false };
+  }
+  const apiKey = process.env.TEMPO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.warn(`[what-changed.classify] missing TEMPO_ANTHROPIC_API_KEY for model="${model}"`);
+    return { material: false, confidence: 0, reasonCode: "missing_api_key", ok: false };
+  }
+
+  const prompt = buildClassifyPrompt(payload);
+  try {
+    const parsed = await withTimeout(
+      async () => {
+        const client = _deltaClassifyClient.create
+          ? _deltaClassifyClient.create({ apiKey, timeoutMs })
+          : new Anthropic({ apiKey, timeout: timeoutMs });
+        const message = await client.messages.create({
+          model: modelName,
+          max_tokens: 128,
+          temperature: 0,
+          messages: [{ role: "user", content: prompt }],
+        });
+        const block = message?.content?.[0];
+        if (!block || block.type !== "text" || !block.text?.trim()) {
+          throw new Error("Anthropic returned empty classify response");
+        }
+        return parseClassifyResponse(block.text);
+      },
+      timeoutMs,
+      `Anthropic classify timed out (${modelName})`
+    );
+    return { ...parsed, ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[what-changed.classify] failed (${modelName}): ${msg}; fail-closed to material=false`);
+    return { material: false, confidence: 0, reasonCode: "classify_failed", ok: false, error: err };
+  }
+}
+
+// ── Sonnet write ────────────────────────────────────────────────────────────
+
+function buildWritePrompt(payload) {
+  return [
+    "You write a 1–2 sentence summary of the MATERIAL DELTA between a prior and current news cluster snapshot.",
+    "Rules:",
+    "- Maximum 2 sentences. Past tense, active voice.",
+    "- Describe ONLY changes attested in the `diff` field (added/removed sources, headline changes, summary/subtitle shifts).",
+    "- Do NOT speculate about motive, audience, or future actions.",
+    "- Do NOT mention outlets that are not present in `current.sources` or `prior.sources`.",
+    "- Do NOT prefix with 'Update:' or 'Latest:'. Start with the substantive change.",
+    "",
+    "Payload:",
+    JSON.stringify(payload),
+    "",
+    "Reply with only the 1–2 sentences. No JSON, no markdown, no commentary.",
+  ].join("\n");
+}
+
+/**
+ * Validate writer prose: strip "Update:" prefix if present (defensive),
+ * truncate to the first MAX_CHANGED_PROSE_SENTENCES sentences, enforce
+ * MAX_CHANGED_PROSE_CHARS.  Returns `{ ok, prose, reason }` — `ok:false`
+ * means the caller should fail-closed to unchanged.
+ *
+ * Trade-off: we truncate when the writer produces > 2 sentences rather
+ * than failing outright.  An extra sentence is a soft style violation;
+ * losing the lede entirely (fail-closed) is worse UX.  Length overflow
+ * after truncation IS a hard fail — we don't try to clip mid-sentence.
+ *
+ * @param {string} raw
+ * @param {object} _payload — currently unused; reserved for future
+ *                            payload-aware validation
+ */
+export function validateChangedProse(raw, _payload) {
+  let text = String(raw ?? "").trim();
+  if (text.length === 0) return { ok: false, prose: "", reason: "empty_prose" };
+
+  // Defensive: strip leading "Update:" / "Latest:" prefixes.  Writers
+  // sometimes ignore the no-prefix instruction; tolerating one prefix is
+  // strictly better than fail-closing on it.
+  text = text.replace(/^(?:update|latest)\s*:\s*/i, "").trim();
+  if (text.length === 0) return { ok: false, prose: "", reason: "empty_after_prefix_strip" };
+
+  // Split on sentence terminators while keeping them attached.  Anything
+  // beyond the cap is dropped; the kept prose stays grammatical because
+  // we keep the terminator with its sentence.
+  const sentenceMatches = text.match(/[^.!?]+[.!?]+(?:\s+|$)/g);
+  if (sentenceMatches && sentenceMatches.length > 0) {
+    const kept = sentenceMatches.slice(0, MAX_CHANGED_PROSE_SENTENCES).join("").trim();
+    if (kept.length > 0) text = kept;
+  }
+  // If there's leftover prose without a terminator (single sentence with
+  // no period), keep it as-is — we don't manufacture punctuation.
+
+  if (text.length > MAX_CHANGED_PROSE_CHARS) {
+    return { ok: false, prose: "", reason: "length_overflow" };
+  }
+  return { ok: true, prose: text, reason: null };
+}
+
+// Known outlet vocabulary for the lightweight hallucination guard.  Spec
+// §6 calls for a NER-light check that "every named entity (outlet name,
+// person, place) in the output must appear in the diff fields or
+// `current.sources[].outlet`".  Full NER is out of scope; we instead look
+// for the small set of outlet names a Sonnet writer is most likely to
+// reach for and require them to be in the allow-set when present.  Add
+// candidates here as production telemetry surfaces them.
+const KNOWN_OUTLET_TOKENS = Object.freeze([
+  "reuters",
+  "bloomberg",
+  "associated press",
+  "the associated press",
+  "afp",
+  "bbc",
+  "cnn",
+  "the new york times",
+  "new york times",
+  "nyt",
+  "the wall street journal",
+  "wall street journal",
+  "wsj",
+  "the washington post",
+  "washington post",
+  "the guardian",
+  "the financial times",
+  "financial times",
+  "ft",
+  "axios",
+  "politico",
+  "semafor",
+  "el tiempo",
+  "el espectador",
+  "el pais",
+  "el país",
+  "semana",
+  "infobae",
+  "noticias caracol",
+  "rcn",
+]);
+
+/**
+ * Lightweight outlet-hallucination guard.  For each known-outlet token
+ * found in the prose, require its normalized form to be in the allow-set
+ * derived from `payload.prior.sources` ∪ `payload.current.sources`.  When
+ * the prose mentions an outlet that isn't in either side of the diff,
+ * fail-closed (the orchestrator routes to unchanged).
+ *
+ * NOT exhaustive — see `KNOWN_OUTLET_TOKENS`.  Telemetry-driven additions
+ * are a fast-follow; spec calls this "start simple".
+ *
+ * @param {string} prose
+ * @param {object} payload
+ * @returns {{ ok: boolean, reason: string|null, offendingOutlet?: string }}
+ */
+export function checkHallucinationGuard(prose, payload) {
+  const allowed = new Set();
+  const collect = (sources) => {
+    for (const s of Array.isArray(sources) ? sources : []) {
+      if (typeof s?.outlet !== "string") continue;
+      const norm = normalizeSourceIdentity(s.outlet);
+      if (norm.length > 0) allowed.add(norm);
+    }
+  };
+  collect(payload?.prior?.sources);
+  collect(payload?.current?.sources);
+
+  const lower = String(prose ?? "").toLowerCase();
+  for (const token of KNOWN_OUTLET_TOKENS) {
+    // Whole-word match so "afp" doesn't match "scaffolding".  The token
+    // itself may contain spaces (multi-word outlets), so we anchor with
+    // simple non-word boundaries on either side via a manual scan rather
+    // than \b (which mishandles spaces).
+    const idx = lower.indexOf(token);
+    if (idx === -1) continue;
+    const before = idx === 0 ? "" : lower[idx - 1];
+    const afterIdx = idx + token.length;
+    const after = afterIdx >= lower.length ? "" : lower[afterIdx];
+    const isBoundaryBefore = before === "" || /[^a-z0-9]/.test(before);
+    const isBoundaryAfter = after === "" || /[^a-z0-9]/.test(after);
+    if (!isBoundaryBefore || !isBoundaryAfter) continue;
+
+    // Substring tolerance: the prose might say "New York Times" while the
+    // payload's outlet is "The New York Times" (or vice versa).  The
+    // KNOWN_OUTLET_TOKENS list carries both forms, so any allowed entry
+    // that is a substring of the token — or has the token as a substring
+    // — counts as a match.  Stops false-flagging well-known masthead
+    // variants when they appear with a different surface form.
+    let allowedHit = false;
+    for (const a of allowed) {
+      if (a === token || a.includes(token) || token.includes(a)) {
+        allowedHit = true;
+        break;
+      }
+    }
+    if (!allowedHit) {
+      return { ok: false, reason: "unknown_outlet", offendingOutlet: token };
+    }
+  }
+  return { ok: true, reason: null };
+}
+
+/**
+ * Test hook for the Sonnet call.  See `_deltaClassifyClient` for the
+ * pattern.
+ */
+export const _deltaWriteClient = { create: null };
+
+/**
+ * Anthropic-backed writer for `changed` prose.  Spec §6.
+ *
+ * Fail-closed: any timeout / SDK error / validation failure / hallucination
+ * trip → `{ ok: false, prose: "", reason }`.  The orchestrator translates
+ * `ok:false` to the unchanged copy + `llmFailed.write` (or
+ * `llmFailed.hallucination`) diagnostic.
+ *
+ * @param {object} payload — output of `buildDeltaPayload({stage:"write"})`
+ * @param {{ writeFn?: Function, config?: object }} [opts]
+ */
+export async function writeDeltaProse(payload, opts = {}) {
+  const run = async () => {
+    if (typeof opts.writeFn === "function") {
+      // Test path: direct stub returns the raw prose; we still validate
+      // length / sentence count / hallucinations so the test contract for
+      // those guards isn't bypassed.
+      const raw = await opts.writeFn(payload);
+      return typeof raw === "string" ? raw : String(raw ?? "");
+    }
+    const config = opts.config ?? resolveDeltaConfig();
+    const model = config.writeModel;
+    const provider = providerFor(model);
+    const modelName = resolveModelName(model);
+    const timeoutMs = config.timeoutMs;
+
+    if (provider === "mock-anthropic" || provider === "mock-openai") {
+      throw new Error("write_mock_provider_skip");
+    }
+    if (provider !== "anthropic") {
+      throw new Error(`unsupported_write_provider:${provider}`);
+    }
+    const apiKey = process.env.TEMPO_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("missing_api_key");
+
+    const prompt = buildWritePrompt(payload);
+    return withTimeout(
+      async () => {
+        const client = _deltaWriteClient.create
+          ? _deltaWriteClient.create({ apiKey, timeoutMs })
+          : new Anthropic({ apiKey, timeout: timeoutMs });
+        const message = await client.messages.create({
+          model: modelName,
+          max_tokens: 200,
+          temperature: 0,
+          messages: [{ role: "user", content: prompt }],
+        });
+        const block = message?.content?.[0];
+        if (!block || block.type !== "text" || !block.text?.trim()) {
+          throw new Error("Anthropic returned empty write response");
+        }
+        return block.text;
+      },
+      timeoutMs,
+      `Anthropic write timed out (${modelName})`
+    );
+  };
+
+  let raw;
+  try {
+    raw = await run();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[what-changed.write] failed: ${msg}; fail-closed to unchanged`);
+    return { ok: false, prose: "", reason: "write_failed", error: err };
+  }
+
+  const validated = validateChangedProse(raw, payload);
+  if (!validated.ok) return { ok: false, prose: "", reason: validated.reason };
+
+  const guard = checkHallucinationGuard(validated.prose, payload);
+  if (!guard.ok) return { ok: false, prose: "", reason: "hallucination", offendingOutlet: guard.offendingOutlet };
+
+  return { ok: true, prose: validated.prose, reason: null };
+}
+
+// ── Async orchestrator (full 3-state resolver) ──────────────────────────────
+
+function emptyDiagnostics() {
+  return {
+    classifySkipped: false,
+    classifyCalled: false,
+    classifyMaterial: false,
+    writeCalled: false,
+    writeOk: false,
+    llmFailed: { classify: false, write: false, hallucination: false },
+    // Per-story stage latency in ms.  Zero when the stage was skipped.
+    // Aggregated into `log.whatChanged.latencyMs` at the pipeline boundary.
+    latencyMs: { classify: 0, write: 0 },
+  };
+}
+
+/**
+ * Full 3-state resolver — the entry point `runRefreshPipeline` calls
+ * per shipped story.  Async because Haiku / Sonnet are awaited; the
+ * mock-only / disabled paths resolve synchronously up to the first
+ * `await` since the early branches don't touch the network.
+ *
+ * State machine (spec §3):
+ *   1. metaStoryId ∉ everSeen          → first-seen   (no LLM)
+ *   2. everSeen + no priorStory        → unchanged    (re-entry, no LLM)
+ *   3. gate.signal === "none"          → unchanged    (no LLM)
+ *   4. weak/strong + LLM disabled      → unchanged    (classifySkipped)
+ *   5. weak/strong + Haiku material=F  → unchanged    (classifyCalled, classifyMaterial=false)
+ *   6. weak/strong + Haiku material=T + Sonnet OK → changed (prose)
+ *   7. weak/strong + Haiku material=T + Sonnet fail → unchanged (llmFailed.write or .hallucination)
+ *
+ * @param {{
+ *   metaStoryId: string,
+ *   currentStory: object,
+ *   priorStory: object|null,
+ *   everSeenMetaStoryIds: string[],
+ * }} input
+ * @param {{
+ *   config?: object,
+ *   classifyFn?: Function,
+ *   writeFn?: Function,
+ * }} [opts]
+ */
+export async function resolveWhatChanged(input, opts = {}) {
+  const { metaStoryId, currentStory, priorStory, everSeenMetaStoryIds } = input ?? {};
+  const everSeen = Array.isArray(everSeenMetaStoryIds) ? new Set(everSeenMetaStoryIds) : new Set();
+  const diagnostics = emptyDiagnostics();
+
+  // 1. first-seen
+  if (typeof metaStoryId !== "string" || metaStoryId.length === 0 || !everSeen.has(metaStoryId)) {
+    diagnostics.classifySkipped = true;
+    return {
+      state: "first-seen",
+      whatChanged: WHAT_CHANGED_COPY.firstSeen,
+      gate: { signal: SIGNAL_NONE, reasons: ["first_seen"] },
+      diagnostics,
+    };
+  }
+
+  // 2. re-entry (ever-seen but no prior story to diff against)
+  if (!priorStory || typeof priorStory !== "object") {
+    diagnostics.classifySkipped = true;
+    return {
+      state: "unchanged",
+      whatChanged: WHAT_CHANGED_COPY.unchanged,
+      gate: { signal: SIGNAL_NONE, reasons: ["no_prior_story"] },
+      diagnostics,
+    };
+  }
+
+  // 3. gate
+  const gate = compareStructuralGate(priorStory, currentStory);
+  if (gate.signal === SIGNAL_NONE) {
+    diagnostics.classifySkipped = true;
+    return {
+      state: "unchanged",
+      whatChanged: WHAT_CHANGED_COPY.unchanged,
+      gate,
+      diagnostics,
+    };
+  }
+
+  // 4. LLM disabled (env off OR mock-only) → unchanged.  Even when the
+  // caller passes classifyFn/writeFn stubs, if the env says off we honor
+  // that — the env is the operator-facing switch and tests should toggle
+  // it explicitly via `opts.config` when they want LLM paths to run.
+  const config = opts.config ?? resolveDeltaConfig();
+  if (!config.enabled) {
+    diagnostics.classifySkipped = true;
+    return {
+      state: "unchanged",
+      whatChanged: WHAT_CHANGED_COPY.unchanged,
+      gate,
+      diagnostics,
+    };
+  }
+
+  // 5. Haiku classify
+  const classifyPayload = buildDeltaPayload({ metaStoryId, priorStory, currentStory, gate, stage: "classify" });
+  const tClassify = Date.now();
+  const classify = await classifyDeltaMaterial(classifyPayload, { classifyFn: opts.classifyFn, config });
+  diagnostics.latencyMs.classify = Date.now() - tClassify;
+  diagnostics.classifyCalled = true;
+  if (!classify.ok) diagnostics.llmFailed.classify = true;
+  diagnostics.classifyMaterial = classify.material === true;
+  if (!classify.material) {
+    return {
+      state: "unchanged",
+      whatChanged: WHAT_CHANGED_COPY.unchanged,
+      gate,
+      diagnostics,
+    };
+  }
+
+  // 6. Sonnet write
+  const writePayload = buildDeltaPayload({ metaStoryId, priorStory, currentStory, gate, stage: "write" });
+  const tWrite = Date.now();
+  const writeResult = await writeDeltaProse(writePayload, { writeFn: opts.writeFn, config });
+  diagnostics.latencyMs.write = Date.now() - tWrite;
+  diagnostics.writeCalled = true;
+  if (writeResult.ok) {
+    diagnostics.writeOk = true;
+    return {
+      state: "changed",
+      whatChanged: writeResult.prose,
+      gate,
+      diagnostics,
+    };
+  }
+  if (writeResult.reason === "hallucination") {
+    diagnostics.llmFailed.hallucination = true;
+  } else {
+    diagnostics.llmFailed.write = true;
+  }
+  return {
+    state: "unchanged",
+    whatChanged: WHAT_CHANGED_COPY.unchanged,
+    gate,
+    diagnostics,
+  };
+}
+
+// ── Run-level diagnostics aggregator (used by the pipeline) ─────────────────
+
+/**
+ * Schema-version stamp for `log.whatChanged` / `_meta.whatChanged`.  Bumped
+ * whenever the counter shape grows or shrinks so downstream consumers (log
+ * scrapers, dashboards) can detect contract changes without inspecting
+ * every key.
+ */
+export const WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION = "whatchanged-v1";
+
+/**
+ * Empty run-level diagnostics shape — every key the aggregator may emit,
+ * pre-initialized to zero/false.  Used as the base for full runs and as
+ * the full payload for the watermark short-circuit branch (with
+ * `watermarkShortCircuited: true`).
+ */
+export function emptyWhatChangedRunDiagnostics() {
+  return {
+    schemaVersion: WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION,
+    firstSeen: 0,
+    unchanged: 0,
+    changed: 0,
+    gateStrong: 0,
+    gateWeak: 0,
+    gateNone: 0,
+    classifySkipped: 0,
+    classifyCalled: 0,
+    classifyMaterialTrue: 0,
+    classifyMaterialFalse: 0,
+    writeCalled: 0,
+    writeOk: 0,
+    llmFailed: { classify: 0, write: 0, hallucination: 0 },
+    latencyMs: { classify: 0, write: 0 },
+    watermarkShortCircuited: false,
+  };
+}
+
+/**
+ * Fold per-story `resolveWhatChanged` results into a single run-level
+ * diagnostic object suitable for `log.whatChanged` → `_lastRunMeta.whatChanged`.
+ *
+ * `extras` carries optional pass-through counts the pipeline knows but
+ * individual stories don't (e.g. `everSeenCount`, `priorStoryCount`).
+ * Those keys are added only when supplied so the diagnostic shape stays
+ * minimal when callers don't care.
+ *
+ * State vs gate counters overlap by design.  `firstSeen` / `unchanged` /
+ * `changed` count the resolved **state** of each story.  `gateStrong` /
+ * `gateWeak` / `gateNone` count the **structural gate signal** that fed
+ * the resolver.  First-seen stories short-circuit before the gate runs
+ * and carry `gate.signal === "none"` with reason `first_seen`, so they
+ * are counted in BOTH `firstSeen` (state) AND `gateNone` (gate signal).
+ * That double-attribution is intentional — operators read state counters
+ * to answer "what did the user see?" and gate counters to answer "did
+ * the structural diff find anything?", and the two questions have
+ * different answers on first-seen stories.
+ *
+ * @param {Array<{state:string, gate:{signal:string}, diagnostics:object}>} perStoryResults
+ * @param {{ everSeenCount?: number, priorStoryCount?: number }} [extras]
+ * @returns {object}
+ */
+export function aggregateWhatChangedDiagnostics(perStoryResults, extras = {}) {
+  const agg = emptyWhatChangedRunDiagnostics();
+  for (const r of perStoryResults ?? []) {
+    if (!r || typeof r !== "object") continue;
+
+    if (r.state === "first-seen") agg.firstSeen += 1;
+    else if (r.state === "changed") agg.changed += 1;
+    else agg.unchanged += 1;
+
+    const signal = r.gate?.signal;
+    if (signal === "strong") agg.gateStrong += 1;
+    else if (signal === "weak") agg.gateWeak += 1;
+    else agg.gateNone += 1;
+
+    const d = r.diagnostics ?? {};
+    if (d.classifySkipped) agg.classifySkipped += 1;
+    if (d.classifyCalled) agg.classifyCalled += 1;
+    if (d.classifyCalled && d.classifyMaterial === true) agg.classifyMaterialTrue += 1;
+    if (d.classifyCalled && d.classifyMaterial === false) agg.classifyMaterialFalse += 1;
+    if (d.writeCalled) agg.writeCalled += 1;
+    if (d.writeOk) agg.writeOk += 1;
+
+    const f = d.llmFailed ?? {};
+    if (f.classify) agg.llmFailed.classify += 1;
+    if (f.write) agg.llmFailed.write += 1;
+    if (f.hallucination) agg.llmFailed.hallucination += 1;
+
+    const lat = d.latencyMs ?? {};
+    if (typeof lat.classify === "number" && Number.isFinite(lat.classify)) {
+      agg.latencyMs.classify += lat.classify;
+    }
+    if (typeof lat.write === "number" && Number.isFinite(lat.write)) {
+      agg.latencyMs.write += lat.write;
+    }
+  }
+  if (typeof extras.everSeenCount === "number") agg.everSeenCount = extras.everSeenCount;
+  if (typeof extras.priorStoryCount === "number") agg.priorStoryCount = extras.priorStoryCount;
+  return agg;
+}

@@ -2,6 +2,54 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-18 - D-065 - What-changed delta engine (3-state hybrid)
+
+#### Context
+
+`story.whatChanged` shipped as `` `Latest update ${freshestMinutesAgo} min ago.` `` — a freshness restatement, not a change signal. It told the user **when** the freshest source landed but never **whether** the narrative had moved. The Mercedes Osma sessions ([interview synthesis](../01-research/interview-synthesis--zero-to-one--mercedes-osma.md)) flagged this as the top monitoring-first pain: comms leads constantly self-interrupt drafting to check if the story changed before they can finalize a response. A line labeled `whatChanged` that only reports freshness creates expectation of delta semantics it cannot deliver — a trust leak on the dashboard's most monitoring-shaped affordance.
+
+#### Decision
+
+Replace the freshness template with a **3-state hybrid delta engine** (first-seen / unchanged / changed) wired into `runRefreshPipeline` after the R1 sort + tag overlay, before the funnel summary:
+
+- **Deterministic structural gate first.** Cheap rules over `sources[].id`, `sources[].outlet` (normalized), `sources[].headline`, `summary`, `subtitle`, and (defensively) `title`. Emits `none` / `weak` / `strong` with a `reasons[]` trail. Filters out reorder, freshness ticks, syndication duplicates, and tag-only changes upfront.
+- **Optional Haiku classify** (`TEMPO_AI_DELTA_CLASSIFY_MODEL`, default `anthropic:claude-haiku-4-5-20251001`) on weak/strong gate signals — confirms material intent or rejects.
+- **Optional Sonnet write** (`TEMPO_AI_DELTA_WRITE_MODEL`, default `anthropic:claude-sonnet-4-6`) on Haiku-confirmed material, producing 1–2 sentences grounded to the structured evidence diff. Hallucination guard rejects outlets not in either prior or current `sources[].outlet` (using a known-outlet vocabulary; see spec §6).
+- **Ever-seen persistence.** `_everSeenMetaStoryIds: string[]` on the snapshot payload (sibling of `_watermark` / `_selectionMeta` / `_lastCheckedAt` / `_lastRunMeta`), merged on each successful write, stripped from client responses. Drives the first-seen branch without a separate Postgres table — JSONB on the existing row is enough for MVP.
+- **Default off.** `TEMPO_AI_DELTA_ENABLED=false` keeps the LLM stages dormant. Without an explicit opt-in (per-environment env flip), refreshes ship only deterministic first-seen / unchanged copy. `TEMPO_AI_MOCK_ONLY=true` vetoes the LLM path regardless of `DELTA_ENABLED`.
+- **Fail-closed everywhere.** Any timeout, parse error, length overflow, or hallucination trip routes to the static unchanged copy. We never synthesize a "something probably happened" sentence.
+- **Run-level diagnostics.** `log.whatChanged` (schemaVersion `whatchanged-v1`) carries state counters, gate-signal breakdown, classify / write call counts, `llmFailed.*`, latency, and a `watermarkShortCircuited` flag. Persisted via `_lastRunMeta.whatChanged` and surfaced on `_meta.whatChanged` for `GET /api/dashboard`.
+
+Shipped across five commits on `feat/what-changed-delta-engine`: `3a9803f` (spec), `70b4734` (persistence), `7230b5b` (gate), `3c90cef` (LLM stages), `0f75206` (pipeline wiring + observability). See [what-changed-spec.md](docs/what-changed-spec.md) for the full contract, scenario table, and implementation map; [what-changed-handoff.md](docs/what-changed-handoff.md) for staging rollout + counter glossary.
+
+#### Why
+
+- **Trust surface, false-positive-first.** A wrong "Updated:" line is worse than a quiet "no material update". The deterministic gate filters out the bulk of false-positive cases (re-syndication, reorder) for free; LLMs only see signals worth confirming.
+- **Two-stage LLM over single-stage.** Haiku gates the writer cheaply on shorter context; Sonnet only sees clusters the classifier already confirmed are material. Splitting keeps writer calls rare and stops single-stage "classify + write" from writing under uncertainty.
+- **Default-off lets us ship the foundation without burning cost.** Phase 4 retires the misleading freshness template right away (CI / unopted prod now ships honest first-seen / unchanged copy); LLM uplift is one env flip and a staging soak away.
+
+#### Tradeoffs
+
+- **Pre-lock vs post-lock asymmetry.** The engine runs against pre-lock current stories (locks are applied later in `server.mjs`) but compares against the persisted prior snapshot, which was lock-applied at write time. Worst case: when a title lock masks underlying drift, the gate may emit a weak `title_change` / `subtitle_change` signal. Both are weak-only and Haiku can reject — the cost is one extra classify call. Spec §7 / alignment #8 picks pre-lock for symmetry with what the user will see post-lock. Storing a pre-lock snapshot side-by-side is a fast-follow if telemetry shows real noise.
+
+- **`firstSeen` + `gateNone` double-count by design.** First-seen stories short-circuit before the structural gate runs and carry `gate.signal === "none"` with reason `first_seen`. They increment both `firstSeen` (state) and `gateNone` (structural). Operators read state counters to answer "what did the user see?" and gate counters to answer "did the structural diff find anything?" — first-seen stories have different answers in those two buckets, so both numbers are honest. Documented in spec §9 and on `aggregateWhatChangedDiagnostics`'s JSDoc.
+
+- **Watermark short-circuit re-serves prior `whatChanged` verbatim.** When the candidate set hasn't moved (watermark match), the route serves the prior snapshot's stories untouched — including the `whatChanged` strings. By design (spec §10 row 6 / alignment #6): nothing material has changed, so the prior delta classification is still the truthful answer. Recomputing on a watermark skip would burn LLM cost for an identical result.
+
+- **Serial per-story LLM loop.** R1-sorted dashboards are small (~≤10 stories), so worst-case enabled latency is `N × (Haiku + Sonnet)`. We avoided parallelism to keep ordering deterministic and diagnostics simple. Revisit if Haiku/Sonnet latency dominates a refresh.
+
+- **Hallucination guard is heuristic, not NER.** A small known-outlet vocabulary (`KNOWN_OUTLET_TOKENS`) catches the Sonnet writer reaching for outlets not in the diff. Misses for outlets outside that list are accepted as a fast-follow item — spec §6 calls this "start simple".
+
+#### Rollback
+
+- **One-flag rollback.** `TEMPO_AI_DELTA_ENABLED=false` in the environment immediately reverts every shipped story to the deterministic first-seen / unchanged branch. No code change, no migration, no schema change.
+
+- **Full revert.** The entire engine + wiring sits on `feat/what-changed-delta-engine` as five sequential commits; reverting the branch restores the prior `whatChanged` field shape. The freshness template (`Latest update ${freshestMinutesAgo} min ago.`) was removed in Phase 4 and is **not** re-introduced on a flag flip. If a hard rollback to the legacy copy is ever needed, revert commit `0f75206` (Phase 4 wiring) along with the placeholder import — `storySchema.whatChanged: z.string().min(1)` is unchanged, so the contract surface stays valid.
+
+- **Ever-seen persistence remains.** `_everSeenMetaStoryIds` continues to populate even with the LLM off — it's deterministic state other monitoring features may build on. Safe to leave in place across rollbacks.
+
+---
+
 ### 2026-05-17 - D-064a - D-064 follow-ups: backfill, single-source synonyms, synonym-aware alias resolve
 
 #### Context

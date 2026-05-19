@@ -44,6 +44,13 @@ import {
   emptyAggregateAxisDiagnostics,
   resolveSemanticTagConfig,
 } from "./meta-story-semantic-mapper.mjs";
+import {
+  WHAT_CHANGED_COPY,
+  WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION,
+  aggregateWhatChangedDiagnostics,
+  emptyWhatChangedRunDiagnostics,
+  resolveWhatChanged,
+} from "./what-changed-engine.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -764,7 +771,6 @@ function buildStory(metaStory, sourceItems, settings) {
 
   const maxWeight = Math.max(...sourceItems.map((i) => i.weight), 0);
   const priority = maxWeight >= 80 ? "top" : "standard";
-  const freshestMinutesAgo = Math.min(...sourceItems.map((i) => i.minutesAgo));
 
   const story = {
     id: metaStory.meta_story_id,
@@ -775,7 +781,12 @@ function buildStory(metaStory, sourceItems, settings) {
     takeaway: metaStory.summary,
     summary: metaStory.summary,
     whyItMatters: metaStory.subtitle,
-    whatChanged: `Latest update ${freshestMinutesAgo} min ago.`,
+    // Phase 4 (what-changed): set to a schema-valid placeholder here and
+    // overwritten by the per-story `resolveWhatChanged` loop further down
+    // (see "Phase 4: compute whatChanged per story").  The legacy
+    // freshness-template default is retired; the pipeline always replaces
+    // this value before the payload is returned.
+    whatChanged: WHAT_CHANGED_COPY.unchanged,
     priority,
     // `outletCount` reports unique source identities (one per distinct outlet/
     // handle); the prototype's collapsed story-card chip surfaces this as
@@ -839,6 +850,23 @@ function buildStory(metaStory, sourceItems, settings) {
  * @param {Function} [opts.readHeldFn]       — injectable hold bucket reader; returns previously held items
  * @param {Function} [opts.writeHeldFn]      — injectable hold bucket writer (for tests)
  * @param {Function} [opts.readPriorSnapshotFn] — injectable prior snapshot reader (for ID lineage continuity)
+ * @param {string[]} [opts.everSeenMetaStoryIds]  — what-changed: union of every metaStoryId
+ *                                                  previously shipped to this user.  Populated by
+ *                                                  the route handler from the prior snapshot's
+ *                                                  `_everSeenMetaStoryIds`.  Drives the first-seen
+ *                                                  branch of the engine; count surfaces on
+ *                                                  `log.whatChanged.everSeenCount`.
+ * @param {Map<string,object>} [opts.priorStoriesById] — what-changed: map of prior story payloads
+ *                                                  keyed by metaStoryId.  The delta engine diffs
+ *                                                  current vs prior for the gate; count surfaces on
+ *                                                  `log.whatChanged.priorStoryCount`.
+ * @param {Function} [opts.classifyFn]              — test injection: stub for Haiku classify.
+ *                                                  Production reads model + key from env via
+ *                                                  `resolveDeltaConfig()`; tests pass a stub here.
+ * @param {Function} [opts.writeFn]                 — test injection: stub for Sonnet write.
+ * @param {object}   [opts.deltaConfig]             — test injection: override of
+ *                                                  `resolveDeltaConfig()` so tests can enable LLM
+ *                                                  paths without env mutation.
  * @param {Array}    [opts.manifestFeeds]    — manifest feed list for source matching (Phase 2)
  * @param {object}   [opts.aliasMap]         — merged alias map (Supabase ∪ repo fallback)
  * @param {string[]} [opts.fallbackFeedIds]  — env-configured fallback baseline feed IDs
@@ -904,6 +932,18 @@ export async function runRefreshPipeline({
   semanticBeatFitConfig = null,
   semanticBeatFitEmbedFn = null,
   semanticBeatFitProfileCache = null,
+  // What-changed engine inputs.  The route handler reads the prior snapshot
+  // once and hands both priors in: `everSeenMetaStoryIds` drives the
+  // first-seen branch; `priorStoriesById` is the per-`metaStoryId` map the
+  // structural gate diffs against.  `classifyFn` / `writeFn` / `deltaConfig`
+  // are test injection points — production reads env via
+  // `resolveDeltaConfig()` and stays disabled until an operator sets
+  // `TEMPO_AI_DELTA_ENABLED=true`.
+  everSeenMetaStoryIds = null,
+  priorStoriesById = null,
+  classifyFn = null,
+  writeFn = null,
+  deltaConfig = null,
 }) {
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
@@ -913,6 +953,17 @@ export async function runRefreshPipeline({
     typeof semanticBeatFitEmbedFn === "function"
       ? semanticBeatFitEmbedFn
       : embedFn;
+  // What-changed pass-through counts, folded into `log.whatChanged` on
+  // both the watermark short-circuit and the full-run branch so operators
+  // can confirm the engine saw its priors.  Local names are prefixed to
+  // avoid shadowing the unrelated `priorStoryCount` option above (which
+  // counts the prior *snapshot's* stories for the watermark trap-guard,
+  // not the size of the lookup map used here).
+  const whatChangedEverSeenCount = Array.isArray(everSeenMetaStoryIds) ? everSeenMetaStoryIds.length : 0;
+  const whatChangedPriorStoryCount =
+    priorStoriesById && typeof priorStoriesById.size === "number"
+      ? priorStoriesById.size
+      : 0;
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
   if (normErrors.length > 0) {
@@ -1361,6 +1412,19 @@ export async function runRefreshPipeline({
           },
           beatFitResult,
         }),
+        // What-changed on the watermark short-circuit (spec §10 row 6):
+        // the prior snapshot's `whatChanged` strings are re-served by the
+        // route handler verbatim — we never recompute the engine on a
+        // skip.  All counters are zero; `watermarkShortCircuited:true`
+        // flags the branch.  `everSeenCount` / `priorStoryCount` are
+        // surfaced so operators can confirm the prior was loaded even
+        // when the engine itself didn't run.
+        whatChanged: {
+          ...emptyWhatChangedRunDiagnostics(),
+          watermarkShortCircuited: true,
+          everSeenCount: whatChangedEverSeenCount,
+          priorStoryCount: whatChangedPriorStoryCount,
+        },
       },
     };
   }
@@ -1570,6 +1634,63 @@ export async function runRefreshPipeline({
       `  semantic_geographies=off(locked)`
   );
 
+  // ── Phase 4: compute whatChanged per story ───────────────────────────────
+  // Runs after R1 sort + tag overlay so the engine compares the same
+  // story shape the user will see (modulo title locks, which are applied
+  // post-pipeline in `server.mjs` — see spec §7 / alignment #8 for the
+  // pre-lock vs post-lock asymmetry).  Default is OFF: `resolveDeltaConfig()`
+  // reads `TEMPO_AI_DELTA_ENABLED` at call time and only routes weak/strong
+  // gate signals through Haiku → Sonnet when an operator opts in.  Until
+  // then, every story resolves to first-seen or unchanged from the gate
+  // alone — no LLM calls in CI/prod.
+  const perStoryWhatChanged = [];
+  for (const story of stories) {
+    const priorStory = priorStoriesById && typeof priorStoriesById.get === "function"
+      ? priorStoriesById.get(story.metaStoryId) ?? null
+      : null;
+    // Serial loop is intentional for MVP: typical R1-sorted dashboard size
+    // is small (~≤10 stories), and serializing keeps log/diagnostics
+    // ordering deterministic.  Revisit if Haiku/Sonnet latency becomes a
+    // dominant pipeline contributor.
+    // eslint-disable-next-line no-await-in-loop
+    const result = await resolveWhatChanged(
+      {
+        metaStoryId: story.metaStoryId,
+        currentStory: story,
+        priorStory,
+        everSeenMetaStoryIds: everSeenMetaStoryIds ?? [],
+      },
+      { classifyFn, writeFn, config: deltaConfig ?? undefined }
+    );
+    story.whatChanged = result.whatChanged;
+    perStoryWhatChanged.push(result);
+  }
+  const whatChangedDiagnostics = aggregateWhatChangedDiagnostics(perStoryWhatChanged, {
+    everSeenCount: whatChangedEverSeenCount,
+    priorStoryCount: whatChangedPriorStoryCount,
+  });
+  console.log(
+    `[pipeline.whatChanged]` +
+      ` schema=${whatChangedDiagnostics.schemaVersion}` +
+      ` first_seen=${whatChangedDiagnostics.firstSeen}` +
+      ` unchanged=${whatChangedDiagnostics.unchanged}` +
+      ` changed=${whatChangedDiagnostics.changed}` +
+      ` gate_strong=${whatChangedDiagnostics.gateStrong}` +
+      ` gate_weak=${whatChangedDiagnostics.gateWeak}` +
+      ` gate_none=${whatChangedDiagnostics.gateNone}` +
+      ` classify_skipped=${whatChangedDiagnostics.classifySkipped}` +
+      ` classify_called=${whatChangedDiagnostics.classifyCalled}` +
+      ` classify_true=${whatChangedDiagnostics.classifyMaterialTrue}` +
+      ` classify_false=${whatChangedDiagnostics.classifyMaterialFalse}` +
+      ` write_called=${whatChangedDiagnostics.writeCalled}` +
+      ` write_ok=${whatChangedDiagnostics.writeOk}` +
+      ` llm_failed_classify=${whatChangedDiagnostics.llmFailed.classify}` +
+      ` llm_failed_write=${whatChangedDiagnostics.llmFailed.write}` +
+      ` llm_failed_hallucination=${whatChangedDiagnostics.llmFailed.hallucination}` +
+      ` latency_classify_ms=${whatChangedDiagnostics.latencyMs.classify}` +
+      ` latency_write_ms=${whatChangedDiagnostics.latencyMs.write}`
+  );
+
   const payload = {
     contractVersion,
     stories,
@@ -1692,6 +1813,12 @@ export async function runRefreshPipeline({
       },
       beatFitResult,
     }),
+    // Run-level what-changed diagnostics aggregated from the per-story
+    // `resolveWhatChanged` results above.  Persisted via
+    // `_lastRunMeta.whatChanged` and surfaced under `_meta.whatChanged` so
+    // operators can answer "how often did the engine fire and what did it
+    // decide?" without re-running refresh.
+    whatChanged: whatChangedDiagnostics,
   };
 
   return { payload, log };

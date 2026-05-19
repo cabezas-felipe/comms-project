@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is primarily a **product discovery research repository** (Markdown-first). Engineering for the Tempo prototype and shared packages lives under [`05-engineering`](05-engineering): run **`cd 05-engineering && npm install`** then **`npm run dev`**, **`npm run build`**, **`npm run test:packages`**, etc. See [`05-engineering/README.md`](05-engineering/README.md).
 
+Dashboard `story.whatChanged` is produced by the **3-state delta engine** — deterministic structural gate plus optional Haiku + Sonnet stages, **default off** until `TEMPO_AI_DELTA_ENABLED=true`. See [`what-changed-spec.md`](05-engineering/docs/what-changed-spec.md) and the [handoff](05-engineering/docs/what-changed-handoff.md).
+
 ## Linking Convention
 
 Per `.cursor/rules/markdown-links.mdc`:

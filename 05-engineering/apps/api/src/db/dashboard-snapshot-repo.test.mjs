@@ -12,7 +12,7 @@ process.env.TEMPO_DATA_DIR = tmpDir;
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks } = await import(
+const { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks, mergeEverSeenMetaStoryIds, extractEverSeenFromSnapshot } = await import(
   "./dashboard-snapshot-repo.mjs"
 );
 
@@ -316,4 +316,110 @@ test("readSnapshot: partial _lastRunMeta lifts only the present keys (no undefin
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "funnel"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "recall"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "beatFit"), false);
+});
+
+// ─── What-changed Phase 1: ever-seen helpers ─────────────────────────────────
+
+test("mergeEverSeenMetaStoryIds: appends new ids preserving oldest-first order", () => {
+  const out = mergeEverSeenMetaStoryIds(["a", "b"], ["c", "d"]);
+  assert.deepEqual(out, ["a", "b", "c", "d"]);
+});
+
+test("mergeEverSeenMetaStoryIds: dedupes when current overlaps prior; prior keeps its position", () => {
+  const out = mergeEverSeenMetaStoryIds(["a", "b", "c"], ["b", "d", "a"]);
+  // a/b/c keep their original positions; only "d" is appended.
+  assert.deepEqual(out, ["a", "b", "c", "d"]);
+});
+
+test("mergeEverSeenMetaStoryIds: empty / null priors are treated as no-history", () => {
+  assert.deepEqual(mergeEverSeenMetaStoryIds(null, ["x", "y"]), ["x", "y"]);
+  assert.deepEqual(mergeEverSeenMetaStoryIds(undefined, ["x"]), ["x"]);
+  assert.deepEqual(mergeEverSeenMetaStoryIds([], ["x"]), ["x"]);
+});
+
+test("mergeEverSeenMetaStoryIds: empty / null current preserves prior verbatim", () => {
+  assert.deepEqual(mergeEverSeenMetaStoryIds(["a", "b"], []), ["a", "b"]);
+  assert.deepEqual(mergeEverSeenMetaStoryIds(["a", "b"], null), ["a", "b"]);
+});
+
+test("mergeEverSeenMetaStoryIds: drops non-string / empty entries from either side", () => {
+  const out = mergeEverSeenMetaStoryIds(["a", null, "", 42, "b"], ["b", undefined, "c"]);
+  assert.deepEqual(out, ["a", "b", "c"]);
+});
+
+test("mergeEverSeenMetaStoryIds: dedupes within the current array itself", () => {
+  const out = mergeEverSeenMetaStoryIds([], ["x", "x", "y", "x"]);
+  assert.deepEqual(out, ["x", "y"]);
+});
+
+test("extractEverSeenFromSnapshot: returns array as-is filtering non-strings", () => {
+  const snapshot = { _everSeenMetaStoryIds: ["a", "", null, "b", 7, "c"] };
+  assert.deepEqual(extractEverSeenFromSnapshot(snapshot), ["a", "b", "c"]);
+});
+
+test("extractEverSeenFromSnapshot: returns [] for missing / null / non-array values", () => {
+  assert.deepEqual(extractEverSeenFromSnapshot(null), []);
+  assert.deepEqual(extractEverSeenFromSnapshot(undefined), []);
+  assert.deepEqual(extractEverSeenFromSnapshot({}), []);
+  assert.deepEqual(extractEverSeenFromSnapshot({ _everSeenMetaStoryIds: "not-an-array" }), []);
+});
+
+test("writeSnapshot + readSnapshot: _lastRunMeta.whatChanged round-trips into _meta.whatChanged", async () => {
+  const userId = "whatchanged-meta-roundtrip";
+  const WHAT_CHANGED = {
+    schemaVersion: "whatchanged-v1",
+    firstSeen: 2,
+    unchanged: 3,
+    changed: 1,
+    gateStrong: 1,
+    gateWeak: 0,
+    gateNone: 5,
+    classifySkipped: 5,
+    classifyCalled: 1,
+    classifyMaterialTrue: 1,
+    classifyMaterialFalse: 0,
+    writeCalled: 1,
+    writeOk: 1,
+    llmFailed: { classify: 0, write: 0, hallucination: 0 },
+    latencyMs: { classify: 42, write: 113 },
+    watermarkShortCircuited: false,
+    everSeenCount: 6,
+    priorStoryCount: 6,
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: { whatChanged: WHAT_CHANGED },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta.whatChanged, WHAT_CHANGED);
+  // Backward-compat guard: nothing else in _lastRunMeta should leak when only
+  // `whatChanged` was set on write.
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "funnel"), false);
+  // Internal storage key must not leak at the top level — lifted into _meta.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot: snapshots without _lastRunMeta.whatChanged omit _meta.whatChanged (backward compat)", async () => {
+  const userId = "whatchanged-meta-legacy";
+  await writeSnapshot(userId, SAMPLE_PAYLOAD);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "whatChanged"), false);
+});
+
+test("writeSnapshot + readSnapshot: _everSeenMetaStoryIds round-trips on the snapshot (not in _meta)", async () => {
+  const userId = "ever-seen-roundtrip-user";
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _everSeenMetaStoryIds: ["story-1", "story-2"],
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  // Internal field is preserved on the top-level snapshot so the route handler
+  // can merge it on the next refresh.
+  assert.deepEqual(result._everSeenMetaStoryIds, ["story-1", "story-2"]);
+  // But it must NOT appear under _meta — _meta is what clients see.
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "everSeenMetaStoryIds"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "_everSeenMetaStoryIds"), false);
 });

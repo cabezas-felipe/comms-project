@@ -19,7 +19,7 @@ import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
-import { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket } from "./db/dashboard-snapshot-repo.mjs";
+import { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket, mergeEverSeenMetaStoryIds, extractEverSeenFromSnapshot } from "./db/dashboard-snapshot-repo.mjs";
 import { appendRejections as appendStoryRejections } from "./db/story-rejection-log-repo.mjs";
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
@@ -714,14 +714,31 @@ app.get("/api/ingestion/sources", async (_req, res) => {
 });
 
 // ─── Dashboard response helpers ──────────────────────────────────────────────
-// The `_selectionMeta` (Phase 2) and `_watermark` (Phase 4) fields are
-// persisted alongside the contract payload but must NOT leak into the response
-// body — they're surfaced under `_meta.selection` / `_meta.watermark` instead.
-// Both dashboard routes (GET, POST refresh, POST bootstrap) repeat the same
-// strip+reattach dance, so it lives here in one place.
+// The `_selectionMeta` (Phase 2), `_watermark` (Phase 4), and
+// `_everSeenMetaStoryIds` (what-changed Phase 1) fields are persisted
+// alongside the contract payload but must NOT leak into the response body —
+// `_selectionMeta` / `_watermark` are surfaced under `_meta.selection` /
+// `_meta.watermark`, and `_everSeenMetaStoryIds` is internal-only (history
+// scope, not for clients). Both dashboard routes (GET, POST refresh, POST
+// bootstrap) repeat the same strip+reattach dance, so it lives here in one
+// place.
 
 function stripPersistedFields(snapshot) {
-  const { _meta = {}, _selectionMeta, _watermark, ...body } = snapshot ?? {};
+  // `_lastRunMeta` is consumed by `liftSnapshotMeta` on subsequent reads
+  // and lifted into `_meta.{funnel,recall,tags,whatChanged,…}`; it must
+  // not leak into the immediate refresh-response body (the manually-built
+  // `_meta` on that branch is the only surface clients should see).
+  // `_everSeenMetaStoryIds` is internal-only history state.  Both are
+  // destructured out below; the rename aliases (`_unused*`) just satisfy
+  // the lint convention for intentionally-discarded keys.
+  const {
+    _meta = {},
+    _selectionMeta,
+    _watermark,
+    _everSeenMetaStoryIds: _unusedEverSeen,
+    _lastRunMeta: _unusedLastRunMeta,
+    ...body
+  } = snapshot ?? {};
   return { body, baseMeta: _meta, selectionMeta: _selectionMeta, watermark: _watermark };
 }
 
@@ -910,6 +927,30 @@ async function executeRefreshFlow(identity) {
     const priorStoryCount = Array.isArray(priorSnapshot?.stories)
       ? priorSnapshot.stories.length
       : null;
+    // What-changed wiring: read priors from the persisted snapshot once and
+    // feed both to the pipeline. `extractEverSeenFromSnapshot` gives the
+    // history set that drives the first-seen branch; `priorStoriesById`
+    // gives the per-`metaStoryId` lookup the structural gate diffs against.
+    // The pipeline returns run-level diagnostics on `log.whatChanged`,
+    // persisted below as `_lastRunMeta.whatChanged` and lifted into
+    // `_meta.whatChanged` on subsequent reads.
+    //
+    // Pre-lock vs post-lock asymmetry (spec alignment #8): the engine runs
+    // inside the pipeline BEFORE title locks are applied to the current
+    // story (locks are applied below in this route handler).  But
+    // `priorStoriesById` is built from the PERSISTED prior snapshot, which
+    // was lock-applied at write time.  MVP accepts that asymmetry — worst
+    // case is an occasional weak `subtitle_change` / `title_change` signal
+    // when the lock masks underlying drift; both are weak-only and Haiku
+    // can reject downstream.  Moving the engine post-lock or storing a
+    // pre-lock snapshot side-by-side is a fast-follow if telemetry shows
+    // material noise.
+    const priorEverSeenMetaStoryIds = extractEverSeenFromSnapshot(priorSnapshot);
+    const priorStoriesById = new Map(
+      (Array.isArray(priorSnapshot?.stories) ? priorSnapshot.stories : [])
+        .filter((s) => s && typeof s.metaStoryId === "string" && s.metaStoryId.length > 0)
+        .map((s) => [s.metaStoryId, s])
+    );
 
     // Decorate the in-memory settings with the narrative so buildProfileText
     // picks it up.  We never persist this back — it's transient per refresh.
@@ -934,6 +975,8 @@ async function executeRefreshFlow(identity) {
       fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
       priorWatermark,
       priorStoryCount,
+      everSeenMetaStoryIds: priorEverSeenMetaStoryIds,
+      priorStoriesById,
     });
 
     // ─── Phase 4 short-circuit: watermark unchanged ─────────────────────────
@@ -1032,6 +1075,15 @@ async function executeRefreshFlow(identity) {
     // /api/dashboard, bootstrap served_fresh_snapshot) surface the same value
     // the refresh response carries.  On a full run, this equals refreshedAt.
     finalPayload._lastCheckedAt = lastCheckedAt;
+    // What-changed: union prior ever-seen with the current run's shipped
+    // metaStoryIds, preserving oldest-first insertion order. Only advanced
+    // when a fresh snapshot is actually written (watermark-skip /
+    // in-flight / error-fallback all skip this branch and inherit the
+    // prior snapshot's array verbatim).
+    finalPayload._everSeenMetaStoryIds = mergeEverSeenMetaStoryIds(
+      priorEverSeenMetaStoryIds,
+      lockedStories.map((s) => s.metaStoryId)
+    );
     // M3b / P1: persist last-run diagnostics so GET /api/dashboard can explain
     // funnel/recall/beatFit/model identity without re-running refresh.  Keys
     // are individually optional — older pipeline returns that lack one of
@@ -1046,6 +1098,11 @@ async function executeRefreshFlow(identity) {
     // `GET /api/dashboard` can surface "was semantic widening on for this
     // run, and how often did it fire?" without re-running the pipeline.
     if (log.tags !== undefined) lastRunMeta.tags = log.tags;
+    // What-changed (Phase 4): run-level diagnostics for the delta engine.
+    // Surfaced under `_meta.whatChanged` on subsequent dashboard reads so
+    // operators can audit first-seen / unchanged / changed counts and any
+    // LLM failures without replaying the pipeline.
+    if (log.whatChanged !== undefined) lastRunMeta.whatChanged = log.whatChanged;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
