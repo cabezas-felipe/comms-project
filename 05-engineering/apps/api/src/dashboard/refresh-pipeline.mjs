@@ -839,6 +839,16 @@ function buildStory(metaStory, sourceItems, settings) {
  * @param {Function} [opts.readHeldFn]       — injectable hold bucket reader; returns previously held items
  * @param {Function} [opts.writeHeldFn]      — injectable hold bucket writer (for tests)
  * @param {Function} [opts.readPriorSnapshotFn] — injectable prior snapshot reader (for ID lineage continuity)
+ * @param {string[]} [opts.everSeenMetaStoryIds]  — what-changed Phase 1 pass-through:
+ *                                                  union of every metaStoryId previously shipped
+ *                                                  to this user. Populated by the route handler from
+ *                                                  the prior snapshot's `_everSeenMetaStoryIds`.
+ *                                                  Not consumed by the pipeline in Phase 1 beyond a
+ *                                                  count surfaced on `log.whatChangedPrep`.
+ * @param {Map<string,object>} [opts.priorStoriesById] — what-changed Phase 1 pass-through: map of
+ *                                                  prior story payloads keyed by metaStoryId. The
+ *                                                  upcoming delta engine will diff current vs prior;
+ *                                                  Phase 1 only counts the entries for diagnostics.
  * @param {Array}    [opts.manifestFeeds]    — manifest feed list for source matching (Phase 2)
  * @param {object}   [opts.aliasMap]         — merged alias map (Supabase ∪ repo fallback)
  * @param {string[]} [opts.fallbackFeedIds]  — env-configured fallback baseline feed IDs
@@ -904,6 +914,12 @@ export async function runRefreshPipeline({
   semanticBeatFitConfig = null,
   semanticBeatFitEmbedFn = null,
   semanticBeatFitProfileCache = null,
+  // What-changed Phase 1: pass-through only. The pipeline accepts these so
+  // the route handler doesn't double-read the prior snapshot once the delta
+  // engine lands, but Phase 1 only surfaces counts on `log.whatChangedPrep`.
+  // `buildStory` continues to emit the deprecated freshness template.
+  everSeenMetaStoryIds = null,
+  priorStoriesById = null,
 }) {
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
@@ -913,6 +929,16 @@ export async function runRefreshPipeline({
     typeof semanticBeatFitEmbedFn === "function"
       ? semanticBeatFitEmbedFn
       : embedFn;
+  // What-changed Phase 1 prep diagnostics. Surfaced on both the watermark
+  // short-circuit log and the full-run log so an operator can confirm the
+  // pass-through is wired before the delta engine lands.
+  const whatChangedPrep = {
+    everSeenCount: Array.isArray(everSeenMetaStoryIds) ? everSeenMetaStoryIds.length : 0,
+    priorStoryCount:
+      priorStoriesById && typeof priorStoriesById.size === "number"
+        ? priorStoriesById.size
+        : 0,
+  };
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
   if (normErrors.length > 0) {
@@ -1361,6 +1387,7 @@ export async function runRefreshPipeline({
           },
           beatFitResult,
         }),
+        whatChangedPrep,
       },
     };
   }
@@ -1692,6 +1719,10 @@ export async function runRefreshPipeline({
       },
       beatFitResult,
     }),
+    // What-changed Phase 1: pass-through counts. Confirms the route handler
+    // is feeding the engine its priors before the engine itself lands in a
+    // later phase.
+    whatChangedPrep,
   };
 
   return { payload, log };

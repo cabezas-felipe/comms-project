@@ -81,6 +81,11 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // backward compat with snapshots written before Phase 4.
     if (_lastRunMeta.tags !== undefined) meta.tags = _lastRunMeta.tags;
   }
+  // `_everSeenMetaStoryIds` (what-changed Phase 1) passes through `...rest` so
+  // the route handler can read it off the returned snapshot for the next
+  // merge. It is intentionally NOT lifted into `_meta` — history scope must
+  // not leak into client responses. `stripPersistedFields` in server.mjs is
+  // the gate that strips it before responding.
   return { ...rest, stories: normalizeStoriesForLoad(stories), _meta: meta };
 }
 
@@ -340,4 +345,51 @@ export async function readHoldBucket(userId) {
 export async function writeHoldBucket(userId, items) {
   if (isSupabaseEnabled()) return writeHoldBucketSupabase(userId, items);
   return writeHoldBucketFile(userId, items);
+}
+
+// ─── What-changed (Phase 1): ever-seen meta-story id set ─────────────────────
+//
+// The persisted snapshot payload carries `_everSeenMetaStoryIds: string[]` —
+// the union of every `metaStoryId` ever shipped on this user's dashboard.
+// It drives the "first-seen" branch of the upcoming delta engine. The field
+// lives on the payload alongside `_watermark` / `_selectionMeta` / `_lastCheckedAt`;
+// `stripPersistedFields` in server.mjs strips it before responding to clients
+// so history scope never leaks. See `docs/what-changed-spec.md` §4.
+
+/**
+ * Reads the ever-seen `metaStoryId` array off a loaded snapshot. Defensive:
+ * filters to strings so a corrupt persisted blob can't surface non-string
+ * entries into the in-memory set.
+ *
+ * @param {object|null|undefined} snapshot — result of `readSnapshot(userId)`
+ * @returns {string[]}
+ */
+export function extractEverSeenFromSnapshot(snapshot) {
+  const raw = snapshot?._everSeenMetaStoryIds;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((id) => typeof id === "string" && id.length > 0);
+}
+
+/**
+ * Merges the prior ever-seen array with the current run's metaStoryIds.
+ * Deduplicates while preserving insertion order (oldest-first per spec §4):
+ * prior ids keep their original positions; new ids are appended in the order
+ * the current refresh emitted them.
+ *
+ * @param {string[]|null|undefined} priorIds
+ * @param {Array<string|null|undefined>} currentMetaStoryIds
+ * @returns {string[]}
+ */
+export function mergeEverSeenMetaStoryIds(priorIds, currentMetaStoryIds) {
+  const seen = new Set();
+  const out = [];
+  const append = (id) => {
+    if (typeof id !== "string" || id.length === 0) return;
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(id);
+  };
+  if (Array.isArray(priorIds)) for (const id of priorIds) append(id);
+  if (Array.isArray(currentMetaStoryIds)) for (const id of currentMetaStoryIds) append(id);
+  return out;
 }

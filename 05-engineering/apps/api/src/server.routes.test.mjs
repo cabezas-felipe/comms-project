@@ -600,6 +600,335 @@ test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns 
   }
 });
 
+// ─── What-changed Phase 1: ever-seen persistence + non-exposure ──────────────
+
+test("POST /api/dashboard/refresh: persisted snapshot includes merged _everSeenMetaStoryIds", async () => {
+  let writtenPayload = null;
+  const prevWrite = _snapshotRepo.write;
+  const prevRead = _snapshotRepo.read;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  // Simulate a prior snapshot carrying two historical metaStoryIds so we can
+  // assert the merge appends new ones without dropping the originals.
+  _snapshotRepo.read = async () => ({
+    contractVersion: VALID_BODY.contractVersion,
+    stories: [],
+    _everSeenMetaStoryIds: ["prior-a", "prior-b"],
+    _meta: { hasSnapshot: true, refreshedAt: "2026-05-12T00:00:00.000Z" },
+  });
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(writtenPayload !== null, "snapshot must be persisted on success");
+    assert.ok(Array.isArray(writtenPayload._everSeenMetaStoryIds));
+    // Prior ids remain in their oldest-first positions.
+    assert.equal(writtenPayload._everSeenMetaStoryIds[0], "prior-a");
+    assert.equal(writtenPayload._everSeenMetaStoryIds[1], "prior-b");
+    // Any metaStoryIds emitted by the current run get appended after them.
+    const currentIds = writtenPayload.stories
+      .map((s) => s.metaStoryId)
+      .filter((id) => typeof id === "string" && id.length > 0);
+    for (const id of currentIds) {
+      assert.ok(
+        writtenPayload._everSeenMetaStoryIds.includes(id),
+        `current metaStoryId ${id} must be in the merged ever-seen array`
+      );
+    }
+    // No duplicates.
+    const unique = new Set(writtenPayload._everSeenMetaStoryIds);
+    assert.equal(unique.size, writtenPayload._everSeenMetaStoryIds.length);
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: ever-seen merge across two runs preserves prior ids and dedupes overlaps", async () => {
+  // Stub the pipeline so each run produces a deterministic payload with a
+  // unique watermark — sidestepping the production watermark short-circuit
+  // that would otherwise suppress the second write when nothing changed.
+  // The merge correctness is what's under test here.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const writes = [];
+  let nextRead = {
+    contractVersion: VALID_BODY.contractVersion,
+    stories: [],
+    _everSeenMetaStoryIds: ["seed-1"],
+    _meta: { hasSnapshot: true, refreshedAt: "2026-05-12T00:00:00.000Z" },
+  };
+  let runIndex = 0;
+  _snapshotRepo.read = async () => nextRead;
+  _snapshotRepo.write = async (_uid, payload) => {
+    writes.push(payload);
+    nextRead = {
+      ...payload,
+      _meta: { hasSnapshot: true, refreshedAt: "2026-05-12T00:00:00.000Z" },
+    };
+  };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  const buildStubStory = (metaStoryId) => ({
+    id: metaStoryId,
+    metaStoryId,
+    title: `Story ${metaStoryId}`,
+    subtitle: "S",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    takeaway: "T",
+    summary: "S",
+    whyItMatters: "W",
+    whatChanged: "C",
+    priority: "standard",
+    outletCount: 1,
+    tags: { topics: [], keywords: [], geographies: [] },
+    sources: [
+      {
+        id: `src-${metaStoryId}`,
+        outlet: "Reuters",
+        kind: "traditional",
+        weight: 50,
+        url: "https://example.com",
+        minutesAgo: 5,
+        headline: "H",
+        body: ["B"],
+      },
+    ],
+  });
+  _refreshPipeline.run = async () => {
+    runIndex += 1;
+    // First run emits seed-1 + new-1; second run emits seed-1 (overlap) + new-2.
+    const stories = runIndex === 1
+      ? [buildStubStory("seed-1"), buildStubStory("new-1")]
+      : [buildStubStory("seed-1"), buildStubStory("new-2")];
+    return {
+      payload: { contractVersion: VALID_BODY.contractVersion, stories },
+      log: {
+        unchanged: false,
+        poolCount: stories.length,
+        relevantCount: stories.length,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: `wm-${runIndex}`,
+        candidateCount: stories.length,
+        selectedFeedCount: 1,
+        selection: {},
+      },
+    };
+  };
+  try {
+    await request(app).post("/api/dashboard/refresh");
+    await request(app).post("/api/dashboard/refresh");
+    assert.equal(writes.length, 2, "stubbed pipeline must produce two writes");
+    const first = writes[0]._everSeenMetaStoryIds;
+    const second = writes[1]._everSeenMetaStoryIds;
+    // First run: prior seed-1 + currently emitted seed-1 (dedup) + new-1.
+    assert.deepEqual(first, ["seed-1", "new-1"]);
+    // Second run: prior [seed-1, new-1] + currently emitted seed-1 (dedup) + new-2.
+    assert.deepEqual(second, ["seed-1", "new-1", "new-2"]);
+    // No duplicates in either snapshot.
+    assert.equal(new Set(first).size, first.length);
+    assert.equal(new Set(second).size, second.length);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: response body does NOT expose _everSeenMetaStoryIds", async () => {
+  const prevWrite = _snapshotRepo.write;
+  const prevRead = _snapshotRepo.read;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.read = async () => ({
+    contractVersion: VALID_BODY.contractVersion,
+    stories: [],
+    _everSeenMetaStoryIds: ["leak-check-a", "leak-check-b"],
+    _meta: { hasSnapshot: true, refreshedAt: "2026-05-12T00:00:00.000Z" },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._everSeenMetaStoryIds, undefined);
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(res.body, "_everSeenMetaStoryIds"),
+      "_everSeenMetaStoryIds must be stripped from refresh response body"
+    );
+    assert.equal(
+      JSON.stringify(res.body).includes("leak-check-a"),
+      false,
+      "history ids must not appear anywhere in the response body"
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("GET /api/dashboard: response body does NOT expose _everSeenMetaStoryIds", async () => {
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => ({
+    contractVersion: VALID_BODY.contractVersion,
+    stories: [],
+    _everSeenMetaStoryIds: ["get-leak-a", "get-leak-b"],
+    _meta: { hasSnapshot: true, refreshedAt: "2026-05-12T00:00:00.000Z" },
+  });
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._everSeenMetaStoryIds, undefined);
+    assert.ok(!Object.prototype.hasOwnProperty.call(res.body, "_everSeenMetaStoryIds"));
+    assert.equal(JSON.stringify(res.body).includes("get-leak-a"), false);
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
+test("POST /api/dashboard/refresh: pipeline receives ever-seen + priorStoriesById pass-through", async () => {
+  let capturedOpts = null;
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.read = async () => ({
+    contractVersion: VALID_BODY.contractVersion,
+    stories: [
+      {
+        id: "ms-1",
+        metaStoryId: "ms-1",
+        title: "Prior 1",
+        subtitle: "S",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        takeaway: "T",
+        summary: "S",
+        whyItMatters: "W",
+        whatChanged: "C",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: [] },
+        sources: [],
+      },
+      {
+        id: "ms-2",
+        metaStoryId: "ms-2",
+        title: "Prior 2",
+        subtitle: "S",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        takeaway: "T",
+        summary: "S",
+        whyItMatters: "W",
+        whatChanged: "C",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: [] },
+        sources: [],
+      },
+    ],
+    _everSeenMetaStoryIds: ["ms-1", "ms-2", "ms-3"],
+    _meta: { hasSnapshot: true, refreshedAt: "2026-05-12T00:00:00.000Z" },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async (opts) => {
+    capturedOpts = opts;
+    // Return a minimal valid pipeline result so the route handler proceeds.
+    return {
+      payload: { contractVersion: VALID_BODY.contractVersion, stories: [] },
+      log: {
+        unchanged: false,
+        poolCount: 0,
+        relevantCount: 0,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "",
+        candidateCount: 0,
+        selectedFeedCount: 0,
+        selection: {},
+      },
+    };
+  };
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(capturedOpts !== null, "pipeline must have been invoked");
+    assert.deepEqual(capturedOpts.everSeenMetaStoryIds, ["ms-1", "ms-2", "ms-3"]);
+    assert.ok(capturedOpts.priorStoriesById instanceof Map, "priorStoriesById must be a Map");
+    assert.equal(capturedOpts.priorStoriesById.size, 2);
+    assert.equal(capturedOpts.priorStoriesById.get("ms-1")?.title, "Prior 1");
+    assert.equal(capturedOpts.priorStoriesById.get("ms-2")?.title, "Prior 2");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: ever-seen NOT advanced on watermark short-circuit (prior snapshot re-served)", async () => {
+  // Watermark short-circuit returns payload: null and the route handler must
+  // skip the snapshot write entirely — so ever-seen on disk stays where it
+  // was on the prior snapshot.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  let writeCalled = false;
+  _snapshotRepo.read = async () => ({
+    contractVersion: VALID_BODY.contractVersion,
+    stories: [],
+    _everSeenMetaStoryIds: ["should-not-grow"],
+    _meta: { hasSnapshot: true, refreshedAt: "2026-05-12T00:00:00.000Z" },
+  });
+  _snapshotRepo.write = async () => { writeCalled = true; };
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-stable",
+      candidateCount: 0,
+      selectedFeedCount: 0,
+      selection: {},
+    },
+  });
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(writeCalled, false, "watermark short-circuit must not call _snapshotRepo.write");
+    // Response body must not expose the ever-seen array either.
+    assert.equal(res.body._everSeenMetaStoryIds, undefined);
+    assert.equal(JSON.stringify(res.body).includes("should-not-grow"), false);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+  }
+});
+
 test("POST /api/dashboard/refresh: embedFn throws WITH lexical hits → lexical fallback (degraded, not hard-empty)", async () => {
   // The dashboard false-empty regression we are guarding against: a real
   // embedding outage with obvious lexical matches (the fixture item carries

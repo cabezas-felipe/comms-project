@@ -19,7 +19,7 @@ import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
-import { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket } from "./db/dashboard-snapshot-repo.mjs";
+import { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket, mergeEverSeenMetaStoryIds, extractEverSeenFromSnapshot } from "./db/dashboard-snapshot-repo.mjs";
 import { appendRejections as appendStoryRejections } from "./db/story-rejection-log-repo.mjs";
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
@@ -714,14 +714,17 @@ app.get("/api/ingestion/sources", async (_req, res) => {
 });
 
 // ─── Dashboard response helpers ──────────────────────────────────────────────
-// The `_selectionMeta` (Phase 2) and `_watermark` (Phase 4) fields are
-// persisted alongside the contract payload but must NOT leak into the response
-// body — they're surfaced under `_meta.selection` / `_meta.watermark` instead.
-// Both dashboard routes (GET, POST refresh, POST bootstrap) repeat the same
-// strip+reattach dance, so it lives here in one place.
+// The `_selectionMeta` (Phase 2), `_watermark` (Phase 4), and
+// `_everSeenMetaStoryIds` (what-changed Phase 1) fields are persisted
+// alongside the contract payload but must NOT leak into the response body —
+// `_selectionMeta` / `_watermark` are surfaced under `_meta.selection` /
+// `_meta.watermark`, and `_everSeenMetaStoryIds` is internal-only (history
+// scope, not for clients). Both dashboard routes (GET, POST refresh, POST
+// bootstrap) repeat the same strip+reattach dance, so it lives here in one
+// place.
 
 function stripPersistedFields(snapshot) {
-  const { _meta = {}, _selectionMeta, _watermark, ...body } = snapshot ?? {};
+  const { _meta = {}, _selectionMeta, _watermark, _everSeenMetaStoryIds: _stripped, ...body } = snapshot ?? {};
   return { body, baseMeta: _meta, selectionMeta: _selectionMeta, watermark: _watermark };
 }
 
@@ -910,6 +913,17 @@ async function executeRefreshFlow(identity) {
     const priorStoryCount = Array.isArray(priorSnapshot?.stories)
       ? priorSnapshot.stories.length
       : null;
+    // What-changed Phase 1: pass-through wiring. The pipeline accepts the
+    // ever-seen set and a `metaStoryId → priorStory` index so a later phase
+    // can compute first-seen / unchanged / changed without re-reading the
+    // snapshot. In Phase 1 these only feed `log.whatChangedPrep` diagnostics;
+    // `buildStory` still emits the deprecated freshness template.
+    const priorEverSeenMetaStoryIds = extractEverSeenFromSnapshot(priorSnapshot);
+    const priorStoriesById = new Map(
+      (Array.isArray(priorSnapshot?.stories) ? priorSnapshot.stories : [])
+        .filter((s) => s && typeof s.metaStoryId === "string" && s.metaStoryId.length > 0)
+        .map((s) => [s.metaStoryId, s])
+    );
 
     // Decorate the in-memory settings with the narrative so buildProfileText
     // picks it up.  We never persist this back — it's transient per refresh.
@@ -934,6 +948,8 @@ async function executeRefreshFlow(identity) {
       fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
       priorWatermark,
       priorStoryCount,
+      everSeenMetaStoryIds: priorEverSeenMetaStoryIds,
+      priorStoriesById,
     });
 
     // ─── Phase 4 short-circuit: watermark unchanged ─────────────────────────
@@ -1032,6 +1048,15 @@ async function executeRefreshFlow(identity) {
     // /api/dashboard, bootstrap served_fresh_snapshot) surface the same value
     // the refresh response carries.  On a full run, this equals refreshedAt.
     finalPayload._lastCheckedAt = lastCheckedAt;
+    // What-changed Phase 1: union prior ever-seen with the current run's
+    // shipped metaStoryIds, preserving oldest-first insertion order. Only
+    // advanced when a fresh snapshot is actually written (watermark-skip /
+    // in-flight / error-fallback all skip this branch and inherit the prior
+    // snapshot's array verbatim).
+    finalPayload._everSeenMetaStoryIds = mergeEverSeenMetaStoryIds(
+      priorEverSeenMetaStoryIds,
+      lockedStories.map((s) => s.metaStoryId)
+    );
     // M3b / P1: persist last-run diagnostics so GET /api/dashboard can explain
     // funnel/recall/beatFit/model identity without re-running refresh.  Keys
     // are individually optional — older pipeline returns that lack one of
