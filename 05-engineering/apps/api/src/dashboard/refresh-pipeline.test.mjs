@@ -5866,3 +5866,215 @@ test("Semantic BeatFit: log surfaces version, model, latency, and score buckets"
   }
   assert.equal(typeof log.semanticBeatFit.latencyMs, "number");
 });
+
+// ─── What-changed Phase 4: pipeline integration ──────────────────────────────
+//
+// These tests verify the engine runs per-story after the R1 sort + tag
+// overlay, that `log.whatChanged` carries the run-level diagnostics, and
+// that the deprecated `Latest update N min ago.` template is gone from
+// every shipped story.  LLM stages stay stubbed — production reads env at
+// call time and stays disabled by default until an operator opts in.
+
+import { WHAT_CHANGED_COPY, WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION } from "./what-changed-engine.mjs";
+
+const PHASE4_ENABLED_CONFIG = {
+  enabled: true,
+  mockOnly: false,
+  classifyModel: "anthropic:claude-haiku-4-5-20251001",
+  writeModel: "anthropic:claude-sonnet-4-6",
+  timeoutMs: 2500,
+};
+
+function assertNoFreshnessTemplate(stories) {
+  for (const s of stories) {
+    assert.ok(
+      !/Latest update .* min ago\./.test(s.whatChanged ?? ""),
+      `story "${s.metaStoryId}" still carries the legacy freshness template: "${s.whatChanged}"`
+    );
+  }
+}
+
+test("Phase 4 — first refresh (empty ever-seen): every shipped story gets first-seen copy + log.whatChanged.firstSeen counts", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    everSeenMetaStoryIds: [],
+    priorStoriesById: new Map(),
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(payload.stories[0].whatChanged, WHAT_CHANGED_COPY.firstSeen);
+  assertNoFreshnessTemplate(payload.stories);
+  assert.ok(log.whatChanged);
+  assert.equal(log.whatChanged.schemaVersion, WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION);
+  assert.equal(log.whatChanged.firstSeen, payload.stories.length);
+  assert.equal(log.whatChanged.unchanged, 0);
+  assert.equal(log.whatChanged.changed, 0);
+  assert.equal(log.whatChanged.classifySkipped, payload.stories.length);
+  assert.equal(log.whatChanged.classifyCalled, 0);
+  assert.equal(log.whatChanged.everSeenCount, 0);
+  assert.equal(log.whatChanged.priorStoryCount, 0);
+});
+
+test("Phase 4 — second refresh (same metaStoryId, no structural change): unchanged copy + gateNone increments", async () => {
+  const metaStoryId = "diplomatic-relations-developments";
+  // The prior story matches the cluster output buildStory will produce
+  // (same sources[].id, same headline, same summary), so the gate should
+  // see no material change.
+  const priorStory = {
+    id: metaStoryId,
+    metaStoryId,
+    title: "Diplomatic Relations Developments",
+    subtitle: "Recent diplomatic updates.",
+    summary: "Diplomatic relations updates tracked.",
+    sources: [
+      { id: "src-1", outlet: "Reuters", headline: "Test Headline", minutesAgo: 0, body: ["Test body."] },
+    ],
+  };
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    everSeenMetaStoryIds: [metaStoryId],
+    priorStoriesById: new Map([[metaStoryId, priorStory]]),
+  });
+  assert.equal(payload.stories[0].whatChanged, WHAT_CHANGED_COPY.unchanged);
+  assertNoFreshnessTemplate(payload.stories);
+  assert.equal(log.whatChanged.firstSeen, 0);
+  assert.equal(log.whatChanged.unchanged, 1);
+  assert.equal(log.whatChanged.gateNone, 1);
+  assert.equal(log.whatChanged.gateStrong, 0);
+  assert.equal(log.whatChanged.classifyCalled, 0);
+});
+
+test("Phase 4 — strong gate + deltaConfig enabled + classify/write stubs → state:'changed' with stubbed prose on story", async () => {
+  const metaStoryId = "diplomatic-relations-developments";
+  // Prior story carries a different set of sources so the gate fires
+  // strong (added_source + new_outlet).
+  const priorStory = {
+    id: metaStoryId,
+    metaStoryId,
+    title: "Diplomatic Relations Developments",
+    subtitle: "Recent diplomatic updates.",
+    summary: "Diplomatic relations updates tracked.",
+    sources: [
+      { id: "src-prior-only", outlet: "AP", headline: "Old headline", minutesAgo: 600, body: ["Old body."] },
+    ],
+  };
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let classifyCalled = false;
+  let writeCalled = false;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    everSeenMetaStoryIds: [metaStoryId],
+    priorStoriesById: new Map([[metaStoryId, priorStory]]),
+    deltaConfig: PHASE4_ENABLED_CONFIG,
+    classifyFn: async () => { classifyCalled = true; return { material: true, confidence: 0.9, reasonCode: "new_outlet" }; },
+    writeFn: async () => { writeCalled = true; return "Reuters joined coverage with a new diplomatic angle."; },
+  });
+  assert.equal(classifyCalled, true);
+  assert.equal(writeCalled, true);
+  assert.equal(payload.stories[0].whatChanged, "Reuters joined coverage with a new diplomatic angle.");
+  assertNoFreshnessTemplate(payload.stories);
+  assert.equal(log.whatChanged.changed, 1);
+  assert.equal(log.whatChanged.gateStrong, 1);
+  assert.equal(log.whatChanged.classifyCalled, 1);
+  assert.equal(log.whatChanged.classifyMaterialTrue, 1);
+  assert.equal(log.whatChanged.writeCalled, 1);
+  assert.equal(log.whatChanged.writeOk, 1);
+});
+
+test("Phase 4 — deltaConfig disabled + strong gate → unchanged copy + classifySkipped (stubs not called)", async () => {
+  const metaStoryId = "diplomatic-relations-developments";
+  const priorStory = {
+    id: metaStoryId,
+    metaStoryId,
+    title: "Diplomatic Relations Developments",
+    subtitle: "Recent diplomatic updates.",
+    summary: "Diplomatic relations updates tracked.",
+    sources: [
+      { id: "src-prior-only", outlet: "AP", headline: "Old headline", minutesAgo: 600, body: ["Old body."] },
+    ],
+  };
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let classifyCalled = false;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    everSeenMetaStoryIds: [metaStoryId],
+    priorStoriesById: new Map([[metaStoryId, priorStory]]),
+    deltaConfig: { ...PHASE4_ENABLED_CONFIG, enabled: false },
+    classifyFn: async () => { classifyCalled = true; return { material: true }; },
+  });
+  assert.equal(classifyCalled, false, "disabled config must veto classify");
+  assert.equal(payload.stories[0].whatChanged, WHAT_CHANGED_COPY.unchanged);
+  assert.equal(log.whatChanged.classifySkipped, 1);
+  assert.equal(log.whatChanged.classifyCalled, 0);
+  // The gate still ran and saw strong signals.
+  assert.equal(log.whatChanged.gateStrong, 1);
+});
+
+test("Phase 4 — watermark short-circuit: log.whatChanged.watermarkShortCircuited=true, no payload built, no freshness template emitted", async () => {
+  // Run twice with the same input — the second run hits the watermark
+  // short-circuit because the candidate set is identical.  The pipeline
+  // returns `payload: null` and the engine never runs.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const first = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    everSeenMetaStoryIds: [],
+    priorStoriesById: new Map(),
+  });
+  const second = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+    priorWatermark: first.log.watermark,
+    priorStoryCount: first.payload.stories.length,
+    everSeenMetaStoryIds: [first.payload.stories[0].metaStoryId],
+    priorStoriesById: new Map([[first.payload.stories[0].metaStoryId, first.payload.stories[0]]]),
+  });
+  assert.equal(second.payload, null, "watermark match must short-circuit payload build");
+  assert.equal(second.log.unchanged, true);
+  assert.ok(second.log.whatChanged, "log.whatChanged must be present on watermark skip");
+  assert.equal(second.log.whatChanged.watermarkShortCircuited, true);
+  assert.equal(second.log.whatChanged.firstSeen, 0);
+  assert.equal(second.log.whatChanged.unchanged, 0);
+  assert.equal(second.log.whatChanged.changed, 0);
+  assert.equal(second.log.whatChanged.schemaVersion, WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION);
+  // Sanity: first run's stories never carried the freshness template either.
+  assertNoFreshnessTemplate(first.payload.stories);
+});
+
+test("Phase 4 — no story ever ships the legacy `Latest update … min ago.` template (regression guard)", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 5 }),
+    makeItem({ sourceId: "src-2", outlet: "Reuters", minutesAgo: 60 }),
+  ];
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-04-22-slice1",
+  });
+  assertNoFreshnessTemplate(payload.stories);
+});

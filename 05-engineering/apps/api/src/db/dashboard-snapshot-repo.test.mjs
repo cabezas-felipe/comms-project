@@ -364,6 +364,50 @@ test("extractEverSeenFromSnapshot: returns [] for missing / null / non-array val
   assert.deepEqual(extractEverSeenFromSnapshot({ _everSeenMetaStoryIds: "not-an-array" }), []);
 });
 
+test("writeSnapshot + readSnapshot: _lastRunMeta.whatChanged round-trips into _meta.whatChanged", async () => {
+  const userId = "whatchanged-meta-roundtrip";
+  const WHAT_CHANGED = {
+    schemaVersion: "whatchanged-v1",
+    firstSeen: 2,
+    unchanged: 3,
+    changed: 1,
+    gateStrong: 1,
+    gateWeak: 0,
+    gateNone: 5,
+    classifySkipped: 5,
+    classifyCalled: 1,
+    classifyMaterialTrue: 1,
+    classifyMaterialFalse: 0,
+    writeCalled: 1,
+    writeOk: 1,
+    llmFailed: { classify: 0, write: 0, hallucination: 0 },
+    latencyMs: { classify: 42, write: 113 },
+    watermarkShortCircuited: false,
+    everSeenCount: 6,
+    priorStoryCount: 6,
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: { whatChanged: WHAT_CHANGED },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta.whatChanged, WHAT_CHANGED);
+  // Backward-compat guard: nothing else in _lastRunMeta should leak when only
+  // `whatChanged` was set on write.
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "funnel"), false);
+  // Internal storage key must not leak at the top level — lifted into _meta.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot: snapshots without _lastRunMeta.whatChanged omit _meta.whatChanged (backward compat)", async () => {
+  const userId = "whatchanged-meta-legacy";
+  await writeSnapshot(userId, SAMPLE_PAYLOAD);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "whatChanged"), false);
+});
+
 test("writeSnapshot + readSnapshot: _everSeenMetaStoryIds round-trips on the snapshot (not in _meta)", async () => {
   const userId = "ever-seen-roundtrip-user";
   await writeSnapshot(userId, {

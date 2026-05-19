@@ -294,7 +294,9 @@ test("GET /api/dashboard returns persisted snapshot when one exists", async () =
         takeaway: "Takeaway",
         summary: "Summary.",
         whyItMatters: "Why.",
-        whatChanged: "Latest update 30 min ago.",
+        // Match the post–Phase 4 unchanged copy so fixtures don't carry the
+        // retired freshness-template wording next to the new regression guards.
+        whatChanged: "No material update since your last refresh.",
         priority: "standard",
         outletCount: 1,
         tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
@@ -799,6 +801,150 @@ test("GET /api/dashboard: response body does NOT expose _everSeenMetaStoryIds", 
     assert.equal(JSON.stringify(res.body).includes("get-leak-a"), false);
   } finally {
     _snapshotRepo.read = prev;
+  }
+});
+
+test("GET /api/dashboard: exposes _meta.whatChanged counters when snapshot carries _lastRunMeta.whatChanged (Phase 4)", async () => {
+  // The snapshot loader (`liftSnapshotMeta`) lifts `_lastRunMeta.whatChanged`
+  // into `_meta.whatChanged` so dashboard reads can answer "what did the
+  // delta engine do on the last refresh?" without replaying the pipeline.
+  // Internal storage keys must NOT appear at the top level — only under
+  // `_meta`.
+  const prev = _snapshotRepo.read;
+  const WHAT_CHANGED = {
+    schemaVersion: "whatchanged-v1",
+    firstSeen: 1,
+    unchanged: 2,
+    changed: 0,
+    gateStrong: 0,
+    gateWeak: 0,
+    gateNone: 3,
+    classifySkipped: 3,
+    classifyCalled: 0,
+    classifyMaterialTrue: 0,
+    classifyMaterialFalse: 0,
+    writeCalled: 0,
+    writeOk: 0,
+    llmFailed: { classify: 0, write: 0, hallucination: 0 },
+    latencyMs: { classify: 0, write: 0 },
+    watermarkShortCircuited: false,
+  };
+  _snapshotRepo.read = async () => ({
+    contractVersion: VALID_BODY.contractVersion,
+    stories: [],
+    _everSeenMetaStoryIds: ["seed-1"],
+    _meta: { hasSnapshot: true, refreshedAt: "2026-05-12T00:00:00.000Z", whatChanged: WHAT_CHANGED },
+  });
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body._meta?.whatChanged, WHAT_CHANGED);
+    // Internal-only keys must stay stripped.
+    assert.equal(res.body._everSeenMetaStoryIds, undefined);
+    assert.equal(res.body._lastRunMeta, undefined);
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
+test("POST /api/dashboard/refresh: persists log.whatChanged onto _lastRunMeta (Phase 4 E2E)", async () => {
+  // Closes the loop GET-side test stops at: a successful refresh whose
+  // pipeline emits `log.whatChanged` must persist that object verbatim onto
+  // `finalPayload._lastRunMeta.whatChanged` (which the snapshot loader then
+  // lifts into `_meta.whatChanged` on subsequent reads).  The response body
+  // must NOT expose the internal storage keys.
+  const WHAT_CHANGED = {
+    schemaVersion: "whatchanged-v1",
+    firstSeen: 1,
+    unchanged: 0,
+    changed: 0,
+    gateStrong: 0,
+    gateWeak: 0,
+    gateNone: 1,
+    classifySkipped: 1,
+    classifyCalled: 0,
+    classifyMaterialTrue: 0,
+    classifyMaterialFalse: 0,
+    writeCalled: 0,
+    writeOk: 0,
+    llmFailed: { classify: 0, write: 0, hallucination: 0 },
+    latencyMs: { classify: 0, write: 0 },
+    watermarkShortCircuited: false,
+    everSeenCount: 0,
+    priorStoryCount: 0,
+  };
+  const STUB_STORY = {
+    id: "ms-new",
+    metaStoryId: "ms-new",
+    title: "Stub Story",
+    subtitle: "S",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    takeaway: "T",
+    summary: "S",
+    whyItMatters: "W",
+    whatChanged: "First appearance in your feed.",
+    priority: "standard",
+    outletCount: 1,
+    tags: { topics: [], keywords: [], geographies: [] },
+    sources: [
+      {
+        id: "src-1",
+        outlet: "Reuters",
+        kind: "traditional",
+        weight: 50,
+        url: "https://example.com",
+        minutesAgo: 5,
+        headline: "H",
+        body: ["B"],
+      },
+    ],
+  };
+  let writtenPayload = null;
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: { contractVersion: VALID_BODY.contractVersion, stories: [STUB_STORY] },
+    log: {
+      unchanged: false,
+      poolCount: 1,
+      relevantCount: 1,
+      usedFallbackClustering: false,
+      groundingFailures: 0,
+      droppedUngroundedStoryCount: 0,
+      groundingDropReasons: {},
+      watermark: "wm-1",
+      candidateCount: 1,
+      selectedFeedCount: 1,
+      selection: {},
+      whatChanged: WHAT_CHANGED,
+    },
+  });
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    // Snapshot write captured the run-level diagnostics under _lastRunMeta.
+    assert.ok(writtenPayload !== null, "snapshot must be written on success");
+    assert.ok(writtenPayload._lastRunMeta, "_lastRunMeta must be set on the persisted payload");
+    assert.deepEqual(writtenPayload._lastRunMeta.whatChanged, WHAT_CHANGED);
+    // Internal storage keys must NOT leak into the client response body.
+    assert.equal(res.body._lastRunMeta, undefined);
+    assert.equal(res.body._everSeenMetaStoryIds, undefined);
+    assert.ok(!Object.prototype.hasOwnProperty.call(res.body, "_lastRunMeta"));
+    assert.ok(!Object.prototype.hasOwnProperty.call(res.body, "_everSeenMetaStoryIds"));
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
   }
 });
 

@@ -874,6 +874,9 @@ function emptyDiagnostics() {
     writeCalled: false,
     writeOk: false,
     llmFailed: { classify: false, write: false, hallucination: false },
+    // Per-story stage latency in ms.  Zero when the stage was skipped.
+    // Aggregated into `log.whatChanged.latencyMs` at the pipeline boundary.
+    latencyMs: { classify: 0, write: 0 },
   };
 }
 
@@ -960,7 +963,9 @@ export async function resolveWhatChanged(input, opts = {}) {
 
   // 5. Haiku classify
   const classifyPayload = buildDeltaPayload({ metaStoryId, priorStory, currentStory, gate, stage: "classify" });
+  const tClassify = Date.now();
   const classify = await classifyDeltaMaterial(classifyPayload, { classifyFn: opts.classifyFn, config });
+  diagnostics.latencyMs.classify = Date.now() - tClassify;
   diagnostics.classifyCalled = true;
   if (!classify.ok) diagnostics.llmFailed.classify = true;
   diagnostics.classifyMaterial = classify.material === true;
@@ -975,7 +980,9 @@ export async function resolveWhatChanged(input, opts = {}) {
 
   // 6. Sonnet write
   const writePayload = buildDeltaPayload({ metaStoryId, priorStory, currentStory, gate, stage: "write" });
+  const tWrite = Date.now();
   const writeResult = await writeDeltaProse(writePayload, { writeFn: opts.writeFn, config });
+  diagnostics.latencyMs.write = Date.now() - tWrite;
   diagnostics.writeCalled = true;
   if (writeResult.ok) {
     diagnostics.writeOk = true;
@@ -997,4 +1004,105 @@ export async function resolveWhatChanged(input, opts = {}) {
     gate,
     diagnostics,
   };
+}
+
+// ── Run-level diagnostics aggregator (used by the pipeline) ─────────────────
+
+/**
+ * Schema-version stamp for `log.whatChanged` / `_meta.whatChanged`.  Bumped
+ * whenever the counter shape grows or shrinks so downstream consumers (log
+ * scrapers, dashboards) can detect contract changes without inspecting
+ * every key.
+ */
+export const WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION = "whatchanged-v1";
+
+/**
+ * Empty run-level diagnostics shape — every key the aggregator may emit,
+ * pre-initialized to zero/false.  Used as the base for full runs and as
+ * the full payload for the watermark short-circuit branch (with
+ * `watermarkShortCircuited: true`).
+ */
+export function emptyWhatChangedRunDiagnostics() {
+  return {
+    schemaVersion: WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION,
+    firstSeen: 0,
+    unchanged: 0,
+    changed: 0,
+    gateStrong: 0,
+    gateWeak: 0,
+    gateNone: 0,
+    classifySkipped: 0,
+    classifyCalled: 0,
+    classifyMaterialTrue: 0,
+    classifyMaterialFalse: 0,
+    writeCalled: 0,
+    writeOk: 0,
+    llmFailed: { classify: 0, write: 0, hallucination: 0 },
+    latencyMs: { classify: 0, write: 0 },
+    watermarkShortCircuited: false,
+  };
+}
+
+/**
+ * Fold per-story `resolveWhatChanged` results into a single run-level
+ * diagnostic object suitable for `log.whatChanged` → `_lastRunMeta.whatChanged`.
+ *
+ * `extras` carries optional pass-through counts the pipeline knows but
+ * individual stories don't (e.g. `everSeenCount`, `priorStoryCount`).
+ * Those keys are added only when supplied so the diagnostic shape stays
+ * minimal when callers don't care.
+ *
+ * State vs gate counters overlap by design.  `firstSeen` / `unchanged` /
+ * `changed` count the resolved **state** of each story.  `gateStrong` /
+ * `gateWeak` / `gateNone` count the **structural gate signal** that fed
+ * the resolver.  First-seen stories short-circuit before the gate runs
+ * and carry `gate.signal === "none"` with reason `first_seen`, so they
+ * are counted in BOTH `firstSeen` (state) AND `gateNone` (gate signal).
+ * That double-attribution is intentional — operators read state counters
+ * to answer "what did the user see?" and gate counters to answer "did
+ * the structural diff find anything?", and the two questions have
+ * different answers on first-seen stories.
+ *
+ * @param {Array<{state:string, gate:{signal:string}, diagnostics:object}>} perStoryResults
+ * @param {{ everSeenCount?: number, priorStoryCount?: number }} [extras]
+ * @returns {object}
+ */
+export function aggregateWhatChangedDiagnostics(perStoryResults, extras = {}) {
+  const agg = emptyWhatChangedRunDiagnostics();
+  for (const r of perStoryResults ?? []) {
+    if (!r || typeof r !== "object") continue;
+
+    if (r.state === "first-seen") agg.firstSeen += 1;
+    else if (r.state === "changed") agg.changed += 1;
+    else agg.unchanged += 1;
+
+    const signal = r.gate?.signal;
+    if (signal === "strong") agg.gateStrong += 1;
+    else if (signal === "weak") agg.gateWeak += 1;
+    else agg.gateNone += 1;
+
+    const d = r.diagnostics ?? {};
+    if (d.classifySkipped) agg.classifySkipped += 1;
+    if (d.classifyCalled) agg.classifyCalled += 1;
+    if (d.classifyCalled && d.classifyMaterial === true) agg.classifyMaterialTrue += 1;
+    if (d.classifyCalled && d.classifyMaterial === false) agg.classifyMaterialFalse += 1;
+    if (d.writeCalled) agg.writeCalled += 1;
+    if (d.writeOk) agg.writeOk += 1;
+
+    const f = d.llmFailed ?? {};
+    if (f.classify) agg.llmFailed.classify += 1;
+    if (f.write) agg.llmFailed.write += 1;
+    if (f.hallucination) agg.llmFailed.hallucination += 1;
+
+    const lat = d.latencyMs ?? {};
+    if (typeof lat.classify === "number" && Number.isFinite(lat.classify)) {
+      agg.latencyMs.classify += lat.classify;
+    }
+    if (typeof lat.write === "number" && Number.isFinite(lat.write)) {
+      agg.latencyMs.write += lat.write;
+    }
+  }
+  if (typeof extras.everSeenCount === "number") agg.everSeenCount = extras.everSeenCount;
+  if (typeof extras.priorStoryCount === "number") agg.priorStoryCount = extras.priorStoryCount;
+  return agg;
 }

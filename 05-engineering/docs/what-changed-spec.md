@@ -211,7 +211,7 @@ These are deferred to a follow-up implementation phase. This section specifies t
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `TEMPO_AI_DELTA_ENABLED` | `false` (default remains off through Phase 3; flipped on as part of Phase 4 pipeline wiring) | Global gate. Truthy values: `"true"` or `"1"` (case-insensitive). Off → engine returns `first-seen` / `unchanged` from deterministic gate only; LLM stages never run. |
+| `TEMPO_AI_DELTA_ENABLED` | `false` (Phase 4 keeps the default off; operators opt in per-deployment when ready) | Global gate. Truthy values: `"true"` or `"1"` (case-insensitive). Off → engine returns `first-seen` / `unchanged` from deterministic gate only; LLM stages never run. |
 | `TEMPO_AI_DELTA_CLASSIFY_MODEL` | `anthropic:claude-haiku-4-5-20251001` | Haiku model id. |
 | `TEMPO_AI_DELTA_WRITE_MODEL` | `anthropic:claude-sonnet-4-6` | Sonnet model id. |
 | `TEMPO_AI_DELTA_TIMEOUT_MS` | `2500` | Per-call timeout for either stage. |
@@ -319,6 +319,8 @@ Add a `log.whatChanged` aggregate per pipeline run. Surface it via the existing 
 | `watermarkShortCircuited` | Boolean — true on this run the engine was bypassed in favor of the prior snapshot. |
 | `latencyMs.classify` | Cumulative classify-call latency this refresh. |
 | `latencyMs.write` | Cumulative write-call latency this refresh. |
+
+**State vs gate counters overlap.** First-seen stories short-circuit before the structural gate runs and carry `gate.signal === "none"` with reason `first_seen`, so they increment **both** `firstSeen` (state) and `gateNone` (gate signal). Operators read state counters to answer "what did the user see?" and gate counters to answer "did the structural diff find anything?" — first-seen stories belong in both buckets, by design.
 
 ### Log line
 

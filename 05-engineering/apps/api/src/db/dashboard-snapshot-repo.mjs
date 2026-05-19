@@ -80,6 +80,11 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // + the `geographies.semanticApplied: false` lock stamp.  Optional for
     // backward compat with snapshots written before Phase 4.
     if (_lastRunMeta.tags !== undefined) meta.tags = _lastRunMeta.tags;
+    // What-changed (Phase 4) run-level diagnostics: first-seen / unchanged /
+    // changed counts plus LLM / gate signal breakdowns.  Optional for
+    // backward compat with snapshots written before the delta engine
+    // shipped.
+    if (_lastRunMeta.whatChanged !== undefined) meta.whatChanged = _lastRunMeta.whatChanged;
   }
   // `_everSeenMetaStoryIds` (what-changed Phase 1) passes through `...rest` so
   // the route handler can read it off the returned snapshot for the next
