@@ -127,12 +127,19 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // backward compat with snapshots written before the delta engine
     // shipped.
     if (_lastRunMeta.whatChanged !== undefined) meta.whatChanged = _lastRunMeta.whatChanged;
+    // Why-this-matters (Phase 5) run-level diagnostics: pass / fallback /
+    // lowConfidence counts plus writer-stage latency.  Optional for
+    // backward compat with snapshots written before the implications
+    // writer shipped.
+    if (_lastRunMeta.whyItMatters !== undefined) meta.whyItMatters = _lastRunMeta.whyItMatters;
   }
-  // `_everSeenMetaStoryIds` (what-changed history set) passes through via
-  // `...rest` so the route handler can read it off the returned snapshot
-  // for the next merge.  Intentionally NOT lifted into `_meta` — history
-  // scope must not leak into client responses; `stripPersistedFields` in
-  // server.mjs is the gate that strips it before responding.
+  // `_everSeenMetaStoryIds` (what-changed history set) and
+  // `_whyItMattersTraces` (why-this-matters trace map) pass through via
+  // `...rest` so the route handler can read them off the returned
+  // snapshot for the next refresh (history merge + watermark replay).
+  // Intentionally NOT lifted into `_meta` — both are internal-only;
+  // `stripPersistedFields` in server.mjs is the gate that removes them
+  // before responding.
   return { ...rest, stories: normalizeStoriesForLoad(stories), _meta: meta };
 }
 

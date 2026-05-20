@@ -113,6 +113,16 @@ function bootstrapApiEnv() {
   if (process.env.TEMPO_AI_DELTA_ENABLED == null) {
     process.env.TEMPO_AI_DELTA_ENABLED = "true";
   }
+
+  // Why-this-matters writer (spec §9): mirror the delta posture.  Product
+  // path is LLM-first — users see tailored implications copy on every refresh.
+  // Templates are the failure / kill-switch path, not the default experience.
+  // Explicit env values still win (`=false` is the operator kill-switch);
+  // `TEMPO_AI_MOCK_ONLY=true` continues to disable the LLM stages via
+  // `resolveWhyConfig()` (treated as LLM failure → deterministic template).
+  if (process.env.TEMPO_AI_WHY_IT_MATTERS_ENABLED == null) {
+    process.env.TEMPO_AI_WHY_IT_MATTERS_ENABLED = "true";
+  }
 }
 bootstrapApiEnv();
 
@@ -723,29 +733,33 @@ app.get("/api/ingestion/sources", async (_req, res) => {
 });
 
 // ─── Dashboard response helpers ──────────────────────────────────────────────
-// The `_selectionMeta` (Phase 2), `_watermark` (Phase 4), and
-// `_everSeenMetaStoryIds` (what-changed Phase 1) fields are persisted
-// alongside the contract payload but must NOT leak into the response body —
-// `_selectionMeta` / `_watermark` are surfaced under `_meta.selection` /
-// `_meta.watermark`, and `_everSeenMetaStoryIds` is internal-only (history
-// scope, not for clients). Both dashboard routes (GET, POST refresh, POST
-// bootstrap) repeat the same strip+reattach dance, so it lives here in one
-// place.
+// The `_selectionMeta` (Phase 2), `_watermark` (Phase 4),
+// `_everSeenMetaStoryIds` (what-changed Phase 1), and `_whyItMattersTraces`
+// (why-this-matters Phase 7) fields are persisted alongside the contract
+// payload but must NOT leak into the response body — `_selectionMeta` /
+// `_watermark` are surfaced under `_meta.selection` / `_meta.watermark`,
+// and `_everSeenMetaStoryIds` / `_whyItMattersTraces` are internal-only
+// (history + trace scope, not for clients).  Both dashboard routes (GET,
+// POST refresh, POST bootstrap) repeat the same strip+reattach dance, so
+// it lives here in one place.
 
 function stripPersistedFields(snapshot) {
   // `_lastRunMeta` is consumed by `liftSnapshotMeta` on subsequent reads
-  // and lifted into `_meta.{funnel,recall,tags,whatChanged,…}`; it must
-  // not leak into the immediate refresh-response body (the manually-built
-  // `_meta` on that branch is the only surface clients should see).
-  // `_everSeenMetaStoryIds` is internal-only history state.  Both are
-  // destructured out below; the rename aliases (`_unused*`) just satisfy
-  // the lint convention for intentionally-discarded keys.
+  // and lifted into `_meta.{funnel,recall,tags,whatChanged,whyItMatters,…}`;
+  // it must not leak into the immediate refresh-response body (the
+  // manually-built `_meta` on that branch is the only surface clients
+  // should see).  `_everSeenMetaStoryIds` is internal-only history state.
+  // `_whyItMattersTraces` is the server-side per-metaStoryId trace map
+  // (spec §7) used for eval replay and debug — never exposed to clients.
+  // All are destructured out below; the rename aliases (`_unused*`) just
+  // satisfy the lint convention for intentionally-discarded keys.
   const {
     _meta = {},
     _selectionMeta,
     _watermark,
     _everSeenMetaStoryIds: _unusedEverSeen,
     _lastRunMeta: _unusedLastRunMeta,
+    _whyItMattersTraces: _unusedWhyTraces,
     ...body
   } = snapshot ?? {};
   return { body, baseMeta: _meta, selectionMeta: _selectionMeta, watermark: _watermark };
@@ -1118,6 +1132,12 @@ async function executeRefreshFlow(identity) {
     // operators can audit first-seen / unchanged / changed counts and any
     // LLM failures without replaying the pipeline.
     if (log.whatChanged !== undefined) lastRunMeta.whatChanged = log.whatChanged;
+    // Why-this-matters (Phase 5): run-level diagnostics for the
+    // implications writer.  Same persistence posture as `whatChanged`
+    // above — surfaced under `_meta.whyItMatters` on subsequent reads so
+    // operators can audit pass / fallback / lowConfidence counts and
+    // writer-stage latency without replaying the pipeline.
+    if (log.whyItMatters !== undefined) lastRunMeta.whyItMatters = log.whyItMatters;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);

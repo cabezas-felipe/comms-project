@@ -510,6 +510,62 @@ test("readSnapshot: snapshots without _lastRunMeta.whatChanged omit _meta.whatCh
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "whatChanged"), false);
 });
 
+test("writeSnapshot + readSnapshot: _lastRunMeta.whyItMatters round-trips into _meta.whyItMatters", async () => {
+  const userId = "whyitmatters-meta-roundtrip";
+  const WHY_IT_MATTERS = {
+    schemaVersion: "whyitmatters-v1",
+    enabled: true,
+    storiesAttempted: 3,
+    pass: 2,
+    rewriteOk: 1,
+    fallback: 1,
+    hardFail: 0,
+    lowConfidence: 1,
+    llmFailed: { write: 0, rewrite: 0 },
+    latencyMs: { write: 220, rewrite: 145 },
+    watermarkShortCircuited: false,
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: { whyItMatters: WHY_IT_MATTERS },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta.whyItMatters, WHY_IT_MATTERS);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "whatChanged"), false);
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("writeSnapshot + readSnapshot: _whyItMattersTraces round-trips on the snapshot (not in _meta)", async () => {
+  const userId = "why-traces-roundtrip-user";
+  const TRACES = {
+    "story-1": {
+      metaStoryId: "story-1",
+      state: "intro",
+      whatChangedState: "firstSeen",
+      taxonomyPrimary: "monitoring_intensity",
+      confidence: "medium",
+      evidenceRefs: { summaryChars: 200, sourceCount: 4, uniqueOutletCount: 3 },
+      doctrineRefs: [],
+      fallback_used: false,
+      writerVersion: "why-it-matters-v0",
+      promptVersion: "why-it-matters-prompt-v0",
+      generatedAt: "2026-05-20T12:00:00.000Z",
+    },
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _whyItMattersTraces: TRACES,
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  // Internal field preserved at the top level for watermark replay /
+  // eval debug.  Must NOT appear under _meta — internal scope only.
+  assert.deepEqual(result._whyItMattersTraces, TRACES);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "whyItMattersTraces"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "_whyItMattersTraces"), false);
+});
+
 test("writeSnapshot + readSnapshot: _everSeenMetaStoryIds round-trips on the snapshot (not in _meta)", async () => {
   const userId = "ever-seen-roundtrip-user";
   await writeSnapshot(userId, {

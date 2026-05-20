@@ -6154,3 +6154,96 @@ test("Phase 4 — no story ever ships the legacy `Latest update … min ago.` te
   });
   assertNoFreshnessTemplate(payload.stories);
 });
+
+// ─── Phase 5 (why-this-matters): doctrine retrieval flows into the writer ───
+
+const PHASE5_WHY_ENABLED_CONFIG = {
+  enabled: true,
+  mockOnly: false,
+  model: "anthropic:claude-sonnet-4-6",
+  timeoutMs: 4000,
+};
+
+test("Phase 5 — doctrine retrieval output is passed into resolveWhyItMatters and surfaced on trace.doctrineRefs", async () => {
+  const stubSnippet = {
+    id: "stub.doctrine.bilateral",
+    topics: ["Diplomatic relations"],
+    geographies: ["US", "Colombia"],
+    keywords: [],
+    body: "Stub doctrine body.",
+    prov: "test-fixture",
+  };
+  const observedPayloads = [];
+  const whyWriteFn = (payload) => {
+    observedPayloads.push(payload);
+    return {
+      text: "Stub implication line — keep baseline monitoring posture across outlets.",
+      taxonomyPrimary: "monitoring_intensity",
+      confidence: "medium",
+    };
+  };
+  const doctrineRetrievalFn = ({ story, state }) => {
+    // The pipeline computes state via the engine-derived mapping; assert it
+    // looks like one of the three canonical values.
+    assert.ok(["intro", "steady", "evolving"].includes(state));
+    assert.ok(story?.metaStoryId);
+    return [stubSnippet];
+  };
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    everSeenMetaStoryIds: [],
+    priorStoriesById: new Map(),
+    whyConfig: PHASE5_WHY_ENABLED_CONFIG,
+    whyWriteFn,
+    doctrineRetrievalFn,
+  });
+  assert.equal(payload.stories.length, 1);
+  // Writer received the doctrine snippets that the retrieval function
+  // returned — verifying the pipeline wires retrieval -> writer.
+  assert.equal(observedPayloads.length, 1, "writer must run once for the shipped story");
+  assert.equal(observedPayloads[0].doctrineSnippets.length, 1);
+  assert.equal(observedPayloads[0].doctrineSnippets[0].id, "stub.doctrine.bilateral");
+  // Trace records the snippet ids that were passed to the writer.
+  const trace = payload._whyItMattersTraces[payload.stories[0].metaStoryId];
+  assert.ok(trace);
+  assert.deepEqual(trace.doctrineRefs, ["stub.doctrine.bilateral"]);
+});
+
+test("Phase 5 — doctrine retrieval throw is caught and writer still runs with []", async () => {
+  const observedPayloads = [];
+  const whyWriteFn = (payload) => {
+    observedPayloads.push(payload);
+    return {
+      text: "Stub line — keep baseline monitoring posture across outlets.",
+      taxonomyPrimary: "monitoring_intensity",
+      confidence: "medium",
+    };
+  };
+  const doctrineRetrievalFn = () => {
+    throw new Error("simulated corpus failure");
+  };
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    everSeenMetaStoryIds: [],
+    priorStoriesById: new Map(),
+    whyConfig: PHASE5_WHY_ENABLED_CONFIG,
+    whyWriteFn,
+    doctrineRetrievalFn,
+  });
+  // Writer ran even though retrieval threw — fail-closed to [] (spec §5).
+  assert.equal(observedPayloads.length, 1);
+  assert.deepEqual(observedPayloads[0].doctrineSnippets, []);
+  assert.equal(payload.stories.length, 1);
+  const trace = payload._whyItMattersTraces[payload.stories[0].metaStoryId];
+  assert.deepEqual(trace.doctrineRefs, []);
+});
