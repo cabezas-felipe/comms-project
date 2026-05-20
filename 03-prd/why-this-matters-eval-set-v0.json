@@ -1,0 +1,542 @@
+{
+  "version": "why-this-matters-eval-v0",
+  "status": "locked",
+  "description": "MVP regression set for Why this matters writer/eval. All 18 cases locked 20 May 26 (synthetic inputs).",
+  "specRef": "why-this-matters--strategy-spec.md",
+  "groups": {
+    "A": { "label": "Core goldens", "mustPassEveryRun": true, "count": 6 },
+    "B": { "label": "State edge cases", "mustPassEveryRun": false, "count": 4 },
+    "C": { "label": "Failure-mode probes", "mustPassEveryRun": false, "count": 4 },
+    "D": { "label": "Ops and failure paths", "mustPassEveryRun": false, "count": 4 }
+  },
+  "cases": [
+    {
+      "id": "eval-A01",
+      "group": "A",
+      "status": "locked",
+      "title": "Intro · monitoring intensity",
+      "input": {
+        "metaStoryId": "fixture-eval-a01",
+        "state": "intro",
+        "whatChangedState": "firstSeen",
+        "subtitle": "New cross-outlet pickup on a developing policy-to-political shift.",
+        "summary": "Coverage is beginning to frame possible sanctions implications and response pressure. The narrative is widening from policy reporting toward political reaction.",
+        "whatChanged": "First appearance in your feed.",
+        "evidenceRefs": {
+          "summaryChars": 210,
+          "sourceCount": 4,
+          "uniqueOutletCount": 3,
+          "framingDivergence": "low",
+          "cadenceSignal": "accelerating"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "monitoring_intensity",
+        "expectedConfidence": "medium",
+        "referenceGolden": "New on your watchlist — early pickup across outlets, so keep baseline monitoring, not background noise."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. Core golden from Phase 4c."
+    },
+    {
+      "id": "eval-A02",
+      "group": "A",
+      "status": "locked",
+      "title": "Intro · stakeholder exposure",
+      "input": {
+        "metaStoryId": "fixture-eval-a02",
+        "state": "intro",
+        "whatChangedState": "firstSeen",
+        "subtitle": "Bilateral framing returns as the story re-enters the watchlist.",
+        "summary": "Policy and regional outlets are picking up deportation-routing discussion again, with renewed attention on bilateral implications for Colombia-adjacent statements.",
+        "whatChanged": "First appearance in your feed.",
+        "evidenceRefs": {
+          "summaryChars": 195,
+          "sourceCount": 3,
+          "uniqueOutletCount": 3,
+          "framingDivergence": "medium",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "stakeholder_exposure",
+        "expectedConfidence": "medium",
+        "referenceGolden": "New narrative — expect early inbound interest before direction is clear."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. Core golden from Phase 4c."
+    },
+    {
+      "id": "eval-A03",
+      "group": "A",
+      "status": "locked",
+      "title": "Steady · narrative stability",
+      "input": {
+        "metaStoryId": "fixture-eval-a03",
+        "state": "steady",
+        "whatChangedState": "unchanged",
+        "subtitle": "Framing remains policy-heavy with limited new angles.",
+        "summary": "Coverage continues to treat the issue as an administrative review with similar headline framing across major outlets. No clear reframing shift in the latest cycle.",
+        "whatChanged": "No material update since your last refresh.",
+        "evidenceRefs": {
+          "summaryChars": 188,
+          "sourceCount": 5,
+          "uniqueOutletCount": 4,
+          "framingDivergence": "low",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "narrative_stability",
+        "expectedConfidence": "high",
+        "referenceGolden": "No material shift since last check; framing still looks consistent across sources."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. Core golden from Phase 4c."
+    },
+    {
+      "id": "eval-A04",
+      "group": "A",
+      "status": "locked",
+      "title": "Steady · readiness urgency",
+      "input": {
+        "metaStoryId": "fixture-eval-a04",
+        "state": "steady",
+        "whatChangedState": "unchanged",
+        "subtitle": "Debate framing persists across opinion and policy outlets.",
+        "summary": "Commentary continues to frame the issue as a debate over diplomatic alignment rather than a discrete policy update. Volume remains steady across the core watchlist outlets.",
+        "whatChanged": "No material update since your last refresh.",
+        "evidenceRefs": {
+          "summaryChars": 201,
+          "sourceCount": 4,
+          "uniqueOutletCount": 4,
+          "framingDivergence": "medium",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "readiness_urgency",
+        "expectedConfidence": "medium",
+        "referenceGolden": "Still in view, still relevant — stay prepared even without fresh movement."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. Core golden from Phase 4c."
+    },
+    {
+      "id": "eval-A05",
+      "group": "A",
+      "status": "locked",
+      "title": "Evolving · coordination pressure",
+      "input": {
+        "metaStoryId": "fixture-eval-a05",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "Coverage shifts from policy detail toward political interpretation.",
+        "summary": "New opinion and wire coverage now stress political reaction and bilateral pressure. Earlier policy-process framing is still present but no longer dominant.",
+        "whatChanged": "Two outlets shifted headline framing in the last cycle.",
+        "evidenceRefs": {
+          "summaryChars": 220,
+          "sourceCount": 6,
+          "uniqueOutletCount": 5,
+          "framingDivergence": "high",
+          "cadenceSignal": "accelerating"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "coordination_pressure",
+        "expectedConfidence": "medium",
+        "referenceGolden": "Coverage is shifting toward political framing — internal alignment pressure may rise."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. Core golden from Phase 4c."
+    },
+    {
+      "id": "eval-A06",
+      "group": "A",
+      "status": "locked",
+      "title": "Evolving · monitoring intensity",
+      "input": {
+        "metaStoryId": "fixture-eval-a06",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "Pickup accelerates as political framing spreads.",
+        "summary": "Additional outlets joined the narrative in the last refresh window. Coverage cadence increased and headline framing moved toward political reaction.",
+        "whatChanged": "One new outlet added and two headlines shifted framing.",
+        "evidenceRefs": {
+          "summaryChars": 198,
+          "sourceCount": 7,
+          "uniqueOutletCount": 6,
+          "framingDivergence": "medium",
+          "cadenceSignal": "accelerating"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "monitoring_intensity",
+        "expectedConfidence": "medium",
+        "referenceGolden": "Movement picked up again — watch this closer over the next cycle."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. Core golden from Phase 4c."
+    },
+    {
+      "id": "eval-B01",
+      "group": "B",
+      "status": "locked",
+      "title": "Intro · thin evidence",
+      "input": {
+        "metaStoryId": "fixture-eval-b01",
+        "state": "intro",
+        "whatChangedState": "firstSeen",
+        "subtitle": "Early signal from a narrow outlet set on a trade-policy mention.",
+        "summary": "One wire and one regional outlet picked up a preliminary trade-policy angle. Coverage remains thin and framing is not yet consistent.",
+        "whatChanged": "First appearance in your feed.",
+        "evidenceRefs": {
+          "summaryChars": 165,
+          "sourceCount": 2,
+          "uniqueOutletCount": 2,
+          "framingDivergence": "low",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "signal_uncertainty",
+        "expectedConfidence": "low",
+        "referenceGolden": "Early, thin coverage — treat as baseline watch with limited implication confidence."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. State edge: thin intro evidence."
+    },
+    {
+      "id": "eval-B02",
+      "group": "B",
+      "status": "locked",
+      "title": "Steady · thin source spread",
+      "input": {
+        "metaStoryId": "fixture-eval-b02",
+        "state": "steady",
+        "whatChangedState": "unchanged",
+        "subtitle": "Story stays on watchlist with coverage from the same two outlets.",
+        "summary": "The narrative remains limited to the same wire and regional pair from prior cycles. Headline framing is unchanged and no new outlets have joined.",
+        "whatChanged": "No material update since your last refresh.",
+        "evidenceRefs": {
+          "summaryChars": 178,
+          "sourceCount": 2,
+          "uniqueOutletCount": 2,
+          "framingDivergence": "low",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "narrative_stability",
+        "expectedConfidence": "medium",
+        "referenceGolden": "Narrow outlet set, steady framing — no escalation warranted from this cycle."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. State edge: thin steady spread."
+    },
+    {
+      "id": "eval-B03",
+      "group": "B",
+      "status": "locked",
+      "title": "Evolving · strong movement",
+      "input": {
+        "metaStoryId": "fixture-eval-b03",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "Major outlets add coverage as legal framing hardens.",
+        "summary": "Three national outlets joined in the last window and headlines now emphasize legal-process and accountability framing over earlier procedural coverage.",
+        "whatChanged": "Three new outlets and four headline reframes in the last cycle.",
+        "evidenceRefs": {
+          "summaryChars": 195,
+          "sourceCount": 8,
+          "uniqueOutletCount": 7,
+          "framingDivergence": "medium",
+          "cadenceSignal": "accelerating"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "coordination_pressure",
+        "expectedConfidence": "medium",
+        "referenceGolden": "Legal framing is spreading fast across major outlets — alignment needs may increase before messaging hardens."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. State edge: strong evolving movement."
+    },
+    {
+      "id": "eval-B04",
+      "group": "B",
+      "status": "locked",
+      "title": "Evolving · high framing divergence",
+      "input": {
+        "metaStoryId": "fixture-eval-b04",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "Sources split between humanitarian and security framing.",
+        "summary": "Wire coverage stresses migration-management and border-security angles while regional outlets emphasize humanitarian and rights-based framing. Both threads advanced in the same cycle without a single dominant frame.",
+        "whatChanged": "Framing divergence increased across core outlets since your last refresh.",
+        "evidenceRefs": {
+          "summaryChars": 248,
+          "sourceCount": 5,
+          "uniqueOutletCount": 4,
+          "framingDivergence": "high",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "narrative_stability",
+        "expectedConfidence": "medium",
+        "referenceGolden": "Competing frames are widening — predictability drops even as volume holds steady."
+      },
+      "notes": "Locked 20 May 26. Synthetic inputs. State edge: high framing divergence."
+    },
+    {
+      "id": "eval-C01",
+      "group": "C",
+      "status": "locked",
+      "title": "Duplication probe",
+      "input": {
+        "metaStoryId": "fixture-eval-c01",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "Courts coverage expands on the same procedural step.",
+        "summary": "Two outlets reported new legal-context framing this morning, with both emphasizing court scheduling and procedural next steps.",
+        "whatChanged": "Legal-context framing appeared in two additional outlets.",
+        "evidenceRefs": {
+          "summaryChars": 142,
+          "sourceCount": 4,
+          "uniqueOutletCount": 3,
+          "framingDivergence": "low",
+          "cadenceSignal": "accelerating"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": false,
+        "expectedTaxonomyPrimary": null,
+        "expectedFailDimension": "non_duplication",
+        "trapGolden": "Two outlets reported new legal-context framing this morning."
+      },
+      "notes": "Locked 20 May 26. Failure probe: duplication. Rewrite recovery allowed."
+    },
+    {
+      "id": "eval-C02",
+      "group": "C",
+      "status": "locked",
+      "title": "Directive tone probe",
+      "input": {
+        "metaStoryId": "fixture-eval-c02",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "Political reaction builds after a bilateral policy announcement.",
+        "summary": "Coverage is shifting toward political reaction and public accountability framing, with accelerating pickup across opinion and wire outlets.",
+        "whatChanged": "Political-framing headlines increased in the last cycle.",
+        "evidenceRefs": {
+          "summaryChars": 168,
+          "sourceCount": 6,
+          "uniqueOutletCount": 5,
+          "framingDivergence": "medium",
+          "cadenceSignal": "accelerating"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": false,
+        "expectedTaxonomyPrimary": null,
+        "expectedFailDimension": "non_prescriptive",
+        "trapGolden": "Issue a statement now before narrative hardens."
+      },
+      "notes": "Locked 20 May 26. Failure probe: directive tone. Hard-fail, no recovery."
+    },
+    {
+      "id": "eval-C03",
+      "group": "C",
+      "status": "locked",
+      "title": "Side-taking probe",
+      "input": {
+        "metaStoryId": "fixture-eval-c03",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "US and regional outlets diverge on who owns the narrative.",
+        "summary": "US wire and opinion coverage frame the episode as policy enforcement success, while Colombian regional outlets stress diplomatic overreach and sovereignty concerns.",
+        "whatChanged": "Cross-market framing gap widened in the latest cycle.",
+        "evidenceRefs": {
+          "summaryChars": 198,
+          "sourceCount": 5,
+          "uniqueOutletCount": 4,
+          "framingDivergence": "high",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": false,
+        "expectedTaxonomyPrimary": null,
+        "expectedFailDimension": "neutral_framing",
+        "trapGolden": "US outlets are framing this correctly; Colombian coverage is misleading."
+      },
+      "notes": "Locked 20 May 26. Failure probe: side-taking. Hard-fail, no recovery."
+    },
+    {
+      "id": "eval-C04",
+      "group": "C",
+      "status": "locked",
+      "title": "State mismatch probe",
+      "input": {
+        "metaStoryId": "fixture-eval-c04",
+        "state": "steady",
+        "whatChangedState": "unchanged",
+        "subtitle": "Routine diplomatic mention with stable headline patterns.",
+        "summary": "Coverage continues along the same diplomatic-mention angle with no new reframing across the core watchlist. Volume and headline patterns match prior cycles.",
+        "whatChanged": "No material update since your last refresh.",
+        "evidenceRefs": {
+          "summaryChars": 195,
+          "sourceCount": 4,
+          "uniqueOutletCount": 4,
+          "framingDivergence": "low",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": false,
+        "expectedTaxonomyPrimary": null,
+        "expectedFailDimension": "state_coherence",
+        "trapGolden": "Nothing to monitor here."
+      },
+      "notes": "Locked 20 May 26. Failure probe: state mismatch on steady/unchanged."
+    },
+    {
+      "id": "eval-D01",
+      "group": "D",
+      "status": "locked",
+      "title": "Doctrine unavailable",
+      "input": {
+        "metaStoryId": "fixture-eval-d01",
+        "state": "intro",
+        "whatChangedState": "firstSeen",
+        "subtitle": "Cross-outlet pickup on a developing sanctions narrative.",
+        "summary": "Coverage is beginning to frame possible sanctions implications and response pressure, with widening pickup across wire and policy outlets.",
+        "whatChanged": "First appearance in your feed.",
+        "evidenceRefs": {
+          "summaryChars": 175,
+          "sourceCount": 4,
+          "uniqueOutletCount": 3,
+          "framingDivergence": "low",
+          "cadenceSignal": "accelerating"
+        },
+        "doctrineAvailable": false
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "monitoring_intensity",
+        "expectedConfidence": "medium",
+        "allowFallback": false,
+        "referenceGolden": "New on your watchlist — early pickup warrants baseline monitoring while doctrine context is unavailable."
+      },
+      "notes": "Locked 20 May 26. Ops path: doctrine unavailable, evidence-only pass."
+    },
+    {
+      "id": "eval-D02",
+      "group": "D",
+      "status": "locked",
+      "title": "whatChanged unavailable",
+      "input": {
+        "metaStoryId": "fixture-eval-d02",
+        "state": "steady",
+        "whatChangedState": null,
+        "subtitle": "Ongoing coverage of a trade-compliance dispute.",
+        "summary": "Outlets continue reporting enforcement steps and market reaction without a clear single dominant frame.",
+        "whatChanged": null,
+        "evidenceRefs": {
+          "summaryChars": 142,
+          "sourceCount": 4,
+          "uniqueOutletCount": 3,
+          "framingDivergence": "medium",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "readiness_urgency",
+        "expectedConfidence": "medium",
+        "allowFallback": true,
+        "referenceGolden": "No delta signal this cycle — maintain standard monitoring posture until movement is confirmed."
+      },
+      "notes": "Locked 20 May 26. Ops path: whatChanged unavailable, conservative steady + fallback allowed."
+    },
+    {
+      "id": "eval-D03",
+      "group": "D",
+      "status": "locked",
+      "title": "Writer validation fail",
+      "input": {
+        "metaStoryId": "fixture-eval-d03",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "Opinion cycle intensifies on embassy security funding.",
+        "summary": "Opinion outlets are increasing commentary volume on embassy security funding, with mixed framing between oversight and political attack lines.",
+        "whatChanged": "Commentary volume increased in the last cycle.",
+        "evidenceRefs": {
+          "summaryChars": 168,
+          "sourceCount": 5,
+          "uniqueOutletCount": 4,
+          "framingDivergence": "high",
+          "cadenceSignal": "accelerating"
+        },
+        "doctrineAvailable": true,
+        "forceWriterFail": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "signal_uncertainty",
+        "expectedConfidence": "low",
+        "allowFallback": true,
+        "expectFallbackUsed": true,
+        "referenceGolden": "Recent movement suggests monitoring posture may need adjustment, though confidence remains limited by current evidence spread."
+      },
+      "notes": "Locked 20 May 26. Ops path: forced writer fail → Phase 3d evolving fallback."
+    },
+    {
+      "id": "eval-D04",
+      "group": "D",
+      "status": "locked",
+      "title": "Low-confidence evolving",
+      "input": {
+        "metaStoryId": "fixture-eval-d04",
+        "state": "evolving",
+        "whatChangedState": "changed",
+        "subtitle": "Single-outlet spike on an unconfirmed policy rumor.",
+        "summary": "One opinion outlet advanced an unconfirmed policy-rumor angle without corroboration from wire or regional sources in this cycle.",
+        "whatChanged": "New angle appeared in one outlet.",
+        "evidenceRefs": {
+          "summaryChars": 145,
+          "sourceCount": 2,
+          "uniqueOutletCount": 2,
+          "framingDivergence": "low",
+          "cadenceSignal": "stable"
+        },
+        "doctrineAvailable": true
+      },
+      "expected": {
+        "expectedPass": true,
+        "expectedTaxonomyPrimary": "signal_uncertainty",
+        "expectedConfidence": "low",
+        "allowFallback": false,
+        "referenceGolden": "Movement signal is early and narrow — keep implications tentative until corroboration broadens."
+      },
+      "notes": "Locked 20 May 26. Ops path: low-confidence evolving, softened pass."
+    }
+  ]
+}

@@ -51,6 +51,16 @@ import {
   emptyWhatChangedRunDiagnostics,
   resolveWhatChanged,
 } from "./what-changed-engine.mjs";
+import {
+  WHY_FALLBACK_COPY,
+  WHY_IT_MATTERS_DIAGNOSTICS_SCHEMA_VERSION,
+  aggregateWhyItMattersDiagnostics,
+  deriveWhyStateFromWhatChangedState,
+  emptyWhyItMattersRunDiagnostics,
+  resolveWhyConfig,
+  resolveWhyItMatters,
+} from "./why-this-matters-engine.mjs";
+import { retrieveDoctrineSnippetsForStory } from "./why-doctrine-retrieval.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -782,9 +792,14 @@ function buildStory(metaStory, sourceItems, settings) {
     subtitle: metaStory.subtitle,
     geographies,
     summary: metaStory.summary,
-    // `whyItMatters` mirrors `subtitle` by design until a dedicated
-    // implications writer ships — do not substitute a placeholder string.
-    whyItMatters: metaStory.subtitle,
+    // Phase 5 (why-this-matters): schema-valid placeholder retired the
+    // legacy subtitle echo (`whyItMatters: metaStory.subtitle`).  The
+    // per-story `resolveWhyItMatters` loop further down overwrites this
+    // before the payload is returned; the placeholder is the conservative
+    // intro safe-fallback so a missed overwrite would still ship neutral,
+    // non-prescriptive copy.  No environment may ship subtitle echo
+    // (spec §1, §11).
+    whyItMatters: WHY_FALLBACK_COPY.intro,
     // Phase 4 (what-changed): set to a schema-valid placeholder here and
     // overwritten by the per-story `resolveWhatChanged` loop further down
     // (see "Phase 4: compute whatChanged per story").  The legacy
@@ -836,6 +851,49 @@ function buildStory(metaStory, sourceItems, settings) {
   // prevents the legacy "Diplomatic relations" fabrication.
   if (validTopic) story.topic = validTopic;
   return story;
+}
+
+// ─── Why-this-matters evidenceRefs builder ───────────────────────────────────
+//
+// Computes the structured `evidenceRefs` block the why-this-matters engine
+// uses for grounding (spec §4 + strategy §3c).  Pure function of the
+// (post-Phase-4) story shape + the resolved whatChangedState.  Heuristic
+// for `framingDivergence` and `cadenceSignal` — sufficient for MVP grounding
+// (trace gets the value the engine actually saw) while we defer per-source
+// stance modeling to a later slice.
+function computeEvidenceRefsForStory(story, whatChangedState) {
+  const summary = typeof story?.summary === "string" ? story.summary : "";
+  const sources = Array.isArray(story?.sources) ? story.sources : [];
+  const sourceCount = sources.length;
+  const uniqueOutlets = new Set();
+  for (const s of sources) {
+    if (s && typeof s.outlet === "string") {
+      const norm = normalizeSourceIdentity(s.outlet);
+      if (norm.length > 0) uniqueOutlets.add(norm);
+    }
+  }
+  const uniqueOutletCount = uniqueOutlets.size;
+
+  // Cadence: only `accelerating` when the delta engine confirmed material
+  // change this refresh.  Conservative `stable` otherwise — we do not yet
+  // track multi-refresh cadence trends.
+  let cadenceSignal = "stable";
+  if (whatChangedState === "changed") cadenceSignal = "accelerating";
+
+  // FramingDivergence: rough outlet-diversity proxy.  Single-outlet or
+  // narrow coverage → low; broader spread bumps to medium/high.  Tightened
+  // to lean conservative so the writer doesn't over-call divergence.
+  let framingDivergence = "low";
+  if (sourceCount >= 4 && uniqueOutletCount >= 4) framingDivergence = "medium";
+  if (sourceCount >= 6 && uniqueOutletCount >= 5) framingDivergence = "high";
+
+  return {
+    summaryChars: summary.length,
+    sourceCount,
+    uniqueOutletCount,
+    framingDivergence,
+    cadenceSignal,
+  };
 }
 
 // ─── Main pipeline ────────────────────────────────────────────────────────────
@@ -948,6 +1006,22 @@ export async function runRefreshPipeline({
   classifyFn = null,
   writeFn = null,
   deltaConfig = null,
+  // Why-this-matters engine inputs (spec §6, §9).  `whyWriteFn` is a test
+  // injection for the Sonnet writer; production reads model + key from env
+  // via `resolveWhyConfig()`.  `whyConfig` lets tests enable the LLM path
+  // without env mutation.  Default posture is LLM-first when
+  // `TEMPO_AI_WHY_IT_MATTERS_ENABLED=true` (server.mjs bootstraps this on
+  // for non-test environments); the deterministic state template is the
+  // fallback / kill-switch path.
+  whyWriteFn = null,
+  whyConfig = null,
+  // Doctrine retrieval injection point (spec §5).  Production reads the
+  // hand-curated `doctrine-snippets.v0.json` allowlist via
+  // `retrieveDoctrineSnippetsForStory`; tests pass a stub here to control
+  // exactly which snippets the writer sees without touching the on-disk
+  // corpus.  Signature: ({ story, state }) => Array<snippet>; throws are
+  // caught and resolve to `[]` (spec §5 "retrieval error / timeout").
+  doctrineRetrievalFn = null,
 }) {
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
@@ -1429,6 +1503,17 @@ export async function runRefreshPipeline({
           everSeenCount: whatChangedEverSeenCount,
           priorStoryCount: whatChangedPriorStoryCount,
         },
+        // Watermark short-circuit (spec §8 row 6): the route handler
+        // re-serves the prior snapshot's `whyItMatters` strings and
+        // `_whyItMattersTraces` verbatim — the engine is not run on a
+        // skip.  All counters zero; `watermarkShortCircuited:true` flags
+        // the branch so operators can distinguish "engine ran, all
+        // unchanged" from "engine skipped because watermark matched".
+        whyItMatters: {
+          ...emptyWhyItMattersRunDiagnostics(),
+          watermarkShortCircuited: true,
+          enabled: (whyConfig ?? resolveWhyConfig()).enabled,
+        },
       },
     };
   }
@@ -1695,9 +1780,103 @@ export async function runRefreshPipeline({
       ` latency_write_ms=${whatChangedDiagnostics.latencyMs.write}`
   );
 
+  // ── Phase 5: compute whyItMatters per story ──────────────────────────────
+  // Runs after Phase 4 because the implications writer needs the resolved
+  // `whatChangedState` to derive emphasis (intro/steady/evolving — see
+  // why-this-matters-spec §3).  Serial, deterministic order — same posture
+  // as the what-changed loop above.  Default posture is LLM-first when
+  // `TEMPO_AI_WHY_IT_MATTERS_ENABLED=true`; on disable / mock-only /
+  // provider failure / rubric fail, the resolver returns a Phase 3d
+  // state-aware safe-fallback template so `story.whyItMatters` is never
+  // empty or subtitle-echo.
+  const effectiveWhyConfig = whyConfig ?? resolveWhyConfig();
+  const everSeenSet = new Set(Array.isArray(everSeenMetaStoryIds) ? everSeenMetaStoryIds : []);
+  const perStoryWhyItMatters = [];
+  const whyItMattersTraces = {};
+  for (let i = 0; i < stories.length; i += 1) {
+    const story = stories[i];
+    const wcResult = perStoryWhatChanged[i] ?? null;
+    // Map what-changed `state` enum into the whatChangedState canonical
+    // delta enum the implications engine couples on (spec §3 mapping).
+    const whatChangedState =
+      wcResult?.state === "first-seen"
+        ? "firstSeen"
+        : wcResult?.state === "changed"
+          ? "changed"
+          : wcResult?.state === "unchanged"
+            ? "unchanged"
+            : null;
+    const evidenceRefs = computeEvidenceRefsForStory(story, whatChangedState);
+    const everSeenForStory =
+      typeof story.metaStoryId === "string" && everSeenSet.has(story.metaStoryId);
+    // State the implications engine will emphasize; computed here so the
+    // doctrine retrieval can apply its `stateVariant` boost to the same
+    // value the writer will see.
+    const whyState = deriveWhyStateFromWhatChangedState({
+      whatChangedState,
+      everSeen: everSeenForStory,
+    });
+    // Doctrine retrieval (spec §5).  Pure / sync; fail-closes to [] on any
+    // malformed input so the writer always proceeds with a valid
+    // snippets array.  Tests can inject `doctrineSnippets` via
+    // `doctrineRetrievalFn` to bypass the on-disk corpus.
+    let doctrineSnippets = [];
+    try {
+      doctrineSnippets = doctrineRetrievalFn
+        ? doctrineRetrievalFn({ story, state: whyState })
+        : retrieveDoctrineSnippetsForStory({ story, state: whyState });
+      if (!Array.isArray(doctrineSnippets)) doctrineSnippets = [];
+    } catch {
+      doctrineSnippets = [];
+    }
+    // eslint-disable-next-line no-await-in-loop
+    const why = await resolveWhyItMatters(
+      {
+        metaStoryId: story.metaStoryId,
+        title: story.title,
+        subtitle: story.subtitle,
+        summary: story.summary,
+        whatChanged: story.whatChanged,
+        whatChangedState,
+        everSeen: everSeenForStory,
+        state: whyState,
+        evidenceRefs,
+        doctrineSnippets,
+      },
+      { writeFn: whyWriteFn ?? undefined, config: effectiveWhyConfig }
+    );
+    story.whyItMatters = why.whyItMatters;
+    if (typeof story.metaStoryId === "string" && story.metaStoryId.length > 0) {
+      whyItMattersTraces[story.metaStoryId] = why.trace;
+    }
+    perStoryWhyItMatters.push(why);
+  }
+  const whyItMattersDiagnostics = aggregateWhyItMattersDiagnostics(perStoryWhyItMatters, {
+    enabled: effectiveWhyConfig.enabled,
+  });
+  console.log(
+    `[pipeline.whyItMatters]` +
+      ` schema=${whyItMattersDiagnostics.schemaVersion}` +
+      ` enabled=${whyItMattersDiagnostics.enabled}` +
+      ` stories=${whyItMattersDiagnostics.storiesAttempted}` +
+      ` pass=${whyItMattersDiagnostics.pass}` +
+      ` rewrite_ok=${whyItMattersDiagnostics.rewriteOk}` +
+      ` fallback=${whyItMattersDiagnostics.fallback}` +
+      ` low_confidence=${whyItMattersDiagnostics.lowConfidence}` +
+      ` llm_failed_write=${whyItMattersDiagnostics.llmFailed.write}` +
+      ` llm_failed_rewrite=${whyItMattersDiagnostics.llmFailed.rewrite}` +
+      ` latency_write_ms=${whyItMattersDiagnostics.latencyMs.write}` +
+      ` latency_rewrite_ms=${whyItMattersDiagnostics.latencyMs.rewrite}`
+  );
+
   const payload = {
     contractVersion,
     stories,
+    // Server-side trace map keyed by metaStoryId (spec §7).  Stripped from
+    // the API response by `stripPersistedFields` in server.mjs; persisted
+    // only inside the snapshot blob so operators can answer "why did we
+    // say this?" on replay without re-running the writer.
+    _whyItMattersTraces: whyItMattersTraces,
   };
 
   // Funnel summary — every refresh emits one. When stories=0 we additionally
@@ -1823,6 +2002,12 @@ export async function runRefreshPipeline({
     // operators can answer "how often did the engine fire and what did it
     // decide?" without re-running refresh.
     whatChanged: whatChangedDiagnostics,
+    // Run-level why-this-matters diagnostics aggregated from the per-story
+    // `resolveWhyItMatters` results above.  Same shape pattern as
+    // `whatChanged`: counters for pass / fallback / hardFail /
+    // lowConfidence + write/rewrite latency.  Persisted via
+    // `_lastRunMeta.whyItMatters` and surfaced under `_meta.whyItMatters`.
+    whyItMatters: whyItMattersDiagnostics,
   };
 
   return { payload, log };

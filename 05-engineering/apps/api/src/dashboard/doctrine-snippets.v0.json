@@ -1,0 +1,91 @@
+{
+  "version": "doctrine-v0",
+  "status": "internal-first",
+  "specRef": "05-engineering/docs/why-this-matters-spec.md#5-doctrine-retrieval-v0-locked-20-may-26",
+  "snippets": [
+    {
+      "id": "doctrine.posture.intro",
+      "topics": ["Diplomatic relations", "Migration policy", "Security cooperation"],
+      "geographies": ["US", "Colombia"],
+      "keywords": [],
+      "stateVariant": "intro",
+      "body": "When a narrative first enters a comms professional's watchlist, frame implications as baseline monitoring posture: this is a category to start tracking, not a directive to act. Avoid escalation language; lead with relevance, not alarm.",
+      "prov": "05-engineering/docs/why-this-matters-spec.md#4b-state-specific-emphasis-locked"
+    },
+    {
+      "id": "doctrine.posture.steady",
+      "topics": ["Diplomatic relations", "Migration policy", "Security cooperation"],
+      "geographies": ["US", "Colombia"],
+      "keywords": [],
+      "stateVariant": "steady",
+      "body": "For narratives that persist without material movement, the implication is ongoing relevance, not fresh escalation. Use stability language ('still in view', 'consistent framing') and avoid implying new movement when none was detected.",
+      "prov": "05-engineering/docs/why-this-matters-spec.md#4b-state-specific-emphasis-locked"
+    },
+    {
+      "id": "doctrine.posture.evolving",
+      "topics": ["Diplomatic relations", "Migration policy", "Security cooperation"],
+      "geographies": ["US", "Colombia"],
+      "keywords": [],
+      "stateVariant": "evolving",
+      "body": "When the delta engine confirms material movement, frame the implication as a posture adjustment tied to that movement, not a re-report of it. Acknowledge the shift and translate it into monitoring intensity or readiness pressure without re-describing what changed.",
+      "prov": "05-engineering/docs/why-this-matters-spec.md#4b-state-specific-emphasis-locked"
+    },
+    {
+      "id": "doctrine.solo-operator.monitoring-first",
+      "topics": ["Diplomatic relations", "Migration policy", "Security cooperation"],
+      "geographies": ["US", "Colombia"],
+      "keywords": [],
+      "body": "Solo bilateral comms leads spend most of their workday monitoring narrative drift to avoid being blindsided mid-draft. Implications should help them decide whether to widen, narrow, or hold their monitoring focus on this cluster.",
+      "prov": "01-research/interview-synthesis--zero-to-one--mercedes-osma.md"
+    },
+    {
+      "id": "doctrine.bilateral.neutral-framing",
+      "topics": ["Diplomatic relations", "Migration policy", "Security cooperation"],
+      "geographies": ["US", "Colombia"],
+      "keywords": [],
+      "body": "Cross-border narratives carry US and Colombian framing simultaneously. Implications must remain neutral on which national framing is correct; describe divergence, do not endorse a side.",
+      "prov": "03-prd/why-this-matters--strategy-spec.md#0c-mvp-constraints"
+    },
+    {
+      "id": "doctrine.diplomatic-relations.framing-pressure",
+      "topics": ["Diplomatic relations"],
+      "geographies": ["US", "Colombia"],
+      "keywords": ["sanctions", "OFAC", "embassy", "ambassador"],
+      "body": "Diplomatic-relations clusters often shift from procedural reporting toward political framing as coverage broadens. When framing moves toward political reaction, surface coordination pressure or stakeholder exposure rather than tactical advice.",
+      "prov": "03-prd/why-this-matters--strategy-spec.md#1a-taxonomy-locked-for-mvp"
+    },
+    {
+      "id": "doctrine.migration-policy.stakeholder-exposure",
+      "topics": ["Migration policy"],
+      "geographies": ["US", "Colombia"],
+      "keywords": ["deportation", "asylum", "border", "migrant", "visa"],
+      "body": "Migration-policy narratives tend to attract rapid inbound from both policy and humanitarian stakeholders. When pickup widens across outlet types, flag stakeholder-exposure implications and prepare for inbound interest before the framing settles.",
+      "prov": "03-prd/why-this-matters--strategy-spec.md#1a-taxonomy-locked-for-mvp"
+    },
+    {
+      "id": "doctrine.security-cooperation.coordination",
+      "topics": ["Security cooperation"],
+      "geographies": ["US", "Colombia"],
+      "keywords": ["extradition", "drug", "trafficking", "cartel", "narco"],
+      "body": "Security-cooperation clusters often surface coordination-pressure implications: legal, policy, and comms teams may need tighter alignment when enforcement-driven coverage spreads. Implications should highlight alignment risk, not prescribe a meeting cadence.",
+      "prov": "03-prd/why-this-matters--strategy-spec.md#1a-taxonomy-locked-for-mvp"
+    },
+    {
+      "id": "doctrine.thin-evidence.signal-uncertainty",
+      "topics": ["Diplomatic relations", "Migration policy", "Security cooperation"],
+      "geographies": ["US", "Colombia"],
+      "keywords": [],
+      "body": "When source spread is narrow (one or two outlets) or framing is not yet consistent, soften implication language: 'early signal', 'limited confidence', 'tentative'. Fail closed on assertions until corroboration broadens.",
+      "prov": "03-prd/why-this-matters--strategy-spec.md#3d-failure-behavior-locked"
+    },
+    {
+      "id": "doctrine.framing-divergence.narrative-stability",
+      "topics": ["Diplomatic relations", "Migration policy", "Security cooperation"],
+      "geographies": ["US", "Colombia"],
+      "keywords": [],
+      "stateVariant": "evolving",
+      "body": "When competing frames widen across outlets even at steady volume, the implication is reduced predictability and narrative instability, not necessarily escalation. Calibrate confidence around the divergence rather than around movement intensity.",
+      "prov": "03-prd/why-this-matters--strategy-spec.md#1b-voice-rules-global"
+    }
+  ]
+}
