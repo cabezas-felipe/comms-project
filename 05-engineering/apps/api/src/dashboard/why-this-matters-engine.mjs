@@ -229,16 +229,6 @@ function hasPostureVocab(text) {
   return POSTURE_VOCAB_PATTERNS.some((re) => re.test(text));
 }
 
-const RECAP_OPENERS = Object.freeze([
-  /^(?:two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(?:outlets?|sources?|wires?|reports?)\s+(?:reported|said|covered|carried|noted|published)/i,
-  /^(?:the\s+)?(?:reuters|bloomberg|nyt|cnn|bbc|el\s+tiempo|el\s+espectador|semana|infobae|associated\s+press|the\s+associated\s+press)\s+(?:reported|said|noted|published)/i,
-]);
-
-function looksLikeRecap(text) {
-  const trimmed = String(text ?? "").trim();
-  return RECAP_OPENERS.some((re) => re.test(trimmed));
-}
-
 function normalizeForCompare(value) {
   return String(value ?? "")
     .trim()

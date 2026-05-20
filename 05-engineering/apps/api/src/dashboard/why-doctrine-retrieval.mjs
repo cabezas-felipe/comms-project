@@ -172,7 +172,6 @@ export function retrieveDoctrineSnippetsForStory({
       ranked.push({
         id: snippet.id,
         snippet,
-        topicOverlap,
         geographyOverlap,
         keywordOverlap,
         stateMatch,

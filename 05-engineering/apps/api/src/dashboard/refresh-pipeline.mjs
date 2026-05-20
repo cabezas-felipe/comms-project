@@ -53,7 +53,6 @@ import {
 } from "./what-changed-engine.mjs";
 import {
   WHY_FALLBACK_COPY,
-  WHY_IT_MATTERS_DIAGNOSTICS_SCHEMA_VERSION,
   aggregateWhyItMattersDiagnostics,
   deriveWhyStateFromWhatChangedState,
   emptyWhyItMattersRunDiagnostics,
@@ -1793,19 +1792,19 @@ export async function runRefreshPipeline({
   const everSeenSet = new Set(Array.isArray(everSeenMetaStoryIds) ? everSeenMetaStoryIds : []);
   const perStoryWhyItMatters = [];
   const whyItMattersTraces = {};
+  // Map what-changed `state` enum into the whatChangedState canonical delta
+  // enum the implications engine couples on (spec §3 mapping).  Unknown /
+  // missing states fall through to `null`, which the engine's fail-closed
+  // derivation handles per §3.
+  const WHAT_CHANGED_TO_DELTA_STATE = {
+    "first-seen": "firstSeen",
+    changed: "changed",
+    unchanged: "unchanged",
+  };
   for (let i = 0; i < stories.length; i += 1) {
     const story = stories[i];
     const wcResult = perStoryWhatChanged[i] ?? null;
-    // Map what-changed `state` enum into the whatChangedState canonical
-    // delta enum the implications engine couples on (spec §3 mapping).
-    const whatChangedState =
-      wcResult?.state === "first-seen"
-        ? "firstSeen"
-        : wcResult?.state === "changed"
-          ? "changed"
-          : wcResult?.state === "unchanged"
-            ? "unchanged"
-            : null;
+    const whatChangedState = WHAT_CHANGED_TO_DELTA_STATE[wcResult?.state] ?? null;
     const evidenceRefs = computeEvidenceRefsForStory(story, whatChangedState);
     const everSeenForStory =
       typeof story.metaStoryId === "string" && everSeenSet.has(story.metaStoryId);
