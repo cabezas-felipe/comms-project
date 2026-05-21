@@ -8,6 +8,7 @@ import {
   filterFeeds,
   mapEntry,
   stripHtml,
+  derivePublisherFromFeedName,
   resolveAllowlist,
   applyAllowlistGuard,
   normalizeAllowlist,
@@ -229,6 +230,117 @@ test("mapEntry: feedId is empty string when manifest row has no id (defensive)",
   const feed = { name: "Anonymous Source", weight: 50 };
   const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
   assert.equal(m.feedId, "");
+});
+
+// ─── Publisher-level outlet labels (B1 + B2) ─────────────────────────────────
+//
+// The user-facing outlet field must carry the publisher brand, not the
+// RSS section name.  Manifest-supplied `publisher` wins; otherwise we strip
+// the trailing " — Section" suffix off `feed.name`.  These tests pin both
+// branches so a manifest refactor can't silently regress the dashboard UI
+// back to section-level outlet labels.
+
+test("mapEntry: outlet uses manifest `publisher` when present (B1)", () => {
+  const feed = {
+    id: "wapo-politics",
+    name: "The Washington Post — Politics",
+    publisher: "The Washington Post",
+    weight: 95,
+  };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.outlet, "The Washington Post");
+});
+
+test("mapEntry: outlet derives publisher from feed.name when `publisher` missing (B2)", () => {
+  // No `publisher` on the manifest row — derivation strips " — Politics"
+  // off the name so the dashboard still shows the brand, not the section.
+  const feed = {
+    id: "wapo-politics",
+    name: "The Washington Post — Politics",
+    weight: 95,
+  };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.outlet, "The Washington Post");
+});
+
+test("mapEntry: outlet falls through to feed.name when no section suffix to strip", () => {
+  // Single-token name (no dash separator) — derivation returns the name as
+  // the publisher, so the fall-through is invisible from the outlet output.
+  const feed = { id: "reuters", name: "Reuters", weight: 80 };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.outlet, "Reuters");
+});
+
+test("derivePublisherFromFeedName: strips em / en / hyphen dash section suffixes", () => {
+  // The three common section-separator characters publishers use in RSS feed
+  // titles.  All three must collapse to the publisher brand so manifests
+  // authored with any of them produce the same outlet label.
+  assert.equal(derivePublisherFromFeedName("The Washington Post — Politics"), "The Washington Post");
+  assert.equal(derivePublisherFromFeedName("Reuters – World News"), "Reuters");
+  assert.equal(derivePublisherFromFeedName("BBC - Technology"), "BBC");
+});
+
+test("derivePublisherFromFeedName: returns the name when there's no separator", () => {
+  // Single-token publisher names round-trip — derivation never invents a
+  // suffix.  This is the path the outlet field hits via fallback so the
+  // contract here pins it.
+  assert.equal(derivePublisherFromFeedName("Reuters"), "Reuters");
+});
+
+test("derivePublisherFromFeedName: requires whitespace around the dash (no false split on hyphenated names)", () => {
+  // Names like "Al-Monitor" are legitimately hyphenated.  Requiring whitespace
+  // on both sides of the dash prevents accidental stripping that would yield
+  // "Al" as the publisher.
+  assert.equal(derivePublisherFromFeedName("Al-Monitor"), "Al-Monitor");
+});
+
+test("derivePublisherFromFeedName: strips hyphenated section without spaced dashes", () => {
+  // Some RSS titles use "Publisher-Section" with no spaces around the hyphen.
+  assert.equal(derivePublisherFromFeedName("Washington Post-Politics"), "Washington Post");
+  assert.equal(derivePublisherFromFeedName("The Washington Post-World"), "The Washington Post");
+});
+
+test("mapEntry: outlet derives publisher from hyphenated feed.name when `publisher` missing", () => {
+  const feed = {
+    id: "wapo-politics",
+    name: "Washington Post-Politics",
+    weight: 95,
+  };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.outlet, "Washington Post");
+});
+
+test("derivePublisherFromFeedName: returns null for non-strings or empty/whitespace input", () => {
+  // Null result lets the mapEntry fallback chain (publisher ?? derive ?? name)
+  // skip cleanly to the next candidate rather than emitting the literal string
+  // "null" / "undefined".
+  assert.equal(derivePublisherFromFeedName(null), null);
+  assert.equal(derivePublisherFromFeedName(undefined), null);
+  assert.equal(derivePublisherFromFeedName(""), null);
+  assert.equal(derivePublisherFromFeedName("   "), null);
+  assert.equal(derivePublisherFromFeedName(42), null);
+});
+
+test("mapEntry: three sibling WaPo feeds emit identical publisher outlet (count-collapses downstream)", () => {
+  // The dashboard contract: three section feeds from the same publisher
+  // contribute one source to a meta-story, not three.  Outlet equality here
+  // is the upstream invariant that lets buildStory's `normalizeSourceIdentity`
+  // deduplicate the chip count — pin it explicitly so a future change to
+  // mapEntry can't break the count without failing this test.
+  const feeds = [
+    { id: "wapo-politics", name: "The Washington Post — Politics", publisher: "The Washington Post", weight: 95 },
+    { id: "wapo-world", name: "The Washington Post — World", publisher: "The Washington Post", weight: 92 },
+    { id: "wapo-national", name: "The Washington Post — National", publisher: "The Washington Post", weight: 90 },
+  ];
+  const outlets = feeds.map((f, i) =>
+    mapEntry(f, {
+      title: `T${i}`,
+      link: `https://wapo/article-${i}`,
+      guid: `g${i}`,
+      pubDate: nowMinusMinutes(10 + i),
+    }).outlet
+  );
+  assert.deepEqual(outlets, ["The Washington Post", "The Washington Post", "The Washington Post"]);
 });
 
 // ─── readFeedItems (live mode) ──────────────────────────────────────────────

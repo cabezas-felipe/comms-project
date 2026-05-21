@@ -200,3 +200,65 @@ test("listIngestionFeeds maps all required output fields", async () => {
   assert.equal(typeof feed.weight, "number");
   assert.equal(typeof feed.active, "boolean");
 });
+
+test("listIngestionFeeds: traditional RSS includes publisher from publisher_display_name (B1)", async () => {
+  const rows = [
+    {
+      manifest_feed_id: "wapo-world",
+      rss_url: "https://feeds.washingtonpost.com/rss/world",
+      social_profile_url: null,
+      ingestion_weight: 92,
+      active: true,
+      status: "mapped",
+      source_entities: {
+        canonical_name: "The Washington Post — World",
+        kind: "traditional",
+        publisher_display_name: "The Washington Post",
+      },
+    },
+  ];
+  const [feed] = await listIngestionFeeds({ supabase: makeMockSupabase(rows) });
+  assert.equal(feed.name, "The Washington Post — World");
+  assert.equal(feed.publisher, "The Washington Post");
+});
+
+test("listIngestionFeeds: derives publisher from canonical_name when DB field null (B2)", async () => {
+  const rows = [
+    {
+      manifest_feed_id: "wapo-politics",
+      rss_url: "https://feeds.washingtonpost.com/rss/politics",
+      social_profile_url: null,
+      ingestion_weight: 95,
+      active: true,
+      status: "mapped",
+      source_entities: {
+        canonical_name: "The Washington Post — Politics",
+        kind: "traditional",
+        publisher_display_name: null,
+      },
+    },
+  ];
+  const [feed] = await listIngestionFeeds({ supabase: makeMockSupabase(rows) });
+  assert.equal(feed.publisher, "The Washington Post");
+});
+
+test("listIngestionFeeds: social rows omit publisher (F1)", async () => {
+  const rows = [
+    {
+      manifest_feed_id: "latamwatcher",
+      rss_url: null,
+      social_profile_url: "https://twitter.com/latamwatcher",
+      ingestion_weight: 50,
+      active: true,
+      status: "mapped",
+      source_entities: {
+        canonical_name: "@latamwatcher",
+        kind: "social",
+        publisher_display_name: null,
+      },
+    },
+  ];
+  const [feed] = await listIngestionFeeds({ supabase: makeMockSupabase(rows) });
+  assert.equal(feed.kind, "social");
+  assert.equal(feed.publisher, undefined);
+});
