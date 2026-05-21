@@ -435,6 +435,25 @@ On per-call timeout, provider error, or missing API key → Phase 3d safe fallba
 | Hard-fail rate | ≤ 2% | Yes |
 | Fallback rate | ≤ 10% | Warn |
 | Duplication failures | ≤ 5% | Warn |
+| Label mismatch rate (taxonomy / confidence) | tracked | **Warn only (MVP policy)** |
+
+### MVP gate policy — label-match is monitored, not blocking
+
+For the MVP pilot, **user-facing prose quality and safety are the gate**: rubric outcomes (`role_fit`, `non_duplication`, `non_prescriptive`, `neutral_framing`, `evidence_discipline`, `length`, `taxonomy_fit`, `state_coherence`), hard-fail patterns, and fallback discipline. Exact-label matching against `expectedTaxonomyPrimary` / `expectedConfidence` is **recorded on each row as `labelMismatches[]` and aggregated as `labelMismatchCount` / `labelMismatchRate`**, but does not push a row to `pass: false` and does not block the gate.
+
+Clarification: `taxonomy_fit` is the rubric check that the emitted taxonomy value is valid and coherent with constraints; `taxonomy_mismatch` is the eval-only comparison against the case's expected label, which is monitor-only under MVP default.
+
+**Why:** The six taxonomy categories cluster ambiguously around real coverage signals (a story can read as both `monitoring_intensity` and `stakeholder_exposure`). At MVP scale we want to ship safe, well-written implications copy first; label-fidelity tuning is a slower, separate workstream that benefits from longitudinal data.
+
+**Escape hatch — restore strict label matching:**
+
+```
+EVAL_STRICT_LABEL_MATCH=true npm run eval:why-this-matters
+# or
+npm run eval:why-this-matters -- --strict-labels
+```
+
+Under strict mode the gate behavior matches the original spec (label mismatches flow into `failReasons[]` and can push Group A pass rate below 100%, which blocks).
 
 ### CI integration
 
@@ -484,7 +503,7 @@ On per-call timeout, provider error, or missing API key → Phase 3d safe fallba
 
 ### 12.4 · Eval golden matching — **locked: rubric-only (A)**
 
-**Decision:** Automated eval **pass** = Phase 5a dimension scores + `expectedPass` / taxonomy / confidence / `expectedFailDimension` (Group C) / `expectFallbackUsed` (D03). **`referenceGolden` is not an exact-string match** — it is a human anchor and prompt-quality reference only.
+**Decision:** Automated eval **pass** = Phase 5a dimension scores + `expectedPass` / `expectedFailDimension` (Group C) / `expectFallbackUsed` (D03). **`referenceGolden` is not an exact-string match** — it is a human anchor and prompt-quality reference only. Taxonomy / confidence label match is policy-gated by §10 (monitor-only under MVP default; opt-in strict mode via `EVAL_STRICT_LABEL_MATCH`).
 
 **Group C exception:** `trapGolden` strings are used to assert the **validator rejects** that exact failure mode (or near-duplicate), not to score good copy.
 
