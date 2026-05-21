@@ -47,12 +47,13 @@ async function main() {
     const entityKind = ENTITY_KIND[feed.kind] ?? "traditional";
 
     // Upsert source_entities keyed on (kind, canonical_name).
+    const entityRow = { canonical_name: feed.name, kind: entityKind };
+    if (typeof feed.publisher === "string" && feed.publisher.trim().length > 0) {
+      entityRow.publisher_display_name = feed.publisher.trim();
+    }
     const { data: entityData, error: entityError } = await supabase
       .from("source_entities")
-      .upsert(
-        { canonical_name: feed.name, kind: entityKind },
-        { onConflict: "kind,canonical_name", ignoreDuplicates: false }
-      )
+      .upsert(entityRow, { onConflict: "kind,canonical_name", ignoreDuplicates: false })
       .select("id")
       .single();
 

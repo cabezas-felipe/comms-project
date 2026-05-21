@@ -21,6 +21,9 @@ import { createHash } from "node:crypto";
 import Parser from "rss-parser";
 import { isSupabaseEnabled, getSupabaseClient } from "../db/client.mjs";
 import { listIngestionFeeds } from "./feed-manifest-repo.mjs";
+import { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
+
+export { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
 
 const USER_AGENT = "Tempo-API/0.1 (+https://github.com/cabezas-felipe/comms-project)";
 const DEFAULT_FETCH_TIMEOUT_MS = 12_000;
@@ -562,7 +565,19 @@ export function mapEntry(feed, entry, fetchedAt = Date.now()) {
     // that an outlet-name string match would miss.  Empty string when the
     // manifest row had no id (defensive — every row should have one).
     feedId: String(feed.id ?? ""),
-    outlet: String(feed.name ?? feed.id ?? "Unknown"),
+    // Publisher brand on the user-facing outlet field — never the section
+    // name.  Manifest-supplied `feed.publisher` wins; otherwise we strip the
+    // trailing "— Section" off `feed.name` (B2 fallback); only then do we
+    // fall through to the raw manifest name / id so the downstream count
+    // collapses sibling-section feeds (e.g. WaPo Politics + World) to one
+    // outlet identity.  See the publisher-outlet spec.
+    outlet: String(
+      feed.publisher ??
+        derivePublisherFromFeedName(feed.name) ??
+        feed.name ??
+        feed.id ??
+        "Unknown"
+    ),
     kind: "traditional",
     weight: Number(feed.weight ?? 0),
     url: link || feed.url,

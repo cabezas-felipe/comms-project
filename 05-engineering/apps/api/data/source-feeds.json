@@ -4,6 +4,7 @@
     {
       "id": "wapo-politics",
       "name": "The Washington Post — Politics",
+      "publisher": "The Washington Post",
       "kind": "rss",
       "url": "https://feeds.washingtonpost.com/rss/politics",
       "weight": 95,
@@ -12,6 +13,7 @@
     {
       "id": "wapo-world",
       "name": "The Washington Post — World",
+      "publisher": "The Washington Post",
       "kind": "rss",
       "url": "https://feeds.washingtonpost.com/rss/world",
       "weight": 92,
@@ -20,6 +22,7 @@
     {
       "id": "wapo-national",
       "name": "The Washington Post — National",
+      "publisher": "The Washington Post",
       "kind": "rss",
       "url": "https://feeds.washingtonpost.com/rss/national",
       "weight": 90,
@@ -28,6 +31,7 @@
     {
       "id": "wapo-business",
       "name": "The Washington Post — Business",
+      "publisher": "The Washington Post",
       "kind": "rss",
       "url": "https://feeds.washingtonpost.com/rss/business",
       "weight": 88,
@@ -36,6 +40,7 @@
     {
       "id": "wapo-technology",
       "name": "The Washington Post — Technology",
+      "publisher": "The Washington Post",
       "kind": "rss",
       "url": "https://feeds.washingtonpost.com/rss/business/technology",
       "weight": 86,

@@ -1,3 +1,5 @@
+import { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
+
 /**
  * DB-backed manifest reader for ingestion feeds.
  *
@@ -10,7 +12,7 @@
  * Callers (e.g. the ingestion runner) are responsible for filtering on active if needed.
  *
  * @param {{ supabase: import('@supabase/supabase-js').SupabaseClient }} opts
- * @returns {Promise<Array<{ id: string, name: string, kind: string, url: string, weight: number, active: boolean }>>}
+ * @returns {Promise<Array<{ id: string, name: string, publisher?: string, kind: string, url: string, weight: number, active: boolean }>>}
  */
 export async function listIngestionFeeds({ supabase }) {
   const { data, error } = await supabase
@@ -22,7 +24,7 @@ export async function listIngestionFeeds({ supabase }) {
        ingestion_weight,
        active,
        status,
-       source_entities ( canonical_name, kind )`
+       source_entities ( canonical_name, kind, publisher_display_name )`
     )
     .in("status", ["mapped", "verified"])
     .order("ingestion_weight", { ascending: false });
@@ -45,14 +47,28 @@ export async function listIngestionFeeds({ supabase }) {
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "");
 
-    feeds.push({
+    const sectionName = entity?.canonical_name ?? id;
+    const feed = {
       id,
-      name: entity?.canonical_name ?? id,
+      // Section-level name retained for matching, logs, and B2 derivation input.
+      name: sectionName,
       kind,
       url,
       weight: row.ingestion_weight,
       active: row.active,
-    });
+    };
+    // Traditional RSS: explicit DB publisher (B1) wins; else derive from
+    // section canonical_name (B2). Social rows omit `publisher` — handles are
+    // the identity and are not collapsed to a parent brand (spec F1).
+    if (entity?.kind === "traditional" && kind === "rss") {
+      const explicit = entity?.publisher_display_name;
+      const derived =
+        typeof explicit === "string" && explicit.trim().length > 0
+          ? explicit.trim()
+          : derivePublisherFromFeedName(sectionName);
+      if (derived) feed.publisher = derived;
+    }
+    feeds.push(feed);
   }
 
   // DB already ordered by weight desc; apply secondary sort by name asc for ties.

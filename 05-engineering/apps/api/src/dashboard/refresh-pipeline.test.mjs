@@ -3393,6 +3393,86 @@ test("runRefreshPipeline: outletCount is 0 when every outlet is blank", async ()
   );
 });
 
+test("runRefreshPipeline: three sibling-section feeds from one publisher collapse to outletCount=1", async () => {
+  // The user-visible payoff of publisher-level outlet labels (spec D1):
+  // three Washington Post section feeds (Politics + World + National) feed
+  // distinct articles into one meta-story; the collapsed story-card chip
+  // must read "1 source", not "3 sources".  By the time items reach the
+  // pipeline they already carry publisher-level `outlet` (mapEntry handles
+  // the publisher derivation upstream — covered in feed-reader.test.mjs),
+  // so this test pins the pipeline's count-collapse contract end-to-end.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["The Washington Post"],
+    socialSources: [],
+  };
+  const rawItems = [
+    makeItem({
+      sourceId: "wapo-pol-a",
+      outlet: "The Washington Post",
+      minutesAgo: 10,
+      headline: "OFAC weighs new tools",
+      body: ["Politics desk reporting."],
+    }),
+    makeItem({
+      sourceId: "wapo-world-b",
+      outlet: "The Washington Post",
+      minutesAgo: 20,
+      headline: "OFAC reaction across the Atlantic",
+      body: ["World desk reporting."],
+    }),
+    makeItem({
+      sourceId: "wapo-natl-c",
+      outlet: "The Washington Post",
+      minutesAgo: 30,
+      headline: "OFAC enforcement memo lands",
+      body: ["National desk reporting."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "wapo-pub-collapse",
+    title: "OFAC coverage",
+    subtitle: "Sub.",
+    source_item_ids: ["wapo-pol-a", "wapo-world-b", "wapo-natl-c"],
+    summary: "Summary.",
+    tags: {
+      topics: ["Diplomatic relations"],
+      keywords: ["OFAC"],
+      geographies: ["US"],
+    },
+    factual_claims: [
+      "The Washington Post reports: OFAC weighs new tools",
+      "The Washington Post reports: OFAC reaction across the Atlantic",
+      "The Washington Post reports: OFAC enforcement memo lands",
+    ],
+    claim_evidence_map: {
+      "0": ["wapo-pol-a"],
+      "1": ["wapo-world-b"],
+      "2": ["wapo-natl-c"],
+    },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  const story = payload.stories[0];
+  assert.equal(story.sources.length, 3, "all three articles remain on the story");
+  assert.equal(
+    story.outletCount,
+    1,
+    "three section feeds from one publisher must collapse to a single source identity"
+  );
+  // The user-visible outlet label on each source row carries the publisher
+  // brand verbatim — sanity check so a future projection change can't sneak
+  // a section name back in.
+  for (const s of story.sources) {
+    assert.equal(s.outlet, "The Washington Post");
+  }
+});
+
 // ─── Cross-feed dedupe (meta-story pipeline integration) ─────────────────────
 //
 // Pinning the strict-match contract for the cross-feed dedupe stage at the
