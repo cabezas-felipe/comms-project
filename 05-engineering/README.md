@@ -64,6 +64,20 @@ This inserts ledger rows without executing the SQL. Use it once per environment 
 1. `npm run db:migrate --workspace=@tempo/api` against the target environment's `DATABASE_URL` first.
 2. Deploy API + frontend together once the migration is confirmed.
 
+**Environments (as of 2026-05-21):** Tempo uses a **single** Supabase project (`Tempo`, ref `kdkzvcwlhgivvjwziqpr`). Local `apps/api/.env`, Vercel **Production – tempo-api**, and **Preview – tempo-api** all point at that database via `DATABASE_URL` / `SUPABASE_URL`. There is no separate staging Postgres — run `db:migrate:dry` against each `DATABASE_URL` you use; if it reports pending files, apply before deploy.
+
+**Migration 018 (`publisher_display_name`):** Adds `source_entities.publisher_display_name` for dashboard outlet labels. Schema change is idempotent (`ADD COLUMN IF NOT EXISTS`). After apply, optional one-time catalog backfill for section-style `canonical_name` rows (em dash separator):
+
+```sql
+UPDATE source_entities
+SET publisher_display_name = trim(split_part(canonical_name, ' — ', 1))
+WHERE kind = 'traditional'
+  AND canonical_name LIKE '% — %'
+  AND (publisher_display_name IS NULL OR publisher_display_name = '');
+```
+
+Re-run `source-feeds-import.mjs` when `source-feeds.json` carries explicit `publisher` fields. B2 derivation in code covers rows still null at read time.
+
 ## Source scope (Phase 1: Washington Post only)
 
 The Supabase manifest's `active` flag is the **primary** lever that decides which feeds run during ingestion. The runtime guard `TEMPO_RSS_ALLOWLIST` (defaults to `washington post`) is defense-in-depth — it filters again at fetch time. `TEMPO_INGESTION_ALLOWLIST` is accepted as a legacy alias for backwards compatibility; new configuration should use `TEMPO_RSS_ALLOWLIST`.
