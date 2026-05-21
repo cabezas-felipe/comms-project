@@ -100,6 +100,19 @@ function resolveWriterMode(argv = process.argv.slice(2), env = process.env) {
   return "stub";
 }
 
+/**
+ * Resolve the MVP label-match policy.  Default is `false` (taxonomy /
+ * confidence label mismatches are monitored but non-blocking); set
+ * `EVAL_STRICT_LABEL_MATCH=true` or pass `--strict-labels` to restore the
+ * original strict behavior where label mismatches block the gate via
+ * overallPassRate.
+ */
+export function resolveStrictLabelMatch(argv = process.argv.slice(2), env = process.env) {
+  if (argv.includes("--strict-labels")) return true;
+  const envVal = String(env.EVAL_STRICT_LABEL_MATCH ?? "").trim().toLowerCase();
+  return envVal === "true" || envVal === "1";
+}
+
 function shouldEmitJsonOnly(argv = process.argv.slice(2)) {
   return argv.includes("--json-only");
 }
@@ -137,6 +150,7 @@ export async function runEvalCase(caseDef, { writerMode } = {}) {
 export async function runEvalSuite({
   datasetPath = DEFAULT_DATASET_PATH,
   writerMode = "stub",
+  strictLabelMatch = false,
 } = {}) {
   const raw = readFileSync(datasetPath, "utf8");
   const dataset = JSON.parse(raw);
@@ -145,13 +159,13 @@ export async function runEvalSuite({
   const scored = [];
   for (const caseDef of cases) {
     const outcome = await runEvalCase(caseDef, { writerMode });
-    const row = scoreEvalCase(caseDef, outcome);
+    const row = scoreEvalCase(caseDef, outcome, { strictLabelMatch });
     scored.push(row);
   }
 
   const metrics = aggregateEvalMetrics(scored);
   const gate = evaluateEvalGate(metrics);
-  return { dataset, scored, metrics, gate };
+  return { dataset, scored, metrics, gate, strictLabelMatch };
 }
 
 function fmtPct(rate) {
@@ -159,12 +173,13 @@ function fmtPct(rate) {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
-function printReport({ dataset, scored, metrics, gate, writerMode }) {
+function printReport({ dataset, scored, metrics, gate, writerMode, strictLabelMatch }) {
   const HR = "-".repeat(60);
   const HR2 = "=".repeat(60);
 
   console.log(`\n${HR2}`);
-  console.log(` Why-this-matters eval — ${dataset?.version ?? "unknown"} (${writerMode})`);
+  const labelPolicy = strictLabelMatch ? "strict-labels" : "labels=monitor";
+  console.log(` Why-this-matters eval — ${dataset?.version ?? "unknown"} (${writerMode}, ${labelPolicy})`);
   console.log(HR2);
 
   for (const row of scored) {
@@ -172,10 +187,16 @@ function printReport({ dataset, scored, metrics, gate, writerMode }) {
     const flags = [];
     if (row.hardFail) flags.push("hardFail");
     if (row.fallbackUsed) flags.push("fallback");
+    if (Array.isArray(row.labelMismatches) && row.labelMismatches.length > 0) {
+      flags.push("labelMismatch");
+    }
     const flagStr = flags.length > 0 ? ` [${flags.join(",")}]` : "";
     console.log(`  ${mark}  ${row.id} (${row.group})${flagStr}`);
     if (!row.pass && row.failReasons.length > 0) {
       console.log(`        failReasons: ${row.failReasons.join("; ")}`);
+    }
+    if (Array.isArray(row.labelMismatches) && row.labelMismatches.length > 0) {
+      console.log(`        labelMismatches: ${row.labelMismatches.join("; ")}`);
     }
   }
 
@@ -202,6 +223,9 @@ function printReport({ dataset, scored, metrics, gate, writerMode }) {
   console.log(
     `  duplication_failures=${metrics.duplicationFailureCount} (${fmtPct(metrics.duplicationFailureRate)})`
   );
+  console.log(
+    `  label_mismatches=${metrics.labelMismatchCount} (${fmtPct(metrics.labelMismatchRate)})  policy=${strictLabelMatch ? "blocking" : "monitor-only"}`
+  );
 
   if (gate.blockers.length > 0) {
     console.log(`\n${HR}`);
@@ -223,13 +247,15 @@ function printReport({ dataset, scored, metrics, gate, writerMode }) {
 
 /**
  * Serialize the run into a stable JSON shape for CI scrapers.  Kept small:
- * id / group / pass / hardFail / fallbackUsed / failReasons per case, plus
- * the same metrics + gate object the runner prints.
+ * id / group / pass / hardFail / fallbackUsed / failReasons / labelMismatches
+ * per case, plus the same metrics + gate object the runner prints and the
+ * `strictLabelMatch` policy flag in effect for the run.
  */
-export function buildJsonSummary({ dataset, scored, metrics, gate, writerMode }) {
+export function buildJsonSummary({ dataset, scored, metrics, gate, writerMode, strictLabelMatch }) {
   return {
     dataset: dataset?.version ?? null,
     writerMode,
+    strictLabelMatch: strictLabelMatch === true,
     metrics,
     gate,
     results: scored.map((r) => ({
@@ -239,18 +265,20 @@ export function buildJsonSummary({ dataset, scored, metrics, gate, writerMode })
       hardFail: r.hardFail,
       fallbackUsed: r.fallbackUsed,
       failReasons: r.failReasons,
+      labelMismatches: Array.isArray(r.labelMismatches) ? r.labelMismatches : [],
     })),
   };
 }
 
 async function main() {
   const writerMode = resolveWriterMode();
+  const strictLabelMatch = resolveStrictLabelMatch();
   const jsonOnly = shouldEmitJsonOnly();
-  const run = await runEvalSuite({ writerMode });
+  const run = await runEvalSuite({ writerMode, strictLabelMatch });
   if (!jsonOnly) {
-    printReport({ ...run, writerMode });
+    printReport({ ...run, writerMode, strictLabelMatch });
   }
-  const summary = buildJsonSummary({ ...run, writerMode });
+  const summary = buildJsonSummary({ ...run, writerMode, strictLabelMatch });
   console.log("=== JSON ===");
   console.log(JSON.stringify(summary, null, 2));
   console.log("=== END JSON ===");

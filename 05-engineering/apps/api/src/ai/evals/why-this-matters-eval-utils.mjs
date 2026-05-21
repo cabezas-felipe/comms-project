@@ -108,12 +108,23 @@ export function buildResolverInputForCase(caseDef) {
  *
  * Always returns the same row shape regardless of path so the aggregator
  * doesn't have to branch.
+ *
+ * MVP gate policy (spec §10): `strictLabelMatch` defaults to `false` so that
+ * `taxonomy_mismatch` / `confidence_mismatch` are recorded on the row's
+ * `labelMismatches[]` field but do NOT push the row into `pass=false`.  Set
+ * to `true` (or via env `EVAL_STRICT_LABEL_MATCH=true` at the runner) to
+ * restore the original strict behavior where label mismatches block.
+ *
+ * @param {object} caseDef
+ * @param {object} outcome
+ * @param {{ strictLabelMatch?: boolean }} [options]
  */
-export function scoreEvalCase(caseDef, outcome) {
+export function scoreEvalCase(caseDef, outcome, { strictLabelMatch = false } = {}) {
   const id = caseDef?.id ?? "unknown";
   const group = caseDef?.group ?? "?";
   const expected = caseDef?.expected ?? {};
   const failReasons = [];
+  const labelMismatches = [];
 
   if (outcome?.type === "validator") {
     const v = outcome.validation ?? {};
@@ -147,6 +158,7 @@ export function scoreEvalCase(caseDef, outcome) {
       hardFail: casePass ? false : validatorHardFail,
       fallbackUsed: false,
       failReasons,
+      labelMismatches,
       dimensionScores: v.dimensionScores ?? {},
       traceComplete: null,
       details: {
@@ -169,21 +181,25 @@ export function scoreEvalCase(caseDef, outcome) {
   if (expected.allowFallback === false && fallbackUsed) {
     failReasons.push("fallback_used_when_disallowed");
   }
+  // MVP gate policy (spec §10): taxonomy / confidence label mismatches are
+  // monitored on `labelMismatches[]` but non-blocking unless `strictLabelMatch`
+  // is true.  Prose quality / safety (rubric, fallback discipline, trace
+  // completeness) remains the gate-relevant signal for MVP pilot.
   if (
     typeof expected.expectedTaxonomyPrimary === "string" &&
     trace?.taxonomyPrimary !== expected.expectedTaxonomyPrimary
   ) {
-    failReasons.push(
-      `taxonomy_mismatch:expected=${expected.expectedTaxonomyPrimary} actual=${trace?.taxonomyPrimary}`
-    );
+    const reason = `taxonomy_mismatch:expected=${expected.expectedTaxonomyPrimary} actual=${trace?.taxonomyPrimary}`;
+    if (strictLabelMatch) failReasons.push(reason);
+    else labelMismatches.push(reason);
   }
   if (
     typeof expected.expectedConfidence === "string" &&
     trace?.confidence !== expected.expectedConfidence
   ) {
-    failReasons.push(
-      `confidence_mismatch:expected=${expected.expectedConfidence} actual=${trace?.confidence}`
-    );
+    const reason = `confidence_mismatch:expected=${expected.expectedConfidence} actual=${trace?.confidence}`;
+    if (strictLabelMatch) failReasons.push(reason);
+    else labelMismatches.push(reason);
   }
 
   const traceComplete = isTraceComplete(trace);
@@ -216,6 +232,7 @@ export function scoreEvalCase(caseDef, outcome) {
     hardFail: validatorHardFail,
     fallbackUsed,
     failReasons,
+    labelMismatches,
     dimensionScores,
     traceComplete,
     details: {
@@ -231,9 +248,10 @@ export function scoreEvalCase(caseDef, outcome) {
 
 /**
  * Aggregate per-case rows into run-level metrics: overall pass rate, hard
- * fail rate, fallback rate, duplication-failure rate, plus per-group
- * (A/B/C/D) pass counts.  All rates are pre-computed so the runner and the
- * gate don't have to recompute.
+ * fail rate, fallback rate, duplication-failure rate, label-mismatch rate
+ * (taxonomy / confidence; monitor-only under MVP policy, see spec §10), plus
+ * per-group (A/B/C/D) pass counts.  All rates are pre-computed so the runner
+ * and the gate don't have to recompute.
  */
 export function aggregateEvalMetrics(scored) {
   const rows = Array.isArray(scored) ? scored : [];
@@ -242,6 +260,7 @@ export function aggregateEvalMetrics(scored) {
   let hardFailCount = 0;
   let fallbackCount = 0;
   let duplicationFailCount = 0;
+  let labelMismatchCount = 0;
   const byGroup = {};
 
   for (const row of rows) {
@@ -249,11 +268,19 @@ export function aggregateEvalMetrics(scored) {
     if (row.pass) passCount += 1;
     if (row.hardFail) hardFailCount += 1;
     if (row.fallbackUsed) fallbackCount += 1;
-    if (
-      Array.isArray(row.failReasons) &&
-      row.failReasons.some((r) => typeof r === "string" && r.includes("non_duplication"))
-    ) {
+    const failReasonsArr = Array.isArray(row.failReasons) ? row.failReasons : [];
+    const labelMismatchesArr = Array.isArray(row.labelMismatches) ? row.labelMismatches : [];
+    if (failReasonsArr.some((r) => typeof r === "string" && r.includes("non_duplication"))) {
       duplicationFailCount += 1;
+    }
+    // Count label mismatches whether they appear in failReasons (strict mode)
+    // or labelMismatches (MVP default).  This keeps the rate comparable
+    // across both modes for the operator-facing warning.
+    const hasLabelMismatchInFails = failReasonsArr.some(
+      (r) => typeof r === "string" && (r.startsWith("taxonomy_mismatch") || r.startsWith("confidence_mismatch"))
+    );
+    if (hasLabelMismatchInFails || labelMismatchesArr.length > 0) {
+      labelMismatchCount += 1;
     }
     const g = typeof row.group === "string" ? row.group : "?";
     if (!byGroup[g]) byGroup[g] = { total: 0, pass: 0, hardFail: 0, fallback: 0 };
@@ -276,6 +303,8 @@ export function aggregateEvalMetrics(scored) {
     fallbackRate: total > 0 ? fallbackCount / total : 0,
     duplicationFailureCount: duplicationFailCount,
     duplicationFailureRate: total > 0 ? duplicationFailCount / total : 0,
+    labelMismatchCount,
+    labelMismatchRate: total > 0 ? labelMismatchCount / total : 0,
     byGroup,
   };
 }
@@ -316,6 +345,15 @@ export function evaluateEvalGate(metrics, thresholds = GATE_THRESHOLDS) {
   if (metrics.duplicationFailureRate > thresholds.duplicationFailureRate) {
     warnings.push(
       `duplication_failure_rate ${(metrics.duplicationFailureRate * 100).toFixed(1)}% > ${(thresholds.duplicationFailureRate * 100).toFixed(0)}%`
+    );
+  }
+  // MVP gate policy (spec §10): taxonomy/confidence label mismatches are
+  // monitored but non-blocking.  Surface as a warning so operators see the
+  // signal without the gate flipping red.  Under EVAL_STRICT_LABEL_MATCH=true
+  // the mismatches will also count in `overallPassRate` and may block there.
+  if (typeof metrics.labelMismatchCount === "number" && metrics.labelMismatchCount > 0) {
+    warnings.push(
+      `label_mismatch_rate ${(metrics.labelMismatchRate * 100).toFixed(1)}% (${metrics.labelMismatchCount}/${metrics.total} cases; taxonomy/confidence labels — non-blocking under MVP policy)`
     );
   }
   return { blockers, warnings };

@@ -14,7 +14,12 @@ import {
   REQUIRED_TRACE_FIELDS,
   scoreEvalCase,
 } from "./why-this-matters-eval-utils.mjs";
-import { buildJsonSummary, runEvalCase, runEvalSuite } from "./run-why-this-matters-eval.mjs";
+import {
+  buildJsonSummary,
+  resolveStrictLabelMatch,
+  runEvalCase,
+  runEvalSuite,
+} from "./run-why-this-matters-eval.mjs";
 
 // ─── isTraceComplete ─────────────────────────────────────────────────────────
 
@@ -175,7 +180,7 @@ test("scoreEvalCase: resolver path with matching taxonomy/confidence + clean rub
   assert.equal(row.traceComplete, true);
 });
 
-test("scoreEvalCase: resolver path with taxonomy mismatch fails with detailed reason", () => {
+test("scoreEvalCase: MVP default — taxonomy mismatch is recorded in labelMismatches[] but does not fail the row", () => {
   const row = scoreEvalCase(baseResolverCase(), {
     type: "resolver",
     whyItMatters:
@@ -187,8 +192,52 @@ test("scoreEvalCase: resolver path with taxonomy mismatch fails with detailed re
     }),
     diagnostics: { fallbackUsed: false },
   });
+  assert.equal(row.pass, true, `expected MVP default to ignore label mismatch; failReasons=${row.failReasons.join("; ")}`);
+  assert.ok(Array.isArray(row.labelMismatches));
+  assert.ok(row.labelMismatches.some((r) => r.startsWith("taxonomy_mismatch:")));
+  assert.equal(
+    row.failReasons.some((r) => r.startsWith("taxonomy_mismatch:")),
+    false,
+    "label mismatch must not leak into failReasons under MVP default"
+  );
+});
+
+test("scoreEvalCase: strict mode — taxonomy mismatch fails the row with detailed reason in failReasons", () => {
+  const row = scoreEvalCase(
+    baseResolverCase(),
+    {
+      type: "resolver",
+      whyItMatters:
+        "New on your watchlist — early pickup across outlets, so keep baseline monitoring, not background noise.",
+      trace: buildFullTrace({
+        taxonomyPrimary: "narrative_stability",
+        confidence: "medium",
+        fallback_used: false,
+      }),
+      diagnostics: { fallbackUsed: false },
+    },
+    { strictLabelMatch: true }
+  );
   assert.equal(row.pass, false);
   assert.ok(row.failReasons.some((r) => r.startsWith("taxonomy_mismatch:")));
+  // Under strict mode the mismatch flows through failReasons; labelMismatches stays empty.
+  assert.deepEqual(row.labelMismatches, []);
+});
+
+test("scoreEvalCase: MVP default — confidence mismatch is also monitored not blocking", () => {
+  const row = scoreEvalCase(baseResolverCase(), {
+    type: "resolver",
+    whyItMatters:
+      "New on your watchlist — early pickup across outlets, so keep baseline monitoring, not background noise.",
+    trace: buildFullTrace({
+      taxonomyPrimary: "monitoring_intensity",
+      confidence: "high", // expected "medium"
+      fallback_used: false,
+    }),
+    diagnostics: { fallbackUsed: false },
+  });
+  assert.equal(row.pass, true);
+  assert.ok(row.labelMismatches.some((r) => r.startsWith("confidence_mismatch:")));
 });
 
 test("scoreEvalCase: resolver path detects rubric failure (e.g. duplication trap)", () => {
@@ -579,11 +628,86 @@ test("buildJsonSummary: emits a stable shape (dataset, writerMode, metrics, gate
     assert.ok(Array.isArray(summary.results));
     assert.deepEqual(
       Object.keys(summary.results[0]).sort(),
-      ["failReasons", "fallbackUsed", "group", "hardFail", "id", "pass"].sort()
+      ["failReasons", "fallbackUsed", "group", "hardFail", "id", "labelMismatches", "pass"].sort()
     );
     // Roundtrip through JSON to confirm shape is serializable.
     const roundtripped = JSON.parse(JSON.stringify(summary));
     assert.equal(roundtripped.results[0].id, "eval-c-shape");
+  });
+});
+
+// ─── MVP gate policy: EVAL_STRICT_LABEL_MATCH toggle ────────────────────────
+
+test("resolveStrictLabelMatch: default false; env=true and --strict-labels CLI both opt in", () => {
+  assert.equal(resolveStrictLabelMatch([], {}), false);
+  assert.equal(resolveStrictLabelMatch([], { EVAL_STRICT_LABEL_MATCH: "true" }), true);
+  assert.equal(resolveStrictLabelMatch([], { EVAL_STRICT_LABEL_MATCH: "1" }), true);
+  assert.equal(resolveStrictLabelMatch([], { EVAL_STRICT_LABEL_MATCH: "TRUE" }), true);
+  assert.equal(resolveStrictLabelMatch([], { EVAL_STRICT_LABEL_MATCH: "false" }), false);
+  assert.equal(resolveStrictLabelMatch([], { EVAL_STRICT_LABEL_MATCH: "yes" }), false);
+  assert.equal(resolveStrictLabelMatch(["--strict-labels"], {}), true);
+});
+
+test("runEvalSuite: label mismatch alone does NOT block under MVP default; surfaces as warning", async () => {
+  // We need a stub-mode case where the writer's emitted taxonomy/confidence
+  // diverge from `expected.*`.  The stub writer normally mirrors the expected
+  // labels back, so we use `forceWriterFail: true` to route through the
+  // Phase 3d fallback, which deterministically emits
+  // signal_uncertainty / low.  Setting expected to monitoring_intensity /
+  // medium therefore guarantees a label mismatch on both fields.
+  const dataset = {
+    version: "test-mvp-policy",
+    cases: [
+      {
+        id: "eval-mvp-policy",
+        group: "B",
+        input: {
+          metaStoryId: "ms-mvp",
+          state: "evolving",
+          whatChangedState: "changed",
+          subtitle: "New cross-outlet pickup on a developing policy-to-political shift.",
+          summary: "Coverage is widening from policy reporting toward political reaction.",
+          whatChanged: "Two outlets shifted framing in the last cycle.",
+          forceWriterFail: true,
+        },
+        expected: {
+          expectedPass: true,
+          expectedTaxonomyPrimary: "monitoring_intensity",
+          expectedConfidence: "medium",
+          allowFallback: true,
+          referenceGolden: "ignored — fallback path",
+        },
+      },
+    ],
+  };
+  await withTempDataset(dataset, async (datasetPath) => {
+    // MVP default: row passes despite taxonomy mismatch; no blocker.
+    const lenient = await runEvalSuite({ datasetPath, writerMode: "stub" });
+    assert.equal(lenient.scored[0].pass, true);
+    assert.ok(lenient.scored[0].labelMismatches.some((r) => r.startsWith("taxonomy_mismatch:")));
+    assert.deepEqual(lenient.gate.blockers, []);
+    assert.ok(
+      lenient.gate.warnings.some((w) => w.startsWith("label_mismatch_rate")),
+      `expected label_mismatch warning, got warnings=${lenient.gate.warnings.join("; ")}`
+    );
+    assert.equal(lenient.metrics.labelMismatchCount, 1);
+    assert.equal(lenient.strictLabelMatch, false);
+
+    // Strict mode: the same mismatches now flow into failReasons and push
+    // overall pass rate below 90%, which blocks.
+    const strict = await runEvalSuite({
+      datasetPath,
+      writerMode: "stub",
+      strictLabelMatch: true,
+    });
+    assert.equal(strict.scored[0].pass, false);
+    assert.ok(strict.scored[0].failReasons.some((r) => r.startsWith("taxonomy_mismatch:")));
+    assert.ok(strict.scored[0].failReasons.some((r) => r.startsWith("confidence_mismatch:")));
+    assert.ok(
+      strict.gate.blockers.some((b) => b.startsWith("overall_pass_rate")),
+      `expected overall_pass_rate blocker under strict mode, got blockers=${strict.gate.blockers.join("; ")}`
+    );
+    assert.equal(strict.strictLabelMatch, true);
   });
 });
 

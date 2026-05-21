@@ -549,7 +549,7 @@ test("writeSnapshot + readSnapshot: _whyItMattersTraces round-trips on the snaps
       doctrineRefs: [],
       fallback_used: false,
       writerVersion: "why-it-matters-v0",
-      promptVersion: "why-it-matters-prompt-v0",
+      promptVersion: "why-it-matters-prompt-v4",
       generatedAt: "2026-05-20T12:00:00.000Z",
     },
   };
