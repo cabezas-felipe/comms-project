@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Source } from "@/data/stories";
-import { X } from "lucide-react";
+import { ArrowUpRight, X } from "lucide-react";
 
 interface Props {
   source: Source | null;
@@ -22,6 +22,7 @@ export default function SourceReader({ source, onClose }: Props) {
 
   const glyph = source.kind === "social" ? "◯" : "■";
   const kindLabel = source.kind === "social" ? "Social account" : "Traditional outlet";
+  const hasExternalUrl = /^https?:\/\//i.test(source.url);
 
   return (
     <aside
@@ -64,9 +65,24 @@ export default function SourceReader({ source, onClose }: Props) {
               </p>
             ))}
           </div>
-          <p className="mt-8 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            Excerpt rendered in Tempo · for monitoring purposes
-          </p>
+          {hasExternalUrl && (
+            <div className="mt-8 border-t border-rule/60 pt-4">
+              <a
+                href={source.url}
+                target="_blank"
+                rel="noreferrer"
+                className="group inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+                aria-label={
+                  source.kind === "social"
+                    ? `Open original post on ${source.outlet} in a new tab`
+                    : `Open ${source.outlet} article in a new tab`
+                }
+              >
+                <span>{source.outlet}</span>
+                <ArrowUpRight className="h-3 w-3 transition-all group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-ember" />
+              </a>
+            </div>
+          )}
         </article>
       </div>
     </aside>
