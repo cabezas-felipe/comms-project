@@ -9,6 +9,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { isUxTestMode } from "@/lib/ux-test-mode";
 
 type AppHeaderProps = {
   lastRefreshedAt?: string | null;
@@ -44,7 +45,7 @@ export default function AppHeader({ lastRefreshedAt }: AppHeaderProps = {}) {
         </div>
 
         <div className="flex items-center gap-5">
-          {!isSettings && (
+          {!isSettings && !isUxTestMode && (
             <div className="hidden text-right md:block">
               <div className="eyebrow leading-none">Last refresh</div>
               <div className="font-mono text-xs text-foreground">
