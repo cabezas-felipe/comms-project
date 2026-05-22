@@ -1,17 +1,13 @@
 import { useEffect } from "react";
 import { Source } from "@/data/stories";
-import { timeAgo } from "@/lib/format";
-import { X, ArrowLeft } from "lucide-react";
+import { X } from "lucide-react";
 
 interface Props {
   source: Source | null;
   onClose: () => void;
-  onBack?: () => void;
-  /** label shown in the back-to-story footer */
-  storyTitle?: string;
 }
 
-export default function SourceReader({ source, onClose, onBack, storyTitle }: Props) {
+export default function SourceReader({ source, onClose }: Props) {
   // Esc to close
   useEffect(() => {
     if (!source) return;
@@ -42,11 +38,6 @@ export default function SourceReader({ source, onClose, onBack, storyTitle }: Pr
           <div className="font-display text-[20px] font-semibold leading-tight tracking-tight">
             {source.outlet}
           </div>
-          {source.byline && (
-            <div className="font-mono text-[11px] text-muted-foreground">
-              {source.byline} · {timeAgo(source.minutesAgo)}
-            </div>
-          )}
         </div>
         <button
           onClick={onClose}
@@ -78,19 +69,6 @@ export default function SourceReader({ source, onClose, onBack, storyTitle }: Pr
           </p>
         </article>
       </div>
-
-      {/* Footer */}
-      {onBack && storyTitle && (
-        <div className="border-t border-rule/60 px-7 py-3">
-          <button
-            onClick={onBack}
-            className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <ArrowLeft className="h-3 w-3" />
-            Back to story · <span className="truncate max-w-[40ch]">{storyTitle}</span>
-          </button>
-        </div>
-      )}
     </aside>
   );
 }

@@ -163,7 +163,6 @@ export default function Dashboard() {
     [stories, activeSourceId]
   );
   const activeSource: Source | null = activeSourcePair?.source ?? null;
-  const activeSourceStory: Story | null = activeSourcePair?.story ?? null;
 
   const railOpen = !!activeSource;
 
@@ -492,9 +491,7 @@ export default function Dashboard() {
             <div className="sticky top-16 h-[calc(100vh-4rem)]">
               <SourceReader
                 source={activeSource}
-                storyTitle={activeSourceStory?.title}
                 onClose={() => setActiveSourceId(null)}
-                onBack={() => setActiveSourceId(null)}
               />
             </div>
           </aside>
@@ -517,9 +514,7 @@ export default function Dashboard() {
       >
         <SourceReader
           source={activeSource}
-          storyTitle={activeSourceStory?.title}
           onClose={() => setActiveSourceId(null)}
-          onBack={() => setActiveSourceId(null)}
         />
       </aside>
     </>
