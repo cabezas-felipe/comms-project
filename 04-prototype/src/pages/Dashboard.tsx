@@ -28,6 +28,7 @@ import {
 } from "@/lib/dashboard-filters";
 import { type StoryDto } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
+import { isUxTestMode } from "@/lib/ux-test-mode";
 import { useRefreshContext } from "@/lib/refresh-context";
 import { REFRESH_INTERVAL_MS } from "@/lib/refresh-heartbeat";
 
@@ -475,14 +476,16 @@ export default function Dashboard() {
             );
           })()}
 
-          <div className="px-6 py-8 text-center">
-            <p
-              data-testid="refresh-footer"
-              className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
-            >
-              {footerText}
-            </p>
-          </div>
+          {!isUxTestMode && (
+            <div className="px-6 py-8 text-center">
+              <p
+                data-testid="refresh-footer"
+                className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
+              >
+                {footerText}
+              </p>
+            </div>
+          )}
         </section>
 
         {/* Desktop source reader rail (lg+) */}
