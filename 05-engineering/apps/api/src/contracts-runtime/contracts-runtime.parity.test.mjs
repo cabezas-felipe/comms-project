@@ -52,6 +52,10 @@ if (published) {
     assert.equal(local.CONTRACT_VERSION, published.CONTRACT_VERSION);
   });
 
+  test("REFRESH_INTERVAL_MS matches between runtime-local and @tempo/contracts", () => {
+    assert.equal(local.REFRESH_INTERVAL_MS, published.REFRESH_INTERVAL_MS);
+  });
+
   test("alias / synonym maps are deeply equal", () => {
     assert.deepEqual(local.TOPIC_SYNONYMS, published.TOPIC_SYNONYMS);
     assert.deepEqual(local.KEYWORD_SYNONYMS, published.KEYWORD_SYNONYMS);

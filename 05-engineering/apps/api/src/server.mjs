@@ -41,6 +41,10 @@ import {
   release as releaseRefresh,
   REFRESH_GUARD_SCOPE,
 } from "./dashboard/refresh-guard.mjs";
+import {
+  listSnapshotAnchors as orchestratorListSnapshotAnchors,
+  runDueRefreshes as orchestratorRunDueRefreshes,
+} from "./dashboard/due-user-orchestrator.mjs";
 import { assessGeoConfidence } from "./dashboard/geo-filter.mjs";
 import {
   parseFallbackFeedIdsEnv,
@@ -1363,6 +1367,31 @@ async function executeRefreshFlow(identity) {
  * tests replace it inside a `try/finally` and restore the prior reference.
  */
 export const _refreshExecutor = { execute: executeRefreshFlow };
+
+/**
+ * Sub-slice 2.4: server-side due-user orchestrator hook.
+ *
+ * Routes through the same `_refreshExecutor.execute` path the interactive
+ * `POST /api/dashboard/refresh` uses, so the in-flight guard, watermark
+ * short-circuit, snapshot persistence, and `_lastCheckedAt` anchor update
+ * all stay consistent regardless of trigger source.
+ *
+ * Mutable so 2.4 tests can stub `listAnchors` and `executeRefreshFlowFn`
+ * deterministically (no live Supabase, no pipeline I/O), and so 2.5 can
+ * later swap the supabase client / interval source via the same hook.
+ *
+ * No public endpoint surfaces this in 2.4 — `runDueRefreshes` is invoked
+ * from the Sub-slice 2.5 entrypoint (scheduled GitHub Action wiring).
+ */
+export const _dueUserOrchestrator = {
+  listAnchors: () => orchestratorListSnapshotAnchors({ supabase: getSupabaseClient() }),
+  runDueRefreshes: (opts = {}) =>
+    orchestratorRunDueRefreshes({
+      listAnchorsFn: _dueUserOrchestrator.listAnchors,
+      executeRefreshFlowFn: _refreshExecutor.execute,
+      ...opts,
+    }),
+};
 
 app.post("/api/dashboard/refresh", async (req, res) => {
   const identity = await requireIdentity(req, res);

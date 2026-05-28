@@ -12,14 +12,18 @@
 //     not block the user's refresh.  Functions return `{ error }` envelopes
 //     and never throw on supabase errors; truly unexpected throws bubble up
 //     for the caller to log.
-//   - `DEFAULT_TTL_MS` deliberately mirrors the dashboard refresh cadence
-//     (1 hour, the canonical `REFRESH_INTERVAL_MS` in @tempo/contracts).  We
-//     keep a local literal here rather than importing the TS package, matching
-//     the existing `contracts-runtime/` pattern used elsewhere in the API.
+//   - `DEFAULT_TTL_MS` is bound to the canonical `REFRESH_INTERVAL_MS` cadence
+//     (`@tempo/contracts`, mirrored in `contracts-runtime/`).  Binding the TTL
+//     to the same constant the client heartbeat and the server-side due-user
+//     orchestrator (Sub-slice 2.4) consume prevents drift between cache expiry
+//     and refresh cadence — a longer TTL would leave the orchestrator reading
+//     a still-fresh cache row on schedules where the user expected new data,
+//     while a shorter TTL would force redundant live fetches.
 
 import { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
+import { REFRESH_INTERVAL_MS } from "../contracts-runtime/index.mjs";
 
-const DEFAULT_TTL_MS = 60 * 60 * 1000;
+const DEFAULT_TTL_MS = REFRESH_INTERVAL_MS;
 const SNIPPET_MAX_LEN = 500;
 const DEFAULT_WEIGHT = 50;
 const DEFAULT_KIND = "traditional";

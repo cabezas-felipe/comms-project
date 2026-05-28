@@ -36,3 +36,5 @@ export {
   resolveGeographyAlias,
   stripKeywordsMatchingGeographies,
 } from "./geography-aliases.mjs";
+
+export { REFRESH_INTERVAL_MS } from "./refresh-cadence.mjs";
