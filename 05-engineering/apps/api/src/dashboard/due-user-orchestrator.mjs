@@ -1,11 +1,12 @@
-// Sub-slice 2.4: server-side due-user refresh orchestrator.
+// Server-side due-user refresh orchestrator.
 //
 // Lets server-side cadence run when no browser is open by iterating users whose
 // last refresh attempt is older than `REFRESH_INTERVAL_MS` and triggering the
 // same `executeRefreshFlow` path the interactive `POST /api/dashboard/refresh`
-// uses.  The orchestrator is purely internal — no public endpoint, no GitHub
-// Action wiring yet (that lands in Sub-slice 2.5, which calls `runDueRefreshes`
-// directly).
+// uses.  The orchestrator is purely internal — no public endpoint; it is
+// invoked from the scheduled cadence-tick entrypoint
+// (`apps/api/src/ops/cadence-tick.mjs`, wired to
+// `.github/workflows/cadence-tick.yml`).
 //
 // Anchor:
 //   - The "last refresh attempt" anchor is the existing `_lastCheckedAt`
@@ -94,8 +95,8 @@ export async function listSnapshotAnchors({ supabase }) {
 
 /**
  * Server-side orchestrator entrypoint.  Iterates due users and invokes the
- * shared refresh flow per user.  Sub-slice 2.5 will call this from a scheduled
- * GitHub Action; this module exposes no HTTP surface of its own.
+ * shared refresh flow per user.  Called from the scheduled cadence-tick
+ * entrypoint; this module exposes no HTTP surface of its own.
  *
  * Returns a summary describing the run:
  *   - `candidates` — total snapshot rows inspected
