@@ -1,0 +1,60 @@
+name: Due-user refresh cadence tick
+
+# Sub-slice 2.5 — invokes the server-side due-user orchestrator on a fixed
+# cadence so users whose browser is closed still get refreshed within
+# REFRESH_INTERVAL_MS (currently 1h, see contracts-runtime/refresh-cadence.mjs).
+#
+# Cadence: hourly at :05.  REFRESH_INTERVAL_MS is 3,600,000 ms, so an hourly
+# tick is the smallest cadence that produces at least one refresh per
+# interval per user without thrashing.  The :05 offset puts the tick after
+# the typical top-of-hour congestion on GitHub Actions runners.
+#
+# Behavior:
+#   - Calls `node apps/api/src/ops/cadence-tick.mjs`, which in turn calls
+#     `_dueUserOrchestrator.runDueRefreshes()`.  Per-user errors do NOT fail
+#     the job — only true orchestrator-level failures (missing env, anchor
+#     list throw/error, runDueRefreshes itself rejecting) exit non-zero.
+#   - Structured summary log line is `[cadence-tick] {…}` (single-line JSON).
+#     Grep the workflow run output for `[cadence-tick]` to read summary
+#     fields: ok, candidates, due, ran, errors, kinds, skippedReason.
+#
+# Secrets:
+#   - SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required (anchor list +
+#     snapshot read/write).  Configure them under repo Settings → Secrets and
+#     variables → Actions before enabling the schedule.
+
+on:
+  schedule:
+    - cron: "5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  cadence-tick:
+    name: Run due-user orchestrator tick
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: 05-engineering/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: 05-engineering
+
+      - name: Run cadence tick
+        run: |
+          echo "[cadence-tick] Run started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          node apps/api/src/ops/cadence-tick.mjs
+        working-directory: 05-engineering
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

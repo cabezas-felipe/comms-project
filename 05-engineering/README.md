@@ -14,6 +14,7 @@ The Lovable reference UI stays in [`../04-prototype`](../04-prototype) and depen
 | Settings save → manual dashboard refresh trigger | [`refresh-context.tsx` `triggerDashboardRefresh`](../04-prototype/src/lib/refresh-context.tsx), [`Settings.tsx` save success branch](../04-prototype/src/pages/Settings.tsx) | [story-pool spec § Settings save to dashboard refresh](docs/dashboard-story-pool-spec.md#settings-save-to-dashboard-refresh) |
 | Beat-fit precision gate — MVP recall-first default `0.20`, env-tunable | [`readBeatFitThreshold()` in `beat-fit-scorer.mjs`](apps/api/src/dashboard/beat-fit-scorer.mjs), [`applyBeatFitFilter` in `refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) | [D-063](DECISIONS.md), [semantic beat-fit runbook](docs/runbook-semantic-beat-fit.md) |
 | What-changed delta engine — 3-state `story.whatChanged` (first-seen / unchanged / changed) via deterministic gate + optional Haiku + Sonnet. **Default ON for prototype dev** via `bootstrapApiEnv()` in [`server.mjs`](apps/api/src/server.mjs); tests (`NODE_ENV=test`) and `TEMPO_AI_MOCK_ONLY=true` still skip the LLM-bound stages. Set `TEMPO_AI_DELTA_ENABLED=false` to disable explicitly. | [`what-changed-engine.mjs`](apps/api/src/dashboard/what-changed-engine.mjs), pipeline call site in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) | [what-changed spec](docs/what-changed-spec.md), [handoff](docs/what-changed-handoff.md), [D-065](DECISIONS.md) |
+| Server-side refresh cadence — `REFRESH_INTERVAL_MS` (1h) drives both the client heartbeat and the scheduled cadence-tick orchestrator; both branches converge on `_lastCheckedAt` and the shared `_refreshExecutor.execute` path. | [`refresh-cadence.mjs`](apps/api/src/contracts-runtime/refresh-cadence.mjs), [`due-user-orchestrator.mjs`](apps/api/src/dashboard/due-user-orchestrator.mjs), [`cadence-tick.mjs`](apps/api/src/ops/cadence-tick.mjs) | [Server-side cadence tick](#server-side-cadence-tick-sub-slice-25) |
 
 Detailed rationale: [dashboard-story-pool-walkthrough.md](docs/dashboard-story-pool-walkthrough.md). Operator scenarios: [dashboard-story-pool-scenario-map.md](docs/dashboard-story-pool-scenario-map.md).
 
@@ -139,6 +140,27 @@ To open up beyond Phase 1 you also need to remove the runtime guard:
 ```sh
 # In your API environment (.env or process env):
 TEMPO_RSS_ALLOWLIST=*
+```
+
+## Server-side cadence tick (Sub-slice 2.5)
+
+Background: Sub-slice 2.4 added the [due-user orchestrator](apps/api/src/dashboard/due-user-orchestrator.mjs) — pure due-selection (`selectDueUsers`), anchor extraction from `dashboard_snapshots` (`listSnapshotAnchors`), and `runDueRefreshes` which iterates due users through the shared `_refreshExecutor.execute` path. 2.4 left the orchestrator without a caller: the interactive `POST /api/dashboard/refresh` only fires when a browser is open.
+
+**2.5 fills the gap with a scheduled, internal-only tick:**
+
+- **What runs on schedule:** [`.github/workflows/cadence-tick.yml`](../.github/workflows/cadence-tick.yml) runs hourly at `:05` (`cron: "5 * * * *"`) and on manual `workflow_dispatch`. Cadence matches `REFRESH_INTERVAL_MS = 1h` from [`refresh-cadence.mjs`](apps/api/src/contracts-runtime/refresh-cadence.mjs) — the smallest cadence that produces ≥1 tick per refresh window per user without thrashing.
+- **What it calls:** [`apps/api/src/ops/cadence-tick.mjs`](apps/api/src/ops/cadence-tick.mjs) invokes `_dueUserOrchestrator.runDueRefreshes()` verbatim — no due-selection or executor logic is reimplemented in 2.5. The same in-flight guard, watermark short-circuit, snapshot persistence, and `_lastCheckedAt` anchor write the interactive path uses also apply here.
+- **Expected logs:** One single-line JSON summary per tick, tagged `[cadence-tick]`. Fields: `ok`, `candidates`, `due`, `ran`, `errors`, `kinds` (e.g. `{ran: 1, unchanged: 2}`), `skippedReason`, `intervalMs`, `startedAt`. Inspect by grepping the workflow run output for `[cadence-tick]`.
+- **Failure semantics:**
+  - Exit `0` when `skippedReason === "none"`. **Per-user errors are counted in `summary.errors` and do NOT fail the job** — one bad user cannot squelch the next scheduled tick.
+  - Exit `1` only for true orchestrator-level failures: missing `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`, anchor list throw (`skippedReason: "list_threw"`), anchor list error (`skippedReason: "list_error"`), or `runDueRefreshes` itself rejecting (`skippedReason: "orchestrator_threw"` in the log).
+- **Where to inspect:** GitHub → Actions → "Due-user refresh cadence tick" → most recent run → `Run cadence tick` step. The `[cadence-tick]` line is the structured signal; the preceding `Run started at …` echo confirms the workflow reached the step.
+- **Secrets:** Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` under repo Settings → Secrets and variables → Actions before enabling the schedule. The tick exits `1` with `skippedReason: "missing_supabase_env"` if either is absent, so the failure surface is loud.
+
+**Local invocation** (for debugging — requires `apps/api/.env` with Supabase creds):
+
+```sh
+node apps/api/src/ops/cadence-tick.mjs
 ```
 
 ## Deployment
