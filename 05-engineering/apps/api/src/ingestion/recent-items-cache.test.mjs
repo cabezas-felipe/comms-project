@@ -4,14 +4,22 @@ import {
   buildRecentItemRows,
   writeRecentItems,
   purgeExpired,
+  readRecentItems,
+  cacheRowsToRawItems,
   RECENT_ITEMS_CACHE_TABLE,
 } from "./recent-items-cache.mjs";
 
 // Recording fake of the supabase-js fluent builder.  Captures the table name,
 // upsert/delete arguments, and `.lt` calls so tests can pin the wire format
 // without a real supabase round-trip.
-function createRecordingClient({ upsertError = null, deleteError = null, deleteCount = 0 } = {}) {
-  const calls = { from: [], upsert: [], delete: [], lt: [] };
+function createRecordingClient({
+  upsertError = null,
+  deleteError = null,
+  deleteCount = 0,
+  selectRows = [],
+  selectError = null,
+} = {}) {
+  const calls = { from: [], upsert: [], delete: [], lt: [], select: [], in: [], gt: [] };
   const builder = {
     from(table) {
       calls.from.push(table);
@@ -28,6 +36,18 @@ function createRecordingClient({ upsertError = null, deleteError = null, deleteC
     lt(column, value) {
       calls.lt.push({ column, value });
       return Promise.resolve({ data: null, error: deleteError, count: deleteCount });
+    },
+    select(columns) {
+      calls.select.push(columns);
+      return builder;
+    },
+    in(column, values) {
+      calls.in.push({ column, values });
+      return builder;
+    },
+    gt(column, value) {
+      calls.gt.push({ column, value });
+      return Promise.resolve({ data: selectRows, error: selectError });
     },
   };
   return { client: builder, calls };
@@ -165,4 +185,111 @@ test("purgeExpired: surfaces supabase errors via the { error } envelope", async 
   const res = await purgeExpired({ supabase: client, now: NOW });
   assert.equal(res.purged, 0);
   assert.equal(res.error, deleteError);
+});
+
+// ─── readRecentItems (Sub-slice 2.3) ─────────────────────────────────────────
+
+test("readRecentItems: queries by feed_id IN (…) and expires_at > now", async () => {
+  const cacheRows = [
+    { source_id: "s1", feed_id: "wapo-politics", url: "u1", headline: "h1", snippet: "b1",
+      published_at: "2026-05-27T11:30:00.000Z", fetched_at: "2026-05-27T11:55:00.000Z", expires_at: "2026-05-27T12:55:00.000Z" },
+  ];
+  const { client, calls } = createRecordingClient({ selectRows: cacheRows });
+  const res = await readRecentItems({
+    supabase: client,
+    feedIds: ["wapo-politics", "reuters-world-americas"],
+    now: NOW,
+  });
+  assert.equal(res.error, null);
+  assert.deepEqual(res.rows, cacheRows);
+  assert.deepEqual(calls.from, [RECENT_ITEMS_CACHE_TABLE]);
+  assert.equal(calls.select.length, 1, "select must be called once");
+  assert.deepEqual(calls.in, [{ column: "feed_id", values: ["wapo-politics", "reuters-world-americas"] }]);
+  assert.deepEqual(calls.gt, [{ column: "expires_at", value: "2026-05-27T12:00:00.000Z" }]);
+});
+
+test("readRecentItems: empty feedIds list short-circuits (no supabase call)", async () => {
+  const { client, calls } = createRecordingClient();
+  const res = await readRecentItems({ supabase: client, feedIds: [], now: NOW });
+  assert.deepEqual(res.rows, []);
+  assert.equal(res.error, null);
+  assert.equal(calls.from.length, 0);
+});
+
+test("readRecentItems: surfaces supabase errors via the { rows: [], error } envelope", async () => {
+  const selectError = { message: "timeout" };
+  const { client } = createRecordingClient({ selectError });
+  const res = await readRecentItems({ supabase: client, feedIds: ["wapo-politics"], now: NOW });
+  assert.deepEqual(res.rows, []);
+  assert.equal(res.error, selectError);
+});
+
+// ─── cacheRowsToRawItems (Sub-slice 2.3 read path) ───────────────────────────
+
+const MANIFEST = [
+  { id: "wapo-politics", name: "The Washington Post — Politics", publisher: "The Washington Post", kind: "rss", weight: 95, active: true, url: "https://wapo.example.com/politics.xml" },
+  { id: "reuters-world-americas", name: "Reuters — World (Americas)", publisher: "Reuters", kind: "rss", weight: 88, active: true, url: "https://reuters.example.com/americas.xml" },
+];
+
+const CACHE_ROW = {
+  source_id: "wapo-politics::abc123",
+  feed_id: "wapo-politics",
+  url: "https://wapo.example.com/article-1",
+  headline: "Test headline",
+  snippet: "First paragraph body.",
+  published_at: "2026-05-27T11:30:00.000Z",
+  fetched_at: "2026-05-27T11:55:00.000Z",
+  expires_at: "2026-05-27T12:55:00.000Z",
+};
+
+test("cacheRowsToRawItems: joins each row with its manifest entry to recover outlet/kind/weight", () => {
+  const [item] = cacheRowsToRawItems([CACHE_ROW], MANIFEST, { now: NOW });
+  assert.equal(item.sourceId, "wapo-politics::abc123");
+  assert.equal(item.feedId, "wapo-politics");
+  assert.equal(item.outlet, "The Washington Post");
+  assert.equal(item.kind, "rss");
+  assert.equal(item.weight, 95);
+  assert.equal(item.url, "https://wapo.example.com/article-1");
+  assert.equal(item.headline, "Test headline");
+  assert.deepEqual(item.body, ["First paragraph body."]);
+});
+
+test("cacheRowsToRawItems: minutesAgo computed from published_at against `now`", () => {
+  const [item] = cacheRowsToRawItems([CACHE_ROW], MANIFEST, { now: NOW });
+  // NOW = 12:00:00; published_at = 11:30:00 → 30 minutes ago
+  assert.equal(item.minutesAgo, 30);
+});
+
+test("cacheRowsToRawItems: falls back to fetched_at when published_at is null", () => {
+  const row = { ...CACHE_ROW, published_at: null };
+  const [item] = cacheRowsToRawItems([row], MANIFEST, { now: NOW });
+  // fetched_at = 11:55:00 → 5 minutes ago
+  assert.equal(item.minutesAgo, 5);
+});
+
+test("cacheRowsToRawItems: snippet → body[] with empty fallback when snippet is null", () => {
+  const [withSnippet] = cacheRowsToRawItems([CACHE_ROW], MANIFEST, { now: NOW });
+  assert.deepEqual(withSnippet.body, ["First paragraph body."]);
+  const [withoutSnippet] = cacheRowsToRawItems([{ ...CACHE_ROW, snippet: null }], MANIFEST, { now: NOW });
+  assert.deepEqual(withoutSnippet.body, []);
+});
+
+test("cacheRowsToRawItems: rows without a manifest match get safe defaults (kind=traditional, weight=50)", () => {
+  const orphan = { ...CACHE_ROW, source_id: "ghost::1", feed_id: "unknown-feed" };
+  const [item] = cacheRowsToRawItems([orphan], MANIFEST, { now: NOW });
+  assert.equal(item.kind, "traditional");
+  assert.equal(item.weight, 50);
+  assert.equal(item.outlet, "", "outlet falls through to empty when manifest is missing");
+});
+
+test("cacheRowsToRawItems: derives outlet from feed name when manifest lacks publisher", () => {
+  const manifest = [{ id: "wapo-politics", name: "The Washington Post — Politics", kind: "rss", weight: 95 }];
+  const [item] = cacheRowsToRawItems([CACHE_ROW], manifest, { now: NOW });
+  assert.equal(item.outlet, "The Washington Post", "section suffix must be stripped via derive helper");
+});
+
+test("cacheRowsToRawItems: skips rows with empty source_id and returns [] for non-array input", () => {
+  const rows = [{ ...CACHE_ROW, source_id: "" }, null];
+  assert.deepEqual(cacheRowsToRawItems(rows, MANIFEST, { now: NOW }), []);
+  assert.deepEqual(cacheRowsToRawItems(null, MANIFEST), []);
 });

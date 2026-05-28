@@ -17,8 +17,12 @@
 //     keep a local literal here rather than importing the TS package, matching
 //     the existing `contracts-runtime/` pattern used elsewhere in the API.
 
+import { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
+
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
 const SNIPPET_MAX_LEN = 500;
+const DEFAULT_WEIGHT = 50;
+const DEFAULT_KIND = "traditional";
 
 const RECENT_ITEMS_TABLE = "ingestion_recent_items";
 
@@ -112,6 +116,91 @@ export async function purgeExpired({ supabase, now = Date.now() }) {
     .delete({ count: "exact" })
     .lt("expires_at", cutoff);
   return { purged: error ? 0 : (count ?? 0), error: error ?? null };
+}
+
+/**
+ * Read recently-cached items for the user's selected feeds (Sub-slice 2.3).
+ *
+ * Returns rows whose `expires_at` is strictly greater than `now`.  The
+ * `feed_id IN (…)` filter scopes the lookup to the user's matched feeds so
+ * we don't drag in rows for publishers the user hasn't selected — keeps the
+ * payload small and avoids surprises if the cache holds historical feeds.
+ *
+ * Returns `{ rows, error }`:
+ *   - `rows`  — array of cache rows (empty on error or no match).
+ *   - `error` — null on success, the supabase error on failure.
+ *
+ * Like the write path, callers should treat read errors as soft-fail and
+ * fall back to a live fetch rather than propagate to the user.
+ */
+export async function readRecentItems({ supabase, feedIds, now = Date.now() }) {
+  if (!Array.isArray(feedIds) || feedIds.length === 0) {
+    return { rows: [], error: null };
+  }
+  const cutoff = new Date(now).toISOString();
+  const { data, error } = await supabase
+    .from(RECENT_ITEMS_TABLE)
+    .select("source_id, feed_id, url, headline, snippet, published_at, fetched_at, expires_at")
+    .in("feed_id", feedIds)
+    .gt("expires_at", cutoff);
+  return { rows: error ? [] : (data ?? []), error: error ?? null };
+}
+
+/**
+ * Convert cache rows back into the pipeline's raw-item shape (`mapEntry`
+ * output).  Joins each row with its manifest entry to recover `outlet`,
+ * `kind`, and `weight` — fields the cache schema deliberately omits because
+ * they belong to the manifest, not the per-item record.
+ *
+ * `now` controls the `minutesAgo` clock so tests can pin the conversion.
+ */
+export function cacheRowsToRawItems(rows, manifestFeeds = [], { now = Date.now() } = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+
+  const manifestById = new Map();
+  for (const f of manifestFeeds ?? []) {
+    if (f && typeof f.id === "string") manifestById.set(f.id, f);
+  }
+
+  const out = [];
+  for (const row of rows) {
+    if (!row || typeof row.source_id !== "string" || row.source_id.length === 0) continue;
+    const manifest = manifestById.get(row.feed_id) ?? null;
+
+    // Recency clock: prefer published_at (matches feed-reader's mapEntry which
+    // derives minutesAgo from the RSS pubDate); fall back to fetched_at when
+    // the upstream feed omits pubDate.  Either way, minutesAgo never goes
+    // negative even if the row clock is ahead of `now`.
+    const publishedMs = row.published_at ? Date.parse(row.published_at) : NaN;
+    const fetchedMs = row.fetched_at ? Date.parse(row.fetched_at) : NaN;
+    const baseMs = Number.isFinite(publishedMs)
+      ? publishedMs
+      : (Number.isFinite(fetchedMs) ? fetchedMs : NaN);
+    const minutesAgo = Number.isFinite(baseMs)
+      ? Math.max(0, Math.floor((now - baseMs) / 60_000))
+      : 0;
+
+    // Outlet derivation mirrors mapEntry: manifest publisher wins, else strip
+    // the section suffix off the feed name, else fall through to the name.
+    const publisher = typeof manifest?.publisher === "string" && manifest.publisher.length > 0
+      ? manifest.publisher
+      : null;
+    const derived = derivePublisherFromFeedName(typeof manifest?.name === "string" ? manifest.name : "");
+    const outlet = publisher ?? derived ?? (typeof manifest?.name === "string" ? manifest.name : "") ?? "";
+
+    out.push({
+      sourceId: row.source_id,
+      feedId: row.feed_id,
+      url: typeof row.url === "string" ? row.url : "",
+      headline: typeof row.headline === "string" ? row.headline : "",
+      body: typeof row.snippet === "string" && row.snippet.length > 0 ? [row.snippet] : [],
+      minutesAgo,
+      outlet,
+      kind: typeof manifest?.kind === "string" ? manifest.kind : DEFAULT_KIND,
+      weight: typeof manifest?.weight === "number" ? manifest.weight : DEFAULT_WEIGHT,
+    });
+  }
+  return out;
 }
 
 export const RECENT_ITEMS_CACHE_TABLE = RECENT_ITEMS_TABLE;

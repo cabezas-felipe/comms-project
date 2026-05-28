@@ -46,7 +46,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings, _recentItemsCache } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema } = await import("./contracts-runtime/index.mjs");
 
@@ -598,6 +598,184 @@ test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns 
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── Sub-slice 2.3: refresh reads from Tier-A cache, falls back to live ──────
+
+test("POST /api/dashboard/refresh (2.3): pipeline receives cache-derived rawItems when cache returns rows for selected feeds", async () => {
+  // Flip ONLY the cache path on (via `_recentItemsCache.enabled` hook) so the
+  // settings/snapshot/narrative adapters stay file-backed.  `_recentItemsCache.read`
+  // is stubbed to return a Reuters row; the route handler must convert it to
+  // pipeline input and skip the live fetch entirely.  Pinned by capturing the
+  // `rawItems` the pipeline actually saw.
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevCacheRead = _recentItemsCache.read;
+  const prevCacheWrite = _recentItemsCache.write;
+  const prevCacheEnabled = _recentItemsCache.enabled;
+  const prevCacheClient = _recentItemsCache.client;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _recentItemsCache.enabled = () => true;
+  _recentItemsCache.client = () => null;
+
+  let cacheReadArgs = null;
+  // Synthetic cache row tied to the manifest feed `reuters-world` seeded at
+  // module load — its publisher resolves to "Reuters" via mapEntry/derive
+  // semantics, matching VALID_BODY.traditionalSources.
+  const CACHED_AT = new Date(Date.now() - 25 * 60_000).toISOString(); // 25min ago
+  const FETCHED_AT = new Date(Date.now() - 5 * 60_000).toISOString();
+  const EXPIRES_AT = new Date(Date.now() + 35 * 60_000).toISOString();
+  const cacheRow = {
+    source_id: "reuters-world::cached-1",
+    feed_id: "reuters-world",
+    url: "https://reuters.example.com/cached-article",
+    headline: "Cached Reuters headline",
+    snippet: "Cached body paragraph.",
+    published_at: CACHED_AT,
+    fetched_at: FETCHED_AT,
+    expires_at: EXPIRES_AT,
+  };
+  _recentItemsCache.read = async (opts) => {
+    cacheReadArgs = opts;
+    return { rows: [cacheRow], error: null };
+  };
+  let cacheWriteCalled = false;
+  _recentItemsCache.write = async () => { cacheWriteCalled = true; return { written: 0, error: null }; };
+
+  let capturedRawItems = null;
+  _refreshPipeline.run = async (opts) => {
+    capturedRawItems = opts.rawItems;
+    return {
+      payload: { contractVersion: VALID_BODY.contractVersion, stories: [] },
+      log: {
+        unchanged: false,
+        poolCount: 0,
+        relevantCount: 0,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "",
+        candidateCount: 0,
+        selectedFeedCount: 0,
+        selection: {},
+      },
+    };
+  };
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(cacheReadArgs, "cache read must have been invoked");
+    assert.ok(
+      Array.isArray(cacheReadArgs.feedIds) && cacheReadArgs.feedIds.includes("reuters-world"),
+      `cache lookup must be scoped to selected feed IDs; saw ${JSON.stringify(cacheReadArgs.feedIds)}`
+    );
+    assert.ok(Array.isArray(capturedRawItems), "pipeline must receive rawItems");
+    assert.equal(capturedRawItems.length, 1, "pipeline must receive exactly the cached row");
+    const item = capturedRawItems[0];
+    assert.equal(item.sourceId, "reuters-world::cached-1");
+    assert.equal(item.feedId, "reuters-world");
+    assert.equal(item.headline, "Cached Reuters headline");
+    assert.equal(item.outlet, "Reuters", "outlet derives from manifest publisher / feed name");
+    assert.deepEqual(item.body, ["Cached body paragraph."]);
+    assert.equal(
+      cacheWriteCalled,
+      false,
+      "cache write must NOT fire on a cache HIT — only live fetches re-warm the cache"
+    );
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _recentItemsCache.read = prevCacheRead;
+    _recentItemsCache.write = prevCacheWrite;
+    _recentItemsCache.enabled = prevCacheEnabled;
+    _recentItemsCache.client = prevCacheClient;
+  }
+});
+
+test("POST /api/dashboard/refresh (2.3): cache miss falls back to live fetch and re-warms cache", async () => {
+  // Pinned cache-miss path: when `_recentItemsCache.read` returns 0 rows, the
+  // handler must fall back to `readFeedItems(DATA_DIR)` (fixture mode in
+  // tests).  And on the live-fetch branch the write path fires fire-and-
+  // forget so the next refresh hits warm cache.
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevCacheRead = _recentItemsCache.read;
+  const prevCacheWrite = _recentItemsCache.write;
+  const prevCacheEnabled = _recentItemsCache.enabled;
+  const prevCacheClient = _recentItemsCache.client;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _recentItemsCache.enabled = () => true;
+  _recentItemsCache.client = () => null;
+  _recentItemsCache.read = async () => ({ rows: [], error: null });
+
+  let cacheWriteItems = null;
+  _recentItemsCache.write = async ({ items }) => {
+    cacheWriteItems = items;
+    return { written: items.length, error: null };
+  };
+
+  let capturedRawItems = null;
+  _refreshPipeline.run = async (opts) => {
+    capturedRawItems = opts.rawItems;
+    return {
+      payload: { contractVersion: VALID_BODY.contractVersion, stories: [] },
+      log: {
+        unchanged: false,
+        poolCount: 0,
+        relevantCount: 0,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "",
+        candidateCount: 0,
+        selectedFeedCount: 0,
+        selection: {},
+      },
+    };
+  };
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    // Pipeline got the fixture items (NODE_ENV=test → feed-reader fixture mode).
+    assert.ok(Array.isArray(capturedRawItems), "pipeline must receive rawItems from the fallback");
+    assert.ok(
+      capturedRawItems.length > 0 && capturedRawItems[0].sourceId === "test-src-1",
+      "rawItems must be the fixture seeded at module load when cache misses"
+    );
+    // Fire-and-forget write may run after the response — await a microtask
+    // for the scheduled .then chain to settle.
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(Array.isArray(cacheWriteItems), "cache write must fire on the live-fetch branch");
+    assert.ok(
+      cacheWriteItems.length > 0 && cacheWriteItems[0].sourceId === "test-src-1",
+      "cache write must receive the fixture items so future refreshes hit warm cache"
+    );
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _recentItemsCache.read = prevCacheRead;
+    _recentItemsCache.write = prevCacheWrite;
+    _recentItemsCache.enabled = prevCacheEnabled;
+    _recentItemsCache.client = prevCacheClient;
   }
 });
 
