@@ -118,6 +118,8 @@ export function formatCatalogMarkdown(rows, meta) {
     `> Supabase is the canonical source of truth for all source mappings.`,
     `> To update a mapping, edit the record in Supabase, then regenerate this file.`,
     `>`,
+    `> **Scope:** active mappings only — inactive rows are filtered out at query time.`,
+    `>`,
     ...(meta.generatedAt ? [`> **Generated:** ${meta.generatedAt.toISOString()}`] : []),
     `> **Supabase project:** ${meta.supabaseUrl}`,
     `> **Regenerate:** \`cd 05-engineering && npm run source-catalog:generate\``,
@@ -147,15 +149,18 @@ export function formatCatalogMarkdown(rows, meta) {
   return lines.join("\n");
 }
 
-async function run() {
-  const supabaseUrl = requireEnv("SUPABASE_URL");
-  const supabaseKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
-
-  const client = createClient(supabaseUrl, supabaseKey, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
-
-  const { data, error } = await client
+/**
+ * Fetch active source-feed mappings (joined with their source entity) from
+ * Supabase.  Returns the raw `{ data, error }` envelope so callers handle
+ * error propagation uniformly.
+ *
+ * Exported so tests can assert the query shape — specifically that the
+ * active filter is applied at query time, not after the fact.
+ */
+export function fetchActiveMappings(client) {
+  // Catalog reflects active mappings only — inactive rows are filtered out
+  // at query time so PMs see the live ingestion scope, not historical entries.
+  return client
     .from("source_feed_mapping")
     .select(
       `manifest_feed_id,
@@ -167,7 +172,19 @@ async function run() {
        created_at,
        updated_at,
        source_entities ( canonical_name, kind )`
-    );
+    )
+    .eq("active", true);
+}
+
+async function run() {
+  const supabaseUrl = requireEnv("SUPABASE_URL");
+  const supabaseKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+
+  const client = createClient(supabaseUrl, supabaseKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+
+  const { data, error } = await fetchActiveMappings(client);
 
   if (error) throw new Error(`Query failed: ${error.message}`);
 

@@ -41,3 +41,4 @@ export {
   GEOGRAPHY_SYNONYMS,
   resolveGeographyAlias,
 } from "./geography-aliases.js";
+export { REFRESH_INTERVAL_MS } from "./refresh-cadence.js";

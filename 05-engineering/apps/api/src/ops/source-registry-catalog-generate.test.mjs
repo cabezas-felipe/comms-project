@@ -3,7 +3,37 @@ import assert from "node:assert/strict";
 import {
   formatCatalogMarkdown,
   sortRows,
+  fetchActiveMappings,
 } from "./source-registry-catalog-generate.mjs";
+
+/**
+ * Recording fake of the supabase-js fluent builder.  Captures `.from`,
+ * `.select`, and `.eq` calls so tests can assert the query shape.  The
+ * final `.eq` returns a thenable-like envelope by being await-able through
+ * its `.then` proxy — callers `await client.from(...).select(...).eq(...)`.
+ */
+function createRecordingClient({ data = [], error = null } = {}) {
+  const calls = { from: [], select: [], eq: [] };
+  const envelope = { data, error };
+  const builder = {
+    from(table) {
+      calls.from.push(table);
+      return builder;
+    },
+    select(columns) {
+      calls.select.push(columns);
+      return builder;
+    },
+    eq(column, value) {
+      calls.eq.push({ column, value });
+      return builder;
+    },
+    then(onFulfilled, onRejected) {
+      return Promise.resolve(envelope).then(onFulfilled, onRejected);
+    },
+  };
+  return { client: builder, calls };
+}
 
 const META = {
   generatedAt: new Date("2026-05-03T12:00:00.000Z"),
@@ -67,6 +97,14 @@ const REJECTED = {
 test("formatCatalogMarkdown: output contains DO NOT EDIT marker", () => {
   const md = formatCatalogMarkdown([VERIFIED], META);
   assert.ok(md.includes("DO NOT EDIT"), `Missing DO NOT EDIT: ${md.slice(0, 200)}`);
+});
+
+test("formatCatalogMarkdown: header declares active-only scope", () => {
+  const md = formatCatalogMarkdown([VERIFIED], META);
+  assert.ok(
+    md.includes("active mappings only"),
+    `Missing active-only scope note: ${md.slice(0, 500)}`
+  );
 });
 
 test("formatCatalogMarkdown: output contains generated timestamp when generatedAt is provided", () => {
@@ -199,4 +237,45 @@ test("formatCatalogMarkdown: does not mutate input array", () => {
   formatCatalogMarkdown(rows, META);
   assert.equal(rows[0], REJECTED, "Input array should not be mutated");
   assert.equal(rows[3], VERIFIED);
+});
+
+// ─── active-only query behavior ──────────────────────────────────────────────
+
+test("fetchActiveMappings: filters by active=true at query time", async () => {
+  const { client, calls } = createRecordingClient();
+  await fetchActiveMappings(client);
+  assert.deepEqual(
+    calls.eq,
+    [{ column: "active", value: true }],
+    `query must apply exactly one filter: active=true (got ${JSON.stringify(calls.eq)})`
+  );
+});
+
+test("fetchActiveMappings: queries source_feed_mapping joined with source_entities", async () => {
+  const { client, calls } = createRecordingClient();
+  await fetchActiveMappings(client);
+  assert.deepEqual(calls.from, ["source_feed_mapping"], "must query source_feed_mapping");
+  assert.equal(calls.select.length, 1, "select must be called exactly once");
+  const projection = calls.select[0];
+  assert.ok(
+    projection.includes("source_entities"),
+    `projection must join source_entities: ${projection}`
+  );
+  assert.ok(projection.includes("active"), `projection must include active column: ${projection}`);
+});
+
+test("fetchActiveMappings: propagates supabase error envelope", async () => {
+  const fakeError = { message: "boom" };
+  const { client } = createRecordingClient({ data: null, error: fakeError });
+  const result = await fetchActiveMappings(client);
+  assert.equal(result.error, fakeError);
+  assert.equal(result.data, null);
+});
+
+test("fetchActiveMappings: returns rows envelope on success", async () => {
+  const rows = [{ manifest_feed_id: "wapo-politics", active: true }];
+  const { client } = createRecordingClient({ data: rows, error: null });
+  const result = await fetchActiveMappings(client);
+  assert.equal(result.error, null);
+  assert.deepEqual(result.data, rows);
 });

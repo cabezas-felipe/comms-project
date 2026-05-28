@@ -279,6 +279,35 @@ test("runRefreshPipeline: returns payload with stories from cluster output", asy
   assert.equal(log.usedFallbackClustering, false);
 });
 
+test("runRefreshPipeline: two-outlet input (WaPo + Reuters) reaches clustering with both outlets", async () => {
+  // Batch 1 two-outlet assertion (Sub-slice 1.3/1.4): when settings select
+  // both publishers, the pool stage must admit items from each outlet and
+  // pass them through to the clustering stage.  Pins the pipeline contract
+  // that lets a downstream meta-story carry source items from more than one
+  // publisher — the cross-outlet sourcing that's the stretch goal of 1.3.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["The Washington Post", "Reuters"],
+  };
+  const rawItems = [
+    makeItem({ sourceId: "wapo-1", outlet: "The Washington Post", minutesAgo: 30 }),
+    makeItem({ sourceId: "reuters-1", outlet: "Reuters", minutesAgo: 45 }),
+  ];
+  let clusterInput = null;
+  await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.ok(clusterInput, "cluster must be invoked when both outlets carry relevant items");
+  const sourceIdsSeen = clusterInput.map((i) => i.sourceId).sort();
+  assert.deepEqual(sourceIdsSeen, ["reuters-1", "wapo-1"]);
+  const outletsSeen = [...new Set(clusterInput.map((i) => i.outlet))].sort();
+  assert.deepEqual(outletsSeen, ["Reuters", "The Washington Post"]);
+});
+
 test("runRefreshPipeline: returns empty stories when relevant pool is empty", async () => {
   const rawItems = [makeItem({ sourceId: "src-out", outlet: "BBC", topic: "Cooking", geographies: ["France"], headline: "Food" })];
   let clusterCalled = false;

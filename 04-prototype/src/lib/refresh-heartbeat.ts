@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { REFRESH_INTERVAL_MS } from "@tempo/contracts";
 import { refreshDashboard, type DashboardFetchResult } from "./api";
 
 // App-scope refresh heartbeat.
@@ -18,7 +19,9 @@ import { refreshDashboard, type DashboardFetchResult } from "./api";
 // (e.g. `tempo_dashboard_last_refresh_attempt_at:<uid>`) before multi-user
 // production rollout.
 export const LAST_REFRESH_ATTEMPT_KEY = "tempo_dashboard_last_refresh_attempt_at";
-export const REFRESH_INTERVAL_MS = 60 * 60 * 1000;
+// Re-exported from @tempo/contracts so prototype callers keep their existing
+// import path; contracts is the single source of truth for refresh cadence.
+export { REFRESH_INTERVAL_MS };
 
 function getDefaultStorage(): Storage | null {
   if (typeof window === "undefined") return null;

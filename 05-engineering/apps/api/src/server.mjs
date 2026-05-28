@@ -17,6 +17,11 @@ import { extractOnboarding, resolveTimeoutMs as resolveExtractionTimeoutMs } fro
 import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
+import {
+  writeRecentItems as cacheWriteRecentItems,
+  readRecentItems as cacheReadRecentItems,
+  cacheRowsToRawItems,
+} from "./ingestion/recent-items-cache.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
 import { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket, mergeEverSeenMetaStoryIds, extractEverSeenFromSnapshot } from "./db/dashboard-snapshot-repo.mjs";
@@ -36,8 +41,16 @@ import {
   release as releaseRefresh,
   REFRESH_GUARD_SCOPE,
 } from "./dashboard/refresh-guard.mjs";
+import {
+  listSnapshotAnchors as orchestratorListSnapshotAnchors,
+  runDueRefreshes as orchestratorRunDueRefreshes,
+} from "./dashboard/due-user-orchestrator.mjs";
 import { assessGeoConfidence } from "./dashboard/geo-filter.mjs";
-import { parseFallbackFeedIdsEnv, parseFallbackEnabledEnv } from "./ingestion/source-matcher.mjs";
+import {
+  parseFallbackFeedIdsEnv,
+  parseFallbackEnabledEnv,
+  resolveSelectedSources,
+} from "./ingestion/source-matcher.mjs";
 import { recordSourceRegistryEventsFromSettings } from "./db/source-registry-sync.mjs";
 import { appendOnboardingNarrative, readCurrentOnboardingNarrative } from "./db/narrative-repo.mjs";
 import { atomicSaveSettingsAndNarrative } from "./db/atomic-settings-save.mjs";
@@ -319,6 +332,24 @@ export const _clusterEngine = { cluster: clusterItems };
  * calling the OpenAI embeddings API.
  */
 export const _embeddings = { embed: embedTexts };
+
+/**
+ * Mutable Tier-A recent-items cache hook (Sub-slices 2.2 + 2.3).  Tests
+ * override the four members to exercise the cache path in isolation —
+ * `enabled` and `client` decouple the cache toggle from the global
+ * `isSupabaseEnabled()` check so a test can flip only this code path on
+ * without forcing every other supabase adapter (settings, snapshots,
+ * narrative) into network mode at the same time.
+ *
+ * Defaults preserve production behavior: gate on global supabase env,
+ * use the shared singleton client.
+ */
+export const _recentItemsCache = {
+  write: cacheWriteRecentItems,
+  read: cacheReadRecentItems,
+  enabled: () => isSupabaseEnabled(),
+  client: () => getSupabaseClient(),
+};
 
 /**
  * Mutable refresh pipeline hook. Tests override run to simulate pipeline
@@ -928,9 +959,8 @@ async function executeRefreshFlow(identity) {
   }
 
   try {
-    const [rawSettings, rawItems, manifestFeeds, priorSnapshot, narrative] = await Promise.all([
+    const [rawSettings, manifestFeeds, priorSnapshot, narrative] = await Promise.all([
       readSettings(identity.userId),
-      readFeedItems(DATA_DIR),
       loadManifestForSelection(),
       _snapshotRepo.read(identity.userId).catch(() => null),
       // Onboarding narrative is the richest source of beat context for the
@@ -938,10 +968,90 @@ async function executeRefreshFlow(identity) {
       // signal and the recall stage falls through to settings-only profile.
       _narrativeRepo.read(identity.userId).catch(() => null),
     ]);
+
     // D-064a: apply the idempotent keyword-dedupe backfill so pipeline
     // scoring uses clean keywords even if the user hasn't hit GET /api/settings
     // since D-064 shipped. Write fires at most once per pre-D-064 user.
     const settings = await backfillKeywordDedupe(rawSettings, identity.userId);
+
+    // Sub-slice 2.3: cache-first ingestion source resolution.
+    //
+    // Resolve the user's selected feed IDs against the manifest, then look up
+    // any non-expired rows in `ingestion_recent_items` for those feeds.  A
+    // cache hit skips the live RSS fetch entirely; a cache miss falls back to
+    // `readFeedItems(DATA_DIR)` and re-populates the cache on the way through
+    // (the 2.2 write path).
+    //
+    // The pipeline still does its own source-selection downstream — the
+    // server-level resolution here is only used to scope the cache lookup.
+    const selectedNames = [
+      ...(settings.traditionalSources ?? []),
+      ...(settings.socialSources ?? []),
+    ];
+    const cacheFeedIds = (manifestFeeds && selectedNames.length > 0)
+      ? resolveSelectedSources({
+          selectedSources: selectedNames,
+          manifestFeeds,
+          fallbackFeedIds: parseFallbackFeedIdsEnv(process.env.TEMPO_FALLBACK_SOURCE_IDS),
+          fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
+        }).matchedFeeds.map((f) => f.id).filter((id) => typeof id === "string" && id.length > 0)
+      : [];
+
+    let rawItems;
+    let ingestionSource = "live";
+    if (_recentItemsCache.enabled() && cacheFeedIds.length > 0) {
+      try {
+        const { rows, error } = await _recentItemsCache.read({
+          supabase: _recentItemsCache.client(),
+          feedIds: cacheFeedIds,
+        });
+        if (error) {
+          console.warn(
+            `[ingestion.cache] read failed (falling back to live): ${error.message ?? error}`
+          );
+        } else if (Array.isArray(rows) && rows.length > 0) {
+          rawItems = cacheRowsToRawItems(rows, manifestFeeds);
+          ingestionSource = "cache";
+        }
+      } catch (err) {
+        console.warn(
+          `[ingestion.cache] read threw (falling back to live): ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
+    if (rawItems === undefined) {
+      rawItems = await readFeedItems(DATA_DIR);
+    }
+    console.log(
+      `[refresh] ingestionSource=${ingestionSource} items=${Array.isArray(rawItems) ? rawItems.length : 0} matchedFeeds=${cacheFeedIds.length}`
+    );
+
+    // Sub-slice 2.2 write: opportunistic upsert into the Tier-A cache so
+    // concurrent refreshes can share this fetch.  Only fires when we did a
+    // live fetch in this request — cache hits don't need to re-write the
+    // rows we just read.  Fire-and-forget: cache failures must never block
+    // the user's refresh.
+    if (
+      ingestionSource === "live" &&
+      _recentItemsCache.enabled() &&
+      Array.isArray(rawItems) &&
+      rawItems.length > 0
+    ) {
+      void Promise.resolve()
+        .then(() => _recentItemsCache.write({ supabase: _recentItemsCache.client(), items: rawItems }))
+        .then((res) => {
+          if (res?.error) {
+            console.warn(
+              `[ingestion.cache] write failed (non-fatal): ${res.error.message ?? res.error}`
+            );
+          }
+        })
+        .catch((err) => {
+          console.warn(
+            `[ingestion.cache] write threw (non-fatal): ${err instanceof Error ? err.message : err}`
+          );
+        });
+    }
 
     const priorWatermark = priorSnapshot?._watermark ?? null;
     // Story count drives the trap-guard inside the pipeline: when the prior
@@ -1257,6 +1367,31 @@ async function executeRefreshFlow(identity) {
  * tests replace it inside a `try/finally` and restore the prior reference.
  */
 export const _refreshExecutor = { execute: executeRefreshFlow };
+
+/**
+ * Sub-slice 2.4: server-side due-user orchestrator hook.
+ *
+ * Routes through the same `_refreshExecutor.execute` path the interactive
+ * `POST /api/dashboard/refresh` uses, so the in-flight guard, watermark
+ * short-circuit, snapshot persistence, and `_lastCheckedAt` anchor update
+ * all stay consistent regardless of trigger source.
+ *
+ * Mutable so 2.4 tests can stub `listAnchors` and `executeRefreshFlowFn`
+ * deterministically (no live Supabase, no pipeline I/O), and so 2.5 can
+ * later swap the supabase client / interval source via the same hook.
+ *
+ * No public endpoint surfaces this in 2.4 — `runDueRefreshes` is invoked
+ * from the Sub-slice 2.5 entrypoint (scheduled GitHub Action wiring).
+ */
+export const _dueUserOrchestrator = {
+  listAnchors: () => orchestratorListSnapshotAnchors({ supabase: getSupabaseClient() }),
+  runDueRefreshes: (opts = {}) =>
+    orchestratorRunDueRefreshes({
+      listAnchorsFn: _dueUserOrchestrator.listAnchors,
+      executeRefreshFlowFn: _refreshExecutor.execute,
+      ...opts,
+    }),
+};
 
 app.post("/api/dashboard/refresh", async (req, res) => {
   const identity = await requireIdentity(req, res);

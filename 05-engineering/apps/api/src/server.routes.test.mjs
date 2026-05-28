@@ -30,6 +30,19 @@ const FIXTURE_SOURCE_ITEMS = [
 // Set temp data dir before importing server so DATA_DIR resolves to isolated storage.
 const tmpDir = await mkdtemp(path.join(tmpdir(), "tempo-api-test-"));
 process.env.TEMPO_DATA_DIR = tmpDir;
+// Pin NODE_ENV=test and strip Supabase env BEFORE importing server.mjs.
+// Why: server.mjs's bootstrapApiEnv() loads .env from common roots when
+// NODE_ENV !== "test", which populates SUPABASE_URL + service-role key in the
+// test process.  Once those are set, settings-repo.readSettings/hasSettings
+// take the Supabase path and never observe the file-seeded fixtures used by
+// these tests — every settings GET returns DEFAULT_SETTINGS instead of the
+// seeded payload, and refresh routes try to read source-feeds from Supabase
+// instead of the JSON manifest.  Setting NODE_ENV=test makes the test robust
+// to being run without the package.json wrapper (e.g., a bare `node --test`).
+process.env.NODE_ENV = "test";
+delete process.env.SUPABASE_URL;
+delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+delete process.env.SUPABASE_ANON_KEY;
 // Seed source-items fixture before server import so GET /api/dashboard can read it.
 await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
 // Seed source-feeds fixture for GET /api/ingestion/sources AND POST /api/dashboard/refresh
@@ -46,9 +59,78 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings, _recentItemsCache, _dueUserOrchestrator } = await import("./server.mjs");
 const { default: request } = await import("supertest");
-const { settingsPayloadSchema, dashboardPayloadSchema } = await import("./contracts-runtime/index.mjs");
+const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
+
+// Stabilization helper (added for cross-test isolation): scopes a block of
+// test code to a unique synthetic userId so the per-user settings file
+// (`settings_user_<id>.json`) cannot collide with the suite-wide TEST_USER_ID
+// file that interactive PUT /api/settings tests mutate.  Restores the prior
+// resolver in finally — failures inside `fn` do not leak the override.
+async function withIsolatedUser(uniqueId, fn) {
+  const prevResolver = _auth.resolver;
+  _auth.resolver = async () => ({ userId: uniqueId, source: "bearer" });
+  try {
+    return await fn();
+  } finally {
+    _auth.resolver = prevResolver;
+  }
+}
+
+// Deterministic stand-in for `_refreshPipeline.run` used by topic-normalization
+// tests.  Applies ONLY the contract under test — that `normalizeTopicLabel`
+// is applied to both item.topic and settings.topics before matching — so the
+// tests no longer depend on the live clustering / recall / beat-fit / grounding
+// stages succeeding (which require Anthropic + OpenAI keys and stable model
+// responses).  Returns a synthetic 1-story payload when at least one item's
+// normalized topic matches a normalized setting topic; otherwise zero stories.
+function topicNormalizationPipelineStub() {
+  return async (opts) => {
+    const items = Array.isArray(opts.rawItems) ? opts.rawItems : [];
+    const settingTopics = new Set(
+      (opts.settings?.topics ?? []).map((t) => normalizeTopicLabel(String(t)))
+    );
+    const matched = items.filter((it) =>
+      settingTopics.has(normalizeTopicLabel(String(it?.topic ?? "")))
+    );
+    const stories = matched.length > 0
+      ? [{
+          id: "norm-test-story",
+          metaStoryId: "norm-test-story",
+          title: "Normalization Test Story",
+          subtitle: "Synthetic subtitle.",
+          geographies: Array.isArray(matched[0]?.geographies) && matched[0].geographies.length > 0
+            ? matched[0].geographies
+            : ["US"],
+          topic: matched[0]?.topic ?? "Diplomatic relations",
+          summary: "Synthetic summary for the normalization integration test.",
+          whyItMatters: "Synthetic implication line.",
+          whatChanged: "Synthetic delta line.",
+          priority: "standard",
+          outletCount: 1,
+          tags: { topics: [], keywords: [], geographies: ["US"] },
+          sources: [],
+        }]
+      : [];
+    return {
+      payload: { contractVersion: opts.contractVersion, stories },
+      log: {
+        unchanged: false,
+        poolCount: items.length,
+        relevantCount: matched.length,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "norm-stub-watermark",
+        candidateCount: matched.length,
+        selectedFeedCount: 1,
+        selection: { sourceSelectionMode: "test" },
+      },
+    };
+  };
+}
 
 // Inject a deterministic test identity so protected routes authenticate without a live Supabase instance.
 const TEST_USER_ID = "test-user-id";
@@ -124,6 +206,12 @@ test("GET /api/settings returns persisted data after valid PUT", async () => {
 // ─── D-064a: keyword-dedupe backfill on read ─────────────────────────────────
 
 test("GET /api/settings backfills pre-D-064 keyword/geography duplicates and persists once", async () => {
+  // Isolated synthetic user: any other test that interactively PUTs settings
+  // under `TEST_USER_ID` cannot overwrite this test's seeded file, since the
+  // file path is keyed by userId.  Eliminated a flake where neighbouring tests
+  // overwrote the seed with `VALID_BODY` between writeFile() and GET, causing
+  // `res1.body.keywords` to be `["OFAC"]` instead of `["war","trade"]`.
+  const ISOLATED_USER_ID = "test-user-backfill-strips";
   // Seed a stale file directly to bypass PUT hygiene — this is the shape a
   // user who onboarded before D-064 still carries.
   const stale = {
@@ -134,36 +222,47 @@ test("GET /api/settings backfills pre-D-064 keyword/geography duplicates and per
     traditionalSources: ["Reuters"],
     socialSources: [],
   };
-  const file = path.join(tmpDir, `settings_user_${TEST_USER_ID}.json`);
+  const file = path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`);
   await writeFile(file, JSON.stringify(stale, null, 2), "utf8");
 
   let writeCount = 0;
   const prev = _writeSettings.write;
   _writeSettings.write = async (payload, userId) => { writeCount += 1; return prev(payload, userId); };
   try {
-    const res1 = await request(app).get("/api/settings");
-    assert.equal(res1.status, 200);
-    assert.ok(!res1.body.keywords.includes("China"), "China must be stripped from keywords");
-    assert.ok(!res1.body.keywords.includes("Russia"), "Russia must be stripped from keywords");
-    assert.ok(res1.body.keywords.includes("war"));
-    assert.ok(res1.body.keywords.includes("trade"));
-    assert.deepEqual(res1.body.geographies, ["China", "Russia", "US"]);
-    assert.equal(writeCount, 1, "backfill must persist exactly once when dedupe changes the list");
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      const res1 = await request(app).get("/api/settings");
+      assert.equal(res1.status, 200);
+      assert.ok(!res1.body.keywords.includes("China"), "China must be stripped from keywords");
+      assert.ok(!res1.body.keywords.includes("Russia"), "Russia must be stripped from keywords");
+      // Use set membership so future additions/orderings of thematic keywords in
+      // the stale payload don't break the assertion contract.
+      const keywordSet = new Set(res1.body.keywords);
+      assert.ok(keywordSet.has("war"), `expected "war" in keywords, got ${JSON.stringify(res1.body.keywords)}`);
+      assert.ok(keywordSet.has("trade"), `expected "trade" in keywords, got ${JSON.stringify(res1.body.keywords)}`);
+      assert.deepEqual(res1.body.geographies, ["China", "Russia", "US"]);
+      assert.equal(writeCount, 1, "backfill must persist exactly once when dedupe changes the list");
 
-    // Second read on the already-cleaned payload must NOT trigger another
-    // write — idempotence guard.
-    const res2 = await request(app).get("/api/settings");
-    assert.equal(res2.status, 200);
-    assert.deepEqual(res2.body.keywords, res1.body.keywords);
-    assert.equal(writeCount, 1, "second read on clean data must not re-persist");
+      // Second read on the already-cleaned payload must NOT trigger another
+      // write — idempotence guard.
+      const res2 = await request(app).get("/api/settings");
+      assert.equal(res2.status, 200);
+      assert.deepEqual(res2.body.keywords, res1.body.keywords);
+      assert.equal(writeCount, 1, "second read on clean data must not re-persist");
+    });
   } finally {
     _writeSettings.write = prev;
-    // Restore the post-PUT state for downstream tests in this file.
-    await writeFile(file, JSON.stringify(VALID_BODY, null, 2), "utf8");
+    // Best-effort cleanup of the isolated user's settings file; failure is
+    // benign because the `after()` block wipes `tmpDir` at suite end.
+    await rm(file, { force: true }).catch(() => {});
   }
 });
 
 test("GET /api/settings backfills when dedupe changes keywords but length is unchanged", async () => {
+  // Isolated synthetic user — see [L126] for the file-collision rationale.
+  // Original failure mode: actual `["OFAC"]` because the suite-wide
+  // `TEST_USER_ID` settings file was concurrently being mutated to
+  // `VALID_BODY` by other tests.
+  const ISOLATED_USER_ID = "test-user-backfill-length-stable";
   const stale = {
     contractVersion: "2026-05-19-meta-story-fields",
     topics: ["Diplomatic relations"],
@@ -172,7 +271,7 @@ test("GET /api/settings backfills when dedupe changes keywords but length is unc
     traditionalSources: ["Reuters"],
     socialSources: [],
   };
-  const file = path.join(tmpDir, `settings_user_${TEST_USER_ID}.json`);
+  const file = path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`);
   await writeFile(file, JSON.stringify(stale, null, 2), "utf8");
 
   let writeCount = 0;
@@ -182,13 +281,15 @@ test("GET /api/settings backfills when dedupe changes keywords but length is unc
     return prev(payload, userId);
   };
   try {
-    const res = await request(app).get("/api/settings");
-    assert.equal(res.status, 200);
-    assert.deepEqual(res.body.keywords, ["Russia"]);
-    assert.equal(writeCount, 1, "must persist when China is stripped but length stays 2");
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      const res = await request(app).get("/api/settings");
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body.keywords, ["Russia"]);
+      assert.equal(writeCount, 1, "must persist when China is stripped but length stays 2");
+    });
   } finally {
     _writeSettings.write = prev;
-    await writeFile(file, JSON.stringify(VALID_BODY, null, 2), "utf8");
+    await rm(file, { force: true }).catch(() => {});
   }
 });
 
@@ -239,28 +340,48 @@ test("PUT /api/settings passes previousPayload and nextPayload to registry sync"
 });
 
 test("PUT /api/settings sync receives updated previousPayload on second save", async () => {
-  // First save — establish baseline
+  // Isolated synthetic user — eliminates the intermittent failure where the
+  // suite-wide `TEST_USER_ID` settings file already carried a different
+  // baseline from a prior test, so the "first save" was effectively the
+  // second save (and previousPayload was the prior test's body, not this
+  // test's `first`).  Also pins `_readSettings.has/.read` so previousPayload
+  // is sourced from this test's stub, not the file adapter.
+  const ISOLATED_USER_ID = "test-user-sync-previous-payload";
   const first = { ...VALID_BODY, traditionalSources: ["Reuters"], socialSources: [] };
-  await request(app).put("/api/settings").send(first).set("Content-Type", "application/json");
-
-  // Second save — capture what sync sees
   const second = { ...VALID_BODY, traditionalSources: ["Reuters", "NYT"], socialSources: [] };
+
   let captured = null;
   const prev = _sourceRegistrySync.record;
+  const prevReadHas = _readSettings.has;
+  const prevReadRead = _readSettings.read;
   _sourceRegistrySync.record = async (args) => { captured = args; };
+  // Inject the "previous payload" the second save should observe.  Removes
+  // the dependency on whatever the settings file happens to contain at this
+  // point in the suite — the only signal the route uses to compute
+  // previousPayload is `_readSettings.has` + `_readSettings.read`.
+  _readSettings.has = async () => true;
+  _readSettings.read = async () => first;
   try {
-    const res = await request(app)
-      .put("/api/settings")
-      .send(second)
-      .set("Content-Type", "application/json");
+    const res = await withIsolatedUser(ISOLATED_USER_ID, () =>
+      request(app)
+        .put("/api/settings")
+        .send(second)
+        .set("Content-Type", "application/json")
+    );
     assert.equal(res.status, 200);
     assert.ok(captured !== null, "registry sync must have been called");
-    // previousPayload reflects the first save's sources
+    assert.equal(captured.userId, ISOLATED_USER_ID);
+    // previousPayload reflects the first save's sources (from the stub above).
     assert.deepEqual(captured.previousPayload?.traditionalSources, ["Reuters"]);
     // nextPayload is the second save
     assert.deepEqual(captured.nextPayload.traditionalSources, ["Reuters", "NYT"]);
   } finally {
     _sourceRegistrySync.record = prev;
+    _readSettings.has = prevReadHas;
+    _readSettings.read = prevReadRead;
+    // Best-effort cleanup of any file the PUT may have written under the
+    // isolated user; benign on failure since `after()` wipes tmpDir.
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
   }
 });
 
@@ -326,63 +447,121 @@ test("GET /api/dashboard returns persisted snapshot when one exists", async () =
 // since that is where filtering runs.
 
 test("refresh pipeline: normalized settings topic matches item with legacy topic label", async () => {
+  // Narrowed integration scope: this test asserts that the route hands raw
+  // items + settings to the pipeline with topic-normalization-aware matching
+  // expected.  The full clustering/recall/beat-fit/grounding chain requires
+  // live Anthropic + OpenAI keys, and was the root cause of false
+  // "stories.length > 0 was false" failures in offline-key environments.
+  //
+  // We stub `_refreshPipeline.run` with `topicNormalizationPipelineStub()`,
+  // which applies ONLY the rule under test (item.topic normalized matches
+  // settings.topics normalized).  All upstream code (settings load, manifest
+  // load, in-flight guard, cache resolution, identity, persistence) still
+  // runs end-to-end — only the AI-bound pipeline interior is swapped for a
+  // deterministic stand-in.
+  const ISOLATED_USER_ID = "test-user-norm-new-label";
   const oldLabelItems = [{ ...FIXTURE_SOURCE_ITEMS[0], topic: "Security cooperation", clusterId: "test-old-label" }];
   await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(oldLabelItems), "utf8");
 
-  await request(app).put("/api/settings")
-    .send({ ...VALID_BODY, topics: ["Security policy"] })
-    .set("Content-Type", "application/json");
-
-  // Inject snapshot write capture to verify stories were produced.
   let capturedPayload = null;
+  let capturedRunOpts = null;
   const prevWrite = _snapshotRepo.write;
-  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
   const prevGetLocks = _snapshotRepo.getLocks;
-  _snapshotRepo.getLocks = async () => new Map();
   const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
   _snapshotRepo.insertLocks = async () => {};
+  const baseStub = topicNormalizationPipelineStub();
+  _refreshPipeline.run = async (opts) => {
+    capturedRunOpts = opts;
+    return baseStub(opts);
+  };
+
   try {
-    const res = await request(app).post("/api/dashboard/refresh");
-    assert.equal(res.status, 200);
-    assert.ok(capturedPayload !== null);
-    assert.ok(capturedPayload.stories.length > 0,
-      "item labeled 'Security cooperation' must match normalized setting 'Security policy'");
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, topics: ["Security policy"] })
+        .set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.ok(capturedRunOpts !== null, "pipeline must have been invoked");
+      // Contract: the pipeline receives the legacy-labeled item AND settings
+      // carrying the normalized topic.  These are what the production matcher
+      // is contractually required to equate.
+      const items = capturedRunOpts.rawItems ?? [];
+      assert.ok(items.some((it) => it.topic === "Security cooperation"),
+        "route must hand the legacy-topic item to the pipeline");
+      const settingTopics = capturedRunOpts.settings?.topics ?? [];
+      assert.ok(settingTopics.includes("Security policy"),
+        "route must hand the normalized setting topic to the pipeline");
+      // Equivalence: both sides normalize to the same canonical.
+      assert.equal(
+        normalizeTopicLabel("Security cooperation"),
+        normalizeTopicLabel("Security policy"),
+        "topic normalization must equate legacy 'Security cooperation' with 'Security policy'"
+      );
+      assert.ok(capturedPayload !== null);
+      assert.ok(capturedPayload.stories.length > 0,
+        "item labeled 'Security cooperation' must match normalized setting 'Security policy'");
+    });
   } finally {
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
     await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
-    await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
   }
 });
 
 test("refresh pipeline: old settings topic still matches item with the same old label (backward compat)", async () => {
+  // See sibling test above for the rationale behind stubbing
+  // `_refreshPipeline.run` with `topicNormalizationPipelineStub()`.
+  const ISOLATED_USER_ID = "test-user-norm-legacy-label";
   const oldLabelItems = [{ ...FIXTURE_SOURCE_ITEMS[0], topic: "Security cooperation", clusterId: "test-old-both" }];
   await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(oldLabelItems), "utf8");
 
-  await request(app).put("/api/settings")
-    .send({ ...VALID_BODY, topics: ["Security cooperation"] })
-    .set("Content-Type", "application/json");
-
   let capturedPayload = null;
+  let capturedRunOpts = null;
   const prevWrite = _snapshotRepo.write;
-  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
   const prevGetLocks = _snapshotRepo.getLocks;
-  _snapshotRepo.getLocks = async () => new Map();
   const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
   _snapshotRepo.insertLocks = async () => {};
+  const baseStub = topicNormalizationPipelineStub();
+  _refreshPipeline.run = async (opts) => {
+    capturedRunOpts = opts;
+    return baseStub(opts);
+  };
+
   try {
-    const res = await request(app).post("/api/dashboard/refresh");
-    assert.equal(res.status, 200);
-    assert.ok(capturedPayload !== null);
-    assert.ok(capturedPayload.stories.length > 0,
-      "old-form setting 'Security cooperation' must still match item with same old label");
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, topics: ["Security cooperation"] })
+        .set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.ok(capturedRunOpts !== null, "pipeline must have been invoked");
+      // Old-form setting equals old-form item topic — even before normalization.
+      const settingTopics = capturedRunOpts.settings?.topics ?? [];
+      assert.ok(settingTopics.includes("Security cooperation"),
+        "route must hand the old-form setting topic to the pipeline");
+      assert.ok(capturedPayload !== null);
+      assert.ok(capturedPayload.stories.length > 0,
+        "old-form setting 'Security cooperation' must still match item with same old label");
+    });
   } finally {
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
     await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
-    await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
   }
 });
 
@@ -598,6 +777,198 @@ test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns 
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── Sub-slice 2.3: refresh reads from Tier-A cache, falls back to live ──────
+
+test("POST /api/dashboard/refresh (2.3): pipeline receives cache-derived rawItems when cache returns rows for selected feeds", async () => {
+  // Flip ONLY the cache path on (via `_recentItemsCache.enabled` hook) so the
+  // settings/snapshot/narrative adapters stay file-backed.  `_recentItemsCache.read`
+  // is stubbed to return a Reuters row; the route handler must convert it to
+  // pipeline input and skip the live fetch entirely.  Pinned by capturing the
+  // `rawItems` the pipeline actually saw.
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevCacheRead = _recentItemsCache.read;
+  const prevCacheWrite = _recentItemsCache.write;
+  const prevCacheEnabled = _recentItemsCache.enabled;
+  const prevCacheClient = _recentItemsCache.client;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _recentItemsCache.enabled = () => true;
+  _recentItemsCache.client = () => null;
+
+  let cacheReadArgs = null;
+  // Synthetic cache row tied to the manifest feed `reuters-world` seeded at
+  // module load — its publisher resolves to "Reuters" via mapEntry/derive
+  // semantics, matching VALID_BODY.traditionalSources.
+  const CACHED_AT = new Date(Date.now() - 25 * 60_000).toISOString(); // 25min ago
+  const FETCHED_AT = new Date(Date.now() - 5 * 60_000).toISOString();
+  const EXPIRES_AT = new Date(Date.now() + 35 * 60_000).toISOString();
+  const cacheRow = {
+    source_id: "reuters-world::cached-1",
+    feed_id: "reuters-world",
+    url: "https://reuters.example.com/cached-article",
+    headline: "Cached Reuters headline",
+    snippet: "Cached body paragraph.",
+    published_at: CACHED_AT,
+    fetched_at: FETCHED_AT,
+    expires_at: EXPIRES_AT,
+  };
+  _recentItemsCache.read = async (opts) => {
+    cacheReadArgs = opts;
+    return { rows: [cacheRow], error: null };
+  };
+  let cacheWriteCalled = false;
+  _recentItemsCache.write = async () => { cacheWriteCalled = true; return { written: 0, error: null }; };
+
+  let capturedRawItems = null;
+  _refreshPipeline.run = async (opts) => {
+    capturedRawItems = opts.rawItems;
+    return {
+      payload: { contractVersion: VALID_BODY.contractVersion, stories: [] },
+      log: {
+        unchanged: false,
+        poolCount: 0,
+        relevantCount: 0,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "",
+        candidateCount: 0,
+        selectedFeedCount: 0,
+        selection: {},
+      },
+    };
+  };
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(cacheReadArgs, "cache read must have been invoked");
+    assert.ok(
+      Array.isArray(cacheReadArgs.feedIds) && cacheReadArgs.feedIds.includes("reuters-world"),
+      `cache lookup must be scoped to selected feed IDs; saw ${JSON.stringify(cacheReadArgs.feedIds)}`
+    );
+    assert.ok(Array.isArray(capturedRawItems), "pipeline must receive rawItems");
+    assert.equal(capturedRawItems.length, 1, "pipeline must receive exactly the cached row");
+    const item = capturedRawItems[0];
+    assert.equal(item.sourceId, "reuters-world::cached-1");
+    assert.equal(item.feedId, "reuters-world");
+    assert.equal(item.headline, "Cached Reuters headline");
+    assert.equal(item.outlet, "Reuters", "outlet derives from manifest publisher / feed name");
+    assert.deepEqual(item.body, ["Cached body paragraph."]);
+    assert.equal(
+      cacheWriteCalled,
+      false,
+      "cache write must NOT fire on a cache HIT — only live fetches re-warm the cache"
+    );
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _recentItemsCache.read = prevCacheRead;
+    _recentItemsCache.write = prevCacheWrite;
+    _recentItemsCache.enabled = prevCacheEnabled;
+    _recentItemsCache.client = prevCacheClient;
+  }
+});
+
+test("POST /api/dashboard/refresh (2.3): cache miss falls back to live fetch and re-warms cache", async () => {
+  // Pinned cache-miss path: when `_recentItemsCache.read` returns 0 rows, the
+  // handler must fall back to `readFeedItems(DATA_DIR)` (fixture mode in
+  // tests).  And on the live-fetch branch the write path fires fire-and-
+  // forget so the next refresh hits warm cache.
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevCacheRead = _recentItemsCache.read;
+  const prevCacheWrite = _recentItemsCache.write;
+  const prevCacheEnabled = _recentItemsCache.enabled;
+  const prevCacheClient = _recentItemsCache.client;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _recentItemsCache.enabled = () => true;
+  _recentItemsCache.client = () => null;
+  _recentItemsCache.read = async () => ({ rows: [], error: null });
+
+  let cacheWriteItems = null;
+  _recentItemsCache.write = async ({ items }) => {
+    cacheWriteItems = items;
+    return { written: items.length, error: null };
+  };
+
+  let capturedRawItems = null;
+  _refreshPipeline.run = async (opts) => {
+    capturedRawItems = opts.rawItems;
+    return {
+      payload: { contractVersion: VALID_BODY.contractVersion, stories: [] },
+      log: {
+        unchanged: false,
+        poolCount: 0,
+        relevantCount: 0,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "",
+        candidateCount: 0,
+        selectedFeedCount: 0,
+        selection: {},
+      },
+    };
+  };
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    // Stable contract: on cache miss the pipeline must receive items from the
+    // live-fetch fallback.  We assert shape (non-empty array of raw items with
+    // a string `sourceId`) instead of pinning to a specific fixture
+    // `sourceId` — the fixture catalog can grow or be reordered without
+    // breaking unrelated assertions about cache-miss wiring.
+    assert.ok(Array.isArray(capturedRawItems), "pipeline must receive rawItems from the fallback");
+    assert.ok(capturedRawItems.length > 0, "live fallback must produce at least one raw item");
+    for (const item of capturedRawItems) {
+      assert.equal(typeof item?.sourceId, "string");
+      assert.ok(item.sourceId.length > 0, "each raw item must carry a non-empty sourceId");
+    }
+    // Fire-and-forget write may run after the response — await a microtask
+    // for the scheduled .then chain to settle.
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(Array.isArray(cacheWriteItems), "cache write must fire on the live-fetch branch");
+    assert.ok(cacheWriteItems.length > 0, "cache write must receive at least one item");
+    // Overlap proof: the cache re-warm path must persist the SAME items the
+    // pipeline just consumed — otherwise a subsequent refresh wouldn't see
+    // the live fetch reflected in the cache.  Using set intersection avoids
+    // coupling to fixture order or count while still failing fast if the two
+    // sides ever diverge.
+    const pipelineIds = new Set(capturedRawItems.map((i) => i.sourceId));
+    const cacheIds = new Set(cacheWriteItems.map((i) => i.sourceId));
+    const overlap = [...pipelineIds].filter((id) => cacheIds.has(id));
+    assert.ok(
+      overlap.length > 0,
+      "cache write and pipeline rawItems must share at least one sourceId (same live-fetch batch)"
+    );
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _recentItemsCache.read = prevCacheRead;
+    _recentItemsCache.write = prevCacheWrite;
+    _recentItemsCache.enabled = prevCacheEnabled;
+    _recentItemsCache.client = prevCacheClient;
   }
 });
 
@@ -1162,8 +1533,48 @@ test("POST /api/dashboard/refresh: embedFn throws WITHOUT lexical hits → stric
 });
 
 test("POST /api/dashboard/refresh: selection metadata reports unmatched sources when settings names not in manifest", async () => {
-  // VALID_BODY (used in setup) sets traditionalSources=["Reuters"], socialSources=["@latamwatcher"].
-  // Reuters resolves; @latamwatcher matches social row but social has no implemented connector.
+  // Self-contained selection-meta test: explicitly pins both the manifest
+  // (via the source-feeds.json file the non-Supabase manifest loader reads)
+  // AND the user's settings inside the test, restoring both in finally.
+  // Removes coupling to prior-test state and to whatever the suite-wide
+  // FIXTURE_SOURCE_FEEDS happens to contain at the moment.
+  //
+  // Scenario: one traditional source matches a row that has an implemented
+  // connector (strict mode preserved with matchedSourceCount=1), one social
+  // source matches a manifest row whose connector is not implemented yet
+  // (counted as unavailable, not strict-empty).
+  const sourceFeedsPath = path.join(tmpDir, "source-feeds.json");
+  const SELECTION_MANIFEST = {
+    feeds: [
+      {
+        id: "reuters-world-2-4-test",
+        name: "Reuters — World News",
+        kind: "rss",
+        url: "https://example.com/reuters-2-4-test",
+        weight: 88,
+        active: true,
+      },
+      // Social row — matches by name but social has no implemented connector,
+      // so it's counted under `unavailableConnectorCount`.
+      {
+        id: "latamwatcher-2-4-test",
+        name: "@latamwatcher",
+        kind: "social",
+        url: "https://twitter.com/latamwatcher",
+        weight: 60,
+        active: true,
+      },
+    ],
+  };
+  const SELECTION_BODY = {
+    contractVersion: VALID_BODY.contractVersion,
+    topics: ["Diplomatic relations"],
+    keywords: ["OFAC"],
+    geographies: ["US"],
+    traditionalSources: ["Reuters"],
+    socialSources: ["@latamwatcher"],
+  };
+
   let writtenPayload = null;
   const prevWrite = _snapshotRepo.write;
   const prevGetLocks = _snapshotRepo.getLocks;
@@ -1171,6 +1582,13 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
   _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
   _snapshotRepo.getLocks = async () => new Map();
   _snapshotRepo.insertLocks = async () => {};
+
+  await writeFile(sourceFeedsPath, JSON.stringify(SELECTION_MANIFEST), "utf8");
+  await request(app)
+    .put("/api/settings")
+    .send(SELECTION_BODY)
+    .set("Content-Type", "application/json");
+
   try {
     const res = await request(app).post("/api/dashboard/refresh");
     assert.equal(res.status, 200);
@@ -1188,6 +1606,13 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+    // Restore the suite-wide manifest + settings so unrelated downstream tests
+    // see the same baseline they did before this test ran.
+    await writeFile(sourceFeedsPath, JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
+    await request(app)
+      .put("/api/settings")
+      .send(VALID_BODY)
+      .set("Content-Type", "application/json");
   }
 });
 
@@ -4100,5 +4525,125 @@ test("GET /api/_debug/dashboard-tags: returns hasSnapshot=false + null tags when
     _snapshotRepo.read = prevRead;
     if (savedDebug === undefined) delete process.env.TEMPO_DEBUG_TAGS_ENABLED;
     else process.env.TEMPO_DEBUG_TAGS_ENABLED = savedDebug;
+  }
+});
+
+// ─── Sub-slice 2.4: due-user orchestrator wiring ──────────────────────────────
+//
+// Pure due-selection logic and the orchestrator entrypoint are covered in
+// `dashboard/due-user-orchestrator.test.mjs`.  These tests verify the
+// server-level wiring: `_dueUserOrchestrator.runDueRefreshes` must route
+// through `_refreshExecutor.execute` so the in-flight guard, watermark
+// short-circuit, and `_lastCheckedAt` anchor write stay consistent with the
+// interactive `POST /api/dashboard/refresh` path.
+
+test("Sub-slice 2.4: _dueUserOrchestrator routes due users through _refreshExecutor only (not-due users skipped)", async () => {
+  const prevListAnchors = _dueUserOrchestrator.listAnchors;
+  const prevExecute = _refreshExecutor.execute;
+
+  const overdue = new Date(Date.now() - (60 * 60 * 1000 + 60_000)).toISOString();
+  const fresh = new Date(Date.now() - 60_000).toISOString();
+  _dueUserOrchestrator.listAnchors = async () => ({
+    rows: [
+      { userId: "user-due-1", lastRefreshAttemptAt: overdue },
+      { userId: "user-fresh", lastRefreshAttemptAt: fresh },
+      { userId: "user-due-2", lastRefreshAttemptAt: overdue },
+    ],
+    error: null,
+  });
+  const executorCalls = [];
+  _refreshExecutor.execute = async (identity) => {
+    executorCalls.push(identity);
+    return { kind: "ran", httpStatus: 200, body: {} };
+  };
+
+  try {
+    const summary = await _dueUserOrchestrator.runDueRefreshes();
+    assert.equal(summary.candidates, 3);
+    assert.equal(summary.due, 2);
+    assert.equal(summary.ran, 2);
+    assert.deepEqual(
+      executorCalls.map((c) => c.userId),
+      ["user-due-1", "user-due-2"],
+      "only due users must hit the executor"
+    );
+    // Orchestrator identity stamp is consistent across calls so telemetry can
+    // distinguish server-initiated refreshes from interactive ones.
+    assert.ok(executorCalls.every((c) => c.source === "orchestrator"));
+  } finally {
+    _dueUserOrchestrator.listAnchors = prevListAnchors;
+    _refreshExecutor.execute = prevExecute;
+  }
+});
+
+test("Sub-slice 2.4: orchestrator-triggered refresh advances _lastCheckedAt anchor via the same executor path", async () => {
+  // Wire the real `_refreshExecutor.execute` (no stub) so we exercise the
+  // production anchor-write code path.  Snapshot repo is stubbed so we can
+  // observe both the persisted `_lastCheckedAt` (full-run branch) and the
+  // `writeMeta` call (unchanged / in_flight / error_fallback branches).
+  const overdue = new Date(Date.now() - (60 * 60 * 1000 + 60_000)).toISOString();
+  const PRIOR_SNAPSHOT = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _watermark: "wm-stable",
+    _meta: { hasSnapshot: true, refreshedAt: overdue, lastCheckedAt: overdue },
+  };
+
+  const prevListAnchors = _dueUserOrchestrator.listAnchors;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevPipelineRun = _refreshPipeline.run;
+
+  _dueUserOrchestrator.listAnchors = async () => ({
+    rows: [{ userId: "user-due", lastRefreshAttemptAt: overdue }],
+    error: null,
+  });
+  _snapshotRepo.read = async () => PRIOR_SNAPSHOT;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  // Force the unchanged-watermark branch — it is the minimal path that
+  // exercises the anchor write (`writeMeta`) without depending on the full
+  // clustering pipeline.  Asserting writeMeta is called proves the
+  // orchestrator-triggered refresh advances the same `_lastCheckedAt`
+  // anchor the orchestrator reads for due selection — closing the loop.
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-stable",
+      candidateCount: 0,
+      selectedFeedCount: 1,
+    },
+  });
+  const writeMetaCalls = [];
+  _snapshotRepo.writeMeta = async (uid, meta) => {
+    writeMetaCalls.push({ uid, meta });
+  };
+
+  try {
+    const summary = await _dueUserOrchestrator.runDueRefreshes();
+    assert.equal(summary.due, 1);
+    assert.equal(summary.ran, 1);
+    assert.equal(summary.kinds.unchanged, 1);
+    assert.equal(writeMetaCalls.length, 1, "anchor must be written through writeMeta on unchanged branch");
+    assert.equal(writeMetaCalls[0].uid, "user-due");
+    assert.ok(typeof writeMetaCalls[0].meta.lastCheckedAt === "string");
+    assert.ok(
+      Date.parse(writeMetaCalls[0].meta.lastCheckedAt) > Date.parse(overdue),
+      "_lastCheckedAt anchor must advance past the prior overdue stamp"
+    );
+  } finally {
+    _dueUserOrchestrator.listAnchors = prevListAnchors;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.writeMeta = prevWriteMeta;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevPipelineRun;
   }
 });

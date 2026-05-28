@@ -1,5 +1,5 @@
 {
-  "_note": "Declared feed sources for ingestion. This list is intentionally Washington Post-only for the current source-by-source rollout. Live fetching is gated by env TEMPO_RSS_INGESTION (values: 'live' | 'fixture'; defaults to 'live' when NODE_ENV=production, else 'fixture'). When set to 'live', feed-reader.mjs fetches every eligible row (kind=rss, active=true, valid http(s) url) and applies caps via TEMPO_RSS_MAX_ITEMS_PER_FEED (default 30) and TEMPO_RSS_MAX_ITEMS_TOTAL (default 200). Optional publisher filter via TEMPO_RSS_PUBLISHER (case-insensitive substring match on feed name). Operators may add/replace rows here for local dev; production reads from the Supabase manifest when isSupabaseEnabled().",
+  "_note": "Declared feed sources for ingestion. Batch 1 covers Washington Post + Reuters (NYT remains inactive in the Supabase manifest pending licensing). Live fetching is gated by env TEMPO_RSS_INGESTION (values: 'live' | 'fixture'; defaults to 'live' when NODE_ENV=production, else 'fixture'). When set to 'live', feed-reader.mjs fetches every eligible row (kind=rss, active=true, valid http(s) url) and applies caps via TEMPO_RSS_MAX_ITEMS_PER_FEED (default 30) and TEMPO_RSS_MAX_ITEMS_TOTAL (default 200). Optional publisher filter via TEMPO_RSS_PUBLISHER (case-insensitive substring match on feed name). Operators may add/replace rows here for local dev; production reads from the Supabase manifest when isSupabaseEnabled().",
   "feeds": [
     {
       "id": "wapo-politics",
@@ -29,6 +29,15 @@
       "active": true
     },
     {
+      "id": "reuters-world-americas",
+      "name": "Reuters — World (Americas)",
+      "publisher": "Reuters",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/b6sShyEZRhHltEjN.xml",
+      "weight": 88,
+      "active": true
+    },
+    {
       "id": "wapo-business",
       "name": "The Washington Post — Business",
       "publisher": "The Washington Post",
@@ -38,11 +47,11 @@
       "active": true
     },
     {
-      "id": "wapo-technology",
-      "name": "The Washington Post — Technology",
-      "publisher": "The Washington Post",
+      "id": "reuters-world-us",
+      "name": "Reuters — World (United States)",
+      "publisher": "Reuters",
       "kind": "rss",
-      "url": "https://feeds.washingtonpost.com/rss/business/technology",
+      "url": "https://rss.app/feeds/koJlvT7N07pEmc09.xml",
       "weight": 86,
       "active": true
     }
