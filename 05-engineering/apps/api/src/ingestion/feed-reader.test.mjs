@@ -1183,6 +1183,109 @@ test("readFeedItems(live): opts.allowlist (Array) overrides env", async () => {
   }
 });
 
+// ─── Reuters Batch 1 (WaPo + Reuters allowlist + outlet propagation) ─────────
+//
+// Pins the Sub-slice 1.3 wire-up: the manifest carries Reuters rows alongside
+// WaPo, and an allowlist of "washington post,reuters" admits both publishers.
+// Substring matching on normalized feed names is what makes a single "reuters"
+// entry match every Reuters section name (e.g. "Reuters — World (Americas)")
+// without per-section allowlist tuning.
+
+const BATCH1_MANIFEST = [
+  { id: "wapo-politics", name: "The Washington Post — Politics", publisher: "The Washington Post", kind: "rss", url: "https://wapo.example.com/politics.xml", weight: 95, active: true },
+  { id: "reuters-world-americas", name: "Reuters — World (Americas)", publisher: "Reuters", kind: "rss", url: "https://reuters.example.com/americas.xml", weight: 88, active: true },
+  { id: "reuters-world-us", name: "Reuters — World (United States)", publisher: "Reuters", kind: "rss", url: "https://reuters.example.com/us.xml", weight: 86, active: true },
+];
+
+const REUTERS_AMERICAS_XML = rssXml({
+  title: "Reuters Americas",
+  items: [
+    { title: "Panama passes tighter rules for multinationals", link: "https://reuters.example.com/americas/panama", guid: "ra-1", pubDate: nowMinusMinutes(20), description: "Body Americas." },
+  ],
+});
+const REUTERS_US_XML = rssXml({
+  title: "Reuters US",
+  items: [
+    { title: "U.S. inflation reading lands below forecast", link: "https://reuters.example.com/us/inflation", guid: "ru-1", pubDate: nowMinusMinutes(40), description: "Body US." },
+  ],
+});
+
+const BATCH1_FETCH_MAP = {
+  "https://wapo.example.com/politics.xml": { body: WAPO_POL_XML },
+  "https://reuters.example.com/americas.xml": { body: REUTERS_AMERICAS_XML },
+  "https://reuters.example.com/us.xml": { body: REUTERS_US_XML },
+};
+
+test("readFeedItems(live): Batch 1 allowlist 'washington post,reuters' admits both publishers", async () => {
+  // End-to-end wire-up for Sub-slice 1.3: the operator-configured allowlist
+  // `washington post,reuters` must permit fetches against every Reuters row
+  // in the manifest as well as the WaPo row.  Substring matching means the
+  // single "reuters" entry covers "Reuters — World (Americas)" and
+  // "Reuters — World (United States)" without enumerating sections.
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return makeFetchMock(BATCH1_FETCH_MAP)(url);
+  };
+  await withAllowlistEnv({ newer: "washington post,reuters", legacy: undefined }, async () => {
+    await readFeedItems("/unused", {
+      mode: "live",
+      fetchImpl,
+      manifestLoader: async () => BATCH1_MANIFEST,
+      // opts.allowlist omitted — env-configured allowlist must take effect.
+    });
+  });
+  const sortedCalls = [...calls].sort();
+  assert.deepEqual(sortedCalls, [
+    "https://reuters.example.com/americas.xml",
+    "https://reuters.example.com/us.xml",
+    "https://wapo.example.com/politics.xml",
+  ], "Batch 1 allowlist must permit all three WaPo+Reuters feeds");
+});
+
+test("readFeedItems(live): Reuters manifest rows produce items tagged outlet='Reuters' (publisher propagation)", async () => {
+  // Pins the publisher tag for the new Batch 1 Reuters names — the dashboard
+  // groups by `outlet`, so a regression that derived "Reuters — World" from
+  // the feed name (instead of using manifest `publisher`) would split a single
+  // publisher into two outlets in the chip count.
+  let items;
+  await withAllowlistEnv({ newer: "washington post,reuters", legacy: undefined }, async () => {
+    items = await readFeedItems("/unused", {
+      mode: "live",
+      fetchImpl: makeFetchMock(BATCH1_FETCH_MAP),
+      manifestLoader: async () => BATCH1_MANIFEST,
+    });
+  });
+  const outlets = [...new Set(items.map((i) => i.outlet))].sort();
+  assert.deepEqual(outlets, ["Reuters", "The Washington Post"], "two distinct outlet tags, not section variants");
+  const reutersItems = items.filter((i) => i.outlet === "Reuters");
+  assert.equal(reutersItems.length, 2, "one item from each Reuters section feed");
+  // feedId must survive end-to-end so source-selection can match by stable id
+  // — pin both Reuters rows specifically since they are the new Batch 1 surface.
+  const reutersFeedIds = [...new Set(reutersItems.map((i) => i.feedId))].sort();
+  assert.deepEqual(reutersFeedIds, ["reuters-world-americas", "reuters-world-us"]);
+});
+
+test("readFeedItems(live): allowlist 'washington post' alone blocks Reuters feeds (Batch 1 isolation)", async () => {
+  // Negative companion: without "reuters" in the allowlist, the Reuters rows
+  // are blocked at the guard step even though they are structurally eligible.
+  // Pins the property that 1.3 widening was a deliberate, env-driven step,
+  // not a manifest-only change.
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return makeFetchMock(BATCH1_FETCH_MAP)(url);
+  };
+  await withAllowlistEnv({ newer: "washington post", legacy: undefined }, async () => {
+    await readFeedItems("/unused", {
+      mode: "live",
+      fetchImpl,
+      manifestLoader: async () => BATCH1_MANIFEST,
+    });
+  });
+  assert.deepEqual(calls, ["https://wapo.example.com/politics.xml"], "only WaPo fetched; both Reuters URLs blocked");
+});
+
 // ─── Optional live smoke (skipped by default) ────────────────────────────────
 
 describe("live smoke (skipped by default; set TEMPO_RSS_LIVE_SMOKE=true to enable)", () => {
