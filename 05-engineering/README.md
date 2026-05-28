@@ -78,9 +78,47 @@ WHERE kind = 'traditional'
 
 Re-run `source-feeds-import.mjs` when `source-feeds.json` carries explicit `publisher` fields. B2 derivation in code covers rows still null at read time.
 
-## Source scope (Phase 1: Washington Post only)
+## Source scope (Batch 1: Washington Post + Reuters)
 
-The Supabase manifest's `active` flag is the **primary** lever that decides which feeds run during ingestion. The runtime guard `TEMPO_RSS_ALLOWLIST` (defaults to `washington post`) is defense-in-depth — it filters again at fetch time. `TEMPO_INGESTION_ALLOWLIST` is accepted as a legacy alias for backwards compatibility; new configuration should use `TEMPO_RSS_ALLOWLIST`.
+The Supabase manifest's `active` flag is the **primary** lever that decides which feeds run during ingestion. The runtime guard `TEMPO_RSS_ALLOWLIST` is defense-in-depth — it filters again at fetch time. `TEMPO_INGESTION_ALLOWLIST` is accepted as a legacy alias for backwards compatibility; new configuration should use `TEMPO_RSS_ALLOWLIST`.
+
+**Batch 1 env setup** (set on the API project, e.g. `apps/api/.env` locally or Vercel env for `tempo-api`):
+
+```
+TEMPO_RSS_INGESTION=live
+TEMPO_RSS_ALLOWLIST=washington post,reuters
+TEMPO_RSS_MAX_ITEMS_TOTAL=150
+TEMPO_RSS_MAX_ITEMS_PER_FEED=20
+```
+
+NYT remains inactive in the Supabase manifest pending licensing — do not flip it to active without sign-off.
+
+**Sync the manifest from `source-feeds.json` → Supabase** (canonical import utility, idempotent, never downgrades `verified` → `mapped`):
+
+```sh
+SUPABASE_URL=<url> SUPABASE_SERVICE_ROLE_KEY=<key> \
+  node apps/api/src/db/source-feeds-import.mjs
+```
+
+Use the service-role key (not the anon key) — the upserts touch `source_entities` and `source_feed_mapping` directly. After import, regenerate the catalog with `npm run source-catalog:generate` to refresh `SOURCE-REGISTRY-CATALOG.generated.md`.
+
+**WaPo-only baseline smoke** — confirms live RSS fetch works against the Washington Post feeds before flipping Reuters on in user settings. Run from `05-engineering/`:
+
+```sh
+TEMPO_RSS_INGESTION=live TEMPO_RSS_ALLOWLIST='washington post,reuters' \
+TEMPO_RSS_MAX_ITEMS_TOTAL=150 TEMPO_RSS_MAX_ITEMS_PER_FEED=20 \
+node --input-type=module -e "
+  import('./apps/api/src/ingestion/feed-reader.mjs').then(async ({ readFeedItems }) => {
+    const { readFile } = await import('node:fs/promises');
+    const manifest = JSON.parse(await readFile('apps/api/data/source-feeds.json', 'utf8')).feeds;
+    const wapoOnly = manifest.filter(f => f.publisher === 'The Washington Post');
+    const items = await readFeedItems(process.cwd(), { manifestLoader: () => wapoOnly });
+    console.log('items:', items.length, 'outlets:', [...new Set(items.map(i => i.outlet))]);
+  });
+"
+```
+
+Healthy output prints `[feed-reader.live] feeds=4 skipped=0 failed=0 parsed=N returned=N` and a single outlet (`The Washington Post`). Use this before Reuters is enabled in settings (Sub-slice 1.3) to keep the WaPo path as a known-good baseline.
 
 The `db:scope:*` scripts wrap the manifest writes safely. They record every row they disable in a `public.phase1_disabled_feeds` tracker table (created on first run) so `restore` only touches rows that this script disabled — never rows that were already inactive for unrelated reasons.
 

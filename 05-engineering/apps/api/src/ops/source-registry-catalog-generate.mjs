@@ -118,6 +118,8 @@ export function formatCatalogMarkdown(rows, meta) {
     `> Supabase is the canonical source of truth for all source mappings.`,
     `> To update a mapping, edit the record in Supabase, then regenerate this file.`,
     `>`,
+    `> **Scope:** active mappings only — inactive rows are filtered out at query time.`,
+    `>`,
     ...(meta.generatedAt ? [`> **Generated:** ${meta.generatedAt.toISOString()}`] : []),
     `> **Supabase project:** ${meta.supabaseUrl}`,
     `> **Regenerate:** \`cd 05-engineering && npm run source-catalog:generate\``,
@@ -155,6 +157,8 @@ async function run() {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  // Catalog reflects active mappings only — inactive rows are filtered out
+  // at query time so PMs see the live ingestion scope, not historical entries.
   const { data, error } = await client
     .from("source_feed_mapping")
     .select(
@@ -167,7 +171,8 @@ async function run() {
        created_at,
        updated_at,
        source_entities ( canonical_name, kind )`
-    );
+    )
+    .eq("active", true);
 
   if (error) throw new Error(`Query failed: ${error.message}`);
 

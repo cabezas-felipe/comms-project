@@ -531,8 +531,8 @@ PMs need to review source mappings (canonical names, statuses, feed URLs, ingest
 
 Added a generator script that produces a deterministic, read-only Markdown catalog:
 
-- **Generator:** [`apps/api/src/ops/source-registry-catalog-generate.mjs`](apps/api/src/ops/source-registry-catalog-generate.mjs) — queries `source_feed_mapping` + `source_entities`, sorts and groups rows, writes `SOURCE-REGISTRY-CATALOG.generated.md`.
-- **Output:** [`SOURCE-REGISTRY-CATALOG.generated.md`](SOURCE-REGISTRY-CATALOG.generated.md) — DO NOT EDIT; Supabase remains the canonical source. No reverse sync from Markdown → DB.
+- **Generator:** [`apps/api/src/ops/source-registry-catalog-generate.mjs`](apps/api/src/ops/source-registry-catalog-generate.mjs) — queries `source_feed_mapping` + `source_entities` (filtered to `active=true` at query time), sorts and groups rows, writes `SOURCE-REGISTRY-CATALOG.generated.md`.
+- **Output:** [`SOURCE-REGISTRY-CATALOG.generated.md`](SOURCE-REGISTRY-CATALOG.generated.md) — DO NOT EDIT; Supabase remains the canonical source. No reverse sync from Markdown → DB. The catalog reflects active mappings only; inactive rows are intentionally excluded so PMs see the live ingestion scope.
 - **npm scripts:** `source-catalog:generate` on `@tempo/api`; passthrough at workspace root.
 - **Tests:** [`apps/api/src/ops/source-registry-catalog-generate.test.mjs`](apps/api/src/ops/source-registry-catalog-generate.test.mjs) covers ordering, grouping, empty-value dashes, header metadata, and no-mutation guard.
 
