@@ -100,9 +100,11 @@ SUPABASE_URL=<url> SUPABASE_SERVICE_ROLE_KEY=<key> \
   node apps/api/src/db/source-feeds-import.mjs
 ```
 
-Use the service-role key (not the anon key) — the upserts touch `source_entities` and `source_feed_mapping` directly. After import, regenerate the catalog with `npm run source-catalog:generate` to refresh `SOURCE-REGISTRY-CATALOG.generated.md`.
+Use the service-role key (not the anon key) — the upserts touch `source_entities` and `source_feed_mapping` directly. After import, regenerate the catalog with `npm run source-catalog:generate` to refresh `SOURCE-REGISTRY-CATALOG.generated.md`. The catalog shows **active mappings only** (inactive rows are filtered at query time) — Reuters Batch 1 rows appear there only after `source-feeds-import.mjs` runs and the rows land as `active=true` in Supabase.
 
-**WaPo-only baseline smoke** — confirms live RSS fetch works against the Washington Post feeds before flipping Reuters on in user settings. Run from `05-engineering/`:
+### Sub-slice 1.2 validation — WaPo-only baseline smoke
+
+Not required for Sub-slice 1.1 completion. Run before enabling Reuters in user settings (Sub-slice 1.3) to confirm the WaPo path is a known-good baseline. From `05-engineering/`:
 
 ```sh
 TEMPO_RSS_INGESTION=live TEMPO_RSS_ALLOWLIST='washington post,reuters' \
@@ -118,7 +120,7 @@ node --input-type=module -e "
 "
 ```
 
-Healthy output prints `[feed-reader.live] feeds=4 skipped=0 failed=0 parsed=N returned=N` and a single outlet (`The Washington Post`). Use this before Reuters is enabled in settings (Sub-slice 1.3) to keep the WaPo path as a known-good baseline.
+Healthy output prints `[feed-reader.live] feeds=4 skipped=0 failed=0 parsed=N returned=N` and a single outlet (`The Washington Post`).
 
 The `db:scope:*` scripts wrap the manifest writes safely. They record every row they disable in a `public.phase1_disabled_feeds` tracker table (created on first run) so `restore` only touches rows that this script disabled — never rows that were already inactive for unrelated reasons.
 
