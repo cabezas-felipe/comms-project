@@ -28,14 +28,6 @@
 import "dotenv/config";
 import { fileURLToPath } from "node:url";
 
-function requireEnv(name) {
-  const val = process.env[name];
-  if (!val || val.trim().length === 0) {
-    throw new Error(`Missing required env var: ${name}`);
-  }
-  return val;
-}
-
 /**
  * Runs one orchestrator tick and emits a structured summary log.
  *
@@ -144,5 +136,3 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       process.exit(1);
     });
 }
-
-export const _internal = { requireEnv };
