@@ -17,6 +17,7 @@ import { extractOnboarding, resolveTimeoutMs as resolveExtractionTimeoutMs } fro
 import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
+import { writeRecentItems as cacheWriteRecentItems } from "./ingestion/recent-items-cache.mjs";
 import { listIngestionFeeds } from "./ingestion/feed-manifest-repo.mjs";
 import { trackServerEvent } from "./telemetry.mjs";
 import { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertTitleLocks, readHoldBucket, writeHoldBucket, mergeEverSeenMetaStoryIds, extractEverSeenFromSnapshot } from "./db/dashboard-snapshot-repo.mjs";
@@ -319,6 +320,14 @@ export const _clusterEngine = { cluster: clusterItems };
  * calling the OpenAI embeddings API.
  */
 export const _embeddings = { embed: embedTexts };
+
+/**
+ * Mutable Tier-A recent-items cache hook (Sub-slice 2.2).  Tests override
+ * `write` to disable the supabase round-trip; production wiring fires-and-
+ * forgets so cache failures never block a refresh.  2.2 ships the write path
+ * only; the refresh read path will adopt it in Sub-slice 2.3.
+ */
+export const _recentItemsCache = { write: cacheWriteRecentItems };
 
 /**
  * Mutable refresh pipeline hook. Tests override run to simulate pipeline
@@ -938,6 +947,28 @@ async function executeRefreshFlow(identity) {
       // signal and the recall stage falls through to settings-only profile.
       _narrativeRepo.read(identity.userId).catch(() => null),
     ]);
+
+    // Sub-slice 2.2: opportunistic write into the Tier-A ephemeral cache so
+    // concurrent refreshes can share this fetch.  Fire-and-forget — cache
+    // failures must never block the user's refresh.  The read path stays on
+    // the live fetch above in 2.2; the refresh-from-cache wiring lands in 2.3.
+    if (isSupabaseEnabled() && Array.isArray(rawItems) && rawItems.length > 0) {
+      void Promise.resolve()
+        .then(() => _recentItemsCache.write({ supabase: getSupabaseClient(), items: rawItems }))
+        .then((res) => {
+          if (res?.error) {
+            console.warn(
+              `[ingestion.cache] write failed (non-fatal): ${res.error.message ?? res.error}`
+            );
+          }
+        })
+        .catch((err) => {
+          console.warn(
+            `[ingestion.cache] write threw (non-fatal): ${err instanceof Error ? err.message : err}`
+          );
+        });
+    }
+
     // D-064a: apply the idempotent keyword-dedupe backfill so pipeline
     // scoring uses clean keywords even if the user hasn't hit GET /api/settings
     // since D-064 shipped. Write fires at most once per pre-D-064 user.
