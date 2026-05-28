@@ -1,8 +1,9 @@
 // Tier-A ephemeral cache for recently-fetched + normalized RSS items.
 //
-// Sub-slice 2.2 establishes the write path only.  The refresh read path keeps
-// hitting the live feed-reader in this slice; Sub-slice 2.3 will wire the
-// refresh pipeline to read from this table when an entry is still fresh.
+// Refresh writes upsert rows here at the end of each ingestion; the next
+// refresh reads still-fresh rows from this table and falls back to a live
+// feed-reader fetch when the cache is cold or expired (see the cache-first
+// branch in `server.mjs`).
 //
 // Design notes:
 //   - All public functions accept a supabase client as an argument so callers
