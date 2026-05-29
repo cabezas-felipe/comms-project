@@ -33,21 +33,15 @@
 // "Africa"). The commodity-framing penalty is kept as a generic precision
 // filter. Core positive signals are now topic + keyword + geo + recency.
 
+import { normalizeTopicLabel } from "../contracts-runtime/index.mjs";
 import {
-  GEOGRAPHY_ALIASES,
-  GEOGRAPHY_SYNONYMS,
-  normalizeTopicLabel,
-  resolveGeographyAlias,
-} from "../contracts-runtime/index.mjs";
+  buildPlainTokenRegex,
+  itemMentionsConfiguredGeography,
+} from "./geo-lexical-match.mjs";
 import {
   SEMANTIC_BLEND_DETERMINISTIC,
   SEMANTIC_BLEND_SEMANTIC,
 } from "./semantic-beat-fit.mjs";
-
-// Precomputed alias entries for the per-item geo loop. Mirrors the structure
-// used in meta-story-tags.mjs so beat-fit and tag assignment share identical
-// alias-hit rules (D-064).
-const ALIAS_ENTRIES = Object.entries(GEOGRAPHY_ALIASES);
 
 export const BEAT_FIT_VERSION = "beat-fit-v1";
 
@@ -139,50 +133,9 @@ const COMMODITY_TERMS = [
   "livestock",
 ];
 
-function escapeRegex(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Soft-geo lexical synonyms used when item.geographies is empty (very common
-// for raw RSS items at the candidate stage). "US" should match "U.S.", "U.S",
-// "USA", "United States" in text without depending on NER. The canonical
-// table lives in `contracts-runtime/geography-aliases.mjs` so this module and
-// `stripKeywordsMatchingGeographies` cannot drift (D-064a).
-function geoTextMatches(text, geo, settingsGeographies) {
-  // 1. Word-boundary token match on the canonical name itself.
-  const canonicalRe = buildPlainTokenRegex([geo]);
-  if (canonicalRe && canonicalRe.test(text)) return true;
-  // 2. Synonym list (handles "U.S." which has a period that defeats \b on the
-  //    trailing side).
-  const synonyms = GEOGRAPHY_SYNONYMS[geo];
-  if (synonyms) {
-    for (const syn of synonyms) {
-      const re = new RegExp(`\\b${escapeRegex(syn)}`, "i");
-      if (re.test(text)) return true;
-    }
-  }
-  // 3. D-064: GEOGRAPHY_ALIASES gated on settings.geographies. Mirrors the
-  //    `assignGeographies` alias path in meta-story-tags.mjs so beat-fit and
-  //    tag-assignment treat alias evidence identically. For each alias key
-  //    that resolves (via `resolveGeographyAlias`) to this same `geo` in the
-  //    settings list, a whole-word hit in the joined text counts.
-  const geoLower = String(geo).trim().toLowerCase();
-  if (!geoLower) return false;
-  for (const [aliasLower] of ALIAS_ENTRIES) {
-    const resolved = resolveGeographyAlias(aliasLower, settingsGeographies);
-    if (!resolved || resolved.trim().toLowerCase() !== geoLower) continue;
-    const re = new RegExp(`\\b${escapeRegex(aliasLower)}\\b`, "i");
-    if (re.test(text)) return true;
-  }
-  return false;
-}
-
-function buildPlainTokenRegex(terms) {
-  const cleaned = (terms ?? []).map((t) => (typeof t === "string" ? t.trim() : "")).filter(Boolean);
-  if (cleaned.length === 0) return null;
-  const alternation = cleaned.map(escapeRegex).join("|");
-  return new RegExp(`\\b(?:${alternation})\\b`, "i");
-}
+// Geo lexical helpers (`geoTextMatches`, `itemMentionsConfiguredGeography`,
+// `buildPlainTokenRegex`) live in `geo-lexical-match.mjs` so beat-fit (Stage 2)
+// and the recall stage share one auditable matcher and cannot drift.
 
 const COMMODITY_REGEX = buildPlainTokenRegex(COMMODITY_TERMS);
 
@@ -275,12 +228,10 @@ export function scoreBeatFit(item, settings, opts = {}) {
       geoHit = true;
       reasonCodes.push("geo_explicit_match");
     } else {
-      for (const g of configuredGeos) {
-        if (geoTextMatches(text, g, settingsGeographies)) {
-          geoHit = true;
-          reasonCodes.push(`geo_text_match:${g.toLowerCase()}`);
-          break;
-        }
+      const matchedGeo = itemMentionsConfiguredGeography(text, settingsGeographies);
+      if (matchedGeo) {
+        geoHit = true;
+        reasonCodes.push(`geo_text_match:${matchedGeo.toLowerCase()}`);
       }
     }
   }

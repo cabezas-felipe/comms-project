@@ -195,7 +195,7 @@ test("runEmbeddingRecall: hybrid_strict widens recall via semantic match (item w
 // vector is [1, 0]; each item's vector is chosen by a marker in its text so we
 // can assert exactly which semantic-only candidates clear the floor.
 //   strongmatch → [1, 0]   → cosine 1.00 (passes any floor < 1)
-//   weakmatch   → [0.1, 1] → cosine ≈ 0.0995 (below the 0.40 default)
+//   weakmatch   → [0.1, 1] → cosine ≈ 0.0995 (below any tested floor)
 //   (other)     → [0, 1]   → cosine 0.00
 function makeFloorEmbedder() {
   return async (texts) =>
@@ -264,15 +264,15 @@ test("runEmbeddingRecall: minSimilarity=0 admits all top-K (floor disabled)", as
   assert.equal(result.diagnostics.similarityRejected, 0);
 });
 
-test("resolveRecallConfig: minSimilarity defaults to 0.40 and honors env override / clamps invalid", () => {
+test("resolveRecallConfig: minSimilarity defaults to 0.35 and honors env override / clamps invalid", () => {
   const prev = process.env.TEMPO_EMBED_MIN_SIMILARITY;
   try {
     delete process.env.TEMPO_EMBED_MIN_SIMILARITY;
-    assert.equal(resolveRecallConfig().minSimilarity, 0.4, "default floor is 0.40");
+    assert.equal(resolveRecallConfig().minSimilarity, 0.35, "default floor is 0.35");
     process.env.TEMPO_EMBED_MIN_SIMILARITY = "0.6";
     assert.equal(resolveRecallConfig().minSimilarity, 0.6, "env override honored");
     process.env.TEMPO_EMBED_MIN_SIMILARITY = "1.5"; // out of [0,1] → fallback
-    assert.equal(resolveRecallConfig().minSimilarity, 0.4, "out-of-range falls back to default");
+    assert.equal(resolveRecallConfig().minSimilarity, 0.35, "out-of-range falls back to default");
     process.env.TEMPO_EMBED_MIN_SIMILARITY = "0"; // valid: disables floor
     assert.equal(resolveRecallConfig().minSimilarity, 0, "explicit 0 is honored");
   } finally {

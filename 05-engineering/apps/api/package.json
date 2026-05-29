@@ -18,6 +18,7 @@
     "eval:cluster-smoke": "node src/ai/evals/run-cluster-smoke.mjs",
     "eval:critical": "node src/ai/evals/run-critical-suite.mjs",
     "eval:dashboard-refresh-golden": "NODE_ENV=test node --test src/ai/evals/dashboard-refresh-golden.test.mjs",
+    "eval:dashboard-dual-beat": "NODE_ENV=test node --test src/ai/evals/dashboard-dual-beat.test.mjs",
     "eval:dashboard-calibration": "node src/ai/evals/run-dashboard-calibration.mjs",
     "eval:dashboard-calibration:verbose": "node src/ai/evals/run-dashboard-calibration.mjs --verbose",
     "eval:dashboard-calibration:json": "node src/ai/evals/run-dashboard-calibration.mjs --json-out tmp/dashboard-calibration.json",

@@ -34,9 +34,11 @@ const DEFAULT_EMBED_MAX_ITEMS = 250;
 // union.  Keyword/topic hits always pass (they cleared real lexical gates);
 // this floor only constrains items that would be admitted purely on embedding
 // proximity, so a weak/off-beat semantic neighbor can't widen recall into
-// noise.  0.40 is a conservative default for text-embedding-3-small cosine on
-// short RSS text; tune via TEMPO_EMBED_MIN_SIMILARITY.
-const DEFAULT_EMBED_MIN_SIMILARITY = 0.4;
+// noise.  0.35 is a conservative default for text-embedding-3-small cosine on
+// short RSS text (recall-widening: lowered from 0.40 to admit slightly more
+// on-beat semantic neighbors while still holding back clear noise); tune via
+// TEMPO_EMBED_MIN_SIMILARITY. Calibration band: 0.35–0.45.
+const DEFAULT_EMBED_MIN_SIMILARITY = 0.35;
 
 function parsePositiveInt(raw, fallback) {
   const n = Number(raw);

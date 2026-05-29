@@ -84,7 +84,7 @@ test("buildCalibrationArtifact produces a stable machine-readable shape", async 
   assert.equal(artifact.harness, CALIBRATION_ARTIFACT_HARNESS);
   assert.equal(artifact.version, CALIBRATION_ARTIFACT_VERSION);
   assert.equal(artifact.timestamp, ts, "timestamp is injected (pure — no Date inside)");
-  assert.equal(artifact.productionDefaultFloor, 0.4);
+  assert.equal(artifact.productionDefaultFloor, 0.35);
   assert.deepEqual(artifact.floors, [0, 0.35, 0.4, 0.45]);
   assert.equal(artifact.overall.pass, true);
   assert.equal(artifact.overall.hardFail, false);

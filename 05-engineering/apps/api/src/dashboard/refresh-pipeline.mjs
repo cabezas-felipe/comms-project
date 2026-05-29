@@ -24,6 +24,7 @@ import {
   BEAT_FIT_VERSION,
   readBeatFitThreshold,
 } from "./beat-fit-scorer.mjs";
+import { itemMentionsConfiguredGeography } from "./geo-lexical-match.mjs";
 import {
   RECALL_MODE,
   resolveRecallConfig,
@@ -606,27 +607,53 @@ function buildKeywordTokenRegex(keywords) {
   return new RegExp(`\\b(?:${alternation})\\b`, "i");
 }
 
+// Join an item's lexical surfaces for the geography text gate. Mirrors the
+// fields beat-fit's `joinText` consults (headline + subtitle + body + url) so
+// the recall geo gate never narrows what beat-fit would later geo-match — geo
+// recall stays at least as wide as the downstream scorer's geo signal.
+function joinGeoText(item) {
+  const headline = item?.headline ?? "";
+  const subtitle = item?.subtitle ?? "";
+  const body = Array.isArray(item?.body) ? item.body.join(" ") : (item?.body ?? "");
+  const url = typeof item?.url === "string" ? item.url : "";
+  return `${headline} ${subtitle} ${body} ${url}`.trim();
+}
+
 /**
- * Filters items by topic and keyword match only (no geography check).
- * Used after applyGeoFilter so geo is handled separately.
+ * Recall lexical gate: an item passes if it matches ANY configured lexical
+ * signal (logical OR) — topic, keyword, OR a configured geography mentioned in
+ * the item's text. Geo handling for explicit `item.geographies` overlap lives
+ * in `applyGeoFilter`; this gate adds the *lexical* geo signal (Slice 2) via
+ * the shared matcher in `geo-lexical-match.mjs` so it cannot drift from
+ * beat-fit's geo behavior.
  *
  *   - Topic uses canonical normalization (`normalizeTopicLabel`).
  *   - Keyword uses whole-word/token matching (case-insensitive); substrings
  *     inside larger words (e.g. "ofac" inside "ofacility") do NOT match.
- *   - Topic OR keyword (logical OR) decides relevance.
- *   - If both topics and keywords are empty, all items pass through.
+ *   - Geography uses `itemMentionsConfiguredGeography` (canonical token +
+ *     GEOGRAPHY_SYNONYMS + settings-gated GEOGRAPHY_ALIASES) over the joined
+ *     item text.
+ *   - Pass-through (return all items) happens ONLY when none of the three
+ *     gates are configured (no topics AND no keywords AND no geographies). When
+ *     only geographies are configured, the item must still mention one of them
+ *     in text to pass — geographies no longer wave items through.
  */
 export function applyTopicKeywordFilter(items, settings) {
   const topics = new Set((settings.topics ?? []).map((t) => normalizeTopicLabel(t)));
   const keywordRegex = buildKeywordTokenRegex(settings.keywords);
+  const geographies = settings.geographies ?? [];
+  const hasGeographies = geographies.length > 0;
 
-  if (topics.size === 0 && !keywordRegex) return items;
+  if (topics.size === 0 && !keywordRegex && !hasGeographies) return items;
 
   return items.filter((item) => {
     if (topics.size > 0 && topics.has(normalizeTopicLabel(item.topic))) return true;
     if (keywordRegex) {
       const text = (item.headline ?? "") + " " + (Array.isArray(item.body) ? item.body.join(" ") : (item.body ?? ""));
       if (keywordRegex.test(text)) return true;
+    }
+    if (hasGeographies && itemMentionsConfiguredGeography(joinGeoText(item), geographies)) {
+      return true;
     }
     return false;
   });
@@ -637,15 +664,22 @@ export function applyTopicKeywordFilter(items, settings) {
  * recall stage.  Used purely for diagnostics — never alters filter behavior.
  *
  * Counts are mutually-exclusive partition of the input set:
- *   - topicOnly   — passed via topic match, no keyword match
- *   - keywordOnly — passed via keyword match, no topic match
- *   - both        — passed both topic and keyword
- *   - neither     — failed both gates (filter rejects)
- *   - passNoConfig — when settings have neither topic nor keyword configured,
- *                    the filter is a no-op pass-through; counted separately so
- *                    "everything passed because nothing was checked" is
- *                    distinguishable from "everything passed because everything
- *                    matched".
+ *   - topicOnly      — passed via topic match (no keyword match)
+ *   - keywordOnly    — passed via keyword match (no topic match)
+ *   - both           — passed both topic and keyword
+ *   - geoLexicalOnly — passed ONLY via a configured-geography text mention
+ *                      (no topic, no keyword); the Slice 2 geo lexical gate
+ *   - neither        — failed all configured gates (filter rejects)
+ *   - passNoConfig   — when settings have no topic, no keyword, AND no
+ *                      geography configured, the filter is a no-op
+ *                      pass-through; counted separately so "everything passed
+ *                      because nothing was checked" is distinguishable from
+ *                      "everything passed because everything matched".
+ *
+ * Partition priority is topic/keyword first, then geo: `both`, `topicOnly`,
+ * `keywordOnly`, `geoLexicalOnly`, `neither`. So an item matching keyword AND
+ * geography is counted as `keywordOnly` (geo is only the *sole* reason for
+ * `geoLexicalOnly`). `passCount` sums every passing bucket.
  *
  * Hint codes (`primaryDropCause`) attached when zero items pass:
  *   - `no_input`           — input set was empty before the stage ran
@@ -655,29 +689,34 @@ export function applyTopicKeywordFilter(items, settings) {
  *                            drifted from the item.topic labels in feed data)
  *   - `no_topic_match`     — topic gate matched zero, keywords not configured
  *   - `no_keyword_match`   — keyword gate matched zero, topics not configured
+ *   - `no_geo_match`       — only geographies configured, none mentioned in text
  *   - null                 — at least one item passed (or stage is no-op)
  */
 export function analyzeTopicKeywordStage(items, settings) {
   const inputCount = items?.length ?? 0;
   const topics = new Set((settings?.topics ?? []).map((t) => normalizeTopicLabel(t)));
   const keywordRegex = buildKeywordTokenRegex(settings?.keywords);
+  const geographies = settings?.geographies ?? [];
   const hasTopics = topics.size > 0;
   const hasKeywords = !!keywordRegex;
+  const hasGeographies = geographies.length > 0;
 
   const breakdown = {
     inputCount,
     hasTopics,
     hasKeywords,
+    hasGeographies,
     topicOnly: 0,
     keywordOnly: 0,
     both: 0,
+    geoLexicalOnly: 0,
     neither: 0,
     passNoConfig: 0,
     passCount: 0,
     primaryDropCause: null,
   };
 
-  if (!hasTopics && !hasKeywords) {
+  if (!hasTopics && !hasKeywords && !hasGeographies) {
     breakdown.passNoConfig = inputCount;
     breakdown.passCount = inputCount;
     if (inputCount === 0) breakdown.primaryDropCause = "no_input";
@@ -694,19 +733,27 @@ export function analyzeTopicKeywordStage(items, settings) {
         (Array.isArray(item?.body) ? item.body.join(" ") : (item?.body ?? ""));
       keywordMatch = keywordRegex.test(text);
     }
+    const geoMatch =
+      hasGeographies && !!itemMentionsConfiguredGeography(joinGeoText(item), geographies);
     if (topicMatch && keywordMatch) breakdown.both++;
     else if (topicMatch) breakdown.topicOnly++;
     else if (keywordMatch) breakdown.keywordOnly++;
+    else if (geoMatch) breakdown.geoLexicalOnly++;
     else breakdown.neither++;
   }
-  breakdown.passCount = breakdown.topicOnly + breakdown.keywordOnly + breakdown.both;
+  breakdown.passCount =
+    breakdown.topicOnly +
+    breakdown.keywordOnly +
+    breakdown.both +
+    breakdown.geoLexicalOnly;
 
   if (inputCount === 0) {
     breakdown.primaryDropCause = "no_input";
   } else if (breakdown.passCount === 0) {
     if (hasTopics && hasKeywords) breakdown.primaryDropCause = "no_topic_no_keyword";
     else if (hasTopics) breakdown.primaryDropCause = "no_topic_match";
-    else breakdown.primaryDropCause = "no_keyword_match";
+    else if (hasKeywords) breakdown.primaryDropCause = "no_keyword_match";
+    else breakdown.primaryDropCause = "no_geo_match";
   }
   return breakdown;
 }
@@ -1259,6 +1306,7 @@ export async function runRefreshPipeline({
       ` topicOnly=${topicKeywordBreakdown.topicOnly}` +
       ` keywordOnly=${topicKeywordBreakdown.keywordOnly}` +
       ` both=${topicKeywordBreakdown.both}` +
+      ` geoLexicalOnly=${topicKeywordBreakdown.geoLexicalOnly}` +
       ` neither=${topicKeywordBreakdown.neither}` +
       ` pass=${topicKeywordBreakdown.passCount}` +
       ` hasTopics=${topicKeywordBreakdown.hasTopics}` +

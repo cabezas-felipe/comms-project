@@ -8,6 +8,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | Onboarding extraction | Per-field precision / recall / F1 / exact-match across 20 gold examples | `npm run eval:onboarding-extraction` | No — advisory, drift only |
 | Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` | Smoke gate (non-zero on contract violation) |
 | **Dashboard refresh golden (Slice 2)** | Hermetic E2E regression guard: fail-closed clustering, no degraded titles, liveblog dedupe, recall floor, healthy 2+ stories | `npm run eval:dashboard-refresh-golden` | Smoke gate (non-zero on any scenario failure) |
+| **Dashboard dual-beat (recall-widening)** | Hermetic regression: one profile (Colombia elections + Kenya Ebola) surfaces BOTH beats as distinct meta-stories in one refresh; geo lexical gate admits geo-only items | `npm run eval:dashboard-dual-beat` | Smoke gate (non-zero on any assertion failure) |
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
 | **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR calibration guardrails regress |
 
@@ -162,7 +163,7 @@ geographies US + Iran) plus three deterministic raw-item sets:
 | `gold-01-fail-closed` | Clustering throws on both attempts | `stories.length === 0`, `usedFallbackClustering === true`, `clusteringFailureReason === "error"`, `clusteringAttempts === 2`, no degraded titles |
 | `gold-02-healthy-path` | Stub returns 2 grounded clusters | `metaStoryCount >= 2`, `usedFallbackClustering === false`, Reuters present, no `/updates?$/i` or "General Updates" titles |
 | `gold-03-liveblog-dedupe` | 4 Spelling Bee variants ingested | exactly 1 reaches clustering (newest `lb-4` survives), `dedupe.collapsedCount >= 3` |
-| `gold-04-recall-floor` | Weak semantic-only item present | `recall.minSimilarityThreshold === 0.4`, `recall.similarityRejected >= 1`, item excluded from clustering |
+| `gold-04-recall-floor` | Weak semantic-only item present | `recall.minSimilarityThreshold === 0.35`, `recall.similarityRejected >= 1`, item excluded from clustering |
 
 ### Exit codes
 
@@ -174,20 +175,79 @@ When to run: after touching `refresh-pipeline.mjs`, `source-deduper.mjs`,
 
 ---
 
+## Dashboard Dual-Beat (recall-widening)
+
+### Why this exists
+
+The recall-widening work (geo as a shared lexical matcher + the recall geo
+gate + the 0.35 embed floor) exists so a monitor watching **more than one beat**
+isn't collapsed to a single dominant topic. This harness pins that contract: a
+single onboarding profile covering **Colombia elections** *and* **Kenya Ebola**
+must surface **both** beats as **distinct** meta-stories in one refresh — not
+merged, not dropped.
+
+It is a regression guard, not a tuning knob — it asserts pipeline *outcomes*, and
+changes no runtime behavior.
+
+### How it works (hermetic)
+
+In-code fixtures (`dashboard-dual-beat-core.mjs`), no live RSS / Anthropic /
+embeddings:
+
+- **Persona** — `geographies: ["Colombia", "Kenya"]`, elections + Ebola keywords,
+  Reuters / Washington Post sources.
+- **Items** — two per beat: a *keyword* item (matches an elections/Ebola keyword)
+  and a *geo-only* item (mentions the country in text but **no** keyword, so it is
+  admitted **only** via the Slice 2 geo lexical gate). Plus one off-beat decoy.
+- **Recall** runs in `keyword` (lexical-only) mode so the geo gate is the surface
+  under test; beat-fit precision is disabled (mirrors the golden/calibration
+  cores) so the run is threshold-independent.
+- A beat-aware cluster stub partitions survivors by country token and emits one
+  grounded meta-story per non-empty beat — if recall ever drops a beat, that
+  partition is empty and only one story ships, failing the test.
+
+### What it asserts
+
+- `payload.stories.length >= 2`; one story owns the Colombia items, one owns the
+  Kenya items, with **distinct `metaStoryId`** and **disjoint source sets** (not
+  merged).
+- The off-beat decoy never reaches a story.
+- Recall diagnostics: `recall.topicKeywordBreakdown` present, `hasGeographies`
+  true, `passCount === 4`, `neither >= 1` (decoy), and `geoLexicalOnly >= 2`
+  (the two geo-only admissions — the recall-widening signal).
+- `usedFallbackClustering !== true`.
+
+### Run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-dual-beat
+```
+
+Exit `0` when all assertions pass; `1` on any failure. Standalone (not part of
+`eval:dashboard-quality-gate`).
+
+When to run: after touching the geo lexical matcher (`geo-lexical-match.mjs`),
+the recall lexical gate (`applyTopicKeywordFilter` / `analyzeTopicKeywordStage`
+in `refresh-pipeline.mjs`), or anything affecting multi-beat recall.
+
+---
+
 ## Embed-floor Calibration (Slice 5)
 
 ### Why this exists
 
 `TEMPO_EMBED_MIN_SIMILARITY` (the recall **cosine floor** for SEMANTIC-ONLY
-top-K union adds — keyword/topic hits always bypass it) ships at **0.40**.
+top-K union adds — keyword/topic hits always bypass it) ships at **0.35**.
 Choosing a floor used to be guesswork. This harness sweeps candidate floors and
 reports objective diagnostics per value so a default change is driven by
 evidence, not vibes. It is **not** a beat-fit knob — see
 [DECISIONS.md → D-063 addendum](../../../../../DECISIONS.md) ("embed floor ≠ beat-fit
 threshold").
 
-It changes **no runtime default** — `DEFAULT_EMBED_MIN_SIMILARITY` stays 0.40 in
-`embedding-recall.mjs`. The sweep injects a floor per run via `recallConfig`.
+Running the sweep changes **no runtime default** — `DEFAULT_EMBED_MIN_SIMILARITY`
+(0.35) in `embedding-recall.mjs` is unaffected. The sweep injects a floor per run
+via `recallConfig`.
 
 ### How to run
 
@@ -225,10 +285,10 @@ floor rises it goes **up** and `finalStories` / `finalRelevant` go **down** —
 the floor is trimming weaker semantic neighbors. That is the lever, not a verdict:
 a higher `similarityRejected` is only "good" if the rejected items were genuinely
 off-beat. Pair the table with manual quality review (`?debug=1` → `diag-recall`)
-on the real dashboard before moving the default. **Default stays 0.40 unless a
-committed run shows systematic loss of on-beat stories at 0.40** (i.e. relevant
-items rejected) — then propose a lower floor; or systematic noise admitted at
-0.40 — then propose a higher floor.
+on the real dashboard before moving the default. **Default is 0.35; change it
+only when a committed run shows systematic loss of on-beat stories at 0.35** (i.e.
+relevant items rejected) — then propose a lower floor; or systematic noise
+admitted at 0.35 — then propose a higher floor.
 
 ### When to run
 
@@ -255,19 +315,19 @@ breaking change):
   "harness": "dashboard-embed-floor-calibration",
   "version": 1,
   "timestamp": "2026-05-29T03:54:10.571Z",
-  "productionDefaultFloor": 0.4,
+  "productionDefaultFloor": 0.35,
   "floors": [0, 0.35, 0.4, 0.45],
   "overall": { "pass": true, "hardFail": false },
   "rows": [
     {
-      "floor": 0.4,
+      "floor": 0.35,
       "finalStories": 7,
       "usedFallbackClustering": false,
       "clusteringFailureReason": null,
       "keywordRecallCount": 8,
       "finalRelevant": 10,
-      "similarityRejected": 2,
-      "minSimilarityThreshold": 0.4,
+      "similarityRejected": 1,
+      "minSimilarityThreshold": 0.35,
       "reutersCount": 2,
       "liveblogCollapsed": 3,
       "guardrail": { "pass": true, "reasons": [] }
@@ -311,20 +371,20 @@ calibration pass/fail, artifact path).
 
 ### Ship / no-ship policy for a floor change
 
-`DEFAULT_EMBED_MIN_SIMILARITY` stays **0.40** by default. To change it, all of:
+`DEFAULT_EMBED_MIN_SIMILARITY` is **0.35** by default. To change it, all of:
 
 1. **Guardrails pass at the candidate floor** — `npm run eval:dashboard-quality-gate`
    green (no fail-closed clustering, no degraded titles, Reuters present, liveblog
    collapses) at the proposed value.
 2. **Manual `?debug=1` quality review** — on the think-tank persona, confirm the
-   items the candidate floor *rejects* (vs admits at 0.40) are genuinely off-beat
-   (or that on-beat items are being lost at 0.40). Synthetic probe metrics alone
+   items the candidate floor *rejects* (vs admits at 0.35) are genuinely off-beat
+   (or that on-beat items are being lost at 0.35). Synthetic probe metrics alone
    are not evidence.
 3. **Committed evidence in the PR notes** — attach the calibration JSON artifact
-   (or its table) for both 0.40 and the candidate floor, plus a one-line rationale
+   (or its table) for both 0.35 and the candidate floor, plus a one-line rationale
    tying `similarityRejected` movement to the manual review.
 
-Absent all three, keep 0.40.
+Absent all three, keep 0.35.
 
 ---
 

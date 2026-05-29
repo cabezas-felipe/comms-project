@@ -166,10 +166,12 @@ Set `TEMPO_BEAT_FIT_THRESHOLD=0.40` in the environment to restore the legacy pre
 
 These two numbers look similar and get conflated; they are **different stages on different scales**. Do not copy one into the other.
 
-- **`TEMPO_EMBED_MIN_SIMILARITY` (default 0.40)** — a raw **cosine** floor in the *recall* stage. It gates only **semantic-only** top-K additions to the `hybrid_strict` union; keyword/topic hits always bypass it. It widens or narrows what reaches the precision stage; it is not a relevance score.
+- **`TEMPO_EMBED_MIN_SIMILARITY` (default 0.35 — recall-widening; lowered from 0.40, see note below)** — a raw **cosine** floor in the *recall* stage. It gates only **semantic-only** top-K additions to the `hybrid_strict` union; keyword/topic hits always bypass it. It widens or narrows what reaches the precision stage; it is not a relevance score.
 - **`TEMPO_BEAT_FIT_THRESHOLD` (default 0.20)** — a blended **precision** score in the *beat-fit* stage, applied *after* recall (D-063). It decides what survives to clustering.
 
-Calibration for manual E2E: sweep the embed floor in the band **0.35–0.45** (set `0` to disable it entirely) while watching `?debug=1` → `diag-recall` (`semantic_rejected`, `floor=`). Roll back beat-fit to precision-first with `TEMPO_BEAT_FIT_THRESHOLD=0.40`. The production embed-floor default stays **0.40** — only change `DEFAULT_EMBED_MIN_SIMILARITY` in code if a committed golden run proves systematic loss at 0.40.
+Calibration for manual E2E: sweep the embed floor in the band **0.35–0.45** (set `0` to disable it entirely) while watching `?debug=1` → `diag-recall` (`semantic_rejected`, `floor=`). Roll back beat-fit to precision-first with `TEMPO_BEAT_FIT_THRESHOLD=0.40`. The production embed-floor default is **0.35** — only change `DEFAULT_EMBED_MIN_SIMILARITY` in code if a committed golden run proves systematic loss at 0.35.
+
+> **Recall-widening update (2026-05-29):** `DEFAULT_EMBED_MIN_SIMILARITY` lowered **0.40 → 0.35** to admit slightly more on-beat semantic neighbors (low end of the calibration band; clear noise still held back). Code default, env override semantics unchanged. Tests/evals/docs realigned to 0.35; the calibration sweep band and probe set are unchanged.
 
 ---
 

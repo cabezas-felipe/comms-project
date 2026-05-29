@@ -27,7 +27,7 @@ const CONTRACT_VERSION = "2026-05-19-meta-story-fields";
 
 // Default sweep. `0` is the debug baseline (floor disabled); 0.35/0.40/0.45 are
 // the calibration band documented in DECISIONS.md (D-063 addendum). Production
-// default stays 0.40.
+// default is 0.35 (recall-widening; was 0.40) and sits at the low end of the band.
 export const DEFAULT_CALIBRATION_FLOORS = Object.freeze([0, 0.35, 0.4, 0.45]);
 
 // Semantic-only probe definitions, pinned at distinct cosine bands so the floor
@@ -217,7 +217,7 @@ export function buildCalibrationArtifact({ rows, hardFail }, { timestamp }) {
     harness: CALIBRATION_ARTIFACT_HARNESS,
     version: CALIBRATION_ARTIFACT_VERSION,
     timestamp,
-    productionDefaultFloor: 0.4,
+    productionDefaultFloor: 0.35,
     floors: rows.map((r) => r.floor),
     overall: { pass: !hardFail, hardFail },
     rows: rows.map((r) => ({

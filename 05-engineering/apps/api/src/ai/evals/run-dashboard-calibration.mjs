@@ -8,10 +8,10 @@
  * Exit code: non-zero ONLY when a hard guardrail fails (fail-closed clustering,
  * degraded title, no Reuters, or liveblog dedupe regression) at any floor. The
  * floor-by-floor metrics themselves never fail the run — they are the signal
- * you read to decide whether 0.40 is still the right default.
+ * you read to decide whether 0.35 is still the right default.
  *
  * This harness changes NO runtime defaults. `DEFAULT_EMBED_MIN_SIMILARITY`
- * stays 0.40 in code; this only injects floors per run for comparison.
+ * stays 0.35 in code; this only injects floors per run for comparison.
  *
  * Usage
  *   cd 05-engineering/apps/api && npm run eval:dashboard-calibration
@@ -95,7 +95,7 @@ async function main() {
   const HR = "─".repeat(96);
 
   console.log("\n[dashboard-calibration] sweeping TEMPO_EMBED_MIN_SIMILARITY (semantic-only recall floor)");
-  console.log(`[dashboard-calibration] floors=[${DEFAULT_CALIBRATION_FLOORS.map(fmtFloor).join(", ")}]  (production default = 0.40)`);
+  console.log(`[dashboard-calibration] floors=[${DEFAULT_CALIBRATION_FLOORS.map(fmtFloor).join(", ")}]  (production default = 0.35)`);
   console.log(HR);
 
   const result = await runDashboardCalibration();

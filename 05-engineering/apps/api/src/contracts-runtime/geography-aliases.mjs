@@ -93,7 +93,7 @@ export function resolveGeographyAlias(token, settingsGeographies) {
 // geography enters the contract.
 export const GEOGRAPHY_SYNONYMS = Object.freeze({
   US: ["U.S.", "U.S", "USA", "U.S.A.", "U.S.A", "United States"],
-  Colombia: ["Colombia", "Colombian", "Bogota", "Bogotá"],
+  Colombia: ["Colombia", "Colombian", "Colombians", "Bogota", "Bogotá"],
 });
 
 // Remove keywords that are semantically equivalent to any configured
