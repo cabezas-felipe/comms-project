@@ -4,8 +4,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+// Isolated temp dir; delete Supabase env before import so the file adapter is
+// always active. Otherwise an ambient SUPABASE_URL routes these tests at real
+// Supabase, which rejects non-UUID test user IDs and lacks migration 014's
+// dedup unique index. Tests must stay hermetic.
 const tmpDir = await mkdtemp(path.join(tmpdir(), "tempo-rejection-log-"));
 process.env.TEMPO_DATA_DIR = tmpDir;
+delete process.env.SUPABASE_URL;
+delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+delete process.env.SUPABASE_ANON_KEY;
 const { appendRejections, readRejections, REJECTION_LOG_MAX_RETAINED } = await import(
   "./story-rejection-log-repo.mjs"
 );

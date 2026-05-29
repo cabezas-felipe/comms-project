@@ -111,17 +111,28 @@ async function main() {
   // source-feeds.json is a stale/legacy row (e.g. reuters-world). Flip it to
   // active=false so the JSON file stays the single source of truth for which
   // feeds run. Never reactivates and never touches rows already inactive.
+  // Quote each ID: PostgREST parses an unquoted `in` list as raw tokens, which
+  // is fragile for text columns (values containing commas/special chars break
+  // the list, and bare hyphenated tokens rely on lenient parsing). Wrapping
+  // each value in double quotes is the documented-safe form for text columns.
   const canonicalIds = feeds.map((f) => f.id);
   const { data: deactivated, error: deactivateError } = await supabase
     .from("source_feed_mapping")
     .update({ active: false })
     .eq("active", true)
-    .not("manifest_feed_id", "in", `(${canonicalIds.join(",")})`)
+    .filter(
+      "manifest_feed_id",
+      "not.in",
+      `(${canonicalIds.map((id) => `"${id}"`).join(",")})`
+    )
     .select("manifest_feed_id");
 
   if (deactivateError) {
     console.error(`[import] deactivation sweep failed — ${deactivateError.message}`);
-  } else if (deactivated && deactivated.length > 0) {
+    process.exit(1);
+  }
+
+  if (deactivated && deactivated.length > 0) {
     const ids = deactivated.map((r) => r.manifest_feed_id).sort();
     console.log(`[import] deactivated ${ids.length} non-canonical feed(s): ${ids.join(", ")}`);
   } else {
@@ -129,6 +140,14 @@ async function main() {
   }
 
   console.log(`\n[import] Done. inserted=${inserted} updated=${updated} skipped=${skipped}`);
+
+  // A non-zero skipped count means one or more feeds failed to upsert (entity
+  // or mapping write errored). The manifest is then only partially synced, so
+  // exit non-zero to surface the failure to callers / CI.
+  if (skipped > 0) {
+    console.error(`[import] ${skipped} feed(s) skipped due to upsert failures — exiting non-zero.`);
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {
