@@ -1,0 +1,68 @@
+name: Ingestion cache warmer
+
+# Phase 1 Slice 4 — keeps the `ingestion_recent_items` Tier-A cache warm so
+# interactive refreshes hit the cache instead of paying the live-fetch latency.
+#
+# Cadence: hourly at :35.  Offset from the cadence-tick workflow (:05) so the
+# two scheduled jobs don't contend for the same top-of-hour runner capacity.
+# The warm is a full-manifest fetch (no per-user feedIds scoping) — its whole
+# job is to populate the cache for every active feed ahead of demand.
+#
+# Behavior:
+#   - Calls `node apps/api/src/ops/ingestion-warm.mjs`, which fetches every
+#     active manifest feed via `readFeedItems(dataDir)` (no feedIds) and
+#     upserts the mapped items via `writeRecentItems({ supabase, items })`.
+#   - Structured summary log line is `[ingestion-warm] {…}` (single-line JSON).
+#     Grep the workflow run output for `[ingestion-warm]` to read summary
+#     fields: ok, startedAt, itemCount, feedCount, written, durationMs, and
+#     skippedReason (present only on failure).
+#
+# Exit-code semantics:
+#   - Exit `0` on success — including a clean warm of zero items (an empty
+#     manifest is not a failure).
+#   - Exit `1` on fatal errors only: missing env, supabase client construction
+#     failed, the live read threw, or the cache write threw / returned an error
+#     envelope.  `skippedReason` in the log names which one.
+#
+# Secrets:
+#   - SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required (the warmer writes
+#     with the service role).  Configure them under repo Settings → Secrets and
+#     variables → Actions before enabling the schedule.  The warm exits `1` with
+#     skippedReason="missing_supabase_env" if either is absent, so the failure
+#     surface is loud.
+
+on:
+  schedule:
+    - cron: "35 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ingestion-warm:
+    name: Warm ingestion_recent_items cache
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: 05-engineering/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: 05-engineering
+
+      - name: Run ingestion warm
+        run: |
+          echo "[ingestion-warm] Run started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          node apps/api/src/ops/ingestion-warm.mjs
+        working-directory: 05-engineering
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
