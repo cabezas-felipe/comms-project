@@ -159,6 +159,19 @@ Three knobs and one locked policy govern how the refresh pipeline fails safe so 
 
 **Slice 2 — prototype empty-state honesty + golden eval.** The prototype API layer ([`api.ts`](../04-prototype/src/lib/api.ts)) lifts the clustering diagnostics off `_meta` (`clusteringFailed`, `clusteringFailureReason`, `clusteringAttempts`, `clusteringLatencyMs`), and the dashboard ([`Dashboard.tsx`](../04-prototype/src/pages/Dashboard.tsx) + [`StateBlocks.tsx`](../04-prototype/src/components/StateBlocks.tsx)) renders a **dedicated "Couldn't compose stories this refresh" empty state** when `clusteringFailed` is true — distinct from the quiet-beat "No stories yet" copy — so a fail-closed run reads as "retry", not "nothing matched". The [dashboard refresh golden eval](apps/api/src/ai/evals/README.md#dashboard-refresh-golden-slice-2) (`npm run eval:dashboard-refresh-golden`) is the hermetic regression guard for fail-closed clustering, no degraded titles, liveblog dedupe, and the recall floor.
 
+**Slice 3 — run diagnostics for manual E2E.** A debug-only diagnostics panel ([`DashboardRunDiagnostics.tsx`](../04-prototype/src/components/DashboardRunDiagnostics.tsx)) surfaces the latest fetch's clustering / funnel / recall / selection blocks lifted from `_meta` so a manual re-test can see *why* the dashboard is empty or thin without reading server logs. It is hidden in normal use and shows only when `VITE_UX_TEST_MODE=true` **or** the URL carries `?debug=1`.
+
+### Manual golden re-test
+
+Run after the think-tank onboarding blurb is saved (topics: economy / elections / Trump / Iran / inflation / gas; sources: Washington Post + Reuters; geographies: US / Iran). Append `?debug=1` to the dashboard URL to read the run-diagnostics panel while checking:
+
+- [ ] Onboarding blurb saved; settings show **WaPo + Reuters**.
+- [ ] Refresh completes; `_meta.usedFallbackClustering === false` (or the **"Couldn't compose stories this refresh"** clustering-failed UI shows if it's `true`).
+- [ ] **≥2 meta-stories** with real titles (not `* Updates` / "General Updates").
+- [ ] **≥1 Reuters-sourced** item in the pool or key stories.
+- [ ] No **Spelling Bee** (liveblog) duplicate stack collapsed into one meta-story.
+- [ ] `npm run eval:dashboard-refresh-golden` passes locally (hermetic regression guard — see [evals README](apps/api/src/ai/evals/README.md#dashboard-refresh-golden-slice-2)).
+
 ## Server-side cadence tick (Sub-slice 2.5)
 
 Background: Sub-slice 2.4 added the [due-user orchestrator](apps/api/src/dashboard/due-user-orchestrator.mjs) — pure due-selection (`selectDueUsers`), anchor extraction from `dashboard_snapshots` (`listSnapshotAnchors`), and `runDueRefreshes` which iterates due users through the shared `_refreshExecutor.execute` path. 2.4 left the orchestrator without a caller: the interactive `POST /api/dashboard/refresh` only fires when a browser is open.

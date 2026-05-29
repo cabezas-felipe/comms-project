@@ -17,7 +17,10 @@ import {
   type DashboardBootstrapDecision,
   type DashboardBootstrapResult,
   type DashboardFetchResult,
+  type DashboardFunnelMeta,
+  type DashboardRecallMeta,
 } from "@/lib/api";
+import { DashboardRunDiagnostics } from "@/components/DashboardRunDiagnostics";
 import { formatKeywordLabel } from "@/lib/format";
 import {
   aggregateTagSections,
@@ -26,7 +29,7 @@ import {
   toggleInSet,
   type TagSelection,
 } from "@/lib/dashboard-filters";
-import { type StoryDto } from "@tempo/contracts";
+import { type StoryDto, type DashboardSelectionMeta } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
 import { isUxTestMode } from "@/lib/ux-test-mode";
 import { useRefreshContext } from "@/lib/refresh-context";
@@ -129,7 +132,20 @@ export default function Dashboard() {
   const [clusteringFailureReason, setClusteringFailureReason] = useState<
     "timeout" | "error" | null
   >(null);
+  // Slice 3: extra `_meta` diagnostics from the latest successful fetch, used
+  // only by the debug panel (gated below). Captured alongside stories so the
+  // panel reflects whatever last updated the feed.
+  const [runDiagnostics, setRunDiagnostics] = useState<{
+    clusteringAttempts: number | null;
+    selection: DashboardSelectionMeta | null;
+    funnel: DashboardFunnelMeta | null;
+    recall: DashboardRecallMeta | null;
+  } | null>(null);
   const [reloadCounter, setReloadCounter] = useState(0);
+
+  // Diagnostics panel visibility: UX test mode OR an explicit `?debug=1`.
+  // Never visible in normal prototype use; carries no end-user copy.
+  const debugMode = isUxTestMode || searchParams.get("debug") === "1";
 
   const tagSections = useMemo(() => aggregateTagSections(stories), [stories]);
   const tagSelection = useMemo<TagSelection>(
@@ -220,6 +236,12 @@ export default function Dashboard() {
         setHasLoadedOnce(true);
         setClusteringFailed(result.clusteringFailed);
         setClusteringFailureReason(result.clusteringFailureReason);
+        setRunDiagnostics({
+          clusteringAttempts: result.clusteringAttempts,
+          selection: result.selection,
+          funnel: result.funnel,
+          recall: result.recall,
+        });
         // First-paint seed.  GET responses never advance an existing
         // anchor (post-seed remounts are no-ops); bootstrap
         // `served_fresh_snapshot` also lands here so a brand-new session
@@ -283,6 +305,12 @@ export default function Dashboard() {
     setHasLoadedOnce(true);
     setClusteringFailed(heartbeatResult.clusteringFailed);
     setClusteringFailureReason(heartbeatResult.clusteringFailureReason);
+    setRunDiagnostics({
+      clusteringAttempts: heartbeatResult.clusteringAttempts,
+      selection: heartbeatResult.selection,
+      funnel: heartbeatResult.funnel,
+      recall: heartbeatResult.recall,
+    });
   }, [emptyMode, heartbeatResult]);
 
   const handleRetry = useCallback(() => {
@@ -434,6 +462,19 @@ export default function Dashboard() {
               )}
             </div>
           </div>
+
+          {/* Debug-only run diagnostics (Slice 3) — gated by UX test mode or
+              ?debug=1. Never visible in normal prototype use. */}
+          {debugMode && (
+            <DashboardRunDiagnostics
+              clusteringFailed={clusteringFailed}
+              clusteringFailureReason={clusteringFailureReason}
+              clusteringAttempts={runDiagnostics?.clusteringAttempts ?? null}
+              funnel={runDiagnostics?.funnel ?? null}
+              recall={runDiagnostics?.recall ?? null}
+              selection={runDiagnostics?.selection ?? null}
+            />
+          )}
 
           {/* Inline banner when a refresh failed but a previous run is on-screen */}
           {loadError && stories.length > 0 && (

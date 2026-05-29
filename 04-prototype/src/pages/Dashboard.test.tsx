@@ -64,7 +64,23 @@ vi.mock("@/lib/refresh-context", () => ({
   }),
 }));
 
-const OK_RESULT = { payload: { contractVersion: CONTRACT_VERSION, stories: [] }, selection: null };
+// Canonical mock result — matches the real DashboardFetchResult shape returned
+// by fetchDashboardWithMeta / bootstrapDashboard / refreshDashboard. Spread
+// from this base in every test ({ ...OK_RESULT, clusteringFailed: true }) so a
+// mock never leaves a parsed field `undefined` and leaks stale state from a
+// prior test (e.g. clusteringFailed left true without a remount).
+const OK_RESULT = {
+  payload: { contractVersion: CONTRACT_VERSION, stories: [] },
+  selection: null,
+  refreshedAt: null,
+  lastCheckedAt: null,
+  clusteringFailed: false,
+  clusteringFailureReason: null,
+  clusteringAttempts: null,
+  clusteringLatencyMs: null,
+  funnel: null,
+  recall: null,
+};
 
 afterEach(() => {
   fetchSpy.mockReset();
@@ -82,6 +98,16 @@ afterEach(() => {
 function renderAt(state: object | null) {
   return render(
     <MemoryRouter initialEntries={[{ pathname: "/dashboard", state }]}>
+      <Routes>
+        <Route path="/dashboard" element={<Dashboard />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+function renderAtSearch(search: string) {
+  return render(
+    <MemoryRouter initialEntries={[{ pathname: "/dashboard", search }]}>
       <Routes>
         <Route path="/dashboard" element={<Dashboard />} />
       </Routes>
@@ -264,11 +290,85 @@ const PHASE6_STORIES: StoryDto[] = [
 
 function renderWithStories(stories: StoryDto[]) {
   fetchSpy.mockResolvedValue({
+    ...OK_RESULT,
     payload: { contractVersion: CONTRACT_VERSION, stories },
-    selection: null,
   });
   return renderAt(null);
 }
+
+describe("Slice 3: debug run-diagnostics panel", () => {
+  const DIAG_RESULT = {
+    ...OK_RESULT,
+    payload: { contractVersion: CONTRACT_VERSION, stories: [] },
+    clusteringFailed: false,
+    clusteringAttempts: 1,
+    funnel: {
+      totalNormalized: 33,
+      afterTimeWindow: 30,
+      afterSourceSelection: 20,
+      afterGeoFilter: 18,
+      afterTopicKeyword: 12,
+      afterBeatFit: 8,
+      afterDedupe: 6,
+      finalStories: 2,
+      primaryDropStage: "geo_filter",
+      executionMode: "full_run",
+    },
+    recall: {
+      mode: "hybrid_strict",
+      keywordRecallCount: 12,
+      finalRelevant: 8,
+      similarityRejected: 3,
+      minSimilarityThreshold: 0.4,
+    },
+    selection: {
+      matchedSourceCount: 2,
+      selectedSourceCount: 2,
+      unavailableConnectorSources: [],
+      matchedFeedIds: ["reuters-world-us"],
+    },
+  };
+
+  it("renders the panel with clustering/funnel/recall/selection when ?debug=1 and _meta carries diagnostics", async () => {
+    fetchSpy.mockResolvedValue(DIAG_RESULT);
+    renderAtSearch("?debug=1");
+    await screen.findByTestId("dashboard-empty");
+    expect(screen.getByTestId("dashboard-run-diagnostics")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("diag-funnel").textContent).toContain("33 → 30")
+    );
+    expect(screen.getByTestId("diag-funnel").textContent).toContain("primary_drop=geo_filter");
+    expect(screen.getByTestId("diag-recall").textContent).toContain("keyword=12");
+    expect(screen.getByTestId("diag-recall").textContent).toContain("semantic_rejected=3");
+    expect(screen.getByTestId("diag-recall").textContent).toContain("floor=0.40");
+    expect(screen.getByTestId("diag-clustering").textContent).toContain("ok");
+    expect(screen.getByTestId("diag-selection").textContent).toContain("matched=2/2");
+    expect(screen.getByTestId("diag-selection").textContent).toContain("reuters-world-us");
+  });
+
+  it("shows clustering-failed detail in the panel when the run failed closed", async () => {
+    fetchSpy.mockResolvedValue({
+      ...DIAG_RESULT,
+      clusteringFailed: true,
+      clusteringFailureReason: "timeout",
+      clusteringAttempts: 2,
+    });
+    renderAtSearch("?debug=1");
+    await screen.findByTestId("dashboard-clustering-failed");
+    await waitFor(() =>
+      expect(screen.getByTestId("diag-clustering").textContent).toContain("failed")
+    );
+    expect(screen.getByTestId("diag-clustering").textContent).toContain("reason=timeout");
+    expect(screen.getByTestId("diag-clustering").textContent).toContain("attempts=2");
+  });
+
+  it("hides the panel by default (no debug flag, UX test mode off)", async () => {
+    fetchSpy.mockResolvedValue(DIAG_RESULT);
+    renderAt(null);
+    await screen.findByTestId("dashboard-empty");
+    expect(screen.queryByTestId("dashboard-run-diagnostics")).toBeNull();
+  });
+});
 
 describe("Phase 6: dynamic header pills", () => {
   it("renders pills derived from current payload stories (All + non-empty sections only)", async () => {
@@ -686,22 +786,22 @@ describe("Dashboard initial loader integration with refresh context", () => {
 describe("Heartbeat → Dashboard story overlay", () => {
   it("replaces on-screen stories when a heartbeat-driven refresh result arrives via context", async () => {
     fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
       payload: {
         contractVersion: CONTRACT_VERSION,
         stories: [makeStoryDto({ id: "init", title: "Initial Story" })],
       },
-      selection: null,
     });
     renderAt(null);
     expect(await screen.findByText("Initial Story")).toBeInTheDocument();
 
     // Heartbeat tick succeeds at app scope — provider pushes a new result.
     mockHeartbeatResult = {
+      ...OK_RESULT,
       payload: {
         contractVersion: CONTRACT_VERSION,
         stories: [makeStoryDto({ id: "next", title: "Refreshed Story" })],
       },
-      selection: null,
       refreshedAt: "2026-05-11T13:00:00Z",
     };
     // Force a re-render by triggering a state change in the dashboard (router
@@ -719,11 +819,11 @@ describe("Heartbeat → Dashboard story overlay", () => {
 
   it("does not overlay in emptyMode (?empty=1)", async () => {
     mockHeartbeatResult = {
+      ...OK_RESULT,
       payload: {
         contractVersion: CONTRACT_VERSION,
         stories: [makeStoryDto({ id: "next", title: "Refreshed Story" })],
       },
-      selection: null,
       refreshedAt: "2026-05-11T13:00:00Z",
     };
     render(
