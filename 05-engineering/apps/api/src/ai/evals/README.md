@@ -8,6 +8,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | Onboarding extraction | Per-field precision / recall / F1 / exact-match across 20 gold examples | `npm run eval:onboarding-extraction` | No — advisory, drift only |
 | Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` | Smoke gate (non-zero on contract violation) |
 | **Dashboard refresh golden (Slice 2)** | Hermetic E2E regression guard: fail-closed clustering, no degraded titles, liveblog dedupe, recall floor, healthy 2+ stories | `npm run eval:dashboard-refresh-golden` | Smoke gate (non-zero on any scenario failure) |
+| **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
 
 ---
 
@@ -169,6 +170,69 @@ geographies US + Iran) plus three deterministic raw-item sets:
 
 When to run: after touching `refresh-pipeline.mjs`, `source-deduper.mjs`,
 `embedding-recall.mjs`, or the clustering fail-closed path.
+
+---
+
+## Embed-floor Calibration (Slice 5)
+
+### Why this exists
+
+`TEMPO_EMBED_MIN_SIMILARITY` (the recall **cosine floor** for SEMANTIC-ONLY
+top-K union adds — keyword/topic hits always bypass it) ships at **0.40**.
+Choosing a floor used to be guesswork. This harness sweeps candidate floors and
+reports objective diagnostics per value so a default change is driven by
+evidence, not vibes. It is **not** a beat-fit knob — see
+[DECISIONS.md → D-063 addendum](../../../../../DECISIONS.md) ("embed floor ≠ beat-fit
+threshold").
+
+It changes **no runtime default** — `DEFAULT_EMBED_MIN_SIMILARITY` stays 0.40 in
+`embedding-recall.mjs`. The sweep injects a floor per run via `recallConfig`.
+
+### How to run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-calibration            # table + advisory metrics
+npm run eval:dashboard-calibration:verbose    # also prints per-floor guardrail detail
+```
+
+Hermetic: reuses the golden fixture + four deterministic "semantic-only" probe
+items pinned at cosine bands 0.33 / 0.38 / 0.43 / 0.48 (no keyword/topic match,
+so they enter recall ONLY via the floor). No live RSS / Anthropic / embedding
+provider.
+
+### What it reports (per floor: 0, 0.35, 0.40, 0.45)
+
+`finalStories`, `usedFallbackClustering`, `clusteringFailureReason`,
+`recall.keywordRecallCount`, `recall.finalRelevant`, `recall.similarityRejected`,
+`recall.minSimilarityThreshold`, Reuters-sourced count, and liveblog
+collapsed-duplicate count.
+
+### Guardrails (hard fail → exit 1, any floor)
+
+- clustering fell closed (`usedFallbackClustering === true`)
+- degraded generic title (`* Updates` / "General Updates")
+- no Reuters presence in the story pool
+- liveblog dedupe regression (the 4-variant stack failed to collapse, `< 3`)
+
+Floor-by-floor metrics are **advisory** and never fail the run.
+
+### Interpreting `similarityRejected` vs story quality
+
+`similarityRejected` counts semantic-only candidates the floor held back. As the
+floor rises it goes **up** and `finalStories` / `finalRelevant` go **down** —
+the floor is trimming weaker semantic neighbors. That is the lever, not a verdict:
+a higher `similarityRejected` is only "good" if the rejected items were genuinely
+off-beat. Pair the table with manual quality review (`?debug=1` → `diag-recall`)
+on the real dashboard before moving the default. **Default stays 0.40 unless a
+committed run shows systematic loss of on-beat stories at 0.40** (i.e. relevant
+items rejected) — then propose a lower floor; or systematic noise admitted at
+0.40 — then propose a higher floor.
+
+### When to run
+
+Before proposing any change to `DEFAULT_EMBED_MIN_SIMILARITY`, and after touching
+`embedding-recall.mjs` recall/union logic.
 
 ---
 

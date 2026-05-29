@@ -163,6 +163,8 @@ Three knobs and one locked policy govern how the refresh pipeline fails safe so 
 
 **Slice 4 — env hygiene + embed-floor calibration.** [`apps/api/.env.example`](apps/api/.env.example) now documents the full recall/precision knob set (`TEMPO_RECALL_MODE`, `TEMPO_EMBED_MIN_SIMILARITY`, `TEMPO_EMBED_TOP_K`/`MAX_ITEMS`, `TEMPO_BEAT_FIT_THRESHOLD`) with explicit "embed floor ≠ beat-fit" warnings. Local calibration workflow for a thin dashboard: restart the API with `TEMPO_EMBED_MIN_SIMILARITY` swept across **0.35–0.45** (production default stays **0.40**; `0` disables the floor), open the dashboard with `?debug=1`, and watch `diag-recall` → `similarityRejected` / `floor=` to see how many semantic-only adds the floor held back. The embed floor (cosine, recall stage) and beat-fit threshold (blended precision, default 0.20 — D-063) are different stages on different scales; see [DECISIONS.md → D-063 addendum](DECISIONS.md).
 
+**Slice 5 — embed-floor calibration harness.** `npm run eval:dashboard-calibration` sweeps `TEMPO_EMBED_MIN_SIMILARITY` across **0 / 0.35 / 0.40 / 0.45** and prints an objective table (`similarityRejected`, `finalStories`, `finalRelevant`, Reuters count, liveblog collapse) per floor, so a default change is evidence-driven rather than guessed. It enforces the same hard guardrails as the golden eval (no fail-closed clustering, no degraded titles, Reuters present, liveblog collapses) at every floor; the floor metrics themselves are advisory. **Production default stays 0.40 unless a committed run shows systematic loss at 0.40.** See [evals README → Embed-floor Calibration](apps/api/src/ai/evals/README.md#embed-floor-calibration-slice-5).
+
 ### Manual golden re-test
 
 Run after the think-tank onboarding blurb is saved (topics: economy / elections / Trump / Iran / inflation / gas; sources: Washington Post + Reuters; geographies: US / Iran). Append `?debug=1` to the dashboard URL to read the run-diagnostics panel while checking:
@@ -173,6 +175,7 @@ Run after the think-tank onboarding blurb is saved (topics: economy / elections 
 - [ ] **≥1 Reuters-sourced** item in the pool or key stories.
 - [ ] No **Spelling Bee** (liveblog) duplicate stack collapsed into one meta-story.
 - [ ] `npm run eval:dashboard-refresh-golden` passes locally (hermetic regression guard — see [evals README](apps/api/src/ai/evals/README.md#dashboard-refresh-golden-slice-2)).
+- [ ] (Optional, before any floor change) `npm run eval:dashboard-calibration` — compare floors and confirm guardrails hold; pair the table with `?debug=1` quality review.
 
 ## Server-side cadence tick (Sub-slice 2.5)
 
