@@ -27,6 +27,64 @@ export interface DashboardFetchResult {
    * back to `refreshedAt` for display.
    */
   lastCheckedAt: string | null;
+  /**
+   * Clustering fail-closed diagnostics lifted from `_meta` (Slice 1 server
+   * contract).  When `clusteringFailed` is true the refresh succeeded HTTP-wise
+   * but clustering failed after its retry, so the backend published zero
+   * meta-stories on purpose — the UI must distinguish this from a quiet beat.
+   *
+   * `clusteringFailed` is derived from `_meta.usedFallbackClustering === true`
+   * (note: the server field name is retained for back-compat; its semantics are
+   * "clustering failed → 0 stories", NOT "degraded buckets shipped").  Parsed
+   * defensively off the raw `_meta` — never schema-validated — so older or
+   * forward responses can't break dashboard fetches.
+   */
+  clusteringFailed: boolean;
+  clusteringFailureReason: "timeout" | "error" | null;
+  clusteringAttempts: number | null;
+  /** Per-attempt clustering latency (ms). Optional for the UI; null when absent/malformed. */
+  clusteringLatencyMs: number[] | null;
+  /**
+   * Funnel stage counts lifted from `_meta.funnel` (Slice 3, dev/manual-E2E
+   * aid only). Lets the debug diagnostics panel show where a thin/empty
+   * dashboard collapsed without reading server logs. `null` when absent.
+   */
+  funnel: DashboardFunnelMeta | null;
+  /**
+   * Recall summary lifted from `_meta.recall` (Slice 3, dev aid). `null` when
+   * absent. Parsed defensively — never schema-validated.
+   */
+  recall: DashboardRecallMeta | null;
+}
+
+interface DashboardClusteringMeta {
+  clusteringFailed: boolean;
+  clusteringFailureReason: "timeout" | "error" | null;
+  clusteringAttempts: number | null;
+  clusteringLatencyMs: number[] | null;
+}
+
+/** Subset of the server funnel object surfaced for the debug diagnostics panel. */
+export interface DashboardFunnelMeta {
+  totalNormalized: number | null;
+  afterTimeWindow: number | null;
+  afterSourceSelection: number | null;
+  afterGeoFilter: number | null;
+  afterTopicKeyword: number | null;
+  afterBeatFit: number | null;
+  afterDedupe: number | null;
+  finalStories: number | null;
+  primaryDropStage: string | null;
+  executionMode: string | null;
+}
+
+/** Subset of the server recall diagnostics surfaced for the debug panel. */
+export interface DashboardRecallMeta {
+  mode: string | null;
+  keywordRecallCount: number | null;
+  finalRelevant: number | null;
+  similarityRejected: number | null;
+  minSimilarityThreshold: number | null;
 }
 
 export interface DashboardBootstrapResult extends DashboardFetchResult {
@@ -104,6 +162,86 @@ function parseIsoTimestampSafe(raw: unknown): string | null {
   return Number.isFinite(parsed) ? raw : null;
 }
 
+const CLUSTERING_META_EMPTY: DashboardClusteringMeta = {
+  clusteringFailed: false,
+  clusteringFailureReason: null,
+  clusteringAttempts: null,
+  clusteringLatencyMs: null,
+};
+
+/**
+ * Lift clustering fail-closed diagnostics off the raw `_meta`.  Tolerant of any
+ * shape: a missing/garbled `_meta`, missing keys, or wrong types all degrade to
+ * `clusteringFailed: false` with nulls elsewhere (a malformed response must
+ * never read as "clustering failed").  Mirrors the defensive `_meta.selection`
+ * pattern — never throws.
+ */
+function parseClusteringMetaSafe(meta: unknown): DashboardClusteringMeta {
+  if (!meta || typeof meta !== "object") return CLUSTERING_META_EMPTY;
+  const m = meta as Record<string, unknown>;
+  const reason = m.clusteringFailureReason;
+  const attempts = m.clusteringAttempts;
+  const latency = m.clusteringLatencyMs;
+  return {
+    clusteringFailed: m.usedFallbackClustering === true,
+    clusteringFailureReason:
+      reason === "timeout" || reason === "error" ? reason : null,
+    clusteringAttempts:
+      typeof attempts === "number" && Number.isFinite(attempts) ? attempts : null,
+    clusteringLatencyMs:
+      Array.isArray(latency) &&
+      latency.every((n) => typeof n === "number" && Number.isFinite(n))
+        ? (latency as number[])
+        : null,
+  };
+}
+
+function numOrNull(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function strOrNull(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/**
+ * Lift the funnel stage counts off `_meta.funnel`. Tolerant of any shape: a
+ * missing/garbled funnel returns `null`; individual missing/mistyped fields
+ * degrade to `null`. Dev-only diagnostics — never gates behavior, never throws.
+ */
+function parseFunnelMetaSafe(raw: unknown): DashboardFunnelMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const f = raw as Record<string, unknown>;
+  return {
+    totalNormalized: numOrNull(f.totalNormalized),
+    afterTimeWindow: numOrNull(f.afterTimeWindow),
+    afterSourceSelection: numOrNull(f.afterSourceSelection),
+    afterGeoFilter: numOrNull(f.afterGeoFilter),
+    afterTopicKeyword: numOrNull(f.afterTopicKeyword),
+    afterBeatFit: numOrNull(f.afterBeatFit),
+    afterDedupe: numOrNull(f.afterDedupe),
+    finalStories: numOrNull(f.finalStories),
+    primaryDropStage: strOrNull(f.primaryDropStage),
+    executionMode: strOrNull(f.executionMode),
+  };
+}
+
+/**
+ * Lift the recall summary off `_meta.recall`. Same defensive posture as
+ * `parseFunnelMetaSafe`. Dev-only — never gates behavior, never throws.
+ */
+function parseRecallMetaSafe(raw: unknown): DashboardRecallMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  return {
+    mode: strOrNull(r.mode),
+    keywordRecallCount: numOrNull(r.keywordRecallCount),
+    finalRelevant: numOrNull(r.finalRelevant),
+    similarityRejected: numOrNull(r.similarityRejected),
+    minSimilarityThreshold: numOrNull(r.minSimilarityThreshold),
+  };
+}
+
 // Mirrors server-side resolver precedence: bearer > email_recognition.
 // Not production auth for the email path — prototype identity layer only.
 async function buildIdentityHeaders(): Promise<Record<string, string>> {
@@ -179,8 +317,11 @@ async function requestDashboard<TExtras extends object>({
       const selection = parseSelectionMetaSafe(meta?.selection);
       const refreshedAt = parseIsoTimestampSafe(meta?.refreshedAt);
       const lastCheckedAt = parseIsoTimestampSafe(meta?.lastCheckedAt);
+      const clustering = parseClusteringMetaSafe(meta);
+      const funnel = parseFunnelMetaSafe(meta?.funnel);
+      const recall = parseRecallMetaSafe(meta?.recall);
       const extras = parseExtras ? parseExtras(raw) : ({} as TExtras);
-      return { payload, selection, refreshedAt, lastCheckedAt, ...extras };
+      return { payload, selection, refreshedAt, lastCheckedAt, ...clustering, funnel, recall, ...extras };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;

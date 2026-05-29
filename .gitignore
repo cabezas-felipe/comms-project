@@ -9,6 +9,10 @@ node_modules/
 *.pem
 *.key
 
+# ...but DO track example/template env files (no secrets, documents config).
+!.env.example
+!*.env.example
+
 # Project-specific local env files
 05-engineering/apps/api/.env
 04-prototype/.env.local
@@ -22,3 +26,8 @@ node_modules/
 # Per-user file-adapter settings written by the API in dev (Supabase is the
 # real store; these are local dev artifacts only).
 05-engineering/apps/api/data/settings_user_*.json
+
+# Generated eval artifacts (calibration JSON, quality-gate output). Re-creatable
+# by `npm run eval:dashboard-calibration:json` / `eval:dashboard-quality-gate`.
+**/.artifacts/
+05-engineering/apps/api/tmp/

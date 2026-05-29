@@ -1228,6 +1228,15 @@ async function executeRefreshFlow(identity) {
     // are individually optional — older pipeline returns that lack one of
     // them won't emit an `undefined` placeholder on readback.
     const lastRunMeta = { clusterModel, embeddingModel };
+    // Clustering fail-closed diagnostics (Slice 1).  Persisted so GET
+    // /api/dashboard can explain "empty dashboard because clustering failed"
+    // (timeout vs error, how many attempts, per-attempt latency) without
+    // re-running refresh.  Each is individually optional for back-compat with
+    // pipeline returns predating these fields.
+    if (log.usedFallbackClustering !== undefined) lastRunMeta.usedFallbackClustering = log.usedFallbackClustering;
+    if (log.clusteringFailureReason !== undefined) lastRunMeta.clusteringFailureReason = log.clusteringFailureReason;
+    if (log.clusteringAttempts !== undefined) lastRunMeta.clusteringAttempts = log.clusteringAttempts;
+    if (log.clusteringLatencyMs !== undefined) lastRunMeta.clusteringLatencyMs = log.clusteringLatencyMs;
     if (log.funnel !== undefined) lastRunMeta.funnel = log.funnel;
     if (log.recall !== undefined) lastRunMeta.recall = log.recall;
     if (log.beatFit !== undefined) lastRunMeta.beatFit = log.beatFit;
@@ -1303,6 +1312,13 @@ async function executeRefreshFlow(identity) {
           beatFit: log.beatFit,
           recall: log.recall,
           funnel: log.funnel,
+          // Clustering fail-closed diagnostics (Slice 1) — also surfaced on
+          // the immediate refresh response so the first read after a failed
+          // clustering run can explain the empty dashboard without a reload.
+          usedFallbackClustering: log.usedFallbackClustering,
+          clusteringFailureReason: log.clusteringFailureReason,
+          clusteringAttempts: log.clusteringAttempts,
+          clusteringLatencyMs: log.clusteringLatencyMs,
           // Phase 2 lightweight decision trace.  Optional, compact,
           // backend-only.  Carries stage counts, beat-fit details, and a
           // capped sample of exclusions — no raw source bodies.

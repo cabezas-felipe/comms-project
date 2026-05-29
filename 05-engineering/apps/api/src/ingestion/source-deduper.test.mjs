@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   canonicalizeUrl,
   dedupeSourceItems,
+  extractLiveblogSubject,
+  liveblogBucket,
   normalizeHeadline,
   PUBLISH_WINDOW_MINUTES,
 } from "./source-deduper.mjs";
@@ -516,4 +518,177 @@ test("output is free of internal _canonicalUrl / _normHeadline annotations", () 
     Object.prototype.hasOwnProperty.call(result.unique[0], "_normHeadline"),
     false
   );
+});
+
+// ─── Liveblog / near-duplicate headline collapse ──────────────────────────────
+
+test("extractLiveblogSubject: matches 'Live updates:' / 'Live update:' / 'Live blog:' and normalizes subject", () => {
+  assert.equal(extractLiveblogSubject("Live updates: Scripps National Spelling Bee"), "scripps national spelling bee");
+  assert.equal(extractLiveblogSubject("LIVE UPDATES:  Scripps National Spelling Bee  "), "scripps national spelling bee");
+  assert.equal(extractLiveblogSubject("Live update: Scripps National Spelling Bee"), "scripps national spelling bee");
+  assert.equal(extractLiveblogSubject("Live blog: Scripps National Spelling Bee"), "scripps national spelling bee");
+});
+
+test("extractLiveblogSubject: returns null for non-liveblog headlines and empty subjects", () => {
+  assert.equal(extractLiveblogSubject("Senate passes border bill"), null);
+  assert.equal(extractLiveblogSubject("Live updates:"), null); // no subject after marker
+  assert.equal(extractLiveblogSubject("Updates: live coverage"), null); // wrong prefix order
+  assert.equal(extractLiveblogSubject(null), null);
+});
+
+test("dedupeSourceItems: four Spelling Bee liveblog variants collapse to one item", () => {
+  // Same rolling story re-emitted with case drift, singular/plural, whitespace,
+  // and changing URLs — the exact-headline/URL rules would under-merge these,
+  // but the liveblog subject key collapses all four into one canonical item.
+  const items = [
+    makeItem({
+      sourceId: "lb-1", feedId: "wapo-national", minutesAgo: 50,
+      url: "https://www.washingtonpost.com/spelling-bee?v=1",
+      headline: "Live updates: Scripps National Spelling Bee",
+    }),
+    makeItem({
+      sourceId: "lb-2", feedId: "wapo-national", minutesAgo: 30,
+      url: "https://www.washingtonpost.com/spelling-bee?v=2",
+      headline: "LIVE UPDATES: Scripps National Spelling Bee",
+    }),
+    makeItem({
+      sourceId: "lb-3", feedId: "wapo-national", minutesAgo: 15,
+      url: "https://www.washingtonpost.com/spelling-bee?v=3",
+      headline: "Live Updates:  Scripps National Spelling Bee  ",
+    }),
+    makeItem({
+      sourceId: "lb-4", feedId: "wapo-national", minutesAgo: 5,
+      url: "https://www.washingtonpost.com/spelling-bee?v=4",
+      headline: "Live update: Scripps National Spelling Bee",
+    }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 1, "all four liveblog variants collapse to one");
+  assert.equal(result.duplicateCount, 3);
+  // Newest snapshot (smallest minutesAgo) is canonical.
+  assert.equal(result.unique[0].sourceId, "lb-4");
+  assert.equal(result.unique[0].minutesAgo, 5);
+  // Losers carried as internal provenance only.
+  const dupIds = result.unique[0]._duplicates.map((d) => d.sourceId).sort();
+  assert.deepEqual(dupIds, ["lb-1", "lb-2", "lb-3"]);
+});
+
+test("dedupeSourceItems: liveblog items beyond the publish window stay distinct", () => {
+  const items = [
+    makeItem({ sourceId: "lb-a", minutesAgo: 5, url: "https://wp.com/lb?a", headline: "Live updates: Olympics opening" }),
+    makeItem({
+      sourceId: "lb-b",
+      minutesAgo: 5 + PUBLISH_WINDOW_MINUTES + 10, // outside the window vs the anchor
+      url: "https://wp.com/lb?b",
+      headline: "Live updates: Olympics opening",
+    }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 2, "same subject but outside window → not merged");
+  assert.equal(result.duplicateCount, 0);
+});
+
+test("dedupeSourceItems: liveblogs with different subjects do not merge", () => {
+  const items = [
+    makeItem({ sourceId: "lb-x", minutesAgo: 10, url: "https://wp.com/x", headline: "Live updates: Senate vote" }),
+    makeItem({ sourceId: "lb-y", minutesAgo: 12, url: "https://wp.com/y", headline: "Live updates: House vote" }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 2, "distinct subjects keep distinct liveblogs");
+});
+
+// ─── Liveblog publisher/domain bucket (no cross-publisher over-merge) ──────────
+
+test("liveblogBucket: hostname from canonical URL takes precedence", () => {
+  assert.equal(
+    liveblogBucket("https://www.washingtonpost.com/spelling-bee", "The Washington Post", "src-1"),
+    "host:www.washingtonpost.com"
+  );
+});
+
+test("liveblogBucket: falls back to normalized outlet when no URL", () => {
+  assert.equal(liveblogBucket(null, "  The  Washington POST ", "src-1"), "outlet:the washington post");
+});
+
+test("liveblogBucket: per-item bucket when neither URL host nor outlet is available", () => {
+  assert.equal(liveblogBucket(null, "", "src-9"), "nopub:src-9");
+  assert.equal(liveblogBucket(null, "   ", "src-9"), "nopub:src-9");
+});
+
+test("dedupeSourceItems: same subject + same domain within window MERGES", () => {
+  // Same publisher (same hostname) re-emitting the rolling story — must collapse.
+  const items = [
+    makeItem({
+      sourceId: "wp-1", outlet: "The Washington Post", minutesAgo: 40,
+      url: "https://www.washingtonpost.com/live/election?v=1",
+      headline: "Live updates: Election night results",
+    }),
+    makeItem({
+      sourceId: "wp-2", outlet: "The Washington Post", minutesAgo: 10,
+      url: "https://www.washingtonpost.com/live/election?v=2",
+      headline: "LIVE UPDATES: Election night results",
+    }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 1, "same-publisher liveblog variants collapse");
+  assert.equal(result.duplicateCount, 1);
+  assert.equal(result.unique[0].sourceId, "wp-2", "newest snapshot wins");
+});
+
+test("dedupeSourceItems: same subject + different publisher/domain within window does NOT merge", () => {
+  // Two different outlets running the same big-story liveblog are distinct
+  // rolling stories — the publisher bucket must keep them separate even though
+  // the subject (and time window) match.
+  const items = [
+    makeItem({
+      sourceId: "wp-1", outlet: "The Washington Post", minutesAgo: 20,
+      url: "https://www.washingtonpost.com/live/election?v=1",
+      headline: "Live updates: Election night results",
+    }),
+    makeItem({
+      sourceId: "reuters-1", outlet: "Reuters", feedId: "reuters-world-us", minutesAgo: 22,
+      url: "https://www.reuters.com/live/election-abc",
+      headline: "Live updates: Election night results",
+    }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 2, "cross-publisher same-subject liveblogs stay distinct");
+  assert.equal(result.duplicateCount, 0);
+  const ids = result.unique.map((u) => u.sourceId).sort();
+  assert.deepEqual(ids, ["reuters-1", "wp-1"]);
+});
+
+test("dedupeSourceItems: same subject + same outlet but no URL MERGES (outlet bucket)", () => {
+  const items = [
+    makeItem({ sourceId: "o-1", outlet: "Reuters", url: undefined, minutesAgo: 30, headline: "Live updates: Storm tracker" }),
+    makeItem({ sourceId: "o-2", outlet: "Reuters", url: undefined, minutesAgo: 12, headline: "Live update: Storm tracker" }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 1, "same outlet (no URL) liveblogs collapse via outlet bucket");
+  assert.equal(result.unique[0].sourceId, "o-2", "newest snapshot wins");
+});
+
+test("dedupeSourceItems: same subject + different outlet, no URL does NOT merge", () => {
+  const items = [
+    makeItem({ sourceId: "o-1", outlet: "Reuters", url: undefined, minutesAgo: 30, headline: "Live updates: Storm tracker" }),
+    makeItem({ sourceId: "o-2", outlet: "The Washington Post", url: undefined, minutesAgo: 12, headline: "Live updates: Storm tracker" }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 2, "different outlets (no URL) stay distinct");
+});
+
+test("dedupeSourceItems: liveblog winner selection is deterministic regardless of input order", () => {
+  // Newest snapshot (smallest minutesAgo) must win no matter how the same
+  // same-publisher cluster is ordered on input.
+  const base = [
+    makeItem({ sourceId: "lb-1", minutesAgo: 50, url: "https://www.washingtonpost.com/live/bee?v=1", headline: "Live updates: Scripps National Spelling Bee" }),
+    makeItem({ sourceId: "lb-2", minutesAgo: 30, url: "https://www.washingtonpost.com/live/bee?v=2", headline: "Live updates: Scripps National Spelling Bee" }),
+    makeItem({ sourceId: "lb-3", minutesAgo: 5, url: "https://www.washingtonpost.com/live/bee?v=3", headline: "Live updates: Scripps National Spelling Bee" }),
+  ];
+  const forward = dedupeSourceItems(base);
+  const reversed = dedupeSourceItems([...base].reverse());
+  assert.equal(forward.unique.length, 1);
+  assert.equal(reversed.unique.length, 1);
+  assert.equal(forward.unique[0].sourceId, "lb-3", "freshest wins (forward order)");
+  assert.equal(reversed.unique[0].sourceId, "lb-3", "freshest wins (reversed order)");
 });

@@ -103,6 +103,8 @@ SUPABASE_URL=<url> SUPABASE_SERVICE_ROLE_KEY=<key> \
 
 Use the service-role key (not the anon key) — the upserts touch `source_entities` and `source_feed_mapping` directly. After import, regenerate the catalog with `npm run source-catalog:generate` to refresh `SOURCE-REGISTRY-CATALOG.generated.md`. The catalog shows **active mappings only** (inactive rows are filtered at query time) — Reuters Batch 1 rows appear there only after `source-feeds-import.mjs` runs and the rows land as `active=true` in Supabase.
 
+**`source-feeds.json` is the single source of truth for the canonical feed list.** The import script ends with a deactivation sweep: any `source_feed_mapping` row whose `manifest_feed_id` is **not** in the JSON file is flipped to `active=false` (logged by ID, e.g. `reuters-world`). Legacy/placeholder IDs (`reuters-world`, NYT, etc.) must remain **inactive** — only the 6 canonical Batch 1 feeds (4 WaPo + Reuters Americas + Reuters US) are `active=true`. To retire a feed, remove it from the JSON and re-run the import; the sweep deactivates it automatically. The sweep never reactivates rows and never touches rows already inactive. The script **exits non-zero** if the sweep errors or if any feed was skipped due to an upsert failure, so a partial sync fails loudly in CI.
+
 ### Sub-slice 1.2 validation — WaPo-only baseline smoke
 
 Not required for Sub-slice 1.1 completion. Run before enabling Reuters in user settings (Sub-slice 1.3) to confirm the WaPo path is a known-good baseline. From `05-engineering/`:
@@ -141,6 +143,42 @@ To open up beyond Phase 1 you also need to remove the runtime guard:
 # In your API environment (.env or process env):
 TEMPO_RSS_ALLOWLIST=*
 ```
+
+## Dashboard trust controls (Slice 1)
+
+Three knobs and one locked policy govern how the refresh pipeline fails safe so users never see fabricated or low-signal stories.
+
+**Fail-closed clustering (locked policy).** Clustering runs once; on throw/timeout it retries **once**; if the retry also fails the pipeline publishes **zero meta-stories** (empty dashboard). It never ships `gracefulFallbackClustering` "General Updates"-style buckets to users — an empty dashboard is the honest signal that clustering failed. Diagnostics are persisted under `_meta`: `usedFallbackClustering` (**true means clustering failed and zero stories were published**, not “degraded fallback buckets shipped”), `clusteringFailureReason` (`timeout` \| `error` \| `null`), `clusteringAttempts`, `clusteringLatencyMs` (per-attempt). See [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) and scenario-map row **I-fallback**.
+
+| Env var | Default | Scope | Purpose |
+|---------|---------|-------|---------|
+| `TEMPO_AI_CLUSTER_TIMEOUT_MS` | `25000` | clustering only | Per-attempt timeout for the cluster round-trip. Deliberately larger than the global `TEMPO_AI_TIMEOUT_MS` because clustering is the single largest AI call; **does not** raise the timeout for other AI stages. The cluster model stays **Sonnet** (`TEMPO_AI_CLUSTER_MODEL`). |
+| `TEMPO_EMBED_MIN_SIMILARITY` | `0.40` | embedding recall | Minimum cosine for a **semantic-only** top-K item to enter the `hybrid_strict` union. Keyword/topic hits always pass regardless of score; only embedding-proximity additions are gated, so a weak/off-beat neighbor can't widen recall into noise. Range `[0,1]`; `0` disables the floor. Diagnostics: `recall.minSimilarityThreshold`, `recall.similarityRejected`. |
+
+**Liveblog / near-duplicate collapse.** The cross-feed deduper ([`source-deduper.mjs`](apps/api/src/ingestion/source-deduper.mjs)) also folds rolling-coverage items — headlines matching `Live updates:` / `Live update:` / `Live blog:` are keyed by the normalized subject after the marker and merged within `PUBLISH_WINDOW_MINUTES`, keeping the newest snapshot and attaching the rest as internal `_duplicates`. WaPo “Quick Post” live items that omit the `Live updates:` prefix are not collapsed yet; extend `LIVEBLOG_PREFIX_RE` when those patterns are confirmed in feed data.
+
+**Slice 2 — prototype empty-state honesty + golden eval.** The prototype API layer ([`api.ts`](../04-prototype/src/lib/api.ts)) lifts the clustering diagnostics off `_meta` (`clusteringFailed`, `clusteringFailureReason`, `clusteringAttempts`, `clusteringLatencyMs`), and the dashboard ([`Dashboard.tsx`](../04-prototype/src/pages/Dashboard.tsx) + [`StateBlocks.tsx`](../04-prototype/src/components/StateBlocks.tsx)) renders a **dedicated "Couldn't compose stories this refresh" empty state** when `clusteringFailed` is true — distinct from the quiet-beat "No stories yet" copy — so a fail-closed run reads as "retry", not "nothing matched". The [dashboard refresh golden eval](apps/api/src/ai/evals/README.md#dashboard-refresh-golden-slice-2) (`npm run eval:dashboard-refresh-golden`) is the hermetic regression guard for fail-closed clustering, no degraded titles, liveblog dedupe, and the recall floor.
+
+**Slice 3 — run diagnostics for manual E2E.** A debug-only diagnostics panel ([`DashboardRunDiagnostics.tsx`](../04-prototype/src/components/DashboardRunDiagnostics.tsx)) surfaces the latest fetch's clustering / funnel / recall / selection blocks lifted from `_meta` so a manual re-test can see *why* the dashboard is empty or thin without reading server logs. It is hidden in normal use and shows only when `VITE_UX_TEST_MODE=true` **or** the URL carries `?debug=1`.
+
+**Slice 4 — env hygiene + embed-floor calibration.** [`apps/api/.env.example`](apps/api/.env.example) now documents the full recall/precision knob set (`TEMPO_RECALL_MODE`, `TEMPO_EMBED_MIN_SIMILARITY`, `TEMPO_EMBED_TOP_K`/`MAX_ITEMS`, `TEMPO_BEAT_FIT_THRESHOLD`) with explicit "embed floor ≠ beat-fit" warnings. Local calibration workflow for a thin dashboard: restart the API with `TEMPO_EMBED_MIN_SIMILARITY` swept across **0.35–0.45** (production default stays **0.40**; `0` disables the floor), open the dashboard with `?debug=1`, and watch `diag-recall` → `similarityRejected` / `floor=` to see how many semantic-only adds the floor held back. The embed floor (cosine, recall stage) and beat-fit threshold (blended precision, default 0.20 — D-063) are different stages on different scales; see [DECISIONS.md → D-063 addendum](DECISIONS.md).
+
+**Slice 5 — embed-floor calibration harness.** `npm run eval:dashboard-calibration` sweeps `TEMPO_EMBED_MIN_SIMILARITY` across **0 / 0.35 / 0.40 / 0.45** and prints an objective table (`similarityRejected`, `finalStories`, `finalRelevant`, Reuters count, liveblog collapse) per floor, so a default change is evidence-driven rather than guessed. It enforces the same hard guardrails as the golden eval (no fail-closed clustering, no degraded titles, Reuters present, liveblog collapses) at every floor; the floor metrics themselves are advisory. **Production default stays 0.40 unless a committed run shows systematic loss at 0.40.** See [evals README → Embed-floor Calibration](apps/api/src/ai/evals/README.md#embed-floor-calibration-slice-5).
+
+**Slice 6 — CI dashboard quality gate + JSON artifacts.** `npm run eval:dashboard-quality-gate` is the single CI-grade entry point: it runs the golden eval **and** the calibration sweep in one hermetic command, exits non-zero if either regresses, and writes a machine-readable calibration JSON artifact (default `.artifacts/dashboard-calibration.json`; `npm run eval:dashboard-calibration:json` writes `tmp/dashboard-calibration.json`). The JSON (`harness`/`version`-stamped, per-floor metrics + guardrail pass/reasons + `overall`) lets CI and reviewers diff runs over time. **Floor-change ship/no-ship policy:** changing `DEFAULT_EMBED_MIN_SIMILARITY` off **0.40** requires (1) the quality gate green at the candidate floor, (2) a manual `?debug=1` quality review confirming rejected items are genuinely off-beat, and (3) committed evidence (the calibration artifact for 0.40 vs the candidate) in the PR notes. See [evals README → Dashboard Quality Gate](apps/api/src/ai/evals/README.md#dashboard-quality-gate-slice-6).
+
+### Manual golden re-test
+
+Run after the think-tank onboarding blurb is saved (topics: economy / elections / Trump / Iran / inflation / gas; sources: Washington Post + Reuters; geographies: US / Iran). Append `?debug=1` to the dashboard URL to read the run-diagnostics panel while checking:
+
+- [ ] Onboarding blurb saved; settings show **WaPo + Reuters**.
+- [ ] Refresh completes; `_meta.usedFallbackClustering === false` (or the **"Couldn't compose stories this refresh"** clustering-failed UI shows if it's `true`).
+- [ ] **≥2 meta-stories** with real titles (not `* Updates` / "General Updates").
+- [ ] **≥1 Reuters-sourced** item in the pool or key stories.
+- [ ] No **Spelling Bee** (liveblog) duplicate stack collapsed into one meta-story.
+- [ ] `npm run eval:dashboard-refresh-golden` passes locally (hermetic regression guard — see [evals README](apps/api/src/ai/evals/README.md#dashboard-refresh-golden-slice-2)).
+- [ ] (Optional, before any floor change) `npm run eval:dashboard-calibration` — compare floors and confirm guardrails hold; pair the table with `?debug=1` quality review.
+- [ ] (CI / pre-PR) `npm run eval:dashboard-quality-gate` — golden + calibration in one command; must exit `0`.
 
 ## Server-side cadence tick (Sub-slice 2.5)
 

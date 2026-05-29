@@ -1,7 +1,6 @@
 import { normalizeSourceItems } from "../ingestion/source-normalizer.mjs";
 import {
   verifyGrounding,
-  gracefulFallbackClustering,
   generateMetaStoryId,
 } from "../ai/cluster-engine.mjs";
 import { applyGeoFilter, mockAssessGeoConfidence } from "./geo-filter.mjs";
@@ -1441,6 +1440,10 @@ export async function runRefreshPipeline({
         relevantItemCount: relevantItems.length,
         metaStoryCount: 0,
         usedFallbackClustering: false,
+        // Clustering never ran on the watermark short-circuit.
+        clusteringFailureReason: null,
+        clusteringAttempts: 0,
+        clusteringLatencyMs: [],
         groundingFailures: 0,
         droppedUngroundedStoryCount: 0,
         groundingDropReasons: {},
@@ -1520,19 +1523,51 @@ export async function runRefreshPipeline({
   // 6. LLM clustering — operates on the deduped candidate set so each unique
   //    article shows up at most once, and the meta-story's source_item_ids
   //    therefore reference unique articles only.
+  //    Fail-closed policy (locked): try clustering once; on throw/timeout
+  //    retry ONCE; if the retry also fails, publish ZERO meta-stories.  We do
+  //    NOT fall back to `gracefulFallbackClustering` on the publish path — that
+  //    function produced degraded "General Updates"-style buckets that read as
+  //    real stories to users.  An empty dashboard is the honest signal that the
+  //    clustering stage failed.  `gracefulFallbackClustering` stays exported for
+  //    tests/ops only.
   let rawMetaStories;
   let usedFallbackClustering = false;
+  let clusteringFailureReason = null; // 'timeout' | 'error' | null
+  let clusteringAttempts = 0;
+  const clusteringAttemptLatencyMs = [];
   if (dedupedItems.length === 0) {
     rawMetaStories = [];
   } else {
-    try {
-      rawMetaStories = await clusterFn(dedupedItems, settings, clusterModel);
-    } catch (clusterErr) {
-      console.warn(
-        `[pipeline] clustering failed (${clusterErr instanceof Error ? clusterErr.message : clusterErr}), using graceful fallback`
-      );
-      rawMetaStories = gracefulFallbackClustering(dedupedItems, settings);
+    const MAX_CLUSTER_ATTEMPTS = 2; // initial try + one retry
+    let lastErr = null;
+    for (let attempt = 1; attempt <= MAX_CLUSTER_ATTEMPTS; attempt++) {
+      clusteringAttempts = attempt;
+      const attemptStartedAt = Date.now();
+      try {
+        rawMetaStories = await clusterFn(dedupedItems, settings, clusterModel);
+        clusteringAttemptLatencyMs.push(Date.now() - attemptStartedAt);
+        lastErr = null;
+        break;
+      } catch (clusterErr) {
+        clusteringAttemptLatencyMs.push(Date.now() - attemptStartedAt);
+        lastErr = clusterErr;
+        const msg = clusterErr instanceof Error ? clusterErr.message : String(clusterErr);
+        console.warn(
+          `[pipeline] clustering attempt ${attempt}/${MAX_CLUSTER_ATTEMPTS} failed: ${msg}`
+        );
+      }
+    }
+    if (lastErr) {
+      // Both attempts failed → fail closed with zero stories.  Classify the
+      // failure so `_meta.clusteringFailureReason` distinguishes a timeout
+      // (capacity / slow round-trip) from a hard error (schema, auth, etc.).
+      const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+      clusteringFailureReason = /timed out|timeout|abort/i.test(msg) ? "timeout" : "error";
+      rawMetaStories = [];
       usedFallbackClustering = true;
+      console.warn(
+        `[pipeline] clustering FAILED after ${clusteringAttempts} attempt(s) (reason=${clusteringFailureReason}) — publishing 0 meta-stories (fail-closed)`
+      );
     }
   }
 
@@ -1915,6 +1950,15 @@ export async function runRefreshPipeline({
     relevantItemCount: relevantItems.length, // alias surfaced in `_meta.selection`
     metaStoryCount: stories.length,
     usedFallbackClustering,
+    // Clustering fail-closed diagnostics (Slice 1).  `usedFallbackClustering`
+    // now means "clustering failed → published 0 stories" (not "degraded
+    // buckets shipped").  `clusteringFailureReason` is 'timeout' | 'error' |
+    // null; `clusteringAttempts` counts initial-try + retries; latency is the
+    // per-attempt array so an operator can see how long each attempt ran
+    // before the timeout/error.
+    clusteringFailureReason,
+    clusteringAttempts,
+    clusteringLatencyMs: clusteringAttemptLatencyMs,
     groundingFailures,
     // Phase 3 strict-grounding metrics
     droppedUngroundedStoryCount,

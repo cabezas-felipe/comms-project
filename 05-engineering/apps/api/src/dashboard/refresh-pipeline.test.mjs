@@ -322,17 +322,59 @@ test("runRefreshPipeline: returns empty stories when relevant pool is empty", as
   assert.equal(clusterCalled, false, "cluster should not be called when pool is empty");
 });
 
-test("runRefreshPipeline: uses graceful fallback when cluster throws", async () => {
+test("runRefreshPipeline: fail-closed (0 stories) when clustering fails on both attempts", async () => {
+  // Locked policy: clustering failure → retry once → publish ZERO meta-stories.
+  // The pipeline must NOT ship gracefulFallbackClustering buckets to users.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let attempts = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { attempts++; throw new Error("model unavailable"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(attempts, 2, "clustering must be attempted exactly twice (initial + one retry)");
+  assert.equal(payload.stories.length, 0, "fail-closed: no stories on clustering failure");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringAttempts, 2);
+});
+
+test("runRefreshPipeline: retries clustering once and publishes when the retry succeeds", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let attempts = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => {
+      attempts++;
+      if (attempts === 1) throw new Error("transient blip");
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(attempts, 2, "first attempt fails, second succeeds");
+  assert.equal(payload.stories.length, 1, "stories published from the successful retry");
+  assert.equal(log.usedFallbackClustering, false);
+  assert.equal(log.clusteringFailureReason, null);
+  assert.equal(log.clusteringAttempts, 2);
+});
+
+test("runRefreshPipeline: classifies a clustering timeout failure reason", async () => {
   const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
   const { payload, log } = await runRefreshPipeline({
     settings: BASE_SETTINGS,
     rawItems,
-    clusterFn: async () => { throw new Error("model unavailable"); },
+    clusterFn: async () => { throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)"); },
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
   });
+  assert.equal(payload.stories.length, 0);
   assert.equal(log.usedFallbackClustering, true);
-  assert.ok(payload.stories.length > 0, "fallback must produce at least one story");
+  assert.equal(log.clusteringFailureReason, "timeout");
+  assert.equal(log.clusteringAttempts, 2);
 });
 
 test("runRefreshPipeline: applies 24h filter before clustering", async () => {

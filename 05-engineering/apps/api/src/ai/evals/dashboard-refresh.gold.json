@@ -1,0 +1,186 @@
+{
+  "_note": "Golden fixture for the dashboard-refresh regression harness (Slice 2). Hermetic: settings + deterministic raw items only — clustering/embedding are stubbed in dashboard-refresh-golden-core.mjs. Guards the failed E2E that shipped 1x 'General Updates', a Spelling Bee liveblog stack, no Reuters, and a clustering fallback. Persona is the think-tank onboarding blurb (economy/elections/Trump/Iran/inflation/gas; WaPo + Reuters; US + Iran).",
+  "persona": {
+    "contractVersion": "2026-05-19-meta-story-fields",
+    "topics": [
+      "Trade policy",
+      "Security policy"
+    ],
+    "keywords": [
+      "economy",
+      "elections",
+      "Trump",
+      "Iran",
+      "inflation",
+      "gas"
+    ],
+    "geographies": [
+      "US",
+      "Iran"
+    ],
+    "traditionalSources": [
+      "The Washington Post",
+      "Reuters"
+    ],
+    "socialSources": []
+  },
+  "onBeatItems": [
+    {
+      "sourceId": "reuters-iran-1",
+      "outlet": "Reuters",
+      "topic": "Security policy",
+      "geographies": [
+        "US",
+        "Iran"
+      ],
+      "weight": 86,
+      "minutesAgo": 25,
+      "url": "https://www.reuters.com/world/trump-iran-sanctions",
+      "headline": "Trump weighs new Iran sanctions amid nuclear standoff",
+      "body": [
+        "The administration is reviewing fresh Iran-focused measures."
+      ],
+      "kind": "traditional",
+      "byline": "Staff"
+    },
+    {
+      "sourceId": "reuters-econ-1",
+      "outlet": "Reuters",
+      "topic": "Trade policy",
+      "geographies": [
+        "US",
+        "Iran"
+      ],
+      "weight": 86,
+      "minutesAgo": 40,
+      "url": "https://www.reuters.com/markets/iran-us-economic-pressure",
+      "headline": "Iran responds to US economy pressure over trade",
+      "body": [
+        "Tehran answered renewed US economic and trade pressure."
+      ],
+      "kind": "traditional",
+      "byline": "Staff"
+    },
+    {
+      "sourceId": "wapo-inflation-1",
+      "outlet": "The Washington Post",
+      "topic": "Trade policy",
+      "geographies": [
+        "US"
+      ],
+      "weight": 92,
+      "minutesAgo": 30,
+      "url": "https://www.washingtonpost.com/business/inflation-gas",
+      "headline": "US inflation cools as gas prices fall",
+      "body": [
+        "Lower gas prices eased the latest inflation reading."
+      ],
+      "kind": "traditional",
+      "byline": "Staff"
+    },
+    {
+      "sourceId": "wapo-elections-1",
+      "outlet": "The Washington Post",
+      "topic": "Trade policy",
+      "geographies": [
+        "US"
+      ],
+      "weight": 90,
+      "minutesAgo": 50,
+      "url": "https://www.washingtonpost.com/politics/economy-elections",
+      "headline": "Economy and 2026 elections dominate voter concerns",
+      "body": [
+        "Voters cite the economy and elections as top issues."
+      ],
+      "kind": "traditional",
+      "byline": "Staff"
+    }
+  ],
+  "liveblogVariants": [
+    {
+      "sourceId": "lb-1",
+      "outlet": "The Washington Post",
+      "topic": "Trade policy",
+      "geographies": [
+        "US"
+      ],
+      "weight": 90,
+      "minutesAgo": 52,
+      "url": "https://www.washingtonpost.com/spelling-bee?v=1",
+      "headline": "Live updates: Scripps National Spelling Bee economy desk",
+      "body": [
+        "Rolling coverage of the bee."
+      ],
+      "kind": "traditional",
+      "byline": "Staff"
+    },
+    {
+      "sourceId": "lb-2",
+      "outlet": "The Washington Post",
+      "topic": "Trade policy",
+      "geographies": [
+        "US"
+      ],
+      "weight": 90,
+      "minutesAgo": 35,
+      "url": "https://www.washingtonpost.com/spelling-bee?v=2",
+      "headline": "LIVE UPDATES: Scripps National Spelling Bee economy desk",
+      "body": [
+        "Rolling coverage of the bee, updated."
+      ],
+      "kind": "traditional",
+      "byline": "Staff"
+    },
+    {
+      "sourceId": "lb-3",
+      "outlet": "The Washington Post",
+      "topic": "Trade policy",
+      "geographies": [
+        "US"
+      ],
+      "weight": 90,
+      "minutesAgo": 18,
+      "url": "https://www.washingtonpost.com/spelling-bee?v=3",
+      "headline": "Live Updates:  Scripps National Spelling Bee economy desk  ",
+      "body": [
+        "Rolling coverage of the bee, updated again."
+      ],
+      "kind": "traditional",
+      "byline": "Staff"
+    },
+    {
+      "sourceId": "lb-4",
+      "outlet": "The Washington Post",
+      "topic": "Trade policy",
+      "geographies": [
+        "US"
+      ],
+      "weight": 90,
+      "minutesAgo": 6,
+      "url": "https://www.washingtonpost.com/spelling-bee?v=4",
+      "headline": "Live update: Scripps National Spelling Bee economy desk",
+      "body": [
+        "Latest snapshot of the bee."
+      ],
+      "kind": "traditional",
+      "byline": "Staff"
+    }
+  ],
+  "weakSemanticItem": {
+    "sourceId": "weak-semantic-1",
+    "outlet": "Reuters",
+    "topic": "Other",
+    "geographies": [
+      "US"
+    ],
+    "weight": 60,
+    "minutesAgo": 20,
+    "url": "https://www.reuters.com/lifestyle/garden-plant-sale",
+    "headline": "Local gardening club hosts annual plant sale",
+    "body": [
+      "A neighborhood plant sale drew a small crowd."
+    ],
+    "kind": "traditional",
+    "byline": "Staff"
+  }
+}

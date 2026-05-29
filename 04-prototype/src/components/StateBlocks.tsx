@@ -1,8 +1,17 @@
-import { AlertCircle, Inbox, Loader2 } from "lucide-react";
+import { AlertCircle, Inbox, Loader2, RefreshCw } from "lucide-react";
 
 interface StateProps {
   variant: "minimal" | "dense" | "briefing";
   onRetry?: () => void;
+}
+
+interface ClusteringFailedStateProps {
+  onRetry?: () => void;
+  /**
+   * Server-classified failure cause (`_meta.clusteringFailureReason`).  Used
+   * only to vary one user-safe line of copy — never to surface raw errors.
+   */
+  reason?: "timeout" | "error" | null;
 }
 
 /* ---------------- Loading ---------------- */
@@ -87,6 +96,42 @@ export function EmptyState({ variant, onRetry }: StateProps) {
         Your selected sources haven't published anything matching your topics in
         the last refresh window. We'll surface stories as soon as the next
         signal crosses threshold.
+      </p>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="mt-2 rounded-sm border border-rule/60 px-3 py-1.5 text-sm hover:bg-secondary"
+        >
+          Refresh
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Clustering failed (fail-closed) ---------------- */
+//
+// Distinct from EmptyState: the refresh succeeded but the clustering stage
+// failed after its retry, so the backend deliberately published zero stories
+// (fail-closed). This is NOT a quiet beat — the honest message is "we couldn't
+// compose stories this time, try again", with no raw error detail.
+export function ClusteringFailedState({ onRetry, reason }: ClusteringFailedStateProps) {
+  const detail =
+    reason === "timeout"
+      ? "Grouping your sources into narratives took too long this time."
+      : "We hit a snag grouping your sources into narratives this time.";
+  return (
+    <div
+      data-testid="dashboard-clustering-failed"
+      className="flex flex-col items-center justify-center gap-4 py-24 text-center"
+    >
+      <RefreshCw className="h-6 w-6 text-muted-foreground" />
+      <p className="max-w-[36ch] font-display text-2xl leading-snug">
+        Couldn't compose stories this refresh.
+      </p>
+      <p className="max-w-[44ch] text-sm text-muted-foreground">
+        {detail} Your sources and topics are unchanged — this is a temporary
+        hiccup, not an empty beat. Try refreshing in a moment.
       </p>
       {onRetry && (
         <button

@@ -4,7 +4,7 @@ import { Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
 import StoryCard from "@/components/StoryCard";
 import SourceReader from "@/components/SourceReader";
-import { EmptyState, ErrorState, LoadingState } from "@/components/StateBlocks";
+import { ClusteringFailedState, EmptyState, ErrorState, LoadingState } from "@/components/StateBlocks";
 import {
   trackDashboardViewed,
   trackSourceOpenError,
@@ -17,7 +17,10 @@ import {
   type DashboardBootstrapDecision,
   type DashboardBootstrapResult,
   type DashboardFetchResult,
+  type DashboardFunnelMeta,
+  type DashboardRecallMeta,
 } from "@/lib/api";
+import { DashboardRunDiagnostics } from "@/components/DashboardRunDiagnostics";
 import { formatKeywordLabel } from "@/lib/format";
 import {
   aggregateTagSections,
@@ -26,7 +29,7 @@ import {
   toggleInSet,
   type TagSelection,
 } from "@/lib/dashboard-filters";
-import { type StoryDto } from "@tempo/contracts";
+import { type StoryDto, type DashboardSelectionMeta } from "@tempo/contracts";
 import { notifyError } from "@/lib/notify";
 import { isUxTestMode } from "@/lib/ux-test-mode";
 import { useRefreshContext } from "@/lib/refresh-context";
@@ -122,7 +125,32 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(!emptyMode);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(emptyMode);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Slice 2: clustering fail-closed signal lifted from `_meta`.  When true the
+  // last successful refresh published zero stories because clustering failed —
+  // distinct from a quiet beat, so the empty zone renders dedicated copy.
+  const [clusteringFailed, setClusteringFailed] = useState(false);
+  const [clusteringFailureReason, setClusteringFailureReason] = useState<
+    "timeout" | "error" | null
+  >(null);
+  // Slice 3: extra `_meta` diagnostics from the latest successful fetch, used
+  // only by the debug panel (gated below). Captured alongside stories so the
+  // panel reflects whatever last updated the feed.
+  const [runDiagnostics, setRunDiagnostics] = useState<{
+    clusteringAttempts: number | null;
+    selection: DashboardSelectionMeta | null;
+    funnel: DashboardFunnelMeta | null;
+    recall: DashboardRecallMeta | null;
+  } | null>(null);
   const [reloadCounter, setReloadCounter] = useState(0);
+
+  // Diagnostics panel visibility: UX test mode OR an explicit `?debug=1`.
+  // Never visible in normal prototype use; carries no end-user copy.
+  // INTERNAL / manual-E2E aid only — `?debug=1` deliberately works outside UX
+  // test mode so operators can inspect a live deploy without a rebuild. It
+  // exposes no secrets (only `_meta` diagnostics already sent to the client).
+  // TODO(slice-4-followup): if we ever want this locked to recordings/walkthroughs,
+  // drop the `?debug=1` clause and gate on `isUxTestMode` alone.
+  const debugMode = isUxTestMode || searchParams.get("debug") === "1";
 
   const tagSections = useMemo(() => aggregateTagSections(stories), [stories]);
   const tagSelection = useMemo<TagSelection>(
@@ -211,6 +239,14 @@ export default function Dashboard() {
         setStories(payload.stories.map(dtoToStory));
         setLoadError(null);
         setHasLoadedOnce(true);
+        setClusteringFailed(result.clusteringFailed);
+        setClusteringFailureReason(result.clusteringFailureReason);
+        setRunDiagnostics({
+          clusteringAttempts: result.clusteringAttempts,
+          selection: result.selection,
+          funnel: result.funnel,
+          recall: result.recall,
+        });
         // First-paint seed.  GET responses never advance an existing
         // anchor (post-seed remounts are no-ops); bootstrap
         // `served_fresh_snapshot` also lands here so a brand-new session
@@ -272,6 +308,14 @@ export default function Dashboard() {
     setStories(heartbeatResult.payload.stories.map(dtoToStory));
     setLoadError(null);
     setHasLoadedOnce(true);
+    setClusteringFailed(heartbeatResult.clusteringFailed);
+    setClusteringFailureReason(heartbeatResult.clusteringFailureReason);
+    setRunDiagnostics({
+      clusteringAttempts: heartbeatResult.clusteringAttempts,
+      selection: heartbeatResult.selection,
+      funnel: heartbeatResult.funnel,
+      recall: heartbeatResult.recall,
+    });
   }, [emptyMode, heartbeatResult]);
 
   const handleRetry = useCallback(() => {
@@ -424,6 +468,19 @@ export default function Dashboard() {
             </div>
           </div>
 
+          {/* Debug-only run diagnostics (Slice 3) — gated by UX test mode or
+              ?debug=1. Never visible in normal prototype use. */}
+          {debugMode && (
+            <DashboardRunDiagnostics
+              clusteringFailed={clusteringFailed}
+              clusteringFailureReason={clusteringFailureReason}
+              clusteringAttempts={runDiagnostics?.clusteringAttempts ?? null}
+              funnel={runDiagnostics?.funnel ?? null}
+              recall={runDiagnostics?.recall ?? null}
+              selection={runDiagnostics?.selection ?? null}
+            />
+          )}
+
           {/* Inline banner when a refresh failed but a previous run is on-screen */}
           {loadError && stories.length > 0 && (
             <ErrorState variant="dense" onRetry={handleRetry} />
@@ -445,6 +502,23 @@ export default function Dashboard() {
                 <div data-testid="dashboard-error">
                   <ErrorState variant="briefing" onRetry={handleRetry} />
                 </div>
+              );
+            }
+            // Clustering failed (fail-closed): 0 stories published on purpose
+            // after a successful fetch. Distinct copy from a quiet beat so the
+            // user knows to retry rather than reading it as "nothing matched".
+            if (
+              !isLoading &&
+              !loadError &&
+              stories.length === 0 &&
+              hasLoadedOnce &&
+              clusteringFailed
+            ) {
+              return (
+                <ClusteringFailedState
+                  onRetry={handleRetry}
+                  reason={clusteringFailureReason}
+                />
               );
             }
             // Backend returned 0 stories (legitimately empty after a successful fetch).

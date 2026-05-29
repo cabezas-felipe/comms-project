@@ -348,6 +348,180 @@ describe("fetchDashboardPayload", () => {
   });
 });
 
+describe("Slice 3: funnel + recall diagnostics from _meta", () => {
+  it("lifts funnel + recall when present", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          funnel: {
+            totalNormalized: 33,
+            afterGeoFilter: 18,
+            finalStories: 2,
+            primaryDropStage: "geo_filter",
+            executionMode: "full_run",
+          },
+          recall: {
+            mode: "hybrid_strict",
+            keywordRecallCount: 12,
+            finalRelevant: 8,
+            similarityRejected: 3,
+            minSimilarityThreshold: 0.4,
+          },
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.funnel?.totalNormalized).toBe(33);
+    expect(result.funnel?.finalStories).toBe(2);
+    expect(result.funnel?.primaryDropStage).toBe("geo_filter");
+    expect(result.recall?.keywordRecallCount).toBe(12);
+    expect(result.recall?.similarityRejected).toBe(3);
+    expect(result.recall?.minSimilarityThreshold).toBe(0.4);
+  });
+
+  it("returns funnel=null / recall=null when absent", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: CONTRACT_VERSION, stories: [], _meta: {} }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.funnel).toBeNull();
+    expect(result.recall).toBeNull();
+  });
+
+  it("degrades malformed funnel/recall fields to null without throwing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          funnel: { totalNormalized: "lots", primaryDropStage: 42 },
+          recall: { similarityRejected: "three", minSimilarityThreshold: null },
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.funnel?.totalNormalized).toBeNull();
+    expect(result.funnel?.primaryDropStage).toBeNull();
+    expect(result.recall?.similarityRejected).toBeNull();
+    expect(result.recall?.minSimilarityThreshold).toBeNull();
+  });
+});
+
+describe("Slice 2: clustering fail-closed diagnostics from _meta", () => {
+  it("happy path — no clustering keys → clusteringFailed=false, nulls elsewhere", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { refreshedAt: "2026-05-08T00:00:00Z", hasSnapshot: true },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.clusteringFailed).toBe(false);
+    expect(result.clusteringFailureReason).toBeNull();
+    expect(result.clusteringAttempts).toBeNull();
+    expect(result.clusteringLatencyMs).toBeNull();
+  });
+
+  it("fail-closed path — usedFallbackClustering=true + reason=timeout surfaces clusteringFailed", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          refreshedAt: "2026-05-08T00:00:00Z",
+          hasSnapshot: true,
+          usedFallbackClustering: true,
+          clusteringFailureReason: "timeout",
+          clusteringAttempts: 2,
+          clusteringLatencyMs: [25000, 25001],
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.payload.stories).toHaveLength(0);
+    expect(result.clusteringFailed).toBe(true);
+    expect(result.clusteringFailureReason).toBe("timeout");
+    expect(result.clusteringAttempts).toBe(2);
+    expect(result.clusteringLatencyMs).toEqual([25000, 25001]);
+  });
+
+  it("error reason is surfaced and propagates through refreshDashboard", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          usedFallbackClustering: true,
+          clusteringFailureReason: "error",
+          clusteringAttempts: 2,
+        },
+      }),
+    });
+    const result = await refreshDashboard({ fetcher });
+    expect(result.clusteringFailed).toBe(true);
+    expect(result.clusteringFailureReason).toBe("error");
+    expect(result.clusteringLatencyMs).toBeNull();
+  });
+
+  it("malformed _meta clustering fields degrade safely (never reads as failed)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: {
+          usedFallbackClustering: "yes", // not boolean true
+          clusteringFailureReason: "weird", // not timeout|error
+          clusteringAttempts: "two", // not a number
+          clusteringLatencyMs: [null, "x"], // not all numbers
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.clusteringFailed).toBe(false);
+    expect(result.clusteringFailureReason).toBeNull();
+    expect(result.clusteringAttempts).toBeNull();
+    expect(result.clusteringLatencyMs).toBeNull();
+  });
+
+  it("bootstrapDashboard also surfaces clustering diagnostics", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          bootstrapDecision: "ran_refresh",
+          usedFallbackClustering: true,
+          clusteringFailureReason: "timeout",
+          clusteringAttempts: 2,
+        },
+      }),
+    });
+    const result = await bootstrapDashboard({ fetcher });
+    expect(result.decision).toBe("ran_refresh");
+    expect(result.clusteringFailed).toBe(true);
+    expect(result.clusteringFailureReason).toBe("timeout");
+  });
+});
+
 describe("fetchDashboardPayload — identity header propagation", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

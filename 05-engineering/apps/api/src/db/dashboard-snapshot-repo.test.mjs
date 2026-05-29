@@ -390,6 +390,36 @@ test("writeSnapshot + readSnapshot: _lastRunMeta round-trips into _meta.{funnel,
   assert.equal(result._lastRunMeta, undefined);
 });
 
+test("writeSnapshot + readSnapshot: clustering fail-closed diagnostics round-trip into _meta", async () => {
+  const userId = "lastrun-meta-clustering";
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: {
+      usedFallbackClustering: true,
+      clusteringFailureReason: "timeout",
+      clusteringAttempts: 2,
+      clusteringLatencyMs: [25000, 25001],
+    },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta.usedFallbackClustering, true);
+  assert.equal(result._meta.clusteringFailureReason, "timeout");
+  assert.equal(result._meta.clusteringAttempts, 2);
+  assert.deepEqual(result._meta.clusteringLatencyMs, [25000, 25001]);
+});
+
+test("readSnapshot: snapshots without clustering diagnostics omit the keys (backward compat)", async () => {
+  const userId = "lastrun-meta-clustering-legacy";
+  await writeSnapshot(userId, SAMPLE_PAYLOAD);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusteringFailureReason"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusteringAttempts"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusteringLatencyMs"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "usedFallbackClustering"), false);
+});
+
 test("readSnapshot: snapshots without _lastRunMeta omit funnel/recall/beatFit/clusterModel/embeddingModel (backward compat)", async () => {
   const userId = "lastrun-meta-legacy";
   await writeSnapshot(userId, SAMPLE_PAYLOAD);
