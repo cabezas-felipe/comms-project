@@ -8,6 +8,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | Onboarding extraction | Per-field precision / recall / F1 / exact-match across 20 gold examples | `npm run eval:onboarding-extraction` | No — advisory, drift only |
 | Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` | Smoke gate (non-zero on contract violation) |
 | **Dashboard refresh golden (Slice 2)** | Hermetic E2E regression guard: fail-closed clustering, no degraded titles, liveblog dedupe, recall floor, healthy 2+ stories | `npm run eval:dashboard-refresh-golden` | Smoke gate (non-zero on any scenario failure) |
+| **Dashboard dual-beat (recall-widening)** | Hermetic regression: one profile (Colombia elections + Kenya Ebola) surfaces BOTH beats as distinct meta-stories in one refresh; geo lexical gate admits geo-only items | `npm run eval:dashboard-dual-beat` | Smoke gate (non-zero on any assertion failure) |
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
 | **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR calibration guardrails regress |
 
@@ -171,6 +172,64 @@ geographies US + Iran) plus three deterministic raw-item sets:
 
 When to run: after touching `refresh-pipeline.mjs`, `source-deduper.mjs`,
 `embedding-recall.mjs`, or the clustering fail-closed path.
+
+---
+
+## Dashboard Dual-Beat (recall-widening)
+
+### Why this exists
+
+The recall-widening work (geo as a shared lexical matcher + the recall geo
+gate + the 0.35 embed floor) exists so a monitor watching **more than one beat**
+isn't collapsed to a single dominant topic. This harness pins that contract: a
+single onboarding profile covering **Colombia elections** *and* **Kenya Ebola**
+must surface **both** beats as **distinct** meta-stories in one refresh — not
+merged, not dropped.
+
+It is a regression guard, not a tuning knob — it asserts pipeline *outcomes*, and
+changes no runtime behavior.
+
+### How it works (hermetic)
+
+In-code fixtures (`dashboard-dual-beat-core.mjs`), no live RSS / Anthropic /
+embeddings:
+
+- **Persona** — `geographies: ["Colombia", "Kenya"]`, elections + Ebola keywords,
+  Reuters / Washington Post sources.
+- **Items** — two per beat: a *keyword* item (matches an elections/Ebola keyword)
+  and a *geo-only* item (mentions the country in text but **no** keyword, so it is
+  admitted **only** via the Slice 2 geo lexical gate). Plus one off-beat decoy.
+- **Recall** runs in `keyword` (lexical-only) mode so the geo gate is the surface
+  under test; beat-fit precision is disabled (mirrors the golden/calibration
+  cores) so the run is threshold-independent.
+- A beat-aware cluster stub partitions survivors by country token and emits one
+  grounded meta-story per non-empty beat — if recall ever drops a beat, that
+  partition is empty and only one story ships, failing the test.
+
+### What it asserts
+
+- `payload.stories.length >= 2`; one story owns the Colombia items, one owns the
+  Kenya items, with **distinct `metaStoryId`** and **disjoint source sets** (not
+  merged).
+- The off-beat decoy never reaches a story.
+- Recall diagnostics: `recall.topicKeywordBreakdown` present, `hasGeographies`
+  true, `passCount === 4`, `neither >= 1` (decoy), and `geoLexicalOnly >= 2`
+  (the two geo-only admissions — the recall-widening signal).
+- `usedFallbackClustering !== true`.
+
+### Run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-dual-beat
+```
+
+Exit `0` when all assertions pass; `1` on any failure. Standalone (not part of
+`eval:dashboard-quality-gate`).
+
+When to run: after touching the geo lexical matcher (`geo-lexical-match.mjs`),
+the recall lexical gate (`applyTopicKeywordFilter` / `analyzeTopicKeywordStage`
+in `refresh-pipeline.mjs`), or anything affecting multi-beat recall.
 
 ---
 
