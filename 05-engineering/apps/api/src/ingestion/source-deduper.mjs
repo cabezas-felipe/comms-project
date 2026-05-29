@@ -167,6 +167,35 @@ export function extractLiveblogSubject(headline) {
   return subject.length > 0 ? subject : null;
 }
 
+/**
+ * Publisher/domain bucket for liveblog grouping.  Subject alone is too coarse —
+ * two different outlets running "Live updates: <same big story>" are distinct
+ * rolling stories and must NOT collapse into one.  We scope the liveblog merge
+ * to a single publisher:
+ *   1. canonical URL present → bucket by hostname (most reliable identity);
+ *   2. else → bucket by normalized outlet (lowercased, whitespace-collapsed);
+ *   3. else (no URL host and no outlet) → a per-item bucket so two unknown
+ *      publishers never merge on subject alone.
+ *
+ * `canonicalUrl` is the already-canonicalized string from `canonicalizeUrl`
+ * (hostname lowercased), so re-parsing is cheap and stable.  Exported for unit
+ * testing.
+ */
+export function liveblogBucket(canonicalUrl, outlet, fallbackId) {
+  if (typeof canonicalUrl === "string" && canonicalUrl) {
+    try {
+      const host = new URL(canonicalUrl).hostname.toLowerCase();
+      if (host) return `host:${host}`;
+    } catch {
+      /* fall through to outlet */
+    }
+  }
+  const normOutlet =
+    typeof outlet === "string" ? outlet.trim().toLowerCase().replace(/\s+/g, " ") : "";
+  if (normOutlet) return `outlet:${normOutlet}`;
+  return `nopub:${fallbackId}`;
+}
+
 function evidenceRichness(item) {
   const bodyLen = Array.isArray(item.body)
     ? item.body.reduce((acc, s) => acc + (typeof s === "string" ? s.length : 0), 0)
@@ -356,11 +385,14 @@ export function dedupeSourceItems(items) {
     let hasUrl;
     let isLiveblog = false;
     if (liveblogSubject) {
-      // Liveblog: group by subject after the live marker (ignoring URL/headline
-      // drift across the day) and gate merges by the publish-time window.  Takes
-      // precedence over the URL/headline paths so case/plural/URL variations of
-      // the same rolling story collapse to one item.
-      key = `liveblog::${liveblogSubject}`;
+      // Liveblog: group by publisher/domain bucket + subject after the live
+      // marker (ignoring URL/headline drift across the day) and gate merges by
+      // the publish-time window.  Takes precedence over the URL/headline paths
+      // so case/plural/URL variations of the same rolling story collapse — but
+      // the publisher bucket keeps two outlets' same-subject liveblogs distinct
+      // (no cross-publisher over-merge on subject alone).
+      const bucket = liveblogBucket(canonical, raw.outlet, raw.sourceId ?? `idx${i}`);
+      key = `liveblog::${bucket}::${liveblogSubject}`;
       hasUrl = false;
       isLiveblog = true;
     } else if (!normHeadline) {

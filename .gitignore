@@ -9,6 +9,10 @@ node_modules/
 *.pem
 *.key
 
+# ...but DO track example/template env files (no secrets, documents config).
+!.env.example
+!*.env.example
+
 # Project-specific local env files
 05-engineering/apps/api/.env
 04-prototype/.env.local

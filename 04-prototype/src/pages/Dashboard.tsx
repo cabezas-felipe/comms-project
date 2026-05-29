@@ -145,6 +145,11 @@ export default function Dashboard() {
 
   // Diagnostics panel visibility: UX test mode OR an explicit `?debug=1`.
   // Never visible in normal prototype use; carries no end-user copy.
+  // INTERNAL / manual-E2E aid only — `?debug=1` deliberately works outside UX
+  // test mode so operators can inspect a live deploy without a rebuild. It
+  // exposes no secrets (only `_meta` diagnostics already sent to the client).
+  // TODO(slice-4-followup): if we ever want this locked to recordings/walkthroughs,
+  // drop the `?debug=1` clause and gate on `isUxTestMode` alone.
   const debugMode = isUxTestMode || searchParams.get("debug") === "1";
 
   const tagSections = useMemo(() => aggregateTagSections(stories), [stories]);

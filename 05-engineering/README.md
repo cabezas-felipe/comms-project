@@ -161,6 +161,8 @@ Three knobs and one locked policy govern how the refresh pipeline fails safe so 
 
 **Slice 3 — run diagnostics for manual E2E.** A debug-only diagnostics panel ([`DashboardRunDiagnostics.tsx`](../04-prototype/src/components/DashboardRunDiagnostics.tsx)) surfaces the latest fetch's clustering / funnel / recall / selection blocks lifted from `_meta` so a manual re-test can see *why* the dashboard is empty or thin without reading server logs. It is hidden in normal use and shows only when `VITE_UX_TEST_MODE=true` **or** the URL carries `?debug=1`.
 
+**Slice 4 — env hygiene + embed-floor calibration.** [`apps/api/.env.example`](apps/api/.env.example) now documents the full recall/precision knob set (`TEMPO_RECALL_MODE`, `TEMPO_EMBED_MIN_SIMILARITY`, `TEMPO_EMBED_TOP_K`/`MAX_ITEMS`, `TEMPO_BEAT_FIT_THRESHOLD`) with explicit "embed floor ≠ beat-fit" warnings. Local calibration workflow for a thin dashboard: restart the API with `TEMPO_EMBED_MIN_SIMILARITY` swept across **0.35–0.45** (production default stays **0.40**; `0` disables the floor), open the dashboard with `?debug=1`, and watch `diag-recall` → `similarityRejected` / `floor=` to see how many semantic-only adds the floor held back. The embed floor (cosine, recall stage) and beat-fit threshold (blended precision, default 0.20 — D-063) are different stages on different scales; see [DECISIONS.md → D-063 addendum](DECISIONS.md).
+
 ### Manual golden re-test
 
 Run after the think-tank onboarding blurb is saved (topics: economy / elections / Trump / Iran / inflation / gas; sources: Washington Post + Reuters; geographies: US / Iran). Append `?debug=1` to the dashboard URL to read the run-diagnostics panel while checking:
