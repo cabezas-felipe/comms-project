@@ -21,7 +21,7 @@
  */
 
 import { runRefreshPipeline } from "../../dashboard/refresh-pipeline.mjs";
-import { loadGold } from "./dashboard-refresh-golden-core.mjs";
+import { loadGold, hasDegradedTitle } from "./dashboard-refresh-golden-core.mjs";
 
 const CONTRACT_VERSION = "2026-05-19-meta-story-fields";
 
@@ -118,15 +118,6 @@ function calibrationClusterFn(capture) {
     capture.input = items;
     return Promise.resolve(items.map((it, i) => makeGroundedCluster(`cal-ms-${i}`, it)));
   };
-}
-
-const TITLE_DEGRADED_RE = /updates?$/i;
-
-function hasDegradedTitle(stories) {
-  return stories.some((s) => {
-    const t = (s?.title ?? "").trim();
-    return TITLE_DEGRADED_RE.test(t) || /general updates/i.test(t);
-  });
 }
 
 // ─── Guardrails ──────────────────────────────────────────────────────────────

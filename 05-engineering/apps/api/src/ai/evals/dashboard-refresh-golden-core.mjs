@@ -125,7 +125,7 @@ function captureClusterFn(capture) {
 
 // Deterministic 2-d embedder for the recall-floor scenario. Profile is [1,0];
 // the off-beat gardening item gets a near-orthogonal vector (cosine ≈ 0.10,
-// below the 0.40 floor) so it is rejected as a weak semantic-only add. Ever
+// below the 0.40 floor) so it is rejected as a weak semantic-only add. All
 // other items are keyword hits, so their semantic score is irrelevant.
 function makeFloorEmbedder() {
   return async (texts) =>
@@ -139,7 +139,9 @@ function makeFloorEmbedder() {
 
 const TITLE_DEGRADED_RE = /updates?$/i;
 
-function hasDegradedTitle(stories) {
+// Exported so the calibration core (which shares this fixture + pipeline)
+// reuses the exact same degraded-title guard instead of re-declaring it.
+export function hasDegradedTitle(stories) {
   return stories.some((s) => {
     const t = (s?.title ?? "").trim();
     return TITLE_DEGRADED_RE.test(t) || /general updates/i.test(t);
