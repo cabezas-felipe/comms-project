@@ -22,6 +22,7 @@ import Parser from "rss-parser";
 import { isSupabaseEnabled, getSupabaseClient } from "../db/client.mjs";
 import { listIngestionFeeds } from "./feed-manifest-repo.mjs";
 import { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
+import { pMap } from "../util/p-map.mjs";
 
 export { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
 
@@ -800,26 +801,5 @@ function safeFromCodePoint(n) {
   }
 }
 
-// ─── Bounded concurrency map (Promise.allSettled-style results) ──────────────
-
-async function pMap(items, fn, concurrency) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  const workers = [];
-  const workerCount = Math.max(1, Math.min(concurrency, items.length));
-  for (let w = 0; w < workerCount; w++) {
-    workers.push((async () => {
-      while (true) {
-        const i = nextIndex++;
-        if (i >= items.length) return;
-        try {
-          results[i] = { status: "fulfilled", value: await fn(items[i], i) };
-        } catch (err) {
-          results[i] = { status: "rejected", reason: err };
-        }
-      }
-    })());
-  }
-  await Promise.all(workers);
-  return results;
-}
+// Bounded-concurrency map now lives in ../util/p-map.mjs (imported above) so
+// the why-it-matters stage can reuse the same worker-pool semantics.

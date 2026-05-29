@@ -63,6 +63,14 @@ const DEFAULT_WHY_MODEL = "anthropic:claude-sonnet-4-6";
 const DEFAULT_WHY_TIMEOUT_MS = 4000;
 const WHY_ENABLED_TRUTHY = new Set(["true", "1"]);
 
+// Concurrency bounds for the (Slice 6) parallel why-it-matters loop.  Default
+// 4 balances throughput against per-refresh LLM fan-out; the 1–6 clamp keeps a
+// misconfigured override from either serializing needlessly (below 1) or
+// stampeding the provider (above 6).
+const DEFAULT_WHY_CONCURRENCY = 4;
+const MIN_WHY_CONCURRENCY = 1;
+const MAX_WHY_CONCURRENCY = 6;
+
 // ── Config ──────────────────────────────────────────────────────────────────
 
 /**
@@ -91,6 +99,32 @@ export function resolveWhyConfig() {
     model,
     timeoutMs,
   };
+}
+
+/**
+ * Resolve the why-it-matters fan-out concurrency from
+ * `TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY` at call time (same env-read posture as
+ * `resolveWhyConfig` — no caching, so tests can flip env between calls).
+ *
+ * Rules:
+ *   - unset / empty / non-numeric (e.g. "abc") → default 4.
+ *   - parsed integer below 1 (e.g. "0", "-1") → clamped up to 1.
+ *   - parsed integer above 6 (e.g. "7", "100") → clamped down to 6.
+ *   - fractional values are truncated toward zero before clamping ("2.9" → 2).
+ *
+ * Kept as a separate resolver (not merged into `resolveWhyConfig`) so Slice 6
+ * can log it independently; the return shape is intentionally minimal.
+ *
+ * @returns {{ concurrency: number }}
+ */
+export function resolveWhyConcurrencyConfig() {
+  const raw = String(process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY ?? "").trim();
+  const parsed = Number.parseInt(raw, 10);
+  // Unparseable / empty falls back to the default; a valid number then clamps
+  // into the [1, 6] band.
+  const base = Number.isNaN(parsed) ? DEFAULT_WHY_CONCURRENCY : parsed;
+  const concurrency = Math.max(MIN_WHY_CONCURRENCY, Math.min(MAX_WHY_CONCURRENCY, base));
+  return { concurrency };
 }
 
 // ── State derivation ────────────────────────────────────────────────────────
