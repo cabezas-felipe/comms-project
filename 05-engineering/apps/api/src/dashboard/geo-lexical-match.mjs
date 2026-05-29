@@ -2,7 +2,7 @@
 //
 // This module is the single home for the "does this text mention a configured
 // geography?" rules that beat-fit (Stage 2 relevance) relies on, and that the
-// recall stage will reuse (Slice 2). Extracting it out of beat-fit keeps the
+// recall lexical gate reuses (Slice 2). Extracting it out of beat-fit keeps the
 // lexical behavior auditable and prevents the two stages from drifting.
 //
 // The matcher is purely deterministic (no NER, no model lookup): canonical
@@ -23,7 +23,9 @@ import {
 // alias-hit rules (D-064).
 const ALIAS_ENTRIES = Object.entries(GEOGRAPHY_ALIASES);
 
-export function escapeRegex(s) {
+// Internal helper — kept module-private (the public surface is geoTextMatches,
+// itemMentionsConfiguredGeography, and buildPlainTokenRegex).
+function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
