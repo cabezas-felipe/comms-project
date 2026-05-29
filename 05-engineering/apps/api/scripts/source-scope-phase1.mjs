@@ -296,12 +296,11 @@ async function runApply() {
     }
   }
 
-  // Sanity post-condition (safe even on dry-run). Re-query and classify in JS.
+  // Sanity post-condition (safe even on dry-run). Classify the already-fetched
+  // `all` snapshot in JS — no re-query needed: apply never touches WaPo rows, so
+  // the snapshot's WaPo count stays accurate even after the disable writes.
   const wapoActive = all.filter(
-    (r) => isWashingtonPost(r.canonical_name) && (r.active === true ||
-      // After a real apply, `all` is stale for rows we just modified — but apply
-      // never touches WaPo rows, so this count remains accurate without a re-query.
-      false)
+    (r) => isWashingtonPost(r.canonical_name) && r.active === true
   ).length;
   console.log(`WaPo active feeds: ${wapoActive}`);
 }
