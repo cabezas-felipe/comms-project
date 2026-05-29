@@ -35,12 +35,6 @@ const DEFAULT_MAX_TOTAL = 200;
 // visibility is still available behind `TEMPO_RSS_ALLOWLIST_VERBOSE=true`.
 const BLOCKED_LOG_DEFAULT_CAP = 5;
 
-// Hardcoded restricted default allowlist used when no operator config is
-// present.  Pinning it here (rather than reading from the manifest) keeps
-// the guard a separate, deliberate kill switch: widening the source pool
-// always requires explicit operator action (env var or `opts.allowlist`).
-const DEFAULT_ALLOWLIST = Object.freeze(["washington post"]);
-
 // Env var aliases — both newer (`TEMPO_RSS_*`) and legacy (`TEMPO_INGESTION_*`)
 // names are honored, with newer winning when set.  Precedence is pinned by
 // tests so dropping legacy support requires a deliberate change.
@@ -48,6 +42,19 @@ const ENV_ALLOWLIST_NEWER = "TEMPO_RSS_ALLOWLIST";
 const ENV_ALLOWLIST_LEGACY = "TEMPO_INGESTION_ALLOWLIST";
 const ENV_VERBOSE_NEWER = "TEMPO_RSS_ALLOWLIST_VERBOSE";
 const ENV_VERBOSE_LEGACY = "TEMPO_INGESTION_GUARD_VERBOSE";
+
+// Tag for the signal that drove the resolved allowlist — quoted in the
+// per-refresh live log line so operators can see at a glance whether the
+// guard came from an explicit override, env config, the manifest-derived
+// default, or the permissive last resort, without grepping env state.
+export const ALLOWLIST_SOURCE = Object.freeze({
+  OPTS_DISABLED: "opts_disabled",       // opts.allowlist === null → guard off
+  OPTS_OVERRIDE: "opts_override",       // opts.allowlist array → explicit list
+  ENV_NEWER: "env",                     // TEMPO_RSS_ALLOWLIST
+  ENV_LEGACY: "env_legacy",             // TEMPO_INGESTION_ALLOWLIST
+  MANIFEST_DERIVED: "manifest_derived", // derived from structurally eligible feeds
+  PERMISSIVE: "permissive",             // last resort: empty list, every feed passes
+});
 
 // Tag for resolveMode's `source` field — quoted in the per-refresh log line
 // and the production guard's error so operators can see which signal drove
@@ -127,11 +134,17 @@ function maxItemsTotal() {
 //
 // Inputs:
 //   - `opts.allowlist`            — caller-supplied (tests + service code).
-//   - `process.env.TEMPO_RSS_ALLOWLIST` — env-supplied default.
+//   - `process.env.TEMPO_RSS_ALLOWLIST` — env-supplied narrowing override.
+//   - manifest-derived entries    — the publishers of the structurally
+//                                    eligible feeds (post-`filterFeeds`).
 // Precedence (must be explicit; ambiguous types fall through to env):
 //   - `null`                      → guard disabled (no filtering).
 //   - `Array.isArray(...)`        → use this list verbatim (after normalize).
-//   - `undefined` / absent        → fall back to env resolution.
+//   - `undefined` / absent        → fall back to env, then manifest-derived.
+//
+// The default (no opts, no env) is now the manifest-derived allowlist rather
+// than a hardcoded publisher: feeds that are structurally eligible ingest by
+// default, and an explicit env/opts list is an optional *narrowing* override.
 //
 // Normalization parity: opts entries and env entries are normalized through
 // the same pipeline (trim, lowercase, collapse internal whitespace, drop
@@ -188,39 +201,83 @@ function readAllowlistEnv() {
 }
 
 /**
- * Resolve the effective allowlist from caller opts + env.  Returns:
- *   - `null`     — guard disabled (caller passed `opts.allowlist === null`).
- *   - `string[]` — normalized allowlist.  An empty list is permissive at the
- *                  filter step (every feed passes); only reachable via an
- *                  explicit empty array from the caller.  When opts is
- *                  absent and env yields nothing, the resolver falls back
- *                  to `DEFAULT_ALLOWLIST` so manifest expansion cannot
- *                  silently widen ingestion.
+ * Derive a normalized allowlist from a list of (structurally eligible) feeds.
+ * Emits BOTH candidate signals when present — the manifest `publisher` AND
+ * the publisher derived from `feed.name` (strip trailing " — Section").  Both
+ * run through the same `normalizeAllowlist` pipeline as opts/env so a derived
+ * "Reuters" matches exactly what an operator-typed "reuters" would.
+ *
+ * Emitting both forms (rather than preferring `publisher`) is what keeps the
+ * default from blocking an active feed whose `publisher` label is NOT a
+ * substring of its `name` — e.g. `{ publisher: "The New York Times", name:
+ * "NYT Politics" }`.  The guard substring-matches against `feed.name`, so the
+ * name-derived "nyt politics" entry is what actually admits that row, while
+ * the `publisher` entry keeps the cross-feed publisher identity intact.
+ *
+ * This is the manifest-derived default: feeds the manifest already marks
+ * eligible ingest by default, so adding an active feed no longer requires a
+ * matching env edit to actually fetch it.
+ */
+export function deriveManifestAllowlist(feeds) {
+  const candidates = [];
+  for (const feed of feeds ?? []) {
+    if (!feed || typeof feed !== "object") continue;
+    if (typeof feed.publisher === "string" && feed.publisher.trim().length > 0) {
+      candidates.push(feed.publisher);
+    }
+    const fromName = derivePublisherFromFeedName(feed.name);
+    if (typeof fromName === "string") candidates.push(fromName);
+  }
+  // normalizeAllowlist dedupes, so a feed whose publisher and name-derived
+  // forms collapse to the same string contributes a single entry.
+  return normalizeAllowlist(candidates);
+}
+
+/**
+ * Resolve the effective allowlist from caller opts → env → manifest-derived,
+ * returning both the resolved value and a `source` tag (see ALLOWLIST_SOURCE)
+ * so the live reader can log which signal drove the guard.  Returns:
+ *   - `{ allowlist: null }`     — guard disabled (`opts.allowlist === null`).
+ *   - `{ allowlist: string[] }` — normalized allowlist.  An empty list is
+ *                                 permissive at the filter step (every feed
+ *                                 passes).
  *
  * The asymmetry between `null` (disabled) and `[]` (permissive) is
- * deliberate: a caller who genuinely wants to bypass the env/default
+ * deliberate: a caller who genuinely wants to bypass the env/manifest
  * allowlist must do so explicitly (`opts.allowlist = null`) so they cannot
  * accidentally lose the guard by passing `undefined`.
  *
- * Env precedence (when opts is absent):
- *   1. `TEMPO_RSS_ALLOWLIST` (newer, scoped to RSS) — wins when normalized
- *      to a non-empty list.
- *   2. `TEMPO_INGESTION_ALLOWLIST` (legacy alias) — fallback.
- *   3. `DEFAULT_ALLOWLIST` (hardcoded `["washington post"]`).
+ * Precedence (first match wins):
+ *   1. `opts.allowlist === null`                 → disabled.
+ *   2. `Array.isArray(opts.allowlist)`           → explicit override.
+ *   3. `TEMPO_RSS_ALLOWLIST` (newer) non-empty   → env.
+ *   4. `TEMPO_INGESTION_ALLOWLIST` (legacy)      → env_legacy.
+ *   5. manifest-derived (non-empty)              → manifest_derived.
+ *   6. last resort                               → permissive `[]`.
  *
- * "Wins when non-empty" means an env value that normalizes to nothing
- * (empty string, only commas/whitespace) does NOT silently flip the
- * guard to permissive — it falls through to the next source.  The only
- * way to get an empty allowlist is an explicit empty array from opts.
+ * "Non-empty wins" means an env value that normalizes to nothing (empty
+ * string, only commas/whitespace) does NOT flip the guard — it falls through
+ * to the next source.  Manifest-derived entries are the publishers of the
+ * structurally eligible feeds, normalized through the same pipeline.
  *
  * The second arg accepts either a `{ newer, legacy }` snapshot (preferred,
- * used by tests that mock the env without touching `process.env`) or a
- * plain string treated as the newer var.  Default is read from
- * `process.env` lazily so the function stays test-friendly.
+ * used by tests that mock the env without touching `process.env`) or a plain
+ * string treated as the newer var.  Default is read from `process.env`
+ * lazily so the function stays test-friendly.  The third arg is the list of
+ * manifest-derived entries (already-normalized or raw — they are re-normalized
+ * here).
  */
-export function resolveAllowlist(optsAllowlist, env = readAllowlistEnv()) {
-  if (optsAllowlist === null) return null;
-  if (Array.isArray(optsAllowlist)) return normalizeAllowlist(optsAllowlist);
+export function resolveAllowlistWithSource(
+  optsAllowlist,
+  env = readAllowlistEnv(),
+  manifestDerived = []
+) {
+  if (optsAllowlist === null) {
+    return { allowlist: null, source: ALLOWLIST_SOURCE.OPTS_DISABLED };
+  }
+  if (Array.isArray(optsAllowlist)) {
+    return { allowlist: normalizeAllowlist(optsAllowlist), source: ALLOWLIST_SOURCE.OPTS_OVERRIDE };
+  }
   // Any other opts shape (undefined, string, object) → fall through to env.
   // We do NOT silently disable the guard for unexpected types — that would
   // let a typo in caller code bypass the operator-configured allowlist.
@@ -228,10 +285,24 @@ export function resolveAllowlist(optsAllowlist, env = readAllowlistEnv()) {
     ? env
     : { newer: env, legacy: undefined };
   const fromNewer = parseAllowlistEnv(snap.newer);
-  if (fromNewer.length > 0) return fromNewer;
+  if (fromNewer.length > 0) return { allowlist: fromNewer, source: ALLOWLIST_SOURCE.ENV_NEWER };
   const fromLegacy = parseAllowlistEnv(snap.legacy);
-  if (fromLegacy.length > 0) return fromLegacy;
-  return normalizeAllowlist(DEFAULT_ALLOWLIST);
+  if (fromLegacy.length > 0) return { allowlist: fromLegacy, source: ALLOWLIST_SOURCE.ENV_LEGACY };
+  const derived = normalizeAllowlist(manifestDerived);
+  if (derived.length > 0) return { allowlist: derived, source: ALLOWLIST_SOURCE.MANIFEST_DERIVED };
+  // Last resort: permissive empty list (NOT a hardcoded publisher).  With no
+  // opts, no env, and no eligible feeds to derive from, the only safe default
+  // is "don't filter" — the structural `filterFeeds` gate still applies.
+  return { allowlist: [], source: ALLOWLIST_SOURCE.PERMISSIVE };
+}
+
+/**
+ * Thin wrapper returning just the resolved allowlist (`null` | `string[]`).
+ * Preserves the original `resolveAllowlist` contract for callers that don't
+ * need the source tag; `resolveAllowlistWithSource` carries the full result.
+ */
+export function resolveAllowlist(optsAllowlist, env = readAllowlistEnv(), manifestDerived = []) {
+  return resolveAllowlistWithSource(optsAllowlist, env, manifestDerived).allowlist;
 }
 
 /**
@@ -389,12 +460,24 @@ async function readLiveItems(dataDir, opts) {
   // and apply it AFTER filterFeeds so the blocked log only mentions rows
   // that would otherwise have been fetched — keeping the operator's mental
   // model simple ("blocked = real feeds the allowlist held back").
-  // Pass `undefined` as the second arg so resolveAllowlist reads its env
-  // snapshot from process.env directly — picks up both the newer and legacy
-  // var names with the documented precedence.  Tests that mock the env
-  // without touching process.env can pass a snapshot via opts.allowlist or
-  // by mutating process.env before the call.
-  const allowlist = resolveAllowlist(opts.allowlist);
+  //
+  // The default (no opts override, no env) is the manifest-derived allowlist:
+  // the publishers of the structurally eligible feeds.  This makes active
+  // feeds ingest by default while keeping explicit env/opts narrowing.  Pass
+  // `undefined` as the env arg so resolveAllowlist reads its snapshot from
+  // process.env directly — picking up both the newer and legacy var names
+  // with the documented precedence.
+  const manifestDerived = deriveManifestAllowlist(structurallyEligible);
+  const { allowlist, source } = resolveAllowlistWithSource(
+    opts.allowlist,
+    undefined,
+    manifestDerived
+  );
+  // Surface which signal drove the guard (env / manifest-derived / etc.) so
+  // "why was this feed (not) fetched?" is a single log grep.
+  console.log(
+    `[feed-reader.live] allowlist source=${source} active=${allowlist === null ? "false" : String(allowlist.length > 0)} entries=${allowlist === null ? 0 : allowlist.length}`
+  );
   const { allowed: eligible, blocked } = applyAllowlistGuard(structurallyEligible, allowlist);
   const blockedFragment = formatBlockedList(blocked, { verbose: isAllowlistVerboseEnv() });
   if (blockedFragment) {

@@ -81,12 +81,17 @@ Re-run `source-feeds-import.mjs` when `source-feeds.json` carries explicit `publ
 
 ## Source scope (Batch 1: Washington Post + Reuters)
 
-The Supabase manifest's `active` flag is the **primary** lever that decides which feeds run during ingestion. The runtime guard `TEMPO_RSS_ALLOWLIST` is defense-in-depth — it filters again at fetch time. `TEMPO_INGESTION_ALLOWLIST` is accepted as a legacy alias for backwards compatibility; new configuration should use `TEMPO_RSS_ALLOWLIST`.
+The Supabase manifest's `active` flag is the **primary** lever that decides which feeds run during ingestion. **By default the runtime allowlist is derived from the manifest itself**: every structurally eligible feed (active RSS row with a valid URL) contributes its publisher to the allowlist, so an active feed ingests without any matching env edit. `TEMPO_RSS_ALLOWLIST` is an **optional narrowing override** — set it only when you want to restrict ingestion to a subset of the otherwise-eligible publishers (e.g. incident response, staging). `TEMPO_INGESTION_ALLOWLIST` is accepted as a legacy alias for backwards compatibility; new configuration should use `TEMPO_RSS_ALLOWLIST`.
+
+Resolution precedence (first match wins): explicit `opts.allowlist` (code) → `TEMPO_RSS_ALLOWLIST` → `TEMPO_INGESTION_ALLOWLIST` (legacy) → **manifest-derived default** → permissive (no filter). There is no hardcoded publisher default — removing the allowlist env entirely falls through to the manifest-derived set, not to a WaPo-only list.
 
 **Batch 1 env setup** (set on the API project, e.g. `apps/api/.env` locally or Vercel env for `tempo-api`):
 
 ```
 TEMPO_RSS_INGESTION=live
+# Optional narrowing override — omit it to ingest every active manifest feed.
+# Kept here as the explicit Batch 1 scope; with the manifest-derived default
+# this line is no longer required for WaPo + Reuters to ingest.
 TEMPO_RSS_ALLOWLIST=washington post,reuters
 TEMPO_RSS_MAX_ITEMS_TOTAL=150
 TEMPO_RSS_MAX_ITEMS_PER_FEED=20
@@ -137,12 +142,14 @@ npm run db:scope:restore --workspace=@tempo/api         # restore prev_active to
 
 `apply` is idempotent (re-running on a fully applied state is a no-op). `restore` consults the tracker first; if the tracker is empty, it does nothing.
 
-To open up beyond Phase 1 you also need to remove the runtime guard:
+To open up beyond Phase 1, **unset** the narrowing override so ingestion falls through to the manifest-derived default (every active feed ingests):
 
 ```sh
-# In your API environment (.env or process env):
-TEMPO_RSS_ALLOWLIST=*
+# In your API environment (.env or process env): remove / comment out the line.
+# unset TEMPO_RSS_ALLOWLIST
 ```
+
+> `TEMPO_RSS_ALLOWLIST=*` does **not** act as a wildcard — entries are matched as substrings of feed names, and no feed name contains a literal `*`, so that value would block every feed. To admit everything, unset the variable (manifest-derived default) rather than setting a wildcard.
 
 ## Dashboard trust controls (Slice 1)
 

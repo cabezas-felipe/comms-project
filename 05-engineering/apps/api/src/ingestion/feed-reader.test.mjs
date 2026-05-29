@@ -10,6 +10,8 @@ import {
   stripHtml,
   derivePublisherFromFeedName,
   resolveAllowlist,
+  resolveAllowlistWithSource,
+  deriveManifestAllowlist,
   applyAllowlistGuard,
   normalizeAllowlist,
   parseAllowlistEnv,
@@ -18,6 +20,7 @@ import {
   resolveMode,
   assertProductionSafe,
   INGESTION_MODE_SOURCE,
+  ALLOWLIST_SOURCE,
 } from "./feed-reader.mjs";
 
 // Helpers shared across the new "restricted default + legacy alias" tests.
@@ -933,19 +936,85 @@ test("readFeedItems(live): opts.allowlist=null disables guard even with TEMPO_RS
   }
 });
 
-// ─── Restricted default + legacy alias precedence (Phase 3 fix patch) ───────
+// ─── Manifest-derived default + legacy alias precedence (Slice 1) ────────────
 
-test("resolveAllowlist: unset env + opts undefined → DEFAULT_ALLOWLIST (NOT permissive)", () => {
-  // Codex-flagged regression: when neither newer nor legacy env is set, the
-  // resolver MUST fall back to the hardcoded restricted default rather than
-  // returning an empty (permissive) list.  This prevents future manifest
-  // expansion from silently widening ingestion.  Snapshot form decouples
-  // the assertion from process.env state.
+test("deriveManifestAllowlist: derives normalized publishers from `publisher` and feed name", () => {
+  // The manifest-derived default is the publishers of the structurally
+  // eligible feeds, normalized through the shared pipeline so a derived
+  // "reuters" matches an operator-typed "reuters".  When `publisher` and the
+  // name-derived form collapse to the same string (the common case) the entry
+  // dedupes to one; rows without `publisher` contribute their name-derived form.
+  const feeds = [
+    { id: "wapo-pol", name: "The Washington Post — Politics", publisher: "The Washington Post" },
+    { id: "wapo-world", name: "The Washington Post — World", publisher: "The Washington Post" }, // dedupes
+    { id: "reuters-am", name: "Reuters — World (Americas)" }, // no publisher → derive from name
+    { id: "nyt", name: "The New York Times — Politics" },     // no publisher → derive from name
+  ];
+  assert.deepEqual(deriveManifestAllowlist(feeds), [
+    "the washington post",
+    "reuters",
+    "the new york times",
+  ]);
+});
+
+test("deriveManifestAllowlist: emits BOTH publisher and name-derived forms when they differ (guard cannot block active feed)", () => {
+  // HIGH finding: with substring matching against `feed.name`, a feed whose
+  // `publisher` label is NOT a substring of its `name` (e.g. publisher "The
+  // New York Times", name "NYT Politics") would be silently blocked by the
+  // manifest-derived default if only `publisher` were emitted.  Emitting both
+  // normalized forms guarantees the name-derived "nyt politics" entry admits
+  // the row, while the "the new york times" entry preserves publisher identity.
+  const feeds = [{ id: "nyt", name: "NYT Politics", publisher: "The New York Times" }];
+  const derived = deriveManifestAllowlist(feeds);
+  assert.deepEqual(derived, ["the new york times", "nyt politics"]);
+  // Prove the guard actually admits the feed under the derived default.
+  const { allowed, blocked } = applyAllowlistGuard(feeds, derived);
+  assert.deepEqual(allowed.map((f) => f.id), ["nyt"], "feed must be admitted, not blocked");
+  assert.deepEqual(blocked, []);
+});
+
+test("deriveManifestAllowlist: empty / non-array input yields empty list (permissive)", () => {
+  assert.deepEqual(deriveManifestAllowlist([]), []);
+  assert.deepEqual(deriveManifestAllowlist(undefined), []);
+  assert.deepEqual(deriveManifestAllowlist(null), []);
+});
+
+test("deriveManifestAllowlist: blank publisher string falls back to feed-name derivation", () => {
+  // A row with `publisher: ""` (or whitespace) must not produce an empty
+  // matcher — it falls through to the name-derived publisher instead.
+  const feeds = [{ id: "reuters-am", name: "Reuters — World (Americas)", publisher: "   " }];
+  assert.deepEqual(deriveManifestAllowlist(feeds), ["reuters"]);
+});
+
+test("resolveAllowlist: unset env + opts undefined + no manifest → permissive [] (NOT hardcoded WaPo)", () => {
+  // Slice 1 change: with no opts, no env, and nothing to derive from, the
+  // resolver returns a permissive empty list rather than the old hardcoded
+  // `["washington post"]`.  The structural `filterFeeds` gate is the real
+  // floor; the allowlist no longer narrows by default.
   const result = resolveAllowlist(undefined, { newer: undefined, legacy: undefined });
-  // The default is intentionally WaPo-scoped to mirror the source-by-source
-  // rollout posture documented in data/source-feeds.json.
-  assert.deepEqual(result, ["washington post"]);
-  assert.notEqual(result.length, 0, "default must NOT be permissive empty list");
+  assert.deepEqual(result, []);
+});
+
+test("resolveAllowlist: unset env + manifest-derived entries → manifest-derived allowlist", () => {
+  // The new default: when neither opts nor env supply a list, the resolver
+  // falls back to the publishers of the structurally eligible feeds so active
+  // feeds ingest without a matching env edit.
+  const { eligible } = filterFeeds(SAMPLE_MANIFEST, ""); // wapo-pol, wapo-world, nyt
+  const derived = deriveManifestAllowlist(eligible);
+  const result = resolveAllowlist(undefined, { newer: undefined, legacy: undefined }, derived);
+  assert.deepEqual(result, ["washington post", "the new york times"]);
+});
+
+test("resolveAllowlistWithSource: tags each precedence tier", () => {
+  // Pin the source tag for the live log line so a future refactor can't drift
+  // the reported signal away from the resolved value.
+  const derived = ["reuters"];
+  assert.equal(resolveAllowlistWithSource(null, {}, derived).source, ALLOWLIST_SOURCE.OPTS_DISABLED);
+  assert.equal(resolveAllowlistWithSource(["nyt"], {}, derived).source, ALLOWLIST_SOURCE.OPTS_OVERRIDE);
+  assert.equal(resolveAllowlistWithSource(undefined, { newer: "bbc" }, derived).source, ALLOWLIST_SOURCE.ENV_NEWER);
+  assert.equal(resolveAllowlistWithSource(undefined, { newer: undefined, legacy: "bbc" }, derived).source, ALLOWLIST_SOURCE.ENV_LEGACY);
+  assert.equal(resolveAllowlistWithSource(undefined, { newer: undefined, legacy: undefined }, derived).source, ALLOWLIST_SOURCE.MANIFEST_DERIVED);
+  assert.equal(resolveAllowlistWithSource(undefined, { newer: undefined, legacy: undefined }, []).source, ALLOWLIST_SOURCE.PERMISSIVE);
 });
 
 test("resolveAllowlist: legacy TEMPO_INGESTION_ALLOWLIST drives behavior when newer is unset", () => {
@@ -999,14 +1068,23 @@ test("resolveAllowlist: newer set to garbage that normalizes to empty falls thro
   assert.deepEqual(result, ["reuters"]);
 });
 
-test("resolveAllowlist: both env vars empty/garbage → DEFAULT_ALLOWLIST", () => {
-  // Final fallback: with nothing usable from either env source the
-  // restricted default still applies.  Ingestion never silently widens.
-  const result = resolveAllowlist(undefined, {
-    newer: " , , ",
-    legacy: "",
-  });
-  assert.deepEqual(result, ["washington post"]);
+test("resolveAllowlist: both env vars empty/garbage → falls through to manifest-derived", () => {
+  // Garbage that normalizes to nothing from both env sources must NOT widen
+  // to permissive while a manifest-derived list exists — it falls through to
+  // the derived publishers.
+  const result = resolveAllowlist(
+    undefined,
+    { newer: " , , ", legacy: "" },
+    ["reuters"]
+  );
+  assert.deepEqual(result, ["reuters"]);
+});
+
+test("resolveAllowlist: both env vars empty/garbage + no manifest → permissive []", () => {
+  // With nothing usable from either env source AND no eligible feeds to
+  // derive from, the only safe default is the permissive empty list.
+  const result = resolveAllowlist(undefined, { newer: " , , ", legacy: "" });
+  assert.deepEqual(result, []);
 });
 
 test("resolveAllowlist: opts=null disables guard regardless of env", () => {
@@ -1034,7 +1112,9 @@ test("resolveAllowlist: reads from process.env when called without explicit env 
     assert.deepEqual(resolveAllowlist(undefined), ["bbc"]);
   });
   withAllowlistEnv({ newer: undefined, legacy: undefined }, () => {
-    assert.deepEqual(resolveAllowlist(undefined), ["washington post"]);
+    // No env, no manifest-derived arg → permissive [] (Slice 1 default; the
+    // old hardcoded ["washington post"] fallback is gone).
+    assert.deepEqual(resolveAllowlist(undefined), []);
   });
 });
 
@@ -1062,13 +1142,12 @@ test("isAllowlistVerboseEnv: newer wins when set, legacy ignored even if 'true'"
   });
 });
 
-test("readFeedItems(live): unset env + opts undefined → DEFAULT_ALLOWLIST restricts to WaPo feeds only", async () => {
-  // End-to-end wire-up: with both newer and legacy env unset and no caller
-  // override, the live reader must apply the restricted default.  NYT
-  // (structurally eligible) gets blocked because it doesn't match
-  // "washington post".  This is the exact regression Codex flagged: prior
-  // to the fix patch the unset-env path returned [] (permissive) and NYT
-  // would have been fetched.
+test("readFeedItems(live): unset env + opts undefined → manifest-derived default fetches ALL eligible feeds", async () => {
+  // Slice 1 fix: with both newer and legacy env unset and no caller override,
+  // the live reader derives its allowlist from the structurally eligible feeds
+  // themselves.  Every eligible publisher (WaPo + NYT here) is therefore
+  // admitted — the old hardcoded ["washington post"] default that silently
+  // blocked active non-WaPo feeds (e.g. Reuters) is gone.
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(url);
@@ -1079,14 +1158,68 @@ test("readFeedItems(live): unset env + opts undefined → DEFAULT_ALLOWLIST rest
       mode: "live",
       fetchImpl,
       manifestLoader: async () => SAMPLE_MANIFEST,
-      // opts.allowlist intentionally omitted — must hit the default.
+      // opts.allowlist intentionally omitted — must hit the manifest-derived default.
     });
   });
   const sortedCalls = [...calls].sort();
   assert.deepEqual(sortedCalls, [
+    "https://nyt.example.com/politics.xml",
     "https://wapo.example.com/politics.xml",
     "https://wapo.example.com/world.xml",
-  ], "default allowlist must restrict to WaPo; NYT must NOT be fetched");
+  ], "manifest-derived default must admit every structurally-eligible feed (incl. NYT)");
+});
+
+test("readFeedItems(live): Batch 1 manifest + unset env → Reuters AND WaPo feeds fetched (no Reuters blocked by default)", async () => {
+  // The exact bug Slice 1 fixes: with unset env, active Reuters feeds were
+  // blocked by the hardcoded ["washington post"] default.  The manifest-derived
+  // default now admits every eligible publisher, so all WaPo + Reuters rows
+  // ingest without any env configuration.
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return makeFetchMock(BATCH1_FETCH_MAP)(url);
+  };
+  await withAllowlistEnv({ newer: undefined, legacy: undefined }, async () => {
+    await readFeedItems("/unused", {
+      mode: "live",
+      fetchImpl,
+      manifestLoader: async () => BATCH1_MANIFEST,
+      // opts.allowlist omitted, env unset — manifest-derived default applies.
+    });
+  });
+  const sortedCalls = [...calls].sort();
+  assert.deepEqual(sortedCalls, [
+    "https://reuters.example.com/americas.xml",
+    "https://reuters.example.com/us.xml",
+    "https://wapo.example.com/politics.xml",
+  ], "unset env must NOT block active Reuters feeds — all eligible feeds ingest");
+});
+
+test("readFeedItems(live): no eligible feeds + unset env does not throw, uses permissive fallback", async () => {
+  // Edge case: an all-ineligible manifest (non-rss / inactive / bad URL) leaves
+  // nothing to derive from.  The reader must return [] cleanly (permissive
+  // fallback, no manifest-derived entries, no hardcoded default) without
+  // throwing.
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return makeFetchMock(FETCH_MAP)(url);
+  };
+  const INELIGIBLE_MANIFEST = [
+    { id: "social-x", name: "@handle", kind: "social", url: "https://x.example.com/h", active: true },
+    { id: "off", name: "Off Feed", kind: "rss", url: "https://off.example.com/x.xml", active: false },
+    { id: "broken", name: "Broken", kind: "rss", url: "not-a-url", active: true },
+  ];
+  let items;
+  await withAllowlistEnv({ newer: undefined, legacy: undefined }, async () => {
+    items = await readFeedItems("/unused", {
+      mode: "live",
+      fetchImpl,
+      manifestLoader: async () => INELIGIBLE_MANIFEST,
+    });
+  });
+  assert.deepEqual(items, [], "no eligible feeds → empty result");
+  assert.deepEqual(calls, [], "nothing eligible → nothing fetched");
 });
 
 test("readFeedItems(live): legacy TEMPO_INGESTION_ALLOWLIST drives the live guard when newer unset", async () => {
@@ -1153,8 +1286,10 @@ test("readFeedItems(live): legacy verbose env enables full blocked-list logging"
   } finally {
     console.log = origLog;
   }
-  const allowlistLog = captured.find((m) => m.includes("[feed-reader.live] allowlist"));
-  assert.ok(allowlistLog, "expected an allowlist log line");
+  // Match the blocked-list line specifically — a separate "allowlist
+  // source=…" line is also emitted now, so anchor on the `blocked=` fragment.
+  const allowlistLog = captured.find((m) => m.includes("[feed-reader.live] allowlist blocked="));
+  assert.ok(allowlistLog, "expected an allowlist blocked-list log line");
   // Verbose mode must NOT include the "...and N more" truncation marker.
   assert.equal(allowlistLog.includes("more"), false, `verbose log must not truncate: ${allowlistLog}`);
   // The blocked NYT feed id must appear in full.
