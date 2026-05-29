@@ -9,6 +9,7 @@ import {
   metaStoryOutputSchema,
 } from "./cluster-engine.mjs";
 import { validateSmokeOutput, runClusterSmoke } from "./evals/cluster-smoke-core.mjs";
+import { buildClusteringPrompt, CLUSTERING_PROMPT_VERSION } from "./prompts.mjs";
 
 function makeItem(overrides = {}) {
   return {
@@ -581,4 +582,53 @@ test("M8 architecture: importing run-cluster-smoke.mjs does not invoke main()", 
     envBefore,
     "importing the runner must not mutate process.env via dotenv"
   );
+});
+
+// ─── Clustering prompt (Slice 3: cluster-v2 anti-over-merge guidance) ─────────
+
+test("CLUSTERING_PROMPT_VERSION is cluster-v2", () => {
+  assert.equal(CLUSTERING_PROMPT_VERSION, "cluster-v2");
+});
+
+test("buildClusteringPrompt: includes anti-over-merge guidance (Slice 3)", () => {
+  const items = [
+    makeItem({
+      sourceId: "co-election",
+      geographies: ["Colombia"],
+      headline: "Colombia presidential election debate draws record viewers",
+      body: ["Candidates clashed over tax reform and security."],
+    }),
+    makeItem({
+      sourceId: "co-mine",
+      geographies: ["Colombia"],
+      headline: "Armed group attacks Colombia gold mine, killing workers",
+      body: ["Authorities blame an illegal armed faction."],
+    }),
+  ];
+  const prompt = buildClusteringPrompt(items, BASE_SETTINGS);
+
+  // Shared geography alone must not justify a merge.
+  assert.match(prompt, /Shared geography alone is NOT enough to merge/);
+  // Unrelated event types stay separate (the election vs accident vs outbreak case).
+  assert.match(prompt, /Do NOT merge unrelated event types/);
+  assert.match(prompt, /election.*industrial accident.*disease outbreak/i);
+  // Bias toward separate meta-stories for distinct events in the same country.
+  assert.match(prompt, /Prefer separate meta-stories when events are distinct/);
+});
+
+test("buildClusteringPrompt: retains the JSON contract and grounded-evidence rules", () => {
+  const prompt = buildClusteringPrompt([makeItem({ sourceId: "src-1" })], BASE_SETTINGS);
+
+  // JSON-only output contract + shape.
+  assert.match(prompt, /Return ONLY valid JSON matching this exact structure/);
+  assert.match(prompt, /meta_stories/);
+  assert.match(prompt, /source_item_ids/);
+  // sourceId constraints.
+  assert.match(prompt, /Every sourceId you reference MUST appear verbatim in the article list/);
+  assert.match(prompt, /reference at least 1 sourceId/);
+  assert.match(prompt, /maximum 5 sourceIds/);
+  // Grounded-evidence rules unchanged.
+  assert.match(prompt, /factual_claims/);
+  assert.match(prompt, /claim_evidence_map/);
+  assert.match(prompt, /Every claim MUST be backed by at least one sourceId/);
 });

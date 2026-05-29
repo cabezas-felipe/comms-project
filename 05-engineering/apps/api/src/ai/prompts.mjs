@@ -1,5 +1,5 @@
 export const SUMMARY_PROMPT_VERSION = "summary-v1";
-export const CLUSTERING_PROMPT_VERSION = "cluster-v1";
+export const CLUSTERING_PROMPT_VERSION = "cluster-v2";
 
 export function buildClusteringPrompt(items, settings) {
   const itemLines = items
@@ -42,6 +42,9 @@ export function buildClusteringPrompt(items, settings) {
     "- Each meta-story MUST reference at least 1 sourceId from the list below",
     "- Each meta-story may reference maximum 5 sourceIds",
     "- Every sourceId you reference MUST appear verbatim in the article list",
+    "- Shared geography alone is NOT enough to merge: articles set in the same country can be unrelated stories",
+    "- Do NOT merge unrelated event types into one meta-story (e.g. an election, an industrial accident, and a disease outbreak are distinct narratives even when they share a country)",
+    "- Prefer separate meta-stories when events are distinct, even if they occur in the same country or geography",
     "- The summary must only describe what is stated in the referenced articles — no speculation",
     "- factual_claims: list each discrete factual claim made in the summary as a separate string",
     "- claim_evidence_map: map each claim index (\"0\", \"1\", ...) to the sourceId(s) that directly support it",
