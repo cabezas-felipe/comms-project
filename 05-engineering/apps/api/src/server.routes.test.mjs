@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings, _recentItemsCache, _dueUserOrchestrator } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
 
@@ -969,6 +969,96 @@ test("POST /api/dashboard/refresh (2.3): cache miss falls back to live fetch and
     _recentItemsCache.write = prevCacheWrite;
     _recentItemsCache.enabled = prevCacheEnabled;
     _recentItemsCache.client = prevCacheClient;
+  }
+});
+
+test("POST /api/dashboard/refresh (Slice 2): cache miss forwards matched feedIds to scoped live fetch", async () => {
+  // The Slice 2 wire-up: on a cache miss with a resolved user selection the
+  // handler must call the live reader with `{ feedIds: [...] }` so only the
+  // user's matched feeds are fetched — not the whole manifest.  We stub the
+  // `_feedReader.read` hook to capture its args (instead of hitting RSS) and
+  // assert the second arg carries the matched feed id.
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevCacheRead = _recentItemsCache.read;
+  const prevCacheWrite = _recentItemsCache.write;
+  const prevCacheEnabled = _recentItemsCache.enabled;
+  const prevCacheClient = _recentItemsCache.client;
+  const prevFeedRead = _feedReader.read;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _recentItemsCache.enabled = () => true;
+  _recentItemsCache.client = () => null;
+  _recentItemsCache.read = async () => ({ rows: [], error: null }); // force miss
+  _recentItemsCache.write = async ({ items }) => ({ written: items.length, error: null });
+
+  let feedReadArgs = null;
+  _feedReader.read = async (dataDir, opts) => {
+    feedReadArgs = { dataDir, opts };
+    // Minimal raw item so the downstream pipeline + cache write don't choke.
+    return [
+      {
+        sourceId: "reuters-world::scoped-1",
+        feedId: "reuters-world",
+        outlet: "Reuters",
+        url: "https://reuters.example.com/scoped-article",
+        headline: "Scoped fetch headline",
+        body: ["Scoped body."],
+        minutesAgo: 5,
+        weight: 80,
+      },
+    ];
+  };
+
+  _refreshPipeline.run = async () => ({
+    payload: { contractVersion: VALID_BODY.contractVersion, stories: [] },
+    log: {
+      unchanged: false,
+      poolCount: 0,
+      relevantCount: 0,
+      usedFallbackClustering: false,
+      groundingFailures: 0,
+      droppedUngroundedStoryCount: 0,
+      groundingDropReasons: {},
+      watermark: "",
+      candidateCount: 0,
+      selectedFeedCount: 0,
+      selection: {},
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(feedReadArgs, "live reader must have been invoked on cache miss");
+    assert.ok(
+      feedReadArgs.opts && typeof feedReadArgs.opts === "object",
+      `live reader must receive a scoped opts object; saw ${JSON.stringify(feedReadArgs.opts)}`
+    );
+    assert.ok(
+      Array.isArray(feedReadArgs.opts.feedIds) && feedReadArgs.opts.feedIds.includes("reuters-world"),
+      `scoped fetch must forward matched feedIds; saw ${JSON.stringify(feedReadArgs.opts?.feedIds)}`
+    );
+    // Slice 2 contract guard: every forwarded id is a non-empty string, and
+    // feedIds is never null/undefined when a selection exists.
+    assert.ok(
+      feedReadArgs.opts.feedIds.every((id) => typeof id === "string" && id.length > 0),
+      "feedIds must be non-empty strings"
+    );
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _recentItemsCache.read = prevCacheRead;
+    _recentItemsCache.write = prevCacheWrite;
+    _recentItemsCache.enabled = prevCacheEnabled;
+    _recentItemsCache.client = prevCacheClient;
+    _feedReader.read = prevFeedRead;
   }
 });
 
