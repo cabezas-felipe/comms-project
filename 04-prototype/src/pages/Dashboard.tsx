@@ -4,7 +4,7 @@ import { Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
 import StoryCard from "@/components/StoryCard";
 import SourceReader from "@/components/SourceReader";
-import { EmptyState, ErrorState, LoadingState } from "@/components/StateBlocks";
+import { ClusteringFailedState, EmptyState, ErrorState, LoadingState } from "@/components/StateBlocks";
 import {
   trackDashboardViewed,
   trackSourceOpenError,
@@ -122,6 +122,13 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(!emptyMode);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(emptyMode);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Slice 2: clustering fail-closed signal lifted from `_meta`.  When true the
+  // last successful refresh published zero stories because clustering failed —
+  // distinct from a quiet beat, so the empty zone renders dedicated copy.
+  const [clusteringFailed, setClusteringFailed] = useState(false);
+  const [clusteringFailureReason, setClusteringFailureReason] = useState<
+    "timeout" | "error" | null
+  >(null);
   const [reloadCounter, setReloadCounter] = useState(0);
 
   const tagSections = useMemo(() => aggregateTagSections(stories), [stories]);
@@ -211,6 +218,8 @@ export default function Dashboard() {
         setStories(payload.stories.map(dtoToStory));
         setLoadError(null);
         setHasLoadedOnce(true);
+        setClusteringFailed(result.clusteringFailed);
+        setClusteringFailureReason(result.clusteringFailureReason);
         // First-paint seed.  GET responses never advance an existing
         // anchor (post-seed remounts are no-ops); bootstrap
         // `served_fresh_snapshot` also lands here so a brand-new session
@@ -272,6 +281,8 @@ export default function Dashboard() {
     setStories(heartbeatResult.payload.stories.map(dtoToStory));
     setLoadError(null);
     setHasLoadedOnce(true);
+    setClusteringFailed(heartbeatResult.clusteringFailed);
+    setClusteringFailureReason(heartbeatResult.clusteringFailureReason);
   }, [emptyMode, heartbeatResult]);
 
   const handleRetry = useCallback(() => {
@@ -445,6 +456,23 @@ export default function Dashboard() {
                 <div data-testid="dashboard-error">
                   <ErrorState variant="briefing" onRetry={handleRetry} />
                 </div>
+              );
+            }
+            // Clustering failed (fail-closed): 0 stories published on purpose
+            // after a successful fetch. Distinct copy from a quiet beat so the
+            // user knows to retry rather than reading it as "nothing matched".
+            if (
+              !isLoading &&
+              !loadError &&
+              stories.length === 0 &&
+              hasLoadedOnce &&
+              clusteringFailed
+            ) {
+              return (
+                <ClusteringFailedState
+                  onRetry={handleRetry}
+                  reason={clusteringFailureReason}
+                />
               );
             }
             // Backend returned 0 stories (legitimately empty after a successful fetch).

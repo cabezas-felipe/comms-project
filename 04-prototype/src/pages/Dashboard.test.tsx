@@ -142,6 +142,43 @@ describe("Dashboard load states (no fake-story fallback)", () => {
     expect(screen.queryByTestId("dashboard-error")).toBeNull();
   });
 
+  it("renders the dedicated clustering-failed empty state (NOT the quiet-beat copy) when clusteringFailed=true", async () => {
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      clusteringFailed: true,
+      clusteringFailureReason: "timeout",
+    });
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-clustering-failed")).toBeInTheDocument();
+    expect(screen.getByText("Couldn't compose stories this refresh.")).toBeInTheDocument();
+    // Must NOT show the generic quiet-beat empty state.
+    expect(screen.queryByTestId("dashboard-empty")).toBeNull();
+    expect(screen.queryByText("No stories yet.")).toBeNull();
+  });
+
+  it("clustering-failed empty state offers a Refresh action that re-invokes the loader", async () => {
+    fetchSpy
+      .mockResolvedValueOnce({
+        ...OK_RESULT,
+        clusteringFailed: true,
+        clusteringFailureReason: "error",
+      })
+      .mockResolvedValueOnce(OK_RESULT);
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-clustering-failed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+    // Second load is a normal empty → generic quiet-beat copy returns.
+    expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("quiet beat (empty stories, clusteringFailed=false) keeps the generic empty state", async () => {
+    fetchSpy.mockResolvedValue({ ...OK_RESULT, clusteringFailed: false });
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("dashboard-clustering-failed")).toBeNull();
+  });
+
   it("renders Error state with retry when fetch fails (no STORIES rendered)", async () => {
     fetchSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
     renderAt(null);

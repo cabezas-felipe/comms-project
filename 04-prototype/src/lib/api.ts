@@ -27,6 +27,30 @@ export interface DashboardFetchResult {
    * back to `refreshedAt` for display.
    */
   lastCheckedAt: string | null;
+  /**
+   * Clustering fail-closed diagnostics lifted from `_meta` (Slice 1 server
+   * contract).  When `clusteringFailed` is true the refresh succeeded HTTP-wise
+   * but clustering failed after its retry, so the backend published zero
+   * meta-stories on purpose — the UI must distinguish this from a quiet beat.
+   *
+   * `clusteringFailed` is derived from `_meta.usedFallbackClustering === true`
+   * (note: the server field name is retained for back-compat; its semantics are
+   * "clustering failed → 0 stories", NOT "degraded buckets shipped").  Parsed
+   * defensively off the raw `_meta` — never schema-validated — so older or
+   * forward responses can't break dashboard fetches.
+   */
+  clusteringFailed: boolean;
+  clusteringFailureReason: "timeout" | "error" | null;
+  clusteringAttempts: number | null;
+  /** Per-attempt clustering latency (ms). Optional for the UI; null when absent/malformed. */
+  clusteringLatencyMs: number[] | null;
+}
+
+interface DashboardClusteringMeta {
+  clusteringFailed: boolean;
+  clusteringFailureReason: "timeout" | "error" | null;
+  clusteringAttempts: number | null;
+  clusteringLatencyMs: number[] | null;
 }
 
 export interface DashboardBootstrapResult extends DashboardFetchResult {
@@ -104,6 +128,40 @@ function parseIsoTimestampSafe(raw: unknown): string | null {
   return Number.isFinite(parsed) ? raw : null;
 }
 
+const CLUSTERING_META_EMPTY: DashboardClusteringMeta = {
+  clusteringFailed: false,
+  clusteringFailureReason: null,
+  clusteringAttempts: null,
+  clusteringLatencyMs: null,
+};
+
+/**
+ * Lift clustering fail-closed diagnostics off the raw `_meta`.  Tolerant of any
+ * shape: a missing/garbled `_meta`, missing keys, or wrong types all degrade to
+ * `clusteringFailed: false` with nulls elsewhere (a malformed response must
+ * never read as "clustering failed").  Mirrors the defensive `_meta.selection`
+ * pattern — never throws.
+ */
+function parseClusteringMetaSafe(meta: unknown): DashboardClusteringMeta {
+  if (!meta || typeof meta !== "object") return CLUSTERING_META_EMPTY;
+  const m = meta as Record<string, unknown>;
+  const reason = m.clusteringFailureReason;
+  const attempts = m.clusteringAttempts;
+  const latency = m.clusteringLatencyMs;
+  return {
+    clusteringFailed: m.usedFallbackClustering === true,
+    clusteringFailureReason:
+      reason === "timeout" || reason === "error" ? reason : null,
+    clusteringAttempts:
+      typeof attempts === "number" && Number.isFinite(attempts) ? attempts : null,
+    clusteringLatencyMs:
+      Array.isArray(latency) &&
+      latency.every((n) => typeof n === "number" && Number.isFinite(n))
+        ? (latency as number[])
+        : null,
+  };
+}
+
 // Mirrors server-side resolver precedence: bearer > email_recognition.
 // Not production auth for the email path — prototype identity layer only.
 async function buildIdentityHeaders(): Promise<Record<string, string>> {
@@ -179,8 +237,9 @@ async function requestDashboard<TExtras extends object>({
       const selection = parseSelectionMetaSafe(meta?.selection);
       const refreshedAt = parseIsoTimestampSafe(meta?.refreshedAt);
       const lastCheckedAt = parseIsoTimestampSafe(meta?.lastCheckedAt);
+      const clustering = parseClusteringMetaSafe(meta);
       const extras = parseExtras ? parseExtras(raw) : ({} as TExtras);
-      return { payload, selection, refreshedAt, lastCheckedAt, ...extras };
+      return { payload, selection, refreshedAt, lastCheckedAt, ...clustering, ...extras };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;

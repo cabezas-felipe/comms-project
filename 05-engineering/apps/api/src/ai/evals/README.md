@@ -7,6 +7,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Critical hard-fail suite (Phase 5b)** | 8 E2E presence-first scenarios; deterministic + advisory hybrid layers | `npm run eval:critical` | **Yes** — non-zero exit on any critical scenario failure |
 | Onboarding extraction | Per-field precision / recall / F1 / exact-match across 20 gold examples | `npm run eval:onboarding-extraction` | No — advisory, drift only |
 | Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` | Smoke gate (non-zero on contract violation) |
+| **Dashboard refresh golden (Slice 2)** | Hermetic E2E regression guard: fail-closed clustering, no degraded titles, liveblog dedupe, recall floor, healthy 2+ stories | `npm run eval:dashboard-refresh-golden` | Smoke gate (non-zero on any scenario failure) |
 
 ---
 
@@ -125,6 +126,49 @@ The smoke reads the clustering model via the same `getAiCapabilityMap().clusteri
 - `1` — schema violation, missing `meta_story_id`, hallucinated source ids, or a thrown error inside `clusterItems`. Diagnostics print the offending payload.
 
 When to run: before DC validation sessions on real-model config, or after touching `cluster-engine.mjs` / clustering prompts.
+
+---
+
+## Dashboard Refresh Golden (Slice 2)
+
+Regression harness pinning the specific failures from the bad dashboard E2E:
+exactly one degraded **"General Updates"** meta-story, a **Spelling Bee
+liveblog** stack that never collapsed, **no Reuters** content, and clustering
+**fallback output shipped** to users. Runs end-to-end against `runRefreshPipeline`
+with injected stubs (clustering + embeddings) — fully hermetic, no provider keys
+or network. A separate `eval:cluster-smoke` can exercise real providers.
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-refresh-golden
+```
+
+### Fixture
+
+`dashboard-refresh.gold.json` — one think-tank persona (topics economy /
+elections / Trump / Iran / inflation / gas; sources Washington Post + Reuters;
+geographies US + Iran) plus three deterministic raw-item sets:
+
+- `onBeatItems` — on-beat WaPo + Reuters headlines (Trump/Iran, economy, elections).
+- `liveblogVariants` — four `Live updates: Scripps National Spelling Bee …` variants (case / plural / whitespace / URL drift) to assert liveblog collapse.
+- `weakSemanticItem` — an off-beat, semantic-only item below the recall floor.
+
+### Scenarios
+
+| ID | Intent | Must pass |
+|---|---|---|
+| `gold-01-fail-closed` | Clustering throws on both attempts | `stories.length === 0`, `usedFallbackClustering === true`, `clusteringFailureReason === "error"`, `clusteringAttempts === 2`, no degraded titles |
+| `gold-02-healthy-path` | Stub returns 2 grounded clusters | `metaStoryCount >= 2`, `usedFallbackClustering === false`, Reuters present, no `/updates?$/i` or "General Updates" titles |
+| `gold-03-liveblog-dedupe` | 4 Spelling Bee variants ingested | exactly 1 reaches clustering (newest `lb-4` survives), `dedupe.collapsedCount >= 3` |
+| `gold-04-recall-floor` | Weak semantic-only item present | `recall.minSimilarityThreshold === 0.4`, `recall.similarityRejected >= 1`, item excluded from clustering |
+
+### Exit codes
+
+- `0` — all scenarios pass.
+- `1` — any scenario failed (or a runner error); diagnostics print the failing reasons.
+
+When to run: after touching `refresh-pipeline.mjs`, `source-deduper.mjs`,
+`embedding-recall.mjs`, or the clustering fail-closed path.
 
 ---
 

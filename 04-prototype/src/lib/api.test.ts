@@ -348,6 +348,113 @@ describe("fetchDashboardPayload", () => {
   });
 });
 
+describe("Slice 2: clustering fail-closed diagnostics from _meta", () => {
+  it("happy path — no clustering keys → clusteringFailed=false, nulls elsewhere", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: { refreshedAt: "2026-05-08T00:00:00Z", hasSnapshot: true },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.clusteringFailed).toBe(false);
+    expect(result.clusteringFailureReason).toBeNull();
+    expect(result.clusteringAttempts).toBeNull();
+    expect(result.clusteringLatencyMs).toBeNull();
+  });
+
+  it("fail-closed path — usedFallbackClustering=true + reason=timeout surfaces clusteringFailed", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          refreshedAt: "2026-05-08T00:00:00Z",
+          hasSnapshot: true,
+          usedFallbackClustering: true,
+          clusteringFailureReason: "timeout",
+          clusteringAttempts: 2,
+          clusteringLatencyMs: [25000, 25001],
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.payload.stories).toHaveLength(0);
+    expect(result.clusteringFailed).toBe(true);
+    expect(result.clusteringFailureReason).toBe("timeout");
+    expect(result.clusteringAttempts).toBe(2);
+    expect(result.clusteringLatencyMs).toEqual([25000, 25001]);
+  });
+
+  it("error reason is surfaced and propagates through refreshDashboard", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          usedFallbackClustering: true,
+          clusteringFailureReason: "error",
+          clusteringAttempts: 2,
+        },
+      }),
+    });
+    const result = await refreshDashboard({ fetcher });
+    expect(result.clusteringFailed).toBe(true);
+    expect(result.clusteringFailureReason).toBe("error");
+    expect(result.clusteringLatencyMs).toBeNull();
+  });
+
+  it("malformed _meta clustering fields degrade safely (never reads as failed)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: {
+          usedFallbackClustering: "yes", // not boolean true
+          clusteringFailureReason: "weird", // not timeout|error
+          clusteringAttempts: "two", // not a number
+          clusteringLatencyMs: [null, "x"], // not all numbers
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.clusteringFailed).toBe(false);
+    expect(result.clusteringFailureReason).toBeNull();
+    expect(result.clusteringAttempts).toBeNull();
+    expect(result.clusteringLatencyMs).toBeNull();
+  });
+
+  it("bootstrapDashboard also surfaces clustering diagnostics", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          bootstrapDecision: "ran_refresh",
+          usedFallbackClustering: true,
+          clusteringFailureReason: "timeout",
+          clusteringAttempts: 2,
+        },
+      }),
+    });
+    const result = await bootstrapDashboard({ fetcher });
+    expect(result.decision).toBe("ran_refresh");
+    expect(result.clusteringFailed).toBe(true);
+    expect(result.clusteringFailureReason).toBe("timeout");
+  });
+});
+
 describe("fetchDashboardPayload — identity header propagation", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
