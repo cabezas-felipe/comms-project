@@ -401,6 +401,13 @@ export function isAllowlistVerboseEnv(env = process.env) {
  * @param {string[]|null} [opts.allowlist]    — feed-name allowlist guard:
  *   `null` disables the guard, `string[]` overrides env, `undefined` falls
  *   back to TEMPO_RSS_ALLOWLIST.  See `resolveAllowlist` for precedence.
+ * @param {string[]} [opts.feedIds]           — optional scoped-fetch set of
+ *   manifest feed `id` values.  When provided and non-empty, the structurally
+ *   eligible rows are narrowed to those whose `feed.id` matches an entry
+ *   (trim + exact id match) BEFORE the allowlist + fetch; ids not in the
+ *   manifest are ignored.  Omitted / undefined / empty array → unchanged
+ *   (every structurally eligible feed is fetched, as today).  See
+ *   `scopeFeedsByIds`.
  * @returns {Promise<Array>} raw items
  */
 export async function readFeedItems(dataDir, opts = {}) {
@@ -455,6 +462,18 @@ async function readLiveItems(dataDir, opts) {
     console.log(`[feed-reader.live] skipped ${skipped.length} manifest row(s): ${skipped.map((s) => `${s.id}:${s.reason}`).join(", ")}`);
   }
 
+  // Scoped fetch (Slice 1): when the caller passes opts.feedIds, narrow the
+  // structurally-eligible set to those rows BEFORE the allowlist + fetch.
+  // Omitted / empty → unchanged (every eligible feed proceeds).  The scoped
+  // subset is what the allowlist (incl. manifest-derived default) then applies
+  // to, so a scoped refresh only ever allowlists/fetches the requested feeds.
+  const { scoped: eligibleScoped, applied: scopeApplied, requested: scopeRequested } =
+    scopeFeedsByIds(structurallyEligible, opts.feedIds);
+  if (scopeApplied) {
+    // One low-noise line, only when scoping actually applied.
+    console.log(`[feed-reader.live] feedIds scope=${scopeRequested} eligible=${eligibleScoped.length}`);
+  }
+
   // Layered guard: filterFeeds rejects rows by structural eligibility
   // (kind/active/url); the allowlist rejects by operator policy.  We resolve
   // and apply it AFTER filterFeeds so the blocked log only mentions rows
@@ -467,7 +486,7 @@ async function readLiveItems(dataDir, opts) {
   // `undefined` as the env arg so resolveAllowlist reads its snapshot from
   // process.env directly — picking up both the newer and legacy var names
   // with the documented precedence.
-  const manifestDerived = deriveManifestAllowlist(structurallyEligible);
+  const manifestDerived = deriveManifestAllowlist(eligibleScoped);
   const { allowlist, source } = resolveAllowlistWithSource(
     opts.allowlist,
     undefined,
@@ -478,7 +497,7 @@ async function readLiveItems(dataDir, opts) {
   console.log(
     `[feed-reader.live] allowlist source=${source} active=${allowlist === null ? "false" : String(allowlist.length > 0)} entries=${allowlist === null ? 0 : allowlist.length}`
   );
-  const { allowed: eligible, blocked } = applyAllowlistGuard(structurallyEligible, allowlist);
+  const { allowed: eligible, blocked } = applyAllowlistGuard(eligibleScoped, allowlist);
   const blockedFragment = formatBlockedList(blocked, { verbose: isAllowlistVerboseEnv() });
   if (blockedFragment) {
     // One log line, optional cap, never "blocked=0" — see formatBlockedList.
@@ -584,6 +603,50 @@ export function filterFeeds(feeds, publisherFilterRaw) {
     eligible.push(feed);
   }
   return { eligible, skipped };
+}
+
+/**
+ * Restrict structurally-eligible feeds to a caller-supplied set of manifest
+ * feed `id` values (the scoped-fetch primitive — Slice 1 of the source
+ * expansion plan).  A later slice will pass user-matched feed ids from the
+ * service layer so a refresh fetches only the feeds a user follows; this
+ * exposes the feed-reader API only — no caller wires it yet.
+ *
+ * Contract:
+ *   - `feedIds` omitted / undefined / empty array (or all entries blank /
+ *     non-string) → no scoping; return the feeds unchanged with
+ *     `applied:false`.  This preserves today's "fetch all structurally
+ *     eligible" behavior exactly.
+ *   - non-empty `feedIds` with at least one usable entry → keep only rows
+ *     whose `feed.id` (stringified, trimmed) matches a trimmed entry in the
+ *     set.  Ids in the set that aren't in the manifest are simply absent from
+ *     the result (ignored, never throw).
+ *
+ * Runs AFTER `filterFeeds` and BEFORE the allowlist, so the scoped subset is
+ * what the allowlist + publisher filter then narrow further.  Returns
+ * `{ scoped, applied, requested }` so the caller can log only when scoping
+ * actually applied (and report how many ids were requested).
+ */
+export function scopeFeedsByIds(feeds, feedIds) {
+  const list = Array.isArray(feeds) ? feeds : [];
+  if (!Array.isArray(feedIds) || feedIds.length === 0) {
+    return { scoped: list, applied: false, requested: 0 };
+  }
+  const wanted = new Set();
+  for (const raw of feedIds) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) continue;
+    wanted.add(trimmed);
+  }
+  // A non-empty array that normalizes to nothing usable (all blank / non-string)
+  // must NOT silently fetch zero feeds — fall through to "no scoping" so a
+  // malformed caller input can't blackhole the whole refresh.
+  if (wanted.size === 0) {
+    return { scoped: list, applied: false, requested: 0 };
+  }
+  const scoped = list.filter((feed) => wanted.has(String(feed?.id ?? "").trim()));
+  return { scoped, applied: true, requested: wanted.size };
 }
 
 // ─── Fetch + parse ───────────────────────────────────────────────────────────

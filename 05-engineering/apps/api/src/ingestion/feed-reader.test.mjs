@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   readFeedItems,
   filterFeeds,
+  scopeFeedsByIds,
   mapEntry,
   stripHtml,
   derivePublisherFromFeedName,
@@ -1419,6 +1420,131 @@ test("readFeedItems(live): allowlist 'washington post' alone blocks Reuters feed
     });
   });
   assert.deepEqual(calls, ["https://wapo.example.com/politics.xml"], "only WaPo fetched; both Reuters URLs blocked");
+});
+
+// ─── Scoped fetch by feedIds (Slice 1) ───────────────────────────────────────
+//
+// readFeedItems / readLiveItems accept an optional opts.feedIds set of manifest
+// feed `id` values.  When provided and non-empty, the structurally eligible
+// rows are narrowed to those ids (trim + exact match) BEFORE the allowlist +
+// fetch.  Omitted / undefined / empty array → unchanged (fetch all eligible).
+// These tests pass allowlist:null so they exercise scoping in isolation rather
+// than having the manifest-derived allowlist default co-narrow the set.
+
+const SCOPE_MANIFEST = [
+  { id: "feed-a", name: "Alpha Wire — Politics", publisher: "Alpha Wire", kind: "rss", url: "https://alpha.example.com/feed.xml", weight: 90, active: true },
+  { id: "feed-b", name: "Beta News — World", publisher: "Beta News", kind: "rss", url: "https://beta.example.com/feed.xml", weight: 85, active: true },
+  { id: "feed-c", name: "Gamma Times — Tech", publisher: "Gamma Times", kind: "rss", url: "https://gamma.example.com/feed.xml", weight: 80, active: true },
+];
+
+const SCOPE_FETCH_MAP = {
+  "https://alpha.example.com/feed.xml": { body: rssXml({ title: "Alpha", items: [{ title: "A1", link: "https://alpha/a1", guid: "a1", pubDate: nowMinusMinutes(10), description: "Body A" }] }) },
+  "https://beta.example.com/feed.xml": { body: rssXml({ title: "Beta", items: [{ title: "B1", link: "https://beta/b1", guid: "b1", pubDate: nowMinusMinutes(20), description: "Body B" }] }) },
+  "https://gamma.example.com/feed.xml": { body: rssXml({ title: "Gamma", items: [{ title: "C1", link: "https://gamma/c1", guid: "c1", pubDate: nowMinusMinutes(30), description: "Body C" }] }) },
+};
+
+test("scopeFeedsByIds: omitted / undefined / empty array → no scoping (unchanged feeds)", () => {
+  const feeds = SCOPE_MANIFEST;
+  for (const feedIds of [undefined, [], null]) {
+    const { scoped, applied, requested } = scopeFeedsByIds(feeds, feedIds);
+    assert.equal(scoped, feeds, `feedIds=${JSON.stringify(feedIds)} must return the input list reference unchanged`);
+    assert.equal(applied, false);
+    assert.equal(requested, 0);
+  }
+});
+
+test("scopeFeedsByIds: non-empty set keeps only matching rows (trim + exact id match)", () => {
+  const { scoped, applied, requested } = scopeFeedsByIds(SCOPE_MANIFEST, ["  feed-a  ", "feed-c"]);
+  assert.deepEqual(scoped.map((f) => f.id), ["feed-a", "feed-c"]);
+  assert.equal(applied, true);
+  assert.equal(requested, 2);
+});
+
+test("scopeFeedsByIds: ids not present in the manifest are ignored (no throw, no phantom rows)", () => {
+  const { scoped, applied } = scopeFeedsByIds(SCOPE_MANIFEST, ["feed-a", "does-not-exist"]);
+  assert.deepEqual(scoped.map((f) => f.id), ["feed-a"]);
+  assert.equal(applied, true);
+});
+
+test("scopeFeedsByIds: non-empty array of blank/non-string entries → falls through to no scoping", () => {
+  // Defensive: a malformed input that normalizes to nothing usable must not
+  // blackhole the refresh by scoping to an empty set.
+  const { scoped, applied } = scopeFeedsByIds(SCOPE_MANIFEST, ["   ", 42, null]);
+  assert.equal(scoped, SCOPE_MANIFEST);
+  assert.equal(applied, false);
+});
+
+test("readFeedItems(live): opts.feedIds=['feed-a'] fetches only feed A", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return makeFetchMock(SCOPE_FETCH_MAP)(url);
+  };
+  await readFeedItems("/unused", {
+    mode: "live",
+    fetchImpl,
+    manifestLoader: async () => SCOPE_MANIFEST,
+    allowlist: null, // isolate scoping from the manifest-derived allowlist default
+    feedIds: ["feed-a"],
+  });
+  assert.deepEqual(calls, ["https://alpha.example.com/feed.xml"], "only feed A fetched; B and C scoped out");
+});
+
+test("readFeedItems(live): opts.feedIds with an id not in the manifest is ignored (no throw)", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return makeFetchMock(SCOPE_FETCH_MAP)(url);
+  };
+  const items = await readFeedItems("/unused", {
+    mode: "live",
+    fetchImpl,
+    manifestLoader: async () => SCOPE_MANIFEST,
+    allowlist: null,
+    feedIds: ["feed-b", "ghost-feed"],
+  });
+  assert.deepEqual(calls, ["https://beta.example.com/feed.xml"], "only the real feed-b fetched; unknown id ignored");
+  assert.equal(items.length, 1);
+});
+
+test("readFeedItems(live): opts.feedIds omitted → fetches all eligible feeds (regression)", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return makeFetchMock(SCOPE_FETCH_MAP)(url);
+  };
+  await readFeedItems("/unused", {
+    mode: "live",
+    fetchImpl,
+    manifestLoader: async () => SCOPE_MANIFEST,
+    allowlist: null,
+    // feedIds intentionally omitted
+  });
+  assert.deepEqual([...calls].sort(), [
+    "https://alpha.example.com/feed.xml",
+    "https://beta.example.com/feed.xml",
+    "https://gamma.example.com/feed.xml",
+  ], "no scoping → every structurally eligible feed fetched");
+});
+
+test("readFeedItems(live): opts.feedIds=[] behaves like omitted (no scoping filter applied)", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return makeFetchMock(SCOPE_FETCH_MAP)(url);
+  };
+  await readFeedItems("/unused", {
+    mode: "live",
+    fetchImpl,
+    manifestLoader: async () => SCOPE_MANIFEST,
+    allowlist: null,
+    feedIds: [],
+  });
+  assert.deepEqual([...calls].sort(), [
+    "https://alpha.example.com/feed.xml",
+    "https://beta.example.com/feed.xml",
+    "https://gamma.example.com/feed.xml",
+  ], "empty feedIds array → same as omitted (all eligible fetched)");
 });
 
 // ─── Optional live smoke (skipped by default) ────────────────────────────────
