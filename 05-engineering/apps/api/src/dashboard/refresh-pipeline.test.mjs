@@ -216,20 +216,45 @@ test("applyTopicKeywordFilter: keeps items matching keyword in headline", () => 
   assert.equal(result[0].sourceId, "a");
 });
 
-test("applyTopicKeywordFilter: passes all items when both topics and keywords are empty", () => {
-  const settings = { ...BASE_SETTINGS, topics: [], keywords: [] };
+test("applyTopicKeywordFilter: passes all items only when topics, keywords AND geographies are all empty", () => {
+  const settings = { ...BASE_SETTINGS, topics: [], keywords: [], geographies: [] };
   const items = [makeItem({ sourceId: "a" }), makeItem({ sourceId: "b" })];
   assert.equal(applyTopicKeywordFilter(items, settings).length, 2);
 });
 
-test("applyTopicKeywordFilter: does NOT filter by geography (geo handled by applyGeoFilter)", () => {
+test("applyTopicKeywordFilter: geographies-only settings now filter by geo text mention (Slice 2)", () => {
   const items = [
-    // has no matching topic or keyword, only a matching geography
-    makeItem({ sourceId: "a", topic: "Unknown", geographies: ["US"], headline: "No keywords here" }),
+    // Mentions configured geo "Colombia" in text — passes via geo lexical gate.
+    makeItem({ sourceId: "geo-hit", topic: "Unknown", geographies: [], headline: "Colombia presidential candidate enters race", body: ["No keyword."] }),
+    // No topic/keyword/geo text — must NOT pass now that geo gate is active.
+    makeItem({ sourceId: "geo-miss", topic: "Unknown", geographies: ["US"], headline: "Local news today", body: ["No keyword."] }),
   ];
-  // With only geo configured (no topics/keywords), applyTopicKeywordFilter passes all
-  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: [], keywords: [] });
-  assert.equal(result.length, 1, "no topics/keywords → all pass regardless of geo");
+  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: [], keywords: [], geographies: ["Colombia"] });
+  assert.deepEqual(result.map((i) => i.sourceId), ["geo-hit"], "geo text mention passes; non-mention is filtered");
+});
+
+test("applyTopicKeywordFilter: 'Colombia presidential candidate…' passes on configured geo alone (no topic/keyword)", () => {
+  const items = [
+    makeItem({ sourceId: "a", topic: "Unknown", geographies: [], headline: "Colombia presidential candidate floats new policy", body: ["No keyword here."] }),
+  ];
+  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: [], keywords: [], geographies: ["Colombia"] });
+  assert.equal(result.length, 1, "configured geography text mention is a sufficient lexical signal");
+});
+
+test("applyTopicKeywordFilter: 'Colombians head to the polls…' passes via demonym synonym (Slice 1 parity)", () => {
+  const items = [
+    makeItem({ sourceId: "a", topic: "Unknown", geographies: [], headline: "Colombians head to the polls this weekend", body: ["No keyword here."] }),
+  ];
+  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: [], keywords: [], geographies: ["Colombia"] });
+  assert.equal(result.length, 1, "demonym 'Colombians' resolves to configured 'Colombia'");
+});
+
+test("applyTopicKeywordFilter: unrelated geography text does not pass when only Colombia/Kenya configured", () => {
+  const items = [
+    makeItem({ sourceId: "a", topic: "Unknown", geographies: [], headline: "Norwegian fisheries report record salmon harvest", body: ["No keyword here."] }),
+  ];
+  const result = applyTopicKeywordFilter(items, { ...BASE_SETTINGS, topics: [], keywords: [], geographies: ["Colombia", "Kenya"] });
+  assert.deepEqual(result, [], "text mentions neither configured geo → filtered");
 });
 
 // ─── Source selection vs. relevance filtering separation ─────────────────────
@@ -2381,6 +2406,40 @@ test("analyzeTopicKeywordStage: pins the four mutually-exclusive partition count
   assert.equal(b.neither, 1);
   assert.equal(b.passCount, 3);
   assert.equal(b.primaryDropCause, null, "at least one item passed");
+});
+
+test("analyzeTopicKeywordStage: geoLexicalOnly is its own mutually-exclusive bucket (Slice 2)", async () => {
+  const { analyzeTopicKeywordStage } = await import("./refresh-pipeline.mjs");
+  const settings = { topics: ["Diplomatic relations"], keywords: ["sanctions"], geographies: ["Colombia"] };
+  const items = [
+    { topic: "Diplomatic relations", headline: "no kw here", body: [] },              // topicOnly
+    { topic: "Other", headline: "Treasury sanctions update", body: [] },              // keywordOnly
+    { topic: "Diplomatic relations", headline: "sanctions", body: [] },               // both
+    { topic: "Other", headline: "Colombians head to the polls", body: [] },           // geoLexicalOnly
+    { topic: "Other", headline: "Local sports", body: [] },                           // neither
+    // keyword + geo both fire → counted as keywordOnly (geo only when sole reason)
+    { topic: "Other", headline: "Bogotá sanctions ruling", body: [] },                // keywordOnly
+  ];
+  const b = analyzeTopicKeywordStage(items, settings);
+  assert.equal(b.inputCount, 6);
+  assert.equal(b.hasGeographies, true);
+  assert.equal(b.topicOnly, 1);
+  assert.equal(b.keywordOnly, 2);
+  assert.equal(b.both, 1);
+  assert.equal(b.geoLexicalOnly, 1);
+  assert.equal(b.neither, 1);
+  // passCount sums every passing bucket (topic+keyword+both+geo).
+  assert.equal(b.passCount, 5);
+  assert.equal(b.primaryDropCause, null, "at least one item passed");
+});
+
+test("analyzeTopicKeywordStage: only geographies configured + no text match → primaryDropCause='no_geo_match'", async () => {
+  const { analyzeTopicKeywordStage } = await import("./refresh-pipeline.mjs");
+  const items = [{ topic: "Other", headline: "unrelated", body: [] }];
+  const b = analyzeTopicKeywordStage(items, { topics: [], keywords: [], geographies: ["Colombia"] });
+  assert.equal(b.passCount, 0);
+  assert.equal(b.geoLexicalOnly, 0);
+  assert.equal(b.primaryDropCause, "no_geo_match");
 });
 
 test("analyzeTopicKeywordStage: primaryDropCause distinguishes 'no_topic_match' vs 'no_keyword_match' vs 'no_topic_no_keyword'", async () => {
@@ -4662,11 +4721,13 @@ function p4SemanticGeoStub() {
 }
 
 test("decisionTrace: pipeline surfaces rescue_semantic_geo path in sampleRescues + counters (D-059 / D-062)", async () => {
-  // Settings have NO configured topic/keyword so recall is a no-op (admits
-  // the item) and scoreBeatFit fires ONLY the geo component — deterministic
-  // ≈ 0.15 (geo) + 0 (stale recency). With semantic ≈ 0.65 the blended
-  // score lands just under 0.40 → multisignal rescue fails (only 1 signal),
-  // semantic-geo rescue succeeds (geo + strong semantic + no penalty).
+  // Settings have NO configured topic/keyword. After Slice 2 the recall geo
+  // lexical gate is active, so the item must mention the configured geography
+  // ("Nigeria") in text to pass recall; beat-fit then fires ONLY the geo
+  // component — deterministic ≈ 0.20 (geo) + 0 (stale recency). With semantic
+  // ≈ 0.65 the blended score lands just under 0.40 → multisignal rescue fails
+  // (only 1 signal), semantic-geo rescue succeeds (geo + strong semantic + no
+  // penalty).
   const settings = {
     contractVersion: "2026-05-19-meta-story-fields",
     topics: [],
@@ -4680,7 +4741,7 @@ test("decisionTrace: pipeline surfaces rescue_semantic_geo path in sampleRescues
     outlet: "The Washington Post — World",
     geographies: ["Nigeria"],
     topic: "",
-    headline: "Background piece on the Sahel region",
+    headline: "Background piece on Nigeria and the Sahel region",
     body: ["A long-form analysis of regional dynamics without any configured signal terms."],
     minutesAgo: 1440,
   });
