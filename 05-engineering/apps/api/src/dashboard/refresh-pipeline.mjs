@@ -60,6 +60,10 @@ import {
   resolveWhyItMatters,
 } from "./why-this-matters-engine.mjs";
 import { retrieveDoctrineSnippetsForStory } from "./why-doctrine-retrieval.mjs";
+import {
+  splitOverMergedClusters,
+  resolveClusterSplitConfig,
+} from "./cluster-split-healer.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -1067,6 +1071,12 @@ export async function runRefreshPipeline({
   // corpus.  Signature: ({ story, state }) => Array<snippet>; throws are
   // caught and resolve to `[]` (spec §5 "retrieval error / timeout").
   doctrineRetrievalFn = null,
+  // Slice 2 — post-cluster split healer config. When omitted,
+  // `resolveClusterSplitConfig()` reads env (default ENABLED). Tests inject an
+  // override (e.g. `{ enabled: false }`) to exercise — or opt out of — the
+  // healer without env mutation, mirroring the other stage-config injection
+  // points above.
+  clusterSplitConfig = null,
 }) {
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
@@ -1619,6 +1629,25 @@ export async function runRefreshPipeline({
     }
   }
 
+  // 6b. Post-cluster split healer (Slice 2): clustering can over-merge
+  //     unrelated stories that share a country (e.g. a Colombia election story
+  //     and a Colombia mine-attack story). The deterministic healer splits such
+  //     over-merges back into one meta-story per source item BEFORE ID lineage
+  //     runs, so each split child gets a fresh evidence-derived metaStoryId.
+  //     Source index is built over the DEDUPED set (the only IDs clustering
+  //     saw) and reused by grounding + buildStory below. Default ENABLED;
+  //     `TEMPO_CLUSTER_SPLIT_HEALER_ENABLED=false` is the instant rollback.
+  const sourceItemsById = new Map(dedupedItems.map((item) => [item.sourceId, item]));
+  const effectiveClusterSplitConfig = clusterSplitConfig ?? resolveClusterSplitConfig();
+  const clusterSplitResult = splitOverMergedClusters(
+    rawMetaStories,
+    sourceItemsById,
+    settings,
+    effectiveClusterSplitConfig
+  );
+  rawMetaStories = clusterSplitResult.stories;
+  const clusterSplitDiagnostics = clusterSplitResult.diagnostics;
+
   // 7. Resolve stable meta_story_id with lineage continuity:
   //    Read prior snapshot, attempt to match each new cluster against a prior
   //    story (same primary topic + Jaccard ≥ 0.5 on source IDs).  Exactly-one
@@ -1635,9 +1664,9 @@ export async function runRefreshPipeline({
   }
   rawMetaStories = reuseOrAssignIds(rawMetaStories, priorStories);
 
-  // 8. Build source index over the DEDUPED set: clustering only saw these IDs,
-  //    so grounding + buildStory must look up against the same universe.
-  const sourceItemsById = new Map(dedupedItems.map((item) => [item.sourceId, item]));
+  // 8. Source index (`sourceItemsById`) was built over the DEDUPED set above
+  //    (step 6b) — clustering only saw these IDs, so grounding + buildStory
+  //    look up against the same universe.
 
   // 9. Grounding verification (source-level + claim-level + summary/subtitle grounding)
   const { valid: groundedStories, invalid: failedGrounding } = verifyGrounding(
@@ -2007,6 +2036,16 @@ export async function runRefreshPipeline({
     clusteringFailureReason,
     clusteringAttempts,
     clusteringLatencyMs: clusteringAttemptLatencyMs,
+    // Slice 2 — post-cluster split healer diagnostics. `enabled` reflects the
+    // resolved config; `splitCount` / `splitReasons` show how many over-merged
+    // clusters were split and why (low_token_overlap | disjoint_claim_evidence).
+    clusterSplit: {
+      enabled: clusterSplitDiagnostics.enabled,
+      inputCount: clusterSplitDiagnostics.inputCount,
+      outputCount: clusterSplitDiagnostics.outputCount,
+      splitCount: clusterSplitDiagnostics.splitCount,
+      splitReasons: clusterSplitDiagnostics.splitReasons,
+    },
     groundingFailures,
     // Phase 3 strict-grounding metrics
     droppedUngroundedStoryCount,

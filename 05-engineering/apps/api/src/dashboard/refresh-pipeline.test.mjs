@@ -77,6 +77,16 @@ function makeItem(overrides = {}) {
   };
 }
 
+// Slice 2: the post-cluster split healer defaults to ENABLED. Pre-existing
+// pipeline tests below build multi-source meta-stories with deliberately
+// low-overlap (or hallucinated-id) fixtures to exercise grounding / tags /
+// outletCount aggregation — those clusters would now be split by the healer,
+// changing the stage under test. Tests that are NOT exercising the healer pass
+// this override so they stay hermetic; the healer's own behavior is covered by
+// the dedicated "Slice 2" tests at the end of this file and by
+// cluster-split-healer.test.mjs.
+const SPLIT_HEALER_DISABLED = { enabled: false, jaccardThreshold: 0.15 };
+
 const BASE_SETTINGS = {
   contractVersion: "2026-05-19-meta-story-fields",
   topics: ["Diplomatic relations", "Migration policy"],
@@ -437,6 +447,7 @@ test("runRefreshPipeline: rejects meta-story with fully hallucinated source IDs 
     clusterFn: async () => [hallucinatedStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   assert.equal(payload.stories.length, 0, "story with all hallucinated IDs must be discarded");
   assert.equal(log.groundingFailures, 1);
@@ -458,6 +469,7 @@ test("runRefreshPipeline: Phase 3 strict drop — partial_source_ids stories are
     clusterFn: async () => [partialStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   assert.equal(payload.stories.length, 0, "partial_source_ids must be dropped under strict grounding");
   assert.equal(log.groundingFailures, 1);
@@ -973,6 +985,7 @@ test("runRefreshPipeline: ≥2 grounded factual_claims → subtitle ≠ summary 
     }],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   assert.equal(payload.stories.length, 1);
   const s = payload.stories[0];
@@ -1010,6 +1023,7 @@ test("runRefreshPipeline: poison subtitle on partial_source_ids cannot reach out
     clusterFn: async () => [partialStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
 
   assert.equal(payload.stories.length, 0, "strict grounding drops the story entirely");
@@ -1278,6 +1292,7 @@ test("runRefreshPipeline: mixed batch — valid stories survive, failed stories 
     clusterFn: async () => stories,
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   assert.equal(payload.stories.length, 1, "only the valid story survives");
   assert.equal(payload.stories[0].metaStoryId, "valid");
@@ -1313,6 +1328,7 @@ test("runRefreshPipeline: dropped stories are written to rejection log via write
     clusterFn: async () => stories,
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
     writeRejectionsFn: async (recs) => { captured = recs; },
   });
   assert.ok(Array.isArray(captured), "writeRejectionsFn must be called with rejection records");
@@ -3171,6 +3187,7 @@ test("runRefreshPipeline: multi-source story aggregates evidence across all sour
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   const tags = payload.stories[0].tags;
   assert.deepEqual(tags.topics, ["Diplomatic relations"]);
@@ -3283,6 +3300,7 @@ test("runRefreshPipeline: outletCount reflects unique outlet identities, not row
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 3, "all 3 source pieces remain on the story");
@@ -3363,6 +3381,7 @@ test("runRefreshPipeline: outletCount collapses casing/whitespace variants of th
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 4, "all 4 source pieces remain on the story");
@@ -3451,6 +3470,7 @@ test("runRefreshPipeline: outletCount excludes blank/whitespace-only outlets", a
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 4, "all 4 source pieces remain on the story");
@@ -3513,6 +3533,7 @@ test("runRefreshPipeline: outletCount is 0 when every outlet is blank", async ()
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 2);
@@ -3587,6 +3608,7 @@ test("runRefreshPipeline: three sibling-section feeds from one publisher collaps
     clusterFn: async () => [metaStory],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
   });
   const story = payload.stories[0];
   assert.equal(story.sources.length, 3, "all three articles remain on the story");
@@ -6458,4 +6480,141 @@ test("Phase 5 — doctrine retrieval throw is caught and writer still runs with 
   assert.equal(payload.stories.length, 1);
   const trace = payload._whyItMattersTraces[payload.stories[0].metaStoryId];
   assert.deepEqual(trace.doctrineRefs, []);
+});
+
+// ─── Slice 2: post-cluster split healer integration ──────────────────────────
+//
+// These pin the wiring of `splitOverMergedClusters` into the pipeline (between
+// clustering and ID lineage). The unit-level split policy is covered in
+// cluster-split-healer.test.mjs; here we assert the end-to-end payload effect
+// and the `log.clusterSplit` diagnostics surface.
+
+// Two unrelated Colombia stories the clusterFn deliberately over-merges into a
+// single meta-story — the case the healer exists to undo.
+const SPLIT_ELECTION_ITEM = {
+  sourceId: "co-election",
+  outlet: "Reuters",
+  topic: "Diplomatic relations",
+  geographies: ["Colombia"],
+  weight: 75,
+  minutesAgo: 30,
+  headline: "Colombia presidential candidates clash in final election debate",
+  body: ["Voters head to the polls next month to choose a new president."],
+};
+const SPLIT_MINE_ITEM = {
+  sourceId: "co-mine",
+  outlet: "Reuters",
+  topic: "Diplomatic relations",
+  geographies: ["Colombia"],
+  weight: 75,
+  minutesAgo: 45,
+  headline: "Armed group attacks Colombia gold mine, killing several workers",
+  body: ["Authorities blame an illegal armed faction for the deadly assault."],
+};
+
+// One merged meta-story carrying both unrelated source items.
+function mergedColombiaMetaStory() {
+  return {
+    meta_story_id: "merged-colombia",
+    title: "Colombia Developments",
+    subtitle: "Recent developments in colombia.",
+    source_item_ids: ["co-election", "co-mine"],
+    summary: "merged",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] },
+    factual_claims: ["election claim", "mine claim"],
+    claim_evidence_map: { "0": ["co-election"], "1": ["co-mine"] },
+  };
+}
+
+test("runRefreshPipeline (Slice 2): merged unrelated Colombia stories get split into 2", async () => {
+  const rawItems = [
+    makeItem(SPLIT_ELECTION_ITEM),
+    makeItem(SPLIT_MINE_ITEM),
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [mergedColombiaMetaStory()],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(payload.stories.length, 2, "healer should split the over-merge into 2 stories");
+  assert.ok(log.clusterSplit, "log.clusterSplit diagnostics must be present");
+  assert.equal(log.clusterSplit.enabled, true);
+  assert.ok(log.clusterSplit.splitCount >= 1, "splitCount must reflect at least one split");
+  assert.equal(log.clusterSplit.inputCount, 1);
+  assert.equal(log.clusterSplit.outputCount, 2);
+  // Each split story carries its own source headline as the title.
+  const titles = payload.stories.map((s) => s.title).sort();
+  assert.deepEqual(titles, [
+    "Armed group attacks Colombia gold mine, killing several workers",
+    "Colombia presidential candidates clash in final election debate",
+  ]);
+});
+
+test("runRefreshPipeline (Slice 2): healer disabled keeps the merged story (1)", async () => {
+  const rawItems = [
+    makeItem(SPLIT_ELECTION_ITEM),
+    makeItem(SPLIT_MINE_ITEM),
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [mergedColombiaMetaStory()],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
+  });
+
+  assert.equal(payload.stories.length, 1, "disabled healer must leave the merge intact");
+  assert.equal(log.clusterSplit.enabled, false);
+  assert.equal(log.clusterSplit.splitCount, 0);
+  assert.equal(log.clusterSplit.outputCount, 1);
+});
+
+test("runRefreshPipeline (Slice 2): a same-event election pair is not split", async () => {
+  const rawItems = [
+    makeItem({
+      sourceId: "co-elec-a",
+      outlet: "Reuters",
+      topic: "Diplomatic relations",
+      geographies: ["Colombia"],
+      minutesAgo: 30,
+      headline: "Colombia presidential election debate draws record viewers",
+      body: ["The presidential debate covered tax reform and security policy."],
+    }),
+    makeItem({
+      sourceId: "co-elec-b",
+      outlet: "Reuters",
+      topic: "Diplomatic relations",
+      geographies: ["Colombia"],
+      minutesAgo: 45,
+      headline: "Colombia presidential election debate sparks tax reform clash",
+      body: ["Candidates argued over tax reform and security during the debate."],
+    }),
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    // Single merged story with corroborated (shared-source) claim evidence so
+    // neither the low-overlap nor the disjoint-claim split path fires.
+    clusterFn: async () => [
+      {
+        meta_story_id: "same-event-election",
+        title: "Colombia Election Debate",
+        subtitle: "Coverage of the presidential debate.",
+        source_item_ids: ["co-elec-a", "co-elec-b"],
+        summary: "merged",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] },
+        factual_claims: ["Candidates debated tax reform and security"],
+        claim_evidence_map: { "0": ["co-elec-a", "co-elec-b"] },
+      },
+    ],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(payload.stories.length, 1, "high-overlap same-event pair must stay merged");
+  assert.equal(log.clusterSplit.splitCount, 0);
 });
