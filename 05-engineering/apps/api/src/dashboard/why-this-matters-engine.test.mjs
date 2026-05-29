@@ -9,6 +9,7 @@ import {
   WHY_TAXONOMY,
   deriveWhyStateFromWhatChangedState,
   resolveWhyConfig,
+  resolveWhyConcurrencyConfig,
   resolveWhyItMatters,
   safeWhyFallbackForState,
   validateWhyItMatters,
@@ -21,6 +22,7 @@ function withWhyEnv(setup, run) {
     enabled: process.env.TEMPO_AI_WHY_IT_MATTERS_ENABLED,
     model: process.env.TEMPO_AI_WHY_IT_MATTERS_MODEL,
     timeout: process.env.TEMPO_AI_WHY_IT_MATTERS_TIMEOUT_MS,
+    concurrency: process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY,
     mockOnly: process.env.TEMPO_AI_MOCK_ONLY,
     apiKey: process.env.TEMPO_ANTHROPIC_API_KEY,
     altKey: process.env.ANTHROPIC_API_KEY,
@@ -28,6 +30,7 @@ function withWhyEnv(setup, run) {
   delete process.env.TEMPO_AI_WHY_IT_MATTERS_ENABLED;
   delete process.env.TEMPO_AI_WHY_IT_MATTERS_MODEL;
   delete process.env.TEMPO_AI_WHY_IT_MATTERS_TIMEOUT_MS;
+  delete process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
   delete process.env.TEMPO_AI_MOCK_ONLY;
   delete process.env.TEMPO_ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
@@ -36,6 +39,7 @@ function withWhyEnv(setup, run) {
     if (saved.enabled !== undefined) process.env.TEMPO_AI_WHY_IT_MATTERS_ENABLED = saved.enabled;
     if (saved.model !== undefined) process.env.TEMPO_AI_WHY_IT_MATTERS_MODEL = saved.model;
     if (saved.timeout !== undefined) process.env.TEMPO_AI_WHY_IT_MATTERS_TIMEOUT_MS = saved.timeout;
+    if (saved.concurrency !== undefined) process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = saved.concurrency;
     if (saved.mockOnly !== undefined) process.env.TEMPO_AI_MOCK_ONLY = saved.mockOnly;
     if (saved.apiKey !== undefined) process.env.TEMPO_ANTHROPIC_API_KEY = saved.apiKey;
     if (saved.altKey !== undefined) process.env.ANTHROPIC_API_KEY = saved.altKey;
@@ -138,6 +142,56 @@ test("resolveWhyConfig: invalid timeout falls back to default", async () => {
   });
   await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_TIMEOUT_MS = "-5"; }, () => {
     assert.equal(resolveWhyConfig().timeoutMs, 4000);
+  });
+});
+
+// ─── resolveWhyConcurrencyConfig ────────────────────────────────────────────
+
+test("resolveWhyConcurrencyConfig: unset → default 4", async () => {
+  await withWhyEnv(() => {}, () => {
+    assert.deepEqual(resolveWhyConcurrencyConfig(), { concurrency: 4 });
+  });
+});
+
+test("resolveWhyConcurrencyConfig: exact in-range values pass through", async () => {
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "4"; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 4);
+  });
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "1"; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 1);
+  });
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "6"; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 6);
+  });
+});
+
+test("resolveWhyConcurrencyConfig: below range clamps up to 1", async () => {
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "0"; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 1);
+  });
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "-1"; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 1);
+  });
+});
+
+test("resolveWhyConcurrencyConfig: above range clamps down to 6", async () => {
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "7"; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 6);
+  });
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "100"; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 6);
+  });
+});
+
+test("resolveWhyConcurrencyConfig: invalid / empty falls back to default 4", async () => {
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "abc"; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 4);
+  });
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = ""; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 4);
+  });
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "   "; }, () => {
+    assert.equal(resolveWhyConcurrencyConfig().concurrency, 4);
   });
 });
 
