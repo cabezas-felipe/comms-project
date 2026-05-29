@@ -106,7 +106,7 @@ export const GEOGRAPHY_ALIASES: Readonly<Record<string, string>> = {
 // the contract.  Mirrored verbatim in `apps/api/src/contracts-runtime/`.
 export const GEOGRAPHY_SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   US: ["U.S.", "U.S", "USA", "U.S.A.", "U.S.A", "United States"],
-  Colombia: ["Colombia", "Colombian", "Bogota", "Bogotá"],
+  Colombia: ["Colombia", "Colombian", "Colombians", "Bogota", "Bogotá"],
 };
 
 export function resolveGeographyAlias(
