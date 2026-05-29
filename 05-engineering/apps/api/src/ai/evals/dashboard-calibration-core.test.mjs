@@ -9,7 +9,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  CALIBRATION_ARTIFACT_HARNESS,
+  CALIBRATION_ARTIFACT_VERSION,
   DEFAULT_CALIBRATION_FLOORS,
+  buildCalibrationArtifact,
   runDashboardCalibration,
 } from "./dashboard-calibration-core.mjs";
 
@@ -71,4 +74,42 @@ test("each row carries the documented diagnostic fields", async () => {
       assert.ok(k in r, `row missing field ${k}`);
     }
   }
+});
+
+test("buildCalibrationArtifact produces a stable machine-readable shape", async () => {
+  const result = await runDashboardCalibration();
+  const ts = "2026-05-29T00:00:00.000Z";
+  const artifact = buildCalibrationArtifact(result, { timestamp: ts });
+
+  assert.equal(artifact.harness, CALIBRATION_ARTIFACT_HARNESS);
+  assert.equal(artifact.version, CALIBRATION_ARTIFACT_VERSION);
+  assert.equal(artifact.timestamp, ts, "timestamp is injected (pure — no Date inside)");
+  assert.equal(artifact.productionDefaultFloor, 0.4);
+  assert.deepEqual(artifact.floors, [0, 0.35, 0.4, 0.45]);
+  assert.equal(artifact.overall.pass, true);
+  assert.equal(artifact.overall.hardFail, false);
+  assert.equal(artifact.rows.length, 4);
+
+  // Each row renames `failures` → stable `guardrail: { pass, reasons }`.
+  for (const row of artifact.rows) {
+    assert.ok(!("failures" in row), "artifact rows must not leak internal `failures` key");
+    assert.equal(typeof row.guardrail.pass, "boolean");
+    assert.ok(Array.isArray(row.guardrail.reasons));
+    for (const k of [
+      "floor",
+      "finalStories",
+      "usedFallbackClustering",
+      "clusteringFailureReason",
+      "keywordRecallCount",
+      "finalRelevant",
+      "similarityRejected",
+      "minSimilarityThreshold",
+      "reutersCount",
+      "liveblogCollapsed",
+    ]) {
+      assert.ok(k in row, `artifact row missing field ${k}`);
+    }
+  }
+  // Round-trips through JSON.stringify (artifact must be serializable).
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(artifact)));
 });

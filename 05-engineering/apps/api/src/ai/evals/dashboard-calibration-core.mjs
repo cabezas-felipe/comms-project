@@ -205,3 +205,42 @@ export async function runDashboardCalibration({ floors = DEFAULT_CALIBRATION_FLO
 
   return { rows, hardFail: rows.some((r) => r.failures.length > 0) };
 }
+
+// Stable identity for the JSON artifact so consumers can validate they're
+// reading the right harness/shape. Bump `version` only on a breaking shape
+// change.
+export const CALIBRATION_ARTIFACT_HARNESS = "dashboard-embed-floor-calibration";
+export const CALIBRATION_ARTIFACT_VERSION = 1;
+
+/**
+ * Build a machine-readable artifact from a calibration result. Pure — the
+ * caller supplies `timestamp` (ISO string) so this stays deterministic/testable
+ * (no `Date` inside). Renames each row's internal `failures` array to a stable
+ * `guardrail: { pass, reasons }` shape for consumers.
+ *
+ * @param {{ rows: Array, hardFail: boolean }} result
+ * @param {{ timestamp: string }} opts
+ */
+export function buildCalibrationArtifact({ rows, hardFail }, { timestamp }) {
+  return {
+    harness: CALIBRATION_ARTIFACT_HARNESS,
+    version: CALIBRATION_ARTIFACT_VERSION,
+    timestamp,
+    productionDefaultFloor: 0.4,
+    floors: rows.map((r) => r.floor),
+    overall: { pass: !hardFail, hardFail },
+    rows: rows.map((r) => ({
+      floor: r.floor,
+      finalStories: r.finalStories,
+      usedFallbackClustering: r.usedFallbackClustering,
+      clusteringFailureReason: r.clusteringFailureReason,
+      keywordRecallCount: r.keywordRecallCount,
+      finalRelevant: r.finalRelevant,
+      similarityRejected: r.similarityRejected,
+      minSimilarityThreshold: r.minSimilarityThreshold,
+      reutersCount: r.reutersCount,
+      liveblogCollapsed: r.liveblogCollapsed,
+      guardrail: { pass: r.failures.length === 0, reasons: r.failures },
+    })),
+  };
+}

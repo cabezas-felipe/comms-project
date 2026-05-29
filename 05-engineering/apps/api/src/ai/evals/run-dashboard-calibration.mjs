@@ -15,16 +15,38 @@
  *
  * Usage
  *   cd 05-engineering/apps/api && npm run eval:dashboard-calibration
- *   ... --verbose   # also prints per-floor guardrail detail
+ *   ... --verbose            # also prints per-floor guardrail detail
+ *   ... --json-out <path>    # also write a machine-readable JSON artifact
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_CALIBRATION_FLOORS,
+  buildCalibrationArtifact,
   runDashboardCalibration,
 } from "./dashboard-calibration-core.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
+
+// Parse `--json-out <path>` (and `--json-out=<path>`). Returns null when absent.
+function parseJsonOut(argv) {
+  const eq = argv.find((a) => a.startsWith("--json-out="));
+  if (eq) return eq.slice("--json-out=".length);
+  const i = argv.indexOf("--json-out");
+  if (i !== -1 && argv[i + 1]) return argv[i + 1];
+  return null;
+}
+
+// Write the artifact to disk, creating parent dirs. Returns the resolved path.
+export function writeCalibrationArtifact(result, outPath, timestamp) {
+  const resolved = path.resolve(outPath);
+  mkdirSync(path.dirname(resolved), { recursive: true });
+  const artifact = buildCalibrationArtifact(result, { timestamp });
+  writeFileSync(resolved, JSON.stringify(artifact, null, 2) + "\n");
+  return resolved;
+}
 
 function fmtFloor(f) {
   return f === 0 ? "0.00 (off)" : f.toFixed(2);
@@ -69,15 +91,23 @@ function printTable(rows) {
 
 async function main() {
   const verbose = process.argv.includes("--verbose");
+  const jsonOut = parseJsonOut(process.argv);
   const HR = "─".repeat(96);
 
   console.log("\n[dashboard-calibration] sweeping TEMPO_EMBED_MIN_SIMILARITY (semantic-only recall floor)");
   console.log(`[dashboard-calibration] floors=[${DEFAULT_CALIBRATION_FLOORS.map(fmtFloor).join(", ")}]  (production default = 0.40)`);
   console.log(HR);
 
-  const { rows, hardFail } = await runDashboardCalibration();
+  const result = await runDashboardCalibration();
+  const { rows, hardFail } = result;
   printTable(rows);
   console.log(HR);
+
+  if (jsonOut) {
+    const resolved = writeCalibrationArtifact(result, jsonOut, new Date().toISOString());
+    console.log(`[dashboard-calibration] JSON artifact written → ${resolved}`);
+    console.log(HR);
+  }
 
   // Soft-metric narration: how the floor moves the candidate pool.
   console.log("soft metrics (informational — never fail the run):");

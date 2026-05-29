@@ -9,6 +9,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` | Smoke gate (non-zero on contract violation) |
 | **Dashboard refresh golden (Slice 2)** | Hermetic E2E regression guard: fail-closed clustering, no degraded titles, liveblog dedupe, recall floor, healthy 2+ stories | `npm run eval:dashboard-refresh-golden` | Smoke gate (non-zero on any scenario failure) |
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
+| **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR calibration guardrails regress |
 
 ---
 
@@ -233,6 +234,97 @@ items rejected) — then propose a lower floor; or systematic noise admitted at
 
 Before proposing any change to `DEFAULT_EMBED_MIN_SIMILARITY`, and after touching
 `embedding-recall.mjs` recall/union logic.
+
+### JSON artifact
+
+Pass `--json-out <path>` to also write a machine-readable artifact (the human
+table is unchanged), so CI and reviewers can diff runs over time:
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-calibration:json    # writes tmp/dashboard-calibration.json
+# or, custom path:
+node src/ai/evals/run-dashboard-calibration.mjs --json-out .artifacts/calibration.json
+```
+
+Shape (`harness` / `version` identify the format; `version` bumps only on a
+breaking change):
+
+```jsonc
+{
+  "harness": "dashboard-embed-floor-calibration",
+  "version": 1,
+  "timestamp": "2026-05-29T03:54:10.571Z",
+  "productionDefaultFloor": 0.4,
+  "floors": [0, 0.35, 0.4, 0.45],
+  "overall": { "pass": true, "hardFail": false },
+  "rows": [
+    {
+      "floor": 0.4,
+      "finalStories": 7,
+      "usedFallbackClustering": false,
+      "clusteringFailureReason": null,
+      "keywordRecallCount": 8,
+      "finalRelevant": 10,
+      "similarityRejected": 2,
+      "minSimilarityThreshold": 0.4,
+      "reutersCount": 2,
+      "liveblogCollapsed": 3,
+      "guardrail": { "pass": true, "reasons": [] }
+    }
+    // … one row per floor
+  ]
+}
+```
+
+Generated artifacts live under gitignored `tmp/` and `.artifacts/` — re-create
+them anytime; do not commit.
+
+---
+
+## Dashboard Quality Gate (Slice 6)
+
+The single CI-grade entry point. Runs both dashboard harnesses in order and
+fails the build if either regresses — use this in CI and before opening a PR
+that touches the dashboard pipeline.
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-quality-gate
+```
+
+Order + behavior:
+
+1. **dashboard-refresh-golden** — the E2E regression scenarios (Slice 2).
+2. **dashboard-calibration** — the embed-floor guardrail sweep (Slice 5); also
+   writes a JSON artifact (default `.artifacts/dashboard-calibration.json`,
+   override with `--json-out <path>`).
+
+Hermetic (no provider keys / network — both cores run in-process with stubs).
+Streams a `✓`/`✗` line per scenario/floor, then a SUMMARY (golden pass/fail,
+calibration pass/fail, artifact path).
+
+### Exit codes
+
+- `0` — golden passed AND calibration guardrails held at every floor.
+- `1` — either harness failed (or a runner error); failing reasons print inline.
+
+### Ship / no-ship policy for a floor change
+
+`DEFAULT_EMBED_MIN_SIMILARITY` stays **0.40** by default. To change it, all of:
+
+1. **Guardrails pass at the candidate floor** — `npm run eval:dashboard-quality-gate`
+   green (no fail-closed clustering, no degraded titles, Reuters present, liveblog
+   collapses) at the proposed value.
+2. **Manual `?debug=1` quality review** — on the think-tank persona, confirm the
+   items the candidate floor *rejects* (vs admits at 0.40) are genuinely off-beat
+   (or that on-beat items are being lost at 0.40). Synthetic probe metrics alone
+   are not evidence.
+3. **Committed evidence in the PR notes** — attach the calibration JSON artifact
+   (or its table) for both 0.40 and the candidate floor, plus a one-line rationale
+   tying `similarityRejected` movement to the manual review.
+
+Absent all three, keep 0.40.
 
 ---
 

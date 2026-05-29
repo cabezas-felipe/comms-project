@@ -165,6 +165,8 @@ Three knobs and one locked policy govern how the refresh pipeline fails safe so 
 
 **Slice 5 — embed-floor calibration harness.** `npm run eval:dashboard-calibration` sweeps `TEMPO_EMBED_MIN_SIMILARITY` across **0 / 0.35 / 0.40 / 0.45** and prints an objective table (`similarityRejected`, `finalStories`, `finalRelevant`, Reuters count, liveblog collapse) per floor, so a default change is evidence-driven rather than guessed. It enforces the same hard guardrails as the golden eval (no fail-closed clustering, no degraded titles, Reuters present, liveblog collapses) at every floor; the floor metrics themselves are advisory. **Production default stays 0.40 unless a committed run shows systematic loss at 0.40.** See [evals README → Embed-floor Calibration](apps/api/src/ai/evals/README.md#embed-floor-calibration-slice-5).
 
+**Slice 6 — CI dashboard quality gate + JSON artifacts.** `npm run eval:dashboard-quality-gate` is the single CI-grade entry point: it runs the golden eval **and** the calibration sweep in one hermetic command, exits non-zero if either regresses, and writes a machine-readable calibration JSON artifact (default `.artifacts/dashboard-calibration.json`; `npm run eval:dashboard-calibration:json` writes `tmp/dashboard-calibration.json`). The JSON (`harness`/`version`-stamped, per-floor metrics + guardrail pass/reasons + `overall`) lets CI and reviewers diff runs over time. **Floor-change ship/no-ship policy:** changing `DEFAULT_EMBED_MIN_SIMILARITY` off **0.40** requires (1) the quality gate green at the candidate floor, (2) a manual `?debug=1` quality review confirming rejected items are genuinely off-beat, and (3) committed evidence (the calibration artifact for 0.40 vs the candidate) in the PR notes. See [evals README → Dashboard Quality Gate](apps/api/src/ai/evals/README.md#dashboard-quality-gate-slice-6).
+
 ### Manual golden re-test
 
 Run after the think-tank onboarding blurb is saved (topics: economy / elections / Trump / Iran / inflation / gas; sources: Washington Post + Reuters; geographies: US / Iran). Append `?debug=1` to the dashboard URL to read the run-diagnostics panel while checking:
@@ -176,6 +178,7 @@ Run after the think-tank onboarding blurb is saved (topics: economy / elections 
 - [ ] No **Spelling Bee** (liveblog) duplicate stack collapsed into one meta-story.
 - [ ] `npm run eval:dashboard-refresh-golden` passes locally (hermetic regression guard — see [evals README](apps/api/src/ai/evals/README.md#dashboard-refresh-golden-slice-2)).
 - [ ] (Optional, before any floor change) `npm run eval:dashboard-calibration` — compare floors and confirm guardrails hold; pair the table with `?debug=1` quality review.
+- [ ] (CI / pre-PR) `npm run eval:dashboard-quality-gate` — golden + calibration in one command; must exit `0`.
 
 ## Server-side cadence tick (Sub-slice 2.5)
 
