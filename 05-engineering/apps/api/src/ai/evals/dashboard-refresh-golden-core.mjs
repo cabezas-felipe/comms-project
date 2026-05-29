@@ -48,7 +48,7 @@ const HYBRID_WITH_FLOOR = Object.freeze({
   mode: "hybrid_strict",
   embedTopK: 5,
   embedMaxItems: 100,
-  minSimilarity: 0.4,
+  minSimilarity: 0.35,
   embeddingModel: "text-embedding-3-small",
 });
 
@@ -125,7 +125,7 @@ function captureClusterFn(capture) {
 
 // Deterministic 2-d embedder for the recall-floor scenario. Profile is [1,0];
 // the off-beat gardening item gets a near-orthogonal vector (cosine ≈ 0.10,
-// below the 0.40 floor) so it is rejected as a weak semantic-only add. All
+// below the 0.35 floor) so it is rejected as a weak semantic-only add. All
 // other items are keyword hits, so their semantic score is irrelevant.
 function makeFloorEmbedder() {
   return async (texts) =>
@@ -240,8 +240,8 @@ async function scenarioRecallFloor(gold) {
   const reasons = [];
   const clusterInput = capture.input ?? [];
   const ids = clusterInput.map((i) => i.sourceId);
-  if (log?.recall?.minSimilarityThreshold !== 0.4) {
-    reasons.push(`expected recall.minSimilarityThreshold=0.4, got ${log?.recall?.minSimilarityThreshold}`);
+  if (log?.recall?.minSimilarityThreshold !== 0.35) {
+    reasons.push(`expected recall.minSimilarityThreshold=0.35, got ${log?.recall?.minSimilarityThreshold}`);
   }
   if ((log?.recall?.similarityRejected ?? 0) < 1) {
     reasons.push(`expected >= 1 weak semantic-only item rejected by the floor, got ${log?.recall?.similarityRejected}`);

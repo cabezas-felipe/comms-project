@@ -162,7 +162,7 @@ geographies US + Iran) plus three deterministic raw-item sets:
 | `gold-01-fail-closed` | Clustering throws on both attempts | `stories.length === 0`, `usedFallbackClustering === true`, `clusteringFailureReason === "error"`, `clusteringAttempts === 2`, no degraded titles |
 | `gold-02-healthy-path` | Stub returns 2 grounded clusters | `metaStoryCount >= 2`, `usedFallbackClustering === false`, Reuters present, no `/updates?$/i` or "General Updates" titles |
 | `gold-03-liveblog-dedupe` | 4 Spelling Bee variants ingested | exactly 1 reaches clustering (newest `lb-4` survives), `dedupe.collapsedCount >= 3` |
-| `gold-04-recall-floor` | Weak semantic-only item present | `recall.minSimilarityThreshold === 0.4`, `recall.similarityRejected >= 1`, item excluded from clustering |
+| `gold-04-recall-floor` | Weak semantic-only item present | `recall.minSimilarityThreshold === 0.35`, `recall.similarityRejected >= 1`, item excluded from clustering |
 
 ### Exit codes
 
@@ -179,15 +179,16 @@ When to run: after touching `refresh-pipeline.mjs`, `source-deduper.mjs`,
 ### Why this exists
 
 `TEMPO_EMBED_MIN_SIMILARITY` (the recall **cosine floor** for SEMANTIC-ONLY
-top-K union adds — keyword/topic hits always bypass it) ships at **0.40**.
+top-K union adds — keyword/topic hits always bypass it) ships at **0.35**.
 Choosing a floor used to be guesswork. This harness sweeps candidate floors and
 reports objective diagnostics per value so a default change is driven by
 evidence, not vibes. It is **not** a beat-fit knob — see
 [DECISIONS.md → D-063 addendum](../../../../../DECISIONS.md) ("embed floor ≠ beat-fit
 threshold").
 
-It changes **no runtime default** — `DEFAULT_EMBED_MIN_SIMILARITY` stays 0.40 in
-`embedding-recall.mjs`. The sweep injects a floor per run via `recallConfig`.
+Running the sweep changes **no runtime default** — `DEFAULT_EMBED_MIN_SIMILARITY`
+(0.35) in `embedding-recall.mjs` is unaffected. The sweep injects a floor per run
+via `recallConfig`.
 
 ### How to run
 
@@ -225,10 +226,10 @@ floor rises it goes **up** and `finalStories` / `finalRelevant` go **down** —
 the floor is trimming weaker semantic neighbors. That is the lever, not a verdict:
 a higher `similarityRejected` is only "good" if the rejected items were genuinely
 off-beat. Pair the table with manual quality review (`?debug=1` → `diag-recall`)
-on the real dashboard before moving the default. **Default stays 0.40 unless a
-committed run shows systematic loss of on-beat stories at 0.40** (i.e. relevant
-items rejected) — then propose a lower floor; or systematic noise admitted at
-0.40 — then propose a higher floor.
+on the real dashboard before moving the default. **Default is 0.35; change it
+only when a committed run shows systematic loss of on-beat stories at 0.35** (i.e.
+relevant items rejected) — then propose a lower floor; or systematic noise
+admitted at 0.35 — then propose a higher floor.
 
 ### When to run
 
@@ -255,19 +256,19 @@ breaking change):
   "harness": "dashboard-embed-floor-calibration",
   "version": 1,
   "timestamp": "2026-05-29T03:54:10.571Z",
-  "productionDefaultFloor": 0.4,
+  "productionDefaultFloor": 0.35,
   "floors": [0, 0.35, 0.4, 0.45],
   "overall": { "pass": true, "hardFail": false },
   "rows": [
     {
-      "floor": 0.4,
+      "floor": 0.35,
       "finalStories": 7,
       "usedFallbackClustering": false,
       "clusteringFailureReason": null,
       "keywordRecallCount": 8,
       "finalRelevant": 10,
-      "similarityRejected": 2,
-      "minSimilarityThreshold": 0.4,
+      "similarityRejected": 1,
+      "minSimilarityThreshold": 0.35,
       "reutersCount": 2,
       "liveblogCollapsed": 3,
       "guardrail": { "pass": true, "reasons": [] }
@@ -311,20 +312,20 @@ calibration pass/fail, artifact path).
 
 ### Ship / no-ship policy for a floor change
 
-`DEFAULT_EMBED_MIN_SIMILARITY` stays **0.40** by default. To change it, all of:
+`DEFAULT_EMBED_MIN_SIMILARITY` is **0.35** by default. To change it, all of:
 
 1. **Guardrails pass at the candidate floor** — `npm run eval:dashboard-quality-gate`
    green (no fail-closed clustering, no degraded titles, Reuters present, liveblog
    collapses) at the proposed value.
 2. **Manual `?debug=1` quality review** — on the think-tank persona, confirm the
-   items the candidate floor *rejects* (vs admits at 0.40) are genuinely off-beat
-   (or that on-beat items are being lost at 0.40). Synthetic probe metrics alone
+   items the candidate floor *rejects* (vs admits at 0.35) are genuinely off-beat
+   (or that on-beat items are being lost at 0.35). Synthetic probe metrics alone
    are not evidence.
 3. **Committed evidence in the PR notes** — attach the calibration JSON artifact
-   (or its table) for both 0.40 and the candidate floor, plus a one-line rationale
+   (or its table) for both 0.35 and the candidate floor, plus a one-line rationale
    tying `similarityRejected` movement to the manual review.
 
-Absent all three, keep 0.40.
+Absent all three, keep 0.35.
 
 ---
 
