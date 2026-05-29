@@ -352,6 +352,15 @@ export const _recentItemsCache = {
 };
 
 /**
+ * Mutable live-fetch hook. Production reads `_feedReader.read`; tests override
+ * it to assert the cache-miss branch forwards the user's matched `feedIds`
+ * (Slice 2 scoped fetch) without hitting a real RSS endpoint.
+ */
+export const _feedReader = {
+  read: readFeedItems,
+};
+
+/**
  * Mutable refresh pipeline hook. Tests override run to simulate pipeline
  * outcomes (success, fallback, grounding failures) without running the full
  * pipeline.
@@ -1020,7 +1029,17 @@ async function executeRefreshFlow(identity) {
       }
     }
     if (rawItems === undefined) {
-      rawItems = await readFeedItems(DATA_DIR);
+      // Slice 2: scope the live fetch to the user's matched feeds so a cache
+      // miss fetches only those feeds instead of the entire manifest.  When
+      // there are no matched feeds (no user selection yet / unresolved), omit
+      // `feedIds` entirely so readFeedItems keeps its full-manifest behavior.
+      // cacheFeedIds is already filtered to non-empty strings above.
+      if (cacheFeedIds.length > 0) {
+        rawItems = await _feedReader.read(DATA_DIR, { feedIds: cacheFeedIds });
+        ingestionSource = "live_scoped";
+      } else {
+        rawItems = await _feedReader.read(DATA_DIR);
+      }
     }
     console.log(
       `[refresh] ingestionSource=${ingestionSource} items=${Array.isArray(rawItems) ? rawItems.length : 0} matchedFeeds=${cacheFeedIds.length}`
@@ -1028,11 +1047,12 @@ async function executeRefreshFlow(identity) {
 
     // Sub-slice 2.2 write: opportunistic upsert into the Tier-A cache so
     // concurrent refreshes can share this fetch.  Only fires when we did a
-    // live fetch in this request — cache hits don't need to re-write the
-    // rows we just read.  Fire-and-forget: cache failures must never block
-    // the user's refresh.
+    // live fetch in this request — both the full-manifest ("live") and the
+    // Slice 2 scoped ("live_scoped") branches re-warm the cache; cache hits
+    // don't need to re-write the rows we just read.  Fire-and-forget: cache
+    // failures must never block the user's refresh.
     if (
-      ingestionSource === "live" &&
+      (ingestionSource === "live" || ingestionSource === "live_scoped") &&
       _recentItemsCache.enabled() &&
       Array.isArray(rawItems) &&
       rawItems.length > 0
