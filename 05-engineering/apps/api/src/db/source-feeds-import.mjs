@@ -107,6 +107,27 @@ async function main() {
     }
   }
 
+  // Deactivation sweep: any active mapping whose manifest_feed_id is not in
+  // source-feeds.json is a stale/legacy row (e.g. reuters-world). Flip it to
+  // active=false so the JSON file stays the single source of truth for which
+  // feeds run. Never reactivates and never touches rows already inactive.
+  const canonicalIds = feeds.map((f) => f.id);
+  const { data: deactivated, error: deactivateError } = await supabase
+    .from("source_feed_mapping")
+    .update({ active: false })
+    .eq("active", true)
+    .not("manifest_feed_id", "in", `(${canonicalIds.join(",")})`)
+    .select("manifest_feed_id");
+
+  if (deactivateError) {
+    console.error(`[import] deactivation sweep failed — ${deactivateError.message}`);
+  } else if (deactivated && deactivated.length > 0) {
+    const ids = deactivated.map((r) => r.manifest_feed_id).sort();
+    console.log(`[import] deactivated ${ids.length} non-canonical feed(s): ${ids.join(", ")}`);
+  } else {
+    console.log("[import] deactivation sweep: no non-canonical active rows found");
+  }
+
   console.log(`\n[import] Done. inserted=${inserted} updated=${updated} skipped=${skipped}`);
 }
 
