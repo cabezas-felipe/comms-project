@@ -2,10 +2,13 @@
 // Phase-1 source scope (Washington Post only).
 //
 // This script is the explicit, operator-driven control for the Supabase
-// manifest's `active` flag. The runtime ingestion guard in feed-reader.mjs
-// (TEMPO_RSS_ALLOWLIST — legacy alias TEMPO_INGESTION_ALLOWLIST — defaults
-// to "washington post") provides defense-in-depth; this script is the
-// *primary* lever.
+// manifest's `active` flag — the *primary* lever for source scope. The
+// runtime ingestion guard in feed-reader.mjs (TEMPO_RSS_ALLOWLIST — legacy
+// alias TEMPO_INGESTION_ALLOWLIST) is an OPTIONAL narrowing override; when it
+// is unset the allowlist is derived from the manifest's structurally eligible
+// feeds, so the default is no longer a hardcoded "washington post". Use this
+// script to control which rows are `active`, and the env var only to narrow
+// further at fetch time.
 //
 // Modes (one per invocation):
 //   apply    — disable every non-WaPo manifest row that is currently active,
