@@ -189,6 +189,98 @@ test("runEmbeddingRecall: hybrid_strict widens recall via semantic match (item w
   assert.equal(result.diagnostics.degraded_reason, null);
 });
 
+// ─── Similarity floor (Slice 1) ───────────────────────────────────────────────
+
+// Deterministic embedder with explicit, controllable cosine scores: profile
+// vector is [1, 0]; each item's vector is chosen by a marker in its text so we
+// can assert exactly which semantic-only candidates clear the floor.
+//   strongmatch → [1, 0]   → cosine 1.00 (passes any floor < 1)
+//   weakmatch   → [0.1, 1] → cosine ≈ 0.0995 (below the 0.40 default)
+//   (other)     → [0, 1]   → cosine 0.00
+function makeFloorEmbedder() {
+  return async (texts) =>
+    texts.map((t, idx) => {
+      if (idx === 0) return [1, 0]; // profile vector
+      const lower = String(t).toLowerCase();
+      if (lower.includes("strongmatch")) return [1, 0];
+      if (lower.includes("weakmatch")) return [0.1, 1];
+      return [0, 1];
+    });
+}
+
+test("runEmbeddingRecall: similarity floor excludes weak semantic-only candidates, counts them", async () => {
+  const items = [
+    makeItem({ sourceId: "kw-hit", headline: "OFAC sanctions ruling" }),
+    makeItem({ sourceId: "strong", headline: "strongmatch semantic neighbor" }),
+    makeItem({ sourceId: "weak", headline: "weakmatch barely related" }),
+  ];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [items[0]],
+    embedFn: makeFloorEmbedder(),
+    config: { ...HYBRID_CONFIG, embedTopK: 5, minSimilarity: 0.4 },
+  });
+  const ids = result.items.map((i) => i.sourceId).sort();
+  assert.deepEqual(ids, ["kw-hit", "strong"], "weak semantic-only candidate excluded by floor");
+  assert.equal(result.diagnostics.minSimilarityThreshold, 0.4);
+  assert.equal(result.diagnostics.similarityRejected, 1, "the one below-floor semantic-only item is counted");
+});
+
+test("runEmbeddingRecall: keyword hit below the similarity floor still passes (keyword path unchanged)", async () => {
+  // `kw-low` is a keyword recall hit but its embedding cosine is 0 (below the
+  // floor).  It must still appear — keyword/topic hits always pass regardless
+  // of semantic score — and must NOT be counted as similarityRejected.
+  const items = [
+    makeItem({ sourceId: "kw-low", headline: "plain keyword headline" }),
+    makeItem({ sourceId: "weak", headline: "weakmatch off-beat" }),
+  ];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [items[0]],
+    embedFn: makeFloorEmbedder(),
+    config: { ...HYBRID_CONFIG, embedTopK: 5, minSimilarity: 0.4 },
+  });
+  const ids = result.items.map((i) => i.sourceId).sort();
+  assert.deepEqual(ids, ["kw-low"], "keyword hit survives despite low cosine; weak semantic-only dropped");
+  assert.equal(result.diagnostics.similarityRejected, 1, "only the semantic-only weak item is rejected");
+});
+
+test("runEmbeddingRecall: minSimilarity=0 admits all top-K (floor disabled)", async () => {
+  const items = [
+    makeItem({ sourceId: "kw-hit", headline: "OFAC sanctions ruling" }),
+    makeItem({ sourceId: "weak", headline: "weakmatch barely related" }),
+  ];
+  const result = await runEmbeddingRecall({
+    candidateItems: items,
+    settings: BASE_SETTINGS,
+    keywordRecallItems: [items[0]],
+    embedFn: makeFloorEmbedder(),
+    config: { ...HYBRID_CONFIG, embedTopK: 5, minSimilarity: 0 },
+  });
+  const ids = result.items.map((i) => i.sourceId).sort();
+  assert.deepEqual(ids, ["kw-hit", "weak"], "floor of 0 lets the weak semantic-only item through");
+  assert.equal(result.diagnostics.similarityRejected, 0);
+});
+
+test("resolveRecallConfig: minSimilarity defaults to 0.40 and honors env override / clamps invalid", () => {
+  const prev = process.env.TEMPO_EMBED_MIN_SIMILARITY;
+  try {
+    delete process.env.TEMPO_EMBED_MIN_SIMILARITY;
+    assert.equal(resolveRecallConfig().minSimilarity, 0.4, "default floor is 0.40");
+    process.env.TEMPO_EMBED_MIN_SIMILARITY = "0.6";
+    assert.equal(resolveRecallConfig().minSimilarity, 0.6, "env override honored");
+    process.env.TEMPO_EMBED_MIN_SIMILARITY = "1.5"; // out of [0,1] → fallback
+    assert.equal(resolveRecallConfig().minSimilarity, 0.4, "out-of-range falls back to default");
+    process.env.TEMPO_EMBED_MIN_SIMILARITY = "0"; // valid: disables floor
+    assert.equal(resolveRecallConfig().minSimilarity, 0, "explicit 0 is honored");
+  } finally {
+    if (prev === undefined) delete process.env.TEMPO_EMBED_MIN_SIMILARITY;
+    else process.env.TEMPO_EMBED_MIN_SIMILARITY = prev;
+  }
+});
+
 test("runEmbeddingRecall: union dedups when keyword item is also a top-K semantic match", async () => {
   const item = makeItem({ sourceId: "shared", headline: "U.S. OFAC update" });
   const result = await runEmbeddingRecall({

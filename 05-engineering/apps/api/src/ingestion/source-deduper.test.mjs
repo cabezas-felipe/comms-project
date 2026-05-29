@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   canonicalizeUrl,
   dedupeSourceItems,
+  extractLiveblogSubject,
   normalizeHeadline,
   PUBLISH_WINDOW_MINUTES,
 } from "./source-deduper.mjs";
@@ -516,4 +517,81 @@ test("output is free of internal _canonicalUrl / _normHeadline annotations", () 
     Object.prototype.hasOwnProperty.call(result.unique[0], "_normHeadline"),
     false
   );
+});
+
+// ─── Liveblog / near-duplicate headline collapse ──────────────────────────────
+
+test("extractLiveblogSubject: matches 'Live updates:' / 'Live update:' / 'Live blog:' and normalizes subject", () => {
+  assert.equal(extractLiveblogSubject("Live updates: Scripps National Spelling Bee"), "scripps national spelling bee");
+  assert.equal(extractLiveblogSubject("LIVE UPDATES:  Scripps National Spelling Bee  "), "scripps national spelling bee");
+  assert.equal(extractLiveblogSubject("Live update: Scripps National Spelling Bee"), "scripps national spelling bee");
+  assert.equal(extractLiveblogSubject("Live blog: Scripps National Spelling Bee"), "scripps national spelling bee");
+});
+
+test("extractLiveblogSubject: returns null for non-liveblog headlines and empty subjects", () => {
+  assert.equal(extractLiveblogSubject("Senate passes border bill"), null);
+  assert.equal(extractLiveblogSubject("Live updates:"), null); // no subject after marker
+  assert.equal(extractLiveblogSubject("Updates: live coverage"), null); // wrong prefix order
+  assert.equal(extractLiveblogSubject(null), null);
+});
+
+test("dedupeSourceItems: four Spelling Bee liveblog variants collapse to one item", () => {
+  // Same rolling story re-emitted with case drift, singular/plural, whitespace,
+  // and changing URLs — the exact-headline/URL rules would under-merge these,
+  // but the liveblog subject key collapses all four into one canonical item.
+  const items = [
+    makeItem({
+      sourceId: "lb-1", feedId: "wapo-national", minutesAgo: 50,
+      url: "https://www.washingtonpost.com/spelling-bee?v=1",
+      headline: "Live updates: Scripps National Spelling Bee",
+    }),
+    makeItem({
+      sourceId: "lb-2", feedId: "wapo-national", minutesAgo: 30,
+      url: "https://www.washingtonpost.com/spelling-bee?v=2",
+      headline: "LIVE UPDATES: Scripps National Spelling Bee",
+    }),
+    makeItem({
+      sourceId: "lb-3", feedId: "wapo-national", minutesAgo: 15,
+      url: "https://www.washingtonpost.com/spelling-bee?v=3",
+      headline: "Live Updates:  Scripps National Spelling Bee  ",
+    }),
+    makeItem({
+      sourceId: "lb-4", feedId: "wapo-national", minutesAgo: 5,
+      url: "https://www.washingtonpost.com/spelling-bee?v=4",
+      headline: "Live update: Scripps National Spelling Bee",
+    }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 1, "all four liveblog variants collapse to one");
+  assert.equal(result.duplicateCount, 3);
+  // Newest snapshot (smallest minutesAgo) is canonical.
+  assert.equal(result.unique[0].sourceId, "lb-4");
+  assert.equal(result.unique[0].minutesAgo, 5);
+  // Losers carried as internal provenance only.
+  const dupIds = result.unique[0]._duplicates.map((d) => d.sourceId).sort();
+  assert.deepEqual(dupIds, ["lb-1", "lb-2", "lb-3"]);
+});
+
+test("dedupeSourceItems: liveblog items beyond the publish window stay distinct", () => {
+  const items = [
+    makeItem({ sourceId: "lb-a", minutesAgo: 5, url: "https://wp.com/lb?a", headline: "Live updates: Olympics opening" }),
+    makeItem({
+      sourceId: "lb-b",
+      minutesAgo: 5 + PUBLISH_WINDOW_MINUTES + 10, // outside the window vs the anchor
+      url: "https://wp.com/lb?b",
+      headline: "Live updates: Olympics opening",
+    }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 2, "same subject but outside window → not merged");
+  assert.equal(result.duplicateCount, 0);
+});
+
+test("dedupeSourceItems: liveblogs with different subjects do not merge", () => {
+  const items = [
+    makeItem({ sourceId: "lb-x", minutesAgo: 10, url: "https://wp.com/x", headline: "Live updates: Senate vote" }),
+    makeItem({ sourceId: "lb-y", minutesAgo: 12, url: "https://wp.com/y", headline: "Live updates: House vote" }),
+  ];
+  const result = dedupeSourceItems(items);
+  assert.equal(result.unique.length, 2, "distinct subjects keep distinct liveblogs");
 });

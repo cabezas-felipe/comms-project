@@ -3284,6 +3284,7 @@ test("atomic path: success routes through _atomicSave.execute with correct args,
   const prevNarrative = _narrativeRepo.append;
   const prevNarrativeRead = _narrativeRepo.read;
   const prevReadHas = _readSettings.has;
+  const prevExtract = _extraction.extract;
   _atomicSave.execute = async (args) => { capturedArgs = args; };
   _writeSettings.write = async () => { settingsWriteCalled = true; };
   _narrativeRepo.append = async () => { narrativeAppendCalled = true; };
@@ -3291,6 +3292,12 @@ test("atomic path: success routes through _atomicSave.execute with correct args,
   _narrativeRepo.read = async () => null;
   // Prevent the previous-settings read from hitting the fake Supabase URL.
   _readSettings.has = async () => false;
+  // Stub extraction to a no-op: post-save onboarding extraction can otherwise
+  // produce merged fields that differ from the saved settings and trigger a
+  // second `_writeSettings.write` (the merge write), which would falsely trip
+  // the "write must not be called independently" assertion below. Returning
+  // null keeps this test scoped to the initial atomic-save path only.
+  _extraction.extract = async () => null;
 
   try {
     const body = { ...VALID_BODY, onboardingRawText: "I cover US-Colombia migration for a nonprofit." };
@@ -3313,6 +3320,7 @@ test("atomic path: success routes through _atomicSave.execute with correct args,
     _narrativeRepo.append = prevNarrative;
     _narrativeRepo.read = prevNarrativeRead;
     _readSettings.has = prevReadHas;
+    _extraction.extract = prevExtract;
     if (savedUrl !== undefined) process.env.SUPABASE_URL = savedUrl;
     else delete process.env.SUPABASE_URL;
     if (savedKey !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = savedKey;

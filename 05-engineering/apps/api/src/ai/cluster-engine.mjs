@@ -340,7 +340,14 @@ export async function clusterItems(items, settings, model) {
 
   const provider = providerFor(model);
   const modelName = model.includes(":") ? model.slice(model.indexOf(":") + 1) : model;
-  const timeoutMs = Number(process.env.TEMPO_AI_TIMEOUT_MS || 15000);
+  // Clustering gets its own timeout budget (default 25s) — larger than the
+  // global TEMPO_AI_TIMEOUT_MS because the cluster prompt is the single
+  // largest AI round-trip (whole candidate pool) and the publish path retries
+  // it once before failing closed (see refresh-pipeline.mjs). Only this stage
+  // reads TEMPO_AI_CLUSTER_TIMEOUT_MS; other AI stages keep TEMPO_AI_TIMEOUT_MS.
+  const timeoutMs = Number(
+    process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS || 25000
+  );
 
   if (provider === "mock-anthropic" || provider === "mock-openai") {
     return mockCluster(items, settings);

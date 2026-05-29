@@ -30,11 +30,28 @@ export const RECALL_MODE = Object.freeze({
 
 const DEFAULT_EMBED_TOP_K = 80;
 const DEFAULT_EMBED_MAX_ITEMS = 250;
+// Minimum cosine similarity for a SEMANTIC-ONLY top-K addition to enter the
+// union.  Keyword/topic hits always pass (they cleared real lexical gates);
+// this floor only constrains items that would be admitted purely on embedding
+// proximity, so a weak/off-beat semantic neighbor can't widen recall into
+// noise.  0.40 is a conservative default for text-embedding-3-small cosine on
+// short RSS text; tune via TEMPO_EMBED_MIN_SIMILARITY.
+const DEFAULT_EMBED_MIN_SIMILARITY = 0.4;
 
 function parsePositiveInt(raw, fallback) {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.floor(n);
+}
+
+// Parse a [0,1] similarity floor.  Out-of-range / non-numeric → fallback.
+// 0 is allowed (admit everything in top-K) so an operator can fully disable
+// the floor without code changes.
+function parseSimilarity(raw, fallback) {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return fallback;
+  return n;
 }
 
 /**
@@ -52,6 +69,7 @@ export function resolveRecallConfig() {
     mode,
     embedTopK: parsePositiveInt(process.env.TEMPO_EMBED_TOP_K, DEFAULT_EMBED_TOP_K),
     embedMaxItems: parsePositiveInt(process.env.TEMPO_EMBED_MAX_ITEMS, DEFAULT_EMBED_MAX_ITEMS),
+    minSimilarity: parseSimilarity(process.env.TEMPO_EMBED_MIN_SIMILARITY, DEFAULT_EMBED_MIN_SIMILARITY),
     embeddingModel: process.env.TEMPO_OPENAI_EMBEDDING_MODEL || "text-embedding-3-small",
   };
 }
@@ -198,6 +216,12 @@ export async function runEmbeddingRecall(opts) {
     embedTopK: config.embedTopK,
     embedMaxItems: config.embedMaxItems,
     embeddingModel: config.embeddingModel,
+    // Similarity floor (Slice 1): the threshold a semantic-only top-K addition
+    // must clear to join the union, and how many were rejected for falling
+    // below it this run.  `similarityRejected` counts only items NOT already
+    // admitted via the keyword path — keyword hits never count as rejected.
+    minSimilarityThreshold: config.minSimilarity,
+    similarityRejected: 0,
     // Profile sparseness diagnostics — pure observability, never gates behavior.
     //   `profileAxes`      : how many of the 5 settings axes contributed
     //                        (0 → empty profile guard fires; 1 → degenerate
@@ -415,9 +439,20 @@ export async function runEmbeddingRecall(opts) {
     seen.add(id);
     merged.push(item);
   });
-  topK.forEach(({ item }) => {
+  // Semantic-only additions must clear the similarity floor.  Items already in
+  // the union via the keyword path are skipped here regardless of score (they
+  // passed a real lexical gate); a below-floor semantic-only neighbor is
+  // dropped and counted in `similarityRejected` so an operator can see how
+  // much noise the floor held back.
+  let similarityRejected = 0;
+  topK.forEach(({ item, score }) => {
     const id = idOf(item, -1);
-    if (seen.has(id)) return;
+    if (seen.has(id)) return; // already admitted via keyword path — always passes
+    if (score < config.minSimilarity) {
+      // Semantic-only candidate below the floor → drop and count it.
+      similarityRejected++;
+      return;
+    }
     seen.add(id);
     merged.push(item);
   });
@@ -427,7 +462,11 @@ export async function runEmbeddingRecall(opts) {
     diagnostics: {
       ...baseDiagnostics,
       embeddedCount: capped.length,
-      similarityKept: topK.length,
+      // `similarityKept` is the number of top-K candidates that survived the
+      // floor (top-K size minus those rejected below threshold).  Preserves
+      // the legacy meaning when no floor is configured (rejected=0 → kept=K).
+      similarityKept: topK.length - similarityRejected,
+      similarityRejected,
       keywordRecallCount: keywordRecallItems.length,
       unionCount: merged.length,
       finalRelevant: merged.length,

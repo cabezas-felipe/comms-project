@@ -144,6 +144,19 @@ To open up beyond Phase 1 you also need to remove the runtime guard:
 TEMPO_RSS_ALLOWLIST=*
 ```
 
+## Dashboard trust controls (Slice 1)
+
+Three knobs and one locked policy govern how the refresh pipeline fails safe so users never see fabricated or low-signal stories.
+
+**Fail-closed clustering (locked policy).** Clustering runs once; on throw/timeout it retries **once**; if the retry also fails the pipeline publishes **zero meta-stories** (empty dashboard). It never ships `gracefulFallbackClustering` "General Updates"-style buckets to users — an empty dashboard is the honest signal that clustering failed. Diagnostics are persisted under `_meta`: `usedFallbackClustering` (**true means clustering failed and zero stories were published**, not “degraded fallback buckets shipped”), `clusteringFailureReason` (`timeout` \| `error` \| `null`), `clusteringAttempts`, `clusteringLatencyMs` (per-attempt). See [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) and scenario-map row **I-fallback**.
+
+| Env var | Default | Scope | Purpose |
+|---------|---------|-------|---------|
+| `TEMPO_AI_CLUSTER_TIMEOUT_MS` | `25000` | clustering only | Per-attempt timeout for the cluster round-trip. Deliberately larger than the global `TEMPO_AI_TIMEOUT_MS` because clustering is the single largest AI call; **does not** raise the timeout for other AI stages. The cluster model stays **Sonnet** (`TEMPO_AI_CLUSTER_MODEL`). |
+| `TEMPO_EMBED_MIN_SIMILARITY` | `0.40` | embedding recall | Minimum cosine for a **semantic-only** top-K item to enter the `hybrid_strict` union. Keyword/topic hits always pass regardless of score; only embedding-proximity additions are gated, so a weak/off-beat neighbor can't widen recall into noise. Range `[0,1]`; `0` disables the floor. Diagnostics: `recall.minSimilarityThreshold`, `recall.similarityRejected`. |
+
+**Liveblog / near-duplicate collapse.** The cross-feed deduper ([`source-deduper.mjs`](apps/api/src/ingestion/source-deduper.mjs)) also folds rolling-coverage items — headlines matching `Live updates:` / `Live update:` / `Live blog:` are keyed by the normalized subject after the marker and merged within `PUBLISH_WINDOW_MINUTES`, keeping the newest snapshot and attaching the rest as internal `_duplicates`. WaPo “Quick Post” live items that omit the `Live updates:` prefix are not collapsed yet; extend `LIVEBLOG_PREFIX_RE` when those patterns are confirmed in feed data.
+
 ## Server-side cadence tick (Sub-slice 2.5)
 
 Background: Sub-slice 2.4 added the [due-user orchestrator](apps/api/src/dashboard/due-user-orchestrator.mjs) — pure due-selection (`selectDueUsers`), anchor extraction from `dashboard_snapshots` (`listSnapshotAnchors`), and `runDueRefreshes` which iterates due users through the shared `_refreshExecutor.execute` path. 2.4 left the orchestrator without a caller: the interactive `POST /api/dashboard/refresh` only fires when a browser is open.

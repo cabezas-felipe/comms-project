@@ -118,6 +118,13 @@ function liftSnapshotMeta(payload, refreshed_at) {
     if (_lastRunMeta.beatFit !== undefined) meta.beatFit = _lastRunMeta.beatFit;
     if (_lastRunMeta.clusterModel !== undefined) meta.clusterModel = _lastRunMeta.clusterModel;
     if (_lastRunMeta.embeddingModel !== undefined) meta.embeddingModel = _lastRunMeta.embeddingModel;
+    // Clustering fail-closed diagnostics (Slice 1): surface timeout/error
+    // reason, attempt count, and per-attempt latency on dashboard reads.
+    // Optional for back-compat with snapshots written before Slice 1.
+    if (_lastRunMeta.usedFallbackClustering !== undefined) meta.usedFallbackClustering = _lastRunMeta.usedFallbackClustering;
+    if (_lastRunMeta.clusteringFailureReason !== undefined) meta.clusteringFailureReason = _lastRunMeta.clusteringFailureReason;
+    if (_lastRunMeta.clusteringAttempts !== undefined) meta.clusteringAttempts = _lastRunMeta.clusteringAttempts;
+    if (_lastRunMeta.clusteringLatencyMs !== undefined) meta.clusteringLatencyMs = _lastRunMeta.clusteringLatencyMs;
     // Phase 4: per-axis semantic tag-mapping aggregate (topics + keywords)
     // + the `geographies.semanticApplied: false` lock stamp.  Optional for
     // backward compat with snapshots written before Phase 4.

@@ -31,7 +31,7 @@
 | **E-sparse** | Sparse profile (1 axis) | Runs, low-confidence semantic widen | `recall.profileAxes: 1`, `profileAxisNames: ["sources"]`, `degraded: false` | `embedding-recall.test.mjs`, `refresh-pipeline.test.mjs` | — |
 | **F-hold** | Geo implicit / conflict | Item deferred, not candidate | geo hold bucket | `geo-filter.test.mjs` | Haiku assessor (**M4**) |
 | **G-empty** | Beat-fit strict empty | No candidates | `beatFit.strictEmpty` | pipeline / beat-fit tests | — |
-| **I-fallback** | Cluster LLM throw | Heuristic clusters or empty cluster path | funnel / cluster logs | `cluster-engine.test.mjs` | Sonnet SKU (**M2**) |
+| **I-fallback** | Cluster LLM throw/timeout (both attempts) | **Empty dashboard** — no degraded "General Updates" titles ever shipped (fail-closed after 1 retry) | `usedFallbackClustering: true`, `clusteringFailureReason: "timeout"\|"error"`, `clusteringAttempts: 2`, `clusteringLatencyMs: [...]` | `refresh-pipeline.test.mjs`, `cluster-engine.test.mjs` | Sonnet SKU (**M2**) |
 | **P2-save** | Settings save → fresh dashboard | Latest intent reflected without waiting for heartbeat | Prototype: `triggerDashboardRefresh` fires after debounced save; API: `POST /api/dashboard/refresh` (same endpoint as heartbeat) | `04-prototype/src/pages/Settings.test.tsx`, `refresh-context.test.tsx` | — |
 
 *Add rows when DC or staging surfaces a repeatable miss.*

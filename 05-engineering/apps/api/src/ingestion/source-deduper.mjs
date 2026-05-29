@@ -137,6 +137,36 @@ export function normalizeHeadline(raw) {
     .trim();
 }
 
+/**
+ * Liveblog / rolling-coverage prefix detector.
+ *
+ * Wire services and WaPo re-emit a single rolling story many times across a
+ * day under a stable "Live updates: <subject>" headline (the subject stays put
+ * while the body churns).  Each re-emission surfaces as a distinct sourceItem —
+ * often with case drift ("LIVE UPDATES"), singular/plural ("Live update"), or
+ * a changing URL — so the exact-headline cross-feed rule under-merges them.
+ *
+ * Matches: "Live updates: …", "Live update: …", "Live blog: …" (case-insensitive,
+ * flexible inner whitespace).  WaPo "Quick Post" style live items can be added
+ * to the alternation here as we observe them in feed data.
+ */
+const LIVEBLOG_PREFIX_RE = /^\s*live\s+(?:updates?|blog)\s*:\s*/i;
+
+/**
+ * Derive a liveblog merge key from a headline, or `null` when the headline is
+ * not a liveblog item (or carries no subject after the marker).  The key is the
+ * subject AFTER the live marker, run through `normalizeHeadline` so casing,
+ * punctuation, and whitespace drift collapse to one identity.  Exported for
+ * unit testing.
+ */
+export function extractLiveblogSubject(headline) {
+  if (typeof headline !== "string") return null;
+  const m = headline.match(LIVEBLOG_PREFIX_RE);
+  if (!m) return null;
+  const subject = normalizeHeadline(headline.slice(m[0].length));
+  return subject.length > 0 ? subject : null;
+}
+
 function evidenceRichness(item) {
   const bodyLen = Array.isArray(item.body)
     ? item.body.reduce((acc, s) => acc + (typeof s === "string" ? s.length : 0), 0)
@@ -168,6 +198,35 @@ function pickWinnerCmp(a, b) {
   const am = Number.isFinite(a.minutesAgo) ? a.minutesAgo : Number.POSITIVE_INFINITY;
   const bm = Number.isFinite(b.minutesAgo) ? b.minutesAgo : Number.POSITIVE_INFINITY;
   if (am !== bm) return am - bm;
+  const aw = Number.isFinite(a.weight) ? a.weight : 0;
+  const bw = Number.isFinite(b.weight) ? b.weight : 0;
+  if (aw !== bw) return bw - aw;
+  const af = String(a.feedId ?? "");
+  const bf = String(b.feedId ?? "");
+  if (af !== bf) return af < bf ? -1 : 1;
+  const as = String(a.sourceId ?? "");
+  const bs = String(b.sourceId ?? "");
+  if (as !== bs) return as < bs ? -1 : 1;
+  return 0;
+}
+
+/**
+ * Winner comparator for a liveblog cluster.  Unlike `pickWinnerCmp` (evidence
+ * richness first), the canonical liveblog item is the NEWEST snapshot — that's
+ * the current state of the rolling story.  Order:
+ *   1. freshness (smaller `minutesAgo` wins)
+ *   2. evidence richness (longer body/headline as a tie-break)
+ *   3. feed weight (higher wins)
+ *   4. feedId, then sourceId lexicographic (final stable tie-breaks)
+ * Returns negative when `a` should win over `b`.
+ */
+function pickLiveblogWinnerCmp(a, b) {
+  const am = Number.isFinite(a.minutesAgo) ? a.minutesAgo : Number.POSITIVE_INFINITY;
+  const bm = Number.isFinite(b.minutesAgo) ? b.minutesAgo : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm;
+  const ar = evidenceRichness(a);
+  const br = evidenceRichness(b);
+  if (ar !== br) return br - ar;
   const aw = Number.isFinite(a.weight) ? a.weight : 0;
   const bw = Number.isFinite(b.weight) ? b.weight : 0;
   if (aw !== bw) return bw - aw;
@@ -287,6 +346,7 @@ export function dedupeSourceItems(items) {
     if (!raw || typeof raw !== "object") continue;
     const canonical = canonicalizeUrl(raw.url);
     const normHeadline = normalizeHeadline(raw.headline);
+    const liveblogSubject = extractLiveblogSubject(raw.headline);
     const annotated = {
       ...raw,
       _canonicalUrl: canonical,
@@ -294,7 +354,16 @@ export function dedupeSourceItems(items) {
     };
     let key;
     let hasUrl;
-    if (!normHeadline) {
+    let isLiveblog = false;
+    if (liveblogSubject) {
+      // Liveblog: group by subject after the live marker (ignoring URL/headline
+      // drift across the day) and gate merges by the publish-time window.  Takes
+      // precedence over the URL/headline paths so case/plural/URL variations of
+      // the same rolling story collapse to one item.
+      key = `liveblog::${liveblogSubject}`;
+      hasUrl = false;
+      isLiveblog = true;
+    } else if (!normHeadline) {
       // No usable headline → unique singleton (insufficient signal to merge).
       key = `__nohl__::${raw.sourceId ?? `idx${i}`}`;
       hasUrl = false;
@@ -307,7 +376,7 @@ export function dedupeSourceItems(items) {
       hasUrl = false;
     }
     if (!groups.has(key)) {
-      groups.set(key, { members: [], hasUrl });
+      groups.set(key, { members: [], hasUrl, isLiveblog });
       order.push(key);
     }
     groups.get(key).members.push(annotated);
@@ -317,20 +386,26 @@ export function dedupeSourceItems(items) {
   let duplicateCount = 0;
 
   for (const key of order) {
-    const { members, hasUrl } = groups.get(key);
+    const { members, hasUrl, isLiveblog } = groups.get(key);
     if (members.length === 1) {
       unique.push(stripInternalAnnotations(members[0]));
       continue;
     }
-    const subClusters = hasUrl
+    // Both the URL path and the liveblog path gate merges by the publish-time
+    // window so far-apart items (URL recycle, or a same-subject liveblog from a
+    // different cycle) stay distinct.
+    const subClusters = hasUrl || isLiveblog
       ? partitionByTimeWindow(members, PUBLISH_WINDOW_MINUTES)
       : [members];
+    // Liveblog clusters keep the NEWEST snapshot as canonical; everything else
+    // uses the evidence-richness-first tie-break.
+    const winnerCmp = isLiveblog ? pickLiveblogWinnerCmp : pickWinnerCmp;
     for (const cluster of subClusters) {
       if (cluster.length === 1) {
         unique.push(stripInternalAnnotations(cluster[0]));
         continue;
       }
-      const sorted = [...cluster].sort(pickWinnerCmp);
+      const sorted = [...cluster].sort(winnerCmp);
       const winner = sorted[0];
       const losers = sorted.slice(1);
       duplicateCount += losers.length;
