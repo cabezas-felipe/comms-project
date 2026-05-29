@@ -15,6 +15,7 @@ The Lovable reference UI stays in [`../04-prototype`](../04-prototype) and depen
 | Beat-fit precision gate — MVP recall-first default `0.20`, env-tunable | [`readBeatFitThreshold()` in `beat-fit-scorer.mjs`](apps/api/src/dashboard/beat-fit-scorer.mjs), [`applyBeatFitFilter` in `refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) | [D-063](DECISIONS.md), [semantic beat-fit runbook](docs/runbook-semantic-beat-fit.md) |
 | What-changed delta engine — 3-state `story.whatChanged` (first-seen / unchanged / changed) via deterministic gate + optional Haiku + Sonnet. **Default ON for prototype dev** via `bootstrapApiEnv()` in [`server.mjs`](apps/api/src/server.mjs); tests (`NODE_ENV=test`) and `TEMPO_AI_MOCK_ONLY=true` still skip the LLM-bound stages. Set `TEMPO_AI_DELTA_ENABLED=false` to disable explicitly. | [`what-changed-engine.mjs`](apps/api/src/dashboard/what-changed-engine.mjs), pipeline call site in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) | [what-changed spec](docs/what-changed-spec.md), [handoff](docs/what-changed-handoff.md), [D-065](DECISIONS.md) |
 | Server-side refresh cadence — `REFRESH_INTERVAL_MS` (1h) drives both the client heartbeat and the scheduled cadence-tick orchestrator; both branches converge on `_lastCheckedAt` and the shared `_refreshExecutor.execute` path. | [`refresh-cadence.mjs`](apps/api/src/contracts-runtime/refresh-cadence.mjs), [`due-user-orchestrator.mjs`](apps/api/src/dashboard/due-user-orchestrator.mjs), [`cadence-tick.mjs`](apps/api/src/ops/cadence-tick.mjs) | [Server-side cadence tick](#server-side-cadence-tick-sub-slice-25) |
+| Ingestion cache warmer — scheduled full-manifest fetch (no `feedIds`) that keeps `ingestion_recent_items` warm so refreshes hit the cache instead of a live RSS fetch; runs hourly at `:35` via GHA. | [`ingestion-warm.mjs`](apps/api/src/ops/ingestion-warm.mjs), [`.github/workflows/ingestion-warm.yml`](../.github/workflows/ingestion-warm.yml) | [Ingestion cache warmer](#ingestion-cache-warmer-phase-1-slice-34) |
 
 Detailed rationale: [dashboard-story-pool-walkthrough.md](docs/dashboard-story-pool-walkthrough.md). Operator scenarios: [dashboard-story-pool-scenario-map.md](docs/dashboard-story-pool-scenario-map.md).
 
@@ -206,6 +207,25 @@ Background: Sub-slice 2.4 added the [due-user orchestrator](apps/api/src/dashboa
 
 ```sh
 node apps/api/src/ops/cadence-tick.mjs
+```
+
+## Ingestion cache warmer (Phase 1 Slice 3–4)
+
+Background: Slice 3 added the [ingestion warmer](apps/api/src/ops/ingestion-warm.mjs) — a standalone ops script that fetches the full active manifest and upserts the rows into the `ingestion_recent_items` Tier-A cache. Slice 4 puts it on a schedule so the cache stays warm without manual invocation, letting interactive `POST /api/dashboard/refresh` calls hit the cache instead of paying the live RSS fetch latency.
+
+- **What runs on schedule:** [`.github/workflows/ingestion-warm.yml`](../.github/workflows/ingestion-warm.yml) runs hourly at `:35` (`cron: "35 * * * *"`) and on manual `workflow_dispatch`. The `:35` offset is deliberate — it stays clear of the cadence-tick workflow at `:05` so the two scheduled jobs don't contend for the same top-of-hour runner capacity.
+- **What it calls:** [`apps/api/src/ops/ingestion-warm.mjs`](apps/api/src/ops/ingestion-warm.mjs) calls `readFeedItems(dataDir)` with **no `feedIds`** — a full-manifest fetch across every active feed (deliberately *not* the per-user scoped fetch the cache-miss path uses) — then writes the mapped items via `writeRecentItems({ supabase, items })` from [`recent-items-cache.mjs`](apps/api/src/ingestion/recent-items-cache.mjs). It imports those helpers directly and never boots the HTTP app.
+- **Expected logs:** One single-line JSON summary per run, tagged `[ingestion-warm]`. Fields: `ok`, `startedAt`, `itemCount`, `feedCount`, `written`, `durationMs`, and `skippedReason` (present only on failure). Inspect by grepping the workflow run output for `[ingestion-warm]`.
+- **Failure semantics:**
+  - Exit `0` on success — **including a clean warm of zero items** (an empty manifest is not a failure).
+  - Exit `1` only on fatal errors: missing `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` (`skippedReason: "missing_supabase_env"`), supabase client construction failure (`"supabase_client_failed"`), the live read throwing (`"read_threw"`), or the cache write throwing (`"write_threw"`) / returning an error envelope (`"write_error"`).
+- **Where to inspect:** GitHub → Actions → "Ingestion cache warmer" → most recent run → `Run ingestion warm` step. The `[ingestion-warm]` line is the structured signal; the preceding `Run started at …` echo confirms the workflow reached the step.
+- **Secrets:** Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (the same pair the cadence tick uses) under repo Settings → Secrets and variables → Actions before enabling the schedule. The warmer writes with the service role, so a service-role key is required — it exits `1` with `skippedReason: "missing_supabase_env"` if either is absent.
+
+**Local invocation** (for debugging — requires `apps/api/.env` with Supabase creds):
+
+```sh
+node apps/api/src/ops/ingestion-warm.mjs
 ```
 
 ## Deployment
