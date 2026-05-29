@@ -129,6 +129,36 @@ test("geography-only overlap still splits (shared country token does not block s
   assert.equal(diagnostics.splitReasons.low_token_overlap, 1);
 });
 
+test("corroboration guard: low overlap but corroborated claim evidence does NOT split", () => {
+  // Two articles about the SAME beat that happen to share few literal tokens
+  // (one headlined around "ballot/vote", the other around "campaign/rally").
+  // Token overlap is below threshold, but the clustering stage corroborated
+  // them under a single shared claim ({"0": [a, b]}) — that is a legitimate
+  // single story and must survive the low-overlap path.
+  const a = item("a", "Colombia presidential ballot race tightens before the vote", [
+    "Candidates crisscross the country ahead of the decision.",
+  ]);
+  const b = item("b", "Colombians rally as campaign enters its closing weekend", [
+    "Crowds gathered for the final push.",
+  ]);
+  const story = metaStory({
+    source_item_ids: ["a", "b"],
+    factual_claims: ["Colombia heads toward a decisive presidential vote"],
+    claim_evidence_map: { "0": ["a", "b"] },
+  });
+
+  const { stories, diagnostics } = splitOverMergedClusters(
+    [story],
+    mapOf(a, b),
+    SETTINGS,
+    ON
+  );
+
+  assert.equal(stories.length, 1, "corroborated low-overlap cluster must not split");
+  assert.equal(diagnostics.splitCount, 0);
+  assert.strictEqual(stories[0], story);
+});
+
 test("disabled config returns passthrough with diagnostics.enabled=false", () => {
   const a = item("a", "Colombia coffee harvest forecast", ["Coffee yields expected to rise."]);
   const b = item("b", "Colombia volcano eruption warning", ["Seismic tremors prompt evacuation."]);

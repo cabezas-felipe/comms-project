@@ -14,6 +14,13 @@
 // its own lone source, no source reused) — the structural fingerprint of two
 // independent stories stitched together.
 //
+// Corroboration guard: the low-overlap path is suppressed when the cluster's
+// claim_evidence_map corroborates a shared claim (any claim grounded in ≥2
+// sources). Low lexical overlap is noisy — two articles about the same event
+// can share few literal tokens — so a corroborated cluster is treated as one
+// legitimate story regardless of token overlap. The disjoint path is the
+// reliable over-merge detector and is left untouched.
+//
 // Slice 1 deliberately does NOT wire this into refresh-pipeline. It ships as a
 // unit-tested module only.
 
@@ -202,6 +209,25 @@ function isDisjointSingleSource(claimEvidenceMap) {
   return distinct >= 2;
 }
 
+// True when the cluster's own evidence map corroborates a shared claim — i.e.
+// at least one claim group cites ≥2 distinct sources. Corroboration is the
+// clustering stage telling us "these sources back the SAME claim", which is the
+// signature of a single legitimate story even when the sources happen to share
+// few literal tokens (e.g. two Colombia-election articles, one headlined around
+// "ballot/vote" and the other around "campaign/rally"). This guards the noisy
+// `low_token_overlap` path from splitting such corroborated clusters; the
+// `disjoint_claim_evidence` path is unaffected (it already requires every group
+// to be single-source, which is the opposite of corroboration).
+function claimEvidenceCorroborates(claimEvidenceMap) {
+  if (!claimEvidenceMap || typeof claimEvidenceMap !== "object") return false;
+  for (const group of Object.values(claimEvidenceMap)) {
+    if (!Array.isArray(group)) continue;
+    const distinct = new Set(group.filter((id) => typeof id === "string" && id));
+    if (distinct.size >= 2) return true;
+  }
+  return false;
+}
+
 // All pairwise overlaps strictly below threshold → the cluster's items share
 // (almost) no topical tokens once geography is removed.
 function allPairwiseBelowThreshold(items, geoStopTokens, threshold) {
@@ -297,8 +323,14 @@ export function splitOverMergedClusters(metaStories, sourceItemsById, settings, 
 
     const items = ids.map((id) => getItem(id));
 
+    // Corroborated clusters (a claim grounded in ≥2 sources) are legitimate
+    // single stories even when their headlines share few literal tokens — the
+    // low-overlap path must not split them. The disjoint path stays available
+    // (it requires single-source-per-claim, which is never corroboration).
+    const corroborated = claimEvidenceCorroborates(story?.claim_evidence_map);
+
     let reason = null;
-    if (allPairwiseBelowThreshold(items, geoStopTokens, threshold)) {
+    if (!corroborated && allPairwiseBelowThreshold(items, geoStopTokens, threshold)) {
       reason = "low_token_overlap";
     } else if (isDisjointSingleSource(story?.claim_evidence_map)) {
       reason = "disjoint_claim_evidence";
