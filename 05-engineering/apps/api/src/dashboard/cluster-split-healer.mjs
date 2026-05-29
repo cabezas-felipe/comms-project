@@ -21,8 +21,9 @@
 // legitimate story regardless of token overlap. The disjoint path is the
 // reliable over-merge detector and is left untouched.
 //
-// Slice 1 deliberately does NOT wire this into refresh-pipeline. It ships as a
-// unit-tested module only.
+// The healer runs as a post-cluster pass in refresh-pipeline (after clustering,
+// before ID lineage); `TEMPO_CLUSTER_SPLIT_HEALER_ENABLED=false` is the instant
+// rollback. The split policy itself stays pure and deterministic.
 
 import {
   GEOGRAPHY_ALIASES,
