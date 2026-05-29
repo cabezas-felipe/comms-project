@@ -1062,6 +1062,108 @@ test("POST /api/dashboard/refresh (Slice 2): cache miss forwards matched feedIds
   }
 });
 
+test("POST /api/dashboard/refresh (Slice 2 deferred): no matched feeds → cache miss calls live reader WITHOUT feedIds (full-manifest)", async () => {
+  // The Slice 2 omit-when-empty contract: when the user has NO matched feeds
+  // (empty traditional + social sources → cacheFeedIds.length === 0), a cache
+  // miss must call `_feedReader.read(DATA_DIR)` with NO opts arg — preserving
+  // full-manifest behavior — rather than passing an empty `feedIds` array.
+  // A fresh isolated user has no settings file, so readSettings returns
+  // DEFAULT_SETTINGS (empty sources) → cacheFeedIds is empty.
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevCacheRead = _recentItemsCache.read;
+  const prevCacheWrite = _recentItemsCache.write;
+  const prevCacheEnabled = _recentItemsCache.enabled;
+  const prevCacheClient = _recentItemsCache.client;
+  const prevFeedRead = _feedReader.read;
+  const origLog = console.log;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _recentItemsCache.enabled = () => true;
+  _recentItemsCache.client = () => null;
+  // Forced miss — though with cacheFeedIds empty the read branch is skipped
+  // entirely; stubbed defensively so a regression that DOES read still misses.
+  _recentItemsCache.read = async () => ({ rows: [], error: null });
+  _recentItemsCache.write = async ({ items }) => ({ written: items.length, error: null });
+
+  let feedReadArgs = null;
+  let feedReadArgCount = null;
+  _feedReader.read = async (...args) => {
+    feedReadArgCount = args.length;
+    feedReadArgs = { dataDir: args[0], opts: args[1] };
+    return [
+      {
+        sourceId: "nyt-politics::full-1",
+        feedId: "nyt-politics",
+        outlet: "The New York Times",
+        url: "https://nyt.example.com/full-article",
+        headline: "Full-manifest headline",
+        body: ["Full body."],
+        minutesAgo: 7,
+        weight: 95,
+      },
+    ];
+  };
+
+  _refreshPipeline.run = async () => ({
+    payload: { contractVersion: VALID_BODY.contractVersion, stories: [] },
+    log: {
+      unchanged: false,
+      poolCount: 0,
+      relevantCount: 0,
+      usedFallbackClustering: false,
+      groundingFailures: 0,
+      droppedUngroundedStoryCount: 0,
+      groundingDropReasons: {},
+      watermark: "",
+      candidateCount: 0,
+      selectedFeedCount: 0,
+      selection: {},
+    },
+  });
+
+  const captured = [];
+  console.log = (...msgs) => { captured.push(msgs.map(String).join(" ")); };
+
+  try {
+    await withIsolatedUser("slice3-no-matched-feeds-user", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+    });
+  } finally {
+    console.log = origLog;
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _recentItemsCache.read = prevCacheRead;
+    _recentItemsCache.write = prevCacheWrite;
+    _recentItemsCache.enabled = prevCacheEnabled;
+    _recentItemsCache.client = prevCacheClient;
+    _feedReader.read = prevFeedRead;
+  }
+
+  assert.ok(feedReadArgs, "live reader must have been invoked on cache miss");
+  // Core contract: feedIds key is omitted entirely (no second arg passed),
+  // NOT passed as an empty array.
+  assert.equal(feedReadArgCount, 1, "live reader must be called with dataDir only (no opts arg)");
+  assert.equal(
+    feedReadArgs.opts,
+    undefined,
+    `opts must be undefined when there are no matched feeds; saw ${JSON.stringify(feedReadArgs.opts)}`
+  );
+
+  // ingestionSource must remain "live" (full manifest), not "live_scoped".
+  const refreshLog = captured.find((m) => m.includes("[refresh] ingestionSource="));
+  assert.ok(refreshLog, "expected a [refresh] summary log line");
+  assert.match(refreshLog, /ingestionSource=live items=/, "ingestionSource must be 'live', not 'live_scoped'");
+  assert.equal(refreshLog.includes("live_scoped"), false, "scoped source must NOT be used with no matched feeds");
+});
+
 // ─── What-changed Phase 1: ever-seen persistence + non-exposure ──────────────
 
 test("POST /api/dashboard/refresh: persisted snapshot includes merged _everSeenMetaStoryIds", async () => {
