@@ -1001,6 +1001,8 @@ function computeEvidenceRefsForStory(story, whatChangedState) {
  *                                              and from tests with deterministic stubs.  Required when
  *                                              recall mode is `hybrid_strict`; missing → fail-closed.
  * @param {object}   [opts.recallConfig]       — override for `resolveRecallConfig()` (tests only).
+ * @param {Function} [opts.resolveWhyItMattersFn] — TEST-ONLY seam: override implications
+ *                                                  resolver to exercise rejected-settle fallback paths.
  *
  * @returns {{ payload: object, log: object }}
  *   payload — ready-to-persist dashboard payload
@@ -1106,6 +1108,9 @@ export async function runRefreshPipeline({
     priorStoriesById && typeof priorStoriesById.size === "number"
       ? priorStoriesById.size
       : 0;
+  // Slice 7: top-level wall-clock bracket. Only the full-run branch sets
+  // log.timings; the watermark short-circuit returns before clustering.
+  const pipelineStartedAt = Date.now();
   // 1. Normalize
   const { items: normalizedItems, errors: normErrors } = normalizeSourceItems(rawItems);
   if (normErrors.length > 0) {
@@ -1335,6 +1340,7 @@ export async function runRefreshPipeline({
         : "")
   );
 
+  const recallStartedAt = Date.now();
   const recallResult = await runEmbeddingRecall({
     candidateItems: semanticAnnotatedGeoItems,
     settings,
@@ -1342,6 +1348,8 @@ export async function runRefreshPipeline({
     embedFn,
     config: effectiveRecallConfig,
   });
+  const recallEndedAt = Date.now();
+  const recallMs = Math.max(0, recallEndedAt - recallStartedAt);
   const recallItems = recallResult.items;
   const recallDiagnostics = {
     ...recallResult.diagnostics,
@@ -1432,6 +1440,17 @@ export async function runRefreshPipeline({
   //     by buildStory's explicit field whitelist).
   const dedupeResult = dedupeSourceItems(relevantItems);
   const dedupedItems = dedupeResult.unique;
+  // Slice 7 (non-overlap): the pre-cluster stage is the two spans that bracket
+  // the recall block — [pipelineStartedAt → recallStartedAt] (normalize → time
+  // window → source selection → geo → semantic prep → topic/keyword) plus
+  // [recallEndedAt → preClusterEndedAt] (beat-fit + cross-feed dedupe). Recall
+  // itself is reported separately as `recallMs`, so the two stages never
+  // overlap.
+  const preClusterEndedAt = Date.now();
+  const preClusterMs = Math.max(
+    0,
+    (recallStartedAt - pipelineStartedAt) + (preClusterEndedAt - recallEndedAt)
+  );
   if (dedupeResult.duplicateCount > 0) {
     console.log(
       `[pipeline.dedupe] input=${relevantItems.length} unique=${dedupedItems.length} collapsed=${dedupeResult.duplicateCount}`
@@ -1597,6 +1616,7 @@ export async function runRefreshPipeline({
   //    real stories to users.  An empty dashboard is the honest signal that the
   //    clustering stage failed.  `gracefulFallbackClustering` stays exported for
   //    tests/ops only.
+  const clusterStartedAt = Date.now();
   let rawMetaStories;
   let usedFallbackClustering = false;
   let clusteringFailureReason = null; // 'timeout' | 'error' | null
@@ -1727,6 +1747,9 @@ export async function runRefreshPipeline({
     }
   }
 
+  // Clustering + grounding stage wall-clock (cluster + split-heal + lineage
+  // + grounding verification; before response shaping).
+  const clusterMs = Math.max(0, Date.now() - clusterStartedAt);
   // 10. Build response stories (resolve source items, shape to schema).
   //     Only `groundedStories` (passed all grounding gates) reach this step.
   //
@@ -1852,6 +1875,7 @@ export async function runRefreshPipeline({
   // gate signals through Haiku → Sonnet when an operator opts in.  Until
   // then, every story resolves to first-seen or unchanged from the gate
   // alone — no LLM calls in CI/prod.
+  const whatChangedStartedAt = Date.now();
   const perStoryWhatChanged = [];
   for (const story of stories) {
     const priorStory = priorStoriesById && typeof priorStoriesById.get === "function"
@@ -1874,6 +1898,7 @@ export async function runRefreshPipeline({
     story.whatChanged = result.whatChanged;
     perStoryWhatChanged.push(result);
   }
+  const whatChangedMs = Math.max(0, Date.now() - whatChangedStartedAt);
   const whatChangedDiagnostics = aggregateWhatChangedDiagnostics(perStoryWhatChanged, {
     everSeenCount: whatChangedEverSeenCount,
     priorStoryCount: whatChangedPriorStoryCount,
@@ -2092,6 +2117,19 @@ export async function runRefreshPipeline({
     console.log(`[pipeline.strict-empty] stories=0  ${noteParts.join("  ")}`);
   }
 
+  // Slice 7: unified per-stage wall-clock timings (additive). Stages are
+  // NON-OVERLAPPING brackets — preClusterMs, recallMs, clusterMs,
+  // whatChangedMs, whyMs each cover a disjoint span — and `pipelineMs` is the
+  // outer envelope (their sum <= pipelineMs; the remainder is bracket overhead
+  // plus the unattributed build/sort/tag span between clusterMs and
+  // whatChangedMs). whyMs reuses the Slice 6 measurement so it stays a single
+  // source of truth.
+  const pipelineMs = Math.max(0, Date.now() - pipelineStartedAt);
+  const pipelineTimings = { preClusterMs, recallMs, clusterMs, whatChangedMs, whyMs, pipelineMs };
+  console.log(
+    `[pipeline.timings] preClusterMs=${preClusterMs} recallMs=${recallMs}` +
+      ` clusterMs=${clusterMs} whatChangedMs=${whatChangedMs} whyMs=${whyMs} pipelineMs=${pipelineMs}`
+  );
   const log = {
     totalItems: normalizedItems.length,
     poolCount: recentItems.length,
@@ -2109,6 +2147,7 @@ export async function runRefreshPipeline({
     // before the timeout/error.
     clusteringFailureReason,
     clusteringAttempts,
+    timings: pipelineTimings,
     clusteringLatencyMs: clusteringAttemptLatencyMs,
     // Slice 2 — post-cluster split healer diagnostics. `enabled` reflects the
     // resolved config; `splitCount` / `splitReasons` show how many over-merged

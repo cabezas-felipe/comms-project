@@ -6835,3 +6835,35 @@ test("runRefreshPipeline Phase 5: parallel apply is index-ordered, not completio
     else process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = prevConc;
   }
 });
+
+
+test("Slice 7: log.timings exposes non-negative integer per-stage wall-clock; whyMs === whyItMatters.whyMs", async () => {
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })],
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.ok(log.timings && typeof log.timings === "object", "log.timings present on a full run");
+  assert.equal(typeof log.timings.whyMs, "number"); // plan-required
+  for (const k of ["preClusterMs", "recallMs", "clusterMs", "whatChangedMs", "whyMs", "pipelineMs"]) {
+    const v = log.timings[k];
+    assert.equal(typeof v, "number", `${k} is a number`);
+    assert.ok(Number.isFinite(v) && v >= 0, `${k} >= 0`);
+    assert.equal(v, Math.trunc(v), `${k} is an integer ms`);
+  }
+  assert.equal(log.timings.whyMs, log.whyItMatters.whyMs, "single source of truth for whyMs");
+  // Non-overlapping brackets must not exceed the outer envelope (small slack
+  // for inter-bracket overhead). Under-counting is fine: the build/sort/tag
+  // span between clusterMs and whatChangedMs is intentionally unattributed.
+  assert.ok(
+    log.timings.preClusterMs + log.timings.recallMs + log.timings.clusterMs +
+      log.timings.whatChangedMs + log.timings.whyMs <= log.timings.pipelineMs + 50,
+    "non-overlapping stage timings should not exceed pipelineMs by much"
+  );
+  // Additive: existing per-stage diagnostic latency fields untouched.
+  assert.ok("latencyMs" in log.whyItMatters, "whyItMatters.latencyMs preserved");
+  assert.ok("latencyMs" in log.whatChanged, "whatChanged.latencyMs preserved");
+  assert.ok("clusteringLatencyMs" in log, "clusteringLatencyMs preserved");
+});

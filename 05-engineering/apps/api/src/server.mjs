@@ -1006,6 +1006,9 @@ async function executeRefreshFlow(identity) {
         }).matchedFeeds.map((f) => f.id).filter((id) => typeof id === "string" && id.length > 0)
       : [];
 
+    // Slice 7: wall-clock around the ingestion block (cache read + optional
+    // live fetch), excluding the pipeline call. Folded into _meta.timings below.
+    const ingestionStartedAt = Date.now();
     let rawItems;
     let ingestionSource = "live";
     if (_recentItemsCache.enabled() && cacheFeedIds.length > 0) {
@@ -1041,8 +1044,9 @@ async function executeRefreshFlow(identity) {
         rawItems = await _feedReader.read(DATA_DIR);
       }
     }
+    const ingestionMs = Math.max(0, Date.now() - ingestionStartedAt);
     console.log(
-      `[refresh] ingestionSource=${ingestionSource} items=${Array.isArray(rawItems) ? rawItems.length : 0} matchedFeeds=${cacheFeedIds.length}`
+      `[refresh] ingestionSource=${ingestionSource} items=${Array.isArray(rawItems) ? rawItems.length : 0} matchedFeeds=${cacheFeedIds.length} ingestionMs=${ingestionMs}`
     );
 
     // Sub-slice 2.2 write: opportunistic upsert into the Tier-A cache so
@@ -1132,6 +1136,14 @@ async function executeRefreshFlow(identity) {
       priorStoriesById,
     });
 
+    // Slice 7: fold the server-measured ingestionMs into the pipeline's
+    // per-stage timings so _meta.timings carries one unified object
+    // (ingestion + pipeline stages). Guarded — the watermark short-circuit
+    // branch returns a log without `timings`, which is fine.
+    if (log && typeof log === "object") {
+      log.timings = { ingestionMs, ...(log.timings ?? {}) };
+    }
+
     // ─── Phase 4 short-circuit: watermark unchanged ─────────────────────────
     if (log?.unchanged === true && payload === null) {
       const elapsedMs = Date.now() - startedAt;
@@ -1175,6 +1187,7 @@ async function executeRefreshFlow(identity) {
       if (log.recall) skipMeta.recall = log.recall;
       if (log.funnel) skipMeta.funnel = log.funnel;
       if (log.beatFit) skipMeta.beatFit = log.beatFit;
+      if (log.timings) skipMeta.timings = log.timings;
       // Phase 2 lightweight decision trace.  Optional — older pipeline mocks
       // and partial returns may omit it; consumers ignore unknown _meta keys.
       if (log.decisionTrace) skipMeta.decisionTrace = log.decisionTrace;
@@ -1277,6 +1290,9 @@ async function executeRefreshFlow(identity) {
     // operators can audit pass / fallback / lowConfidence counts and
     // writer-stage latency without replaying the pipeline.
     if (log.whyItMatters !== undefined) lastRunMeta.whyItMatters = log.whyItMatters;
+    // Slice 7: per-stage wall-clock timings (ingestion + pipeline). Optional —
+    // surfaced under `_meta.timings` on subsequent reads via liftSnapshotMeta.
+    if (log.timings !== undefined) lastRunMeta.timings = log.timings;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
@@ -1323,6 +1339,7 @@ async function executeRefreshFlow(identity) {
           lastCheckedAt,
           hasSnapshot: true,
           selection: log.selection,
+          timings: log.timings,
           unchanged: false,
           watermark: log.watermark,
           candidateCount: log.candidateCount,
