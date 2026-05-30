@@ -6618,3 +6618,220 @@ test("runRefreshPipeline (Slice 2): a same-event election pair is not split", as
   assert.equal(payload.stories.length, 1, "high-overlap same-event pair must stay merged");
   assert.equal(log.clusterSplit.splitCount, 0);
 });
+test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats serial wall-clock (order preserved)", async () => {
+  // Slice 6: Phase 5 now fans the per-story why-it-matters resolver calls out
+  // through a bounded `pMap` pool instead of awaiting them serially.  Pins:
+  //   1. every story still gets a non-empty whyItMatters,
+  //   2. payload story order is the deterministic R1 order (unaffected by why
+  //      completion order),
+  //   3. wall-clock for the stage reflects parallel waves, not the serial sum.
+  const STORY_COUNT = 6;
+  const PER_STORY_DELAY_MS = 100;
+  const localDelay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Six distinct stories so none get merged/deduped before Phase 5.  Built off
+  // MOCK_META_STORIES[0] (which grounds against the rawItems) with unique
+  // ids/titles/sources.  Ids are lexically ascending so the R1 tiebreaker
+  // (metaStoryId) yields the same order as construction.
+  const clusterStories = Array.from({ length: STORY_COUNT }, (_, i) => ({
+    ...MOCK_META_STORIES[0],
+    meta_story_id: `ms-why-par-${i}`,
+    title: `Parallel why story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i} - multiple outlets report on developments`,
+    summary: `Summary ${i}: diplomatic relations updates tracked across outlets.`,
+    source_item_ids: ["src-1"],
+  }));
+
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  const prevConc = process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
+  process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "4";
+  try {
+    const { payload, log } = await runRefreshPipeline({
+      settings: BASE_SETTINGS,
+      rawItems: [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })],
+      clusterFn: async () => clusterStories,
+      clusterModel: "mock-anthropic-haiku",
+      contractVersion: "2026-05-19-meta-story-fields",
+      deltaConfig: { enabled: false },
+      whyConfig: PHASE5_WHY_ENABLED_CONFIG,
+      whyWriteFn: async (payload) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await localDelay(PER_STORY_DELAY_MS);
+        inFlight -= 1;
+        return {
+          text: `Parallel implications copy for ${payload?.state ?? "steady"} state, sufficiently long to pass the validation gates.`,
+          taxonomyPrimary: "monitoring_intensity",
+          confidence: "medium",
+        };
+      },
+    });
+
+    const whyStories = payload.stories.filter((s) => s.metaStoryId.startsWith("ms-why-par-"));
+    assert.equal(whyStories.length, STORY_COUNT, "all six stories survive to the payload");
+    for (const s of whyStories) {
+      assert.ok(s.whyItMatters && s.whyItMatters.length > 0, `whyItMatters populated for ${s.metaStoryId}`);
+    }
+
+    // R1: payload order is the deterministic server-canonical order.  With
+    // equal beat-fit / recency, the metaStoryId tiebreaker yields ascending
+    // ms-why-par-0..5 — and crucially it is NOT driven by why completion order
+    // (the Slice 6 invariant: parallel apply preserves order).
+    const expectedOrder = clusterStories.map((s) => s.meta_story_id).slice().sort();
+    assert.deepEqual(
+      payload.stories.map((s) => s.metaStoryId),
+      expectedOrder,
+      "story order in payload is the deterministic R1 order, independent of parallel completion order (R1)"
+    );
+
+    // Concurrency cap honored — at most 4 why writers in flight; with 6 stories
+    // and cap 4 the ceiling is actually reached.
+    assert.ok(maxInFlight <= 4, `max in-flight why writers must be <= 4, saw ${maxInFlight}`);
+    assert.equal(maxInFlight, 4, "concurrency 4 with 6 stories must reach the cap");
+
+    // Stage telemetry surfaced on the returned log.
+    assert.equal(log.whyItMatters.whyConcurrency, 4, "whyConcurrency surfaced on log.whyItMatters");
+    assert.equal(typeof log.whyItMatters.whyMs, "number", "whyMs surfaced on log.whyItMatters");
+
+    // Wall-clock proof: serial would be 6 * 100 = ~600ms; parallel with cap 4
+    // is two waves (4 then 2) ~ 200ms.  Generous threshold well under serial.
+    assert.ok(
+      log.whyItMatters.whyMs < STORY_COUNT * PER_STORY_DELAY_MS * 0.85, // 0.85 margin absorbs GHA runner jitter while staying clearly under serial
+      `parallel why wall-clock (${log.whyItMatters.whyMs}ms) must beat serial ~${STORY_COUNT * PER_STORY_DELAY_MS}ms`
+    );
+  } finally {
+    if (prevConc === undefined) delete process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
+    else process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = prevConc;
+  }
+});
+
+
+test("runRefreshPipeline Phase 5: rejected settle uses safeWhyFallbackForState (resolver_threw)", async () => {
+  // A throwing `whyWriteFn` is caught inside resolveWhyItMatters (returns an
+  // internal fallback), so it cannot produce a *rejected* pMap settle.  We use
+  // the `resolveWhyItMattersFn` seam to make the resolver itself throw for one
+  // story, hitting the pipeline's defensive rejected-settle branch.
+  const { safeWhyFallbackForState } = await import("./why-this-matters-engine.mjs");
+  const REJECT_ID = "ms-why-reject-1";
+  const stories = [0, 1, 2].map((i) => ({
+    ...MOCK_META_STORIES[0],
+    meta_story_id: `ms-why-reject-${i}`,
+    title: `Reject-path story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i} - outlets report developments`,
+    summary: `Summary ${i}: diplomatic relations updates tracked across outlets.`,
+    source_item_ids: ["src-1"],
+  }));
+  // Throws for one story (forcing a rejected settle); returns a valid
+  // resolver-shaped result for the others (the non-throwing stub).
+  const resolveWhyItMattersFn = (input) => {
+    if (input.metaStoryId === REJECT_ID) {
+      throw new Error("synthetic resolver explosion");
+    }
+    return {
+      whyItMatters: `OK copy for ${input.metaStoryId}`,
+      trace: { metaStoryId: input.metaStoryId, state: input.state, fallback_used: false },
+      diagnostics: { fallbackUsed: false, writerOk: true, latencyMs: { write: 0, rewrite: 0 } },
+    };
+  };
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })],
+    clusterFn: async () => stories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    deltaConfig: { enabled: false },
+    whyConfig: PHASE5_WHY_ENABLED_CONFIG,
+    resolveWhyItMattersFn,
+  });
+
+  // Failing story still ships with a non-empty, state-aware safe fallback.
+  const failed = payload.stories.find((s) => s.metaStoryId === REJECT_ID);
+  assert.ok(failed, "the failing story must still ship");
+  const failedTrace = payload._whyItMattersTraces[REJECT_ID];
+  assert.ok(failedTrace, "trace recorded for the failed story");
+  assert.equal(failedTrace.fallback_used, true, "rejected settle marks trace.fallback_used");
+  assert.ok(failed.whyItMatters && failed.whyItMatters.length > 0, "fallback copy is non-empty");
+  assert.equal(
+    failed.whyItMatters,
+    safeWhyFallbackForState(failedTrace.state),
+    "rejected settle uses safeWhyFallbackForState for the pipeline-derived state"
+  );
+
+  // Other stories still get normal copy from the non-throwing stub.
+  const others = payload.stories.filter((s) => s.metaStoryId !== REJECT_ID);
+  assert.equal(others.length, 2, "two non-failing stories ship");
+  for (const s of others) {
+    assert.equal(s.whyItMatters, `OK copy for ${s.metaStoryId}`, `normal copy for ${s.metaStoryId}`);
+    assert.equal(payload._whyItMattersTraces[s.metaStoryId].fallback_used, false, `${s.metaStoryId} did not fall back`);
+  }
+
+  // Run-level diagnostics count the rejected story as a fallback.
+  assert.ok(log.whyItMatters.fallback >= 1, "fallback count includes the rejected story");
+});
+
+
+test("runRefreshPipeline Phase 5: parallel apply is index-ordered, not completion-ordered (R1)", async () => {
+  // Reverse the completion order vs input order (descending delay by index) and
+  // prove the payload still ships in deterministic R1 order — pinning that the
+  // index-aligned apply pass, not pMap completion order, drives story order.
+  const N = 4;
+  const completion = [];
+  const stories = Array.from({ length: N }, (_, i) => ({
+    ...MOCK_META_STORIES[0],
+    meta_story_id: `ms-why-order-${i}`,
+    title: `Order story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i} - outlets report developments`,
+    summary: `Summary ${i}: diplomatic relations updates tracked across outlets.`,
+    source_item_ids: ["src-1"],
+  }));
+  // Story 0 waits longest, story N-1 shortest → completion order is reversed.
+  const resolveWhyItMattersFn = async (input) => {
+    const idx = Number(String(input.metaStoryId).split("-").pop());
+    await new Promise((r) => setTimeout(r, (N - idx) * 40));
+    completion.push(input.metaStoryId);
+    return {
+      whyItMatters: `Order copy ${idx}`,
+      trace: { metaStoryId: input.metaStoryId, state: input.state, fallback_used: false },
+      diagnostics: { fallbackUsed: false, writerOk: true, latencyMs: { write: 0, rewrite: 0 } },
+    };
+  };
+
+  const prevConc = process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
+  process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "4"; // all four resolve in one wave
+  try {
+    const { payload } = await runRefreshPipeline({
+      settings: BASE_SETTINGS,
+      rawItems: [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })],
+      clusterFn: async () => stories,
+      clusterModel: "mock-anthropic-haiku",
+      contractVersion: "2026-05-19-meta-story-fields",
+      deltaConfig: { enabled: false },
+      whyConfig: PHASE5_WHY_ENABLED_CONFIG,
+      resolveWhyItMattersFn,
+    });
+
+    const order = payload.stories.map((s) => s.metaStoryId);
+    assert.deepEqual(
+      order,
+      ["ms-why-order-0", "ms-why-order-1", "ms-why-order-2", "ms-why-order-3"],
+      "payload ships in deterministic R1 (metaStoryId) order"
+    );
+    // Completion order is the reverse — proving the order assertion is meaningful
+    // (payload order is NOT a side effect of which resolver finished first).
+    assert.deepEqual(
+      completion,
+      ["ms-why-order-3", "ms-why-order-2", "ms-why-order-1", "ms-why-order-0"],
+      "resolvers completed in reverse-of-input order"
+    );
+    assert.notDeepEqual(completion, order, "completion order must differ from payload order");
+    for (const s of payload.stories) {
+      assert.ok(s.whyItMatters && s.whyItMatters.length > 0, `whyItMatters populated for ${s.metaStoryId}`);
+    }
+  } finally {
+    if (prevConc === undefined) delete process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
+    else process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = prevConc;
+  }
+});

@@ -56,14 +56,17 @@ import {
   aggregateWhyItMattersDiagnostics,
   deriveWhyStateFromWhatChangedState,
   emptyWhyItMattersRunDiagnostics,
+  resolveWhyConcurrencyConfig,
   resolveWhyConfig,
   resolveWhyItMatters,
+  safeWhyFallbackForState,
 } from "./why-this-matters-engine.mjs";
 import { retrieveDoctrineSnippetsForStory } from "./why-doctrine-retrieval.mjs";
 import {
   splitOverMergedClusters,
   resolveClusterSplitConfig,
 } from "./cluster-split-healer.mjs";
+import { pMap } from "../util/p-map.mjs";
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -1064,6 +1067,12 @@ export async function runRefreshPipeline({
   // fallback / kill-switch path.
   whyWriteFn = null,
   whyConfig = null,
+  // Test seam for the implications resolver itself (not just its writer).
+  // Defaults to the imported `resolveWhyItMatters`; tests inject a wrapper to
+  // exercise the rejected-settle defensive path in the Phase 5 parallel apply
+  // (a throwing `whyWriteFn` is caught inside the resolver, so it cannot
+  // produce a rejected pMap settle on its own). Zero behavior change when null.
+  resolveWhyItMattersFn = null,
   // Doctrine retrieval injection point (spec §5).  Production reads the
   // hand-curated `doctrine-snippets.v0.json` allowlist via
   // `retrieveDoctrineSnippetsForStory`; tests pass a stub here to control
@@ -1891,15 +1900,24 @@ export async function runRefreshPipeline({
       ` latency_write_ms=${whatChangedDiagnostics.latencyMs.write}`
   );
 
-  // ── Phase 5: compute whyItMatters per story ──────────────────────────────
+  // ── Phase 5: compute whyItMatters per story (bounded parallel) ───────────
   // Runs after Phase 4 because the implications writer needs the resolved
   // `whatChangedState` to derive emphasis (intro/steady/evolving — see
-  // why-this-matters-spec §3).  Serial, deterministic order — same posture
-  // as the what-changed loop above.  Default posture is LLM-first when
-  // `TEMPO_AI_WHY_IT_MATTERS_ENABLED=true`; on disable / mock-only /
-  // provider failure / rubric fail, the resolver returns a Phase 3d
-  // state-aware safe-fallback template so `story.whyItMatters` is never
-  // empty or subtitle-echo.
+  // why-this-matters-spec §3).
+  //
+  // Structure: a sync, index-aligned PREPARATION pass computes every input
+  // the resolver needs per story (no awaits), then a bounded `pMap` worker
+  // pool fans the `resolveWhyItMatters` calls out so the per-story LLM
+  // round-trips overlap instead of running serially (Slice 6).  Concurrency
+  // comes from `TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY` (default 4, clamp 1–6).
+  // pMap returns settled results index-aligned with the input, so the APPLY
+  // pass walks them in order — payload story order (R1) is preserved
+  // regardless of completion order.
+  //
+  // Default posture is LLM-first when `TEMPO_AI_WHY_IT_MATTERS_ENABLED=true`;
+  // on disable / mock-only / provider failure / rubric fail, the resolver
+  // returns a Phase 3d state-aware safe-fallback template so
+  // `story.whyItMatters` is never empty or subtitle-echo.
   const effectiveWhyConfig = whyConfig ?? resolveWhyConfig();
   const everSeenSet = new Set(Array.isArray(everSeenMetaStoryIds) ? everSeenMetaStoryIds : []);
   const perStoryWhyItMatters = [];
@@ -1913,8 +1931,11 @@ export async function runRefreshPipeline({
     changed: "changed",
     unchanged: "unchanged",
   };
-  for (let i = 0; i < stories.length; i += 1) {
-    const story = stories[i];
+
+  // Preparation pass — sync, index-aligned with `stories`.  Computes the
+  // resolver input for every story up front so the parallel stage below is a
+  // pure fan-out with no per-task setup work.
+  const preparedWhy = stories.map((story, i) => {
     const wcResult = perStoryWhatChanged[i] ?? null;
     const whatChangedState = WHAT_CHANGED_TO_DELTA_STATE[wcResult?.state] ?? null;
     const evidenceRefs = computeEvidenceRefsForStory(story, whatChangedState);
@@ -1928,9 +1949,9 @@ export async function runRefreshPipeline({
       everSeen: everSeenForStory,
     });
     // Doctrine retrieval (spec §5).  Pure / sync; fail-closes to [] on any
-    // malformed input so the writer always proceeds with a valid
-    // snippets array.  Tests can inject `doctrineSnippets` via
-    // `doctrineRetrievalFn` to bypass the on-disk corpus.
+    // malformed input so the writer always proceeds with a valid snippets
+    // array.  Tests can inject `doctrineSnippets` via `doctrineRetrievalFn`
+    // to bypass the on-disk corpus.
     let doctrineSnippets = [];
     try {
       doctrineSnippets = doctrineRetrievalFn
@@ -1940,9 +1961,11 @@ export async function runRefreshPipeline({
     } catch {
       doctrineSnippets = [];
     }
-    // eslint-disable-next-line no-await-in-loop
-    const why = await resolveWhyItMatters(
-      {
+    return {
+      index: i,
+      story,
+      whyState,
+      resolveArgs: {
         metaStoryId: story.metaStoryId,
         title: story.title,
         subtitle: story.subtitle,
@@ -1954,8 +1977,52 @@ export async function runRefreshPipeline({
         evidenceRefs,
         doctrineSnippets,
       },
-      { writeFn: whyWriteFn ?? undefined, config: effectiveWhyConfig }
-    );
+    };
+  });
+
+  // Parallel fan-out — bounded worker pool caps in-flight resolver calls at
+  // `whyConcurrency`.  `whyMs` is the wall-clock for the whole stage.
+  const { concurrency: whyConcurrency } = resolveWhyConcurrencyConfig();
+  const whyStartedAt = Date.now();
+  const whyResolver = resolveWhyItMattersFn ?? resolveWhyItMatters;
+  const whySettled = await pMap(
+    preparedWhy,
+    ({ resolveArgs }) =>
+      whyResolver(resolveArgs, {
+        writeFn: whyWriteFn ?? undefined,
+        config: effectiveWhyConfig,
+      }),
+    whyConcurrency
+  );
+  const whyMs = Date.now() - whyStartedAt;
+
+  // Apply pass — walk settled results in input index order so story order is
+  // unchanged (R1).  A `rejected` settle means `resolveWhyItMatters` itself
+  // threw; it normally fail-closes internally, so this is a defensive net:
+  // synthesize the same state-aware safe fallback the resolver would have
+  // returned (marked as a fallback in diagnostics) so `story.whyItMatters` is
+  // never left empty.
+  for (let i = 0; i < preparedWhy.length; i += 1) {
+    const { story, whyState } = preparedWhy[i];
+    const settled = whySettled[i];
+    let why;
+    if (settled.status === "fulfilled") {
+      why = settled.value;
+    } else {
+      why = {
+        whyItMatters: safeWhyFallbackForState(whyState),
+        trace: {
+          metaStoryId: typeof story.metaStoryId === "string" ? story.metaStoryId : "",
+          state: whyState,
+          fallback_used: true,
+        },
+        diagnostics: {
+          fallbackUsed: true,
+          fallbackReason: "resolver_threw",
+          llmFailed: { write: true },
+        },
+      };
+    }
     story.whyItMatters = why.whyItMatters;
     if (typeof story.metaStoryId === "string" && story.metaStoryId.length > 0) {
       whyItMattersTraces[story.metaStoryId] = why.trace;
@@ -1965,6 +2032,11 @@ export async function runRefreshPipeline({
   const whyItMattersDiagnostics = aggregateWhyItMattersDiagnostics(perStoryWhyItMatters, {
     enabled: effectiveWhyConfig.enabled,
   });
+  // Stage wall-clock + concurrency surfaced on the diagnostics object so they
+  // ride along in the returned `log.whyItMatters` next to `latencyMs` (the
+  // analogous what-changed/recall stages already expose per-stage latency).
+  whyItMattersDiagnostics.whyConcurrency = whyConcurrency;
+  whyItMattersDiagnostics.whyMs = whyMs;
   console.log(
     `[pipeline.whyItMatters]` +
       ` schema=${whyItMattersDiagnostics.schemaVersion}` +
@@ -1977,7 +2049,9 @@ export async function runRefreshPipeline({
       ` llm_failed_write=${whyItMattersDiagnostics.llmFailed.write}` +
       ` llm_failed_rewrite=${whyItMattersDiagnostics.llmFailed.rewrite}` +
       ` latency_write_ms=${whyItMattersDiagnostics.latencyMs.write}` +
-      ` latency_rewrite_ms=${whyItMattersDiagnostics.latencyMs.rewrite}`
+      ` latency_rewrite_ms=${whyItMattersDiagnostics.latencyMs.rewrite}` +
+      ` why_concurrency=${whyConcurrency}` +
+      ` why_ms=${whyMs}`
   );
 
   const payload = {

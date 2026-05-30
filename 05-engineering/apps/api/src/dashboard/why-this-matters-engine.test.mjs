@@ -183,6 +183,14 @@ test("resolveWhyConcurrencyConfig: above range clamps down to 6", async () => {
   });
 });
 
+test("resolveWhyConcurrencyConfig: fractional value is truncated by parseInt before clamp ('2.9' → 2)", async () => {
+  // parseInt stops at the decimal point, so "2.9" parses to 2 (not rounded to
+  // 3) and then clamps within [1,6] unchanged.  Pins the documented truncation.
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "2.9"; }, () => {
+    assert.deepEqual(resolveWhyConcurrencyConfig(), { concurrency: 2 });
+  });
+});
+
 test("resolveWhyConcurrencyConfig: invalid / empty falls back to default 4", async () => {
   await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "abc"; }, () => {
     assert.equal(resolveWhyConcurrencyConfig().concurrency, 4);
