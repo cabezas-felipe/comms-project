@@ -139,6 +139,9 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // backward compat with snapshots written before the implications
     // writer shipped.
     if (_lastRunMeta.whyItMatters !== undefined) meta.whyItMatters = _lastRunMeta.whyItMatters;
+    // Slice 7: per-stage wall-clock timings (ingestion + pipeline). Optional —
+    // absent on pre-Slice-7 snapshots, so older reads simply omit the key.
+    if (_lastRunMeta.timings !== undefined) meta.timings = _lastRunMeta.timings;
   }
   // `_everSeenMetaStoryIds` (what-changed history set) and
   // `_whyItMattersTraces` (why-this-matters trace map) pass through via

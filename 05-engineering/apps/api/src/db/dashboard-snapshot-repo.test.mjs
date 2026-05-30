@@ -566,6 +566,40 @@ test("writeSnapshot + readSnapshot: _lastRunMeta.whyItMatters round-trips into _
   assert.equal(result._lastRunMeta, undefined);
 });
 
+test("writeSnapshot + readSnapshot: _lastRunMeta.timings round-trips into _meta.timings", async () => {
+  // Slice 7: per-stage wall-clock timings persist in the snapshot blob and
+  // surface under `_meta.timings` on read (same posture as whatChanged /
+  // whyItMatters above).
+  const userId = "timings-meta-roundtrip";
+  const TIMINGS = {
+    ingestionMs: 42,
+    preClusterMs: 10,
+    recallMs: 5,
+    clusterMs: 100,
+    whatChangedMs: 8,
+    whyMs: 120,
+    pipelineMs: 250,
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: { timings: TIMINGS },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta.timings, TIMINGS);
+  // Backward-compat guard: nothing else leaks when only timings is present.
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "whyItMatters"), false);
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot: snapshots without _lastRunMeta.timings omit _meta.timings (backward compat)", async () => {
+  const userId = "no-timings-backcompat";
+  await writeSnapshot(userId, SAMPLE_PAYLOAD);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "timings"), false);
+});
+
 test("writeSnapshot + readSnapshot: _whyItMattersTraces round-trips on the snapshot (not in _meta)", async () => {
   const userId = "why-traces-roundtrip-user";
   const TRACES = {

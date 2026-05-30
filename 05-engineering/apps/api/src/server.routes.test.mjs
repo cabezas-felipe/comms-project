@@ -4847,3 +4847,89 @@ test("Sub-slice 2.4: orchestrator-triggered refresh advances _lastCheckedAt anch
     _refreshPipeline.run = prevPipelineRun;
   }
 });
+
+
+test("Slice 7: POST refresh _meta.timings carries ingestionMs + pipeline stage timings", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  // Pipeline stub returns its own log.timings (pipeline stages). The server
+  // folds the server-measured ingestionMs into log.timings and surfaces the
+  // unified object on the immediate response _meta.timings.
+  _refreshPipeline.run = async () => ({
+    payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
+    log: {
+      selection: {},
+      watermark: "w-timings-slice7",
+      candidateCount: 0,
+      selectedFeedCount: 0,
+      timings: { preClusterMs: 1, recallMs: 0, clusterMs: 2, whatChangedMs: 1, whyMs: 3, pipelineMs: 7 },
+    },
+  });
+  _snapshotRepo.write = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.ok(res.body._meta && typeof res.body._meta === "object", "_meta present on ran response");
+    const t = res.body._meta.timings;
+    assert.ok(t && typeof t === "object", "_meta.timings present");
+    assert.equal(typeof t.ingestionMs, "number", "ingestionMs is a number (server-measured)");
+    assert.ok(t.ingestionMs >= 0, "ingestionMs non-negative");
+    assert.equal(typeof t.pipelineMs, "number", "pipelineMs is a number");
+    assert.equal(t.pipelineMs, 7, "pipelineMs lifted verbatim from pipeline log");
+    assert.equal(t.whyMs, 3, "whyMs lifted verbatim");
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+  }
+});
+
+test("Slice 7: POST refresh _meta.timings.ingestionMs is server-measured (live fetch path)", async () => {
+  // Light integration: do NOT supply pipeline timings — the pipeline stub
+  // omits `log.timings` so the server must inject `ingestionMs` on its own.
+  // `_feedReader.read` sleeps 50ms so the server-measured ingestion bracket
+  // (cache read + live fetch, excluding the pipeline call) is non-trivial.
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevFeedRead = _feedReader.read;
+  const prevCacheEnabled = _recentItemsCache.enabled;
+  const prevCacheRead = _recentItemsCache.read;
+  // Force the live-fetch path: cache disabled so the handler calls _feedReader.
+  _recentItemsCache.enabled = () => false;
+  _recentItemsCache.read = async () => ({ rows: [], error: null });
+  _feedReader.read = async () => {
+    await new Promise((r) => setTimeout(r, 50));
+    return [
+      {
+        sourceId: "reuters-world::timings-1",
+        feedId: "reuters-world",
+        outlet: "Reuters",
+        url: "https://reuters.example.com/timings-article",
+        headline: "Timings fixture headline",
+        body: ["Timings fixture body."],
+        minutesAgo: 5,
+        weight: 80,
+      },
+    ];
+  };
+  // Minimal pipeline stub WITHOUT log.timings — proves the server injects
+  // ingestionMs even when the pipeline reports no per-stage breakdown.
+  _refreshPipeline.run = async () => ({
+    payload: { contractVersion: "2026-05-19-meta-story-fields", stories: [] },
+    log: { selection: {}, watermark: "w-ingestion-slice7", candidateCount: 0, selectedFeedCount: 0 },
+  });
+  _snapshotRepo.write = async () => {};
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    const t = res.body._meta.timings;
+    assert.ok(t && typeof t === "object", "_meta.timings present even without pipeline timings");
+    assert.equal(typeof t.ingestionMs, "number", "ingestionMs is server-measured");
+    assert.ok(t.ingestionMs >= 40, `ingestionMs should reflect the ~50ms live fetch; saw ${t.ingestionMs}`);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _feedReader.read = prevFeedRead;
+    _recentItemsCache.enabled = prevCacheEnabled;
+    _recentItemsCache.read = prevCacheRead;
+  }
+});
