@@ -126,6 +126,24 @@
       "url": "https://rss.app/feeds/UazFLROXqfvuIKqG.xml",
       "weight": 70,
       "active": true
+    },
+    {
+      "id": "bloomberg-politics-americas",
+      "name": "Bloomberg — Politics (Americas)",
+      "publisher": "Bloomberg",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/aC0kAUP9YEWllT2q.xml",
+      "weight": 68,
+      "active": true
+    },
+    {
+      "id": "bloomberg-politics-trump-trade-war",
+      "name": "Bloomberg — Politics (Trump's Trade War)",
+      "publisher": "Bloomberg",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/cJ4tzpEQmkl4mZ3z.xml",
+      "weight": 66,
+      "active": true
     }
   ]
 }
