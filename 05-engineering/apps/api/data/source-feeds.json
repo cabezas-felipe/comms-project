@@ -194,6 +194,16 @@
       "weight": 56,
       "active": true,
       "lang": "es"
+    },
+    {
+      "id": "silla-nacional",
+      "name": "Silla Nacional",
+      "publisher": "La Silla Vacía",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/N37ND11lGU7zb8iG.xml",
+      "weight": 54,
+      "active": true,
+      "lang": "es"
     }
   ]
 }

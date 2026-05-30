@@ -15,9 +15,9 @@
 
 | Metric | Count |
 | ------ | ----- |
-| Total | 21 |
+| Total | 22 |
 | Verified | 0 |
-| Mapped | 21 |
+| Mapped | 22 |
 | Pending | 0 |
 | Rejected | 0 |
 
@@ -50,6 +50,7 @@ _No entries._
 | Semana - Política | traditional | mapped | https://rss.app/feeds/QaXDt18tvtzcS8Gn.xml | semana-politica | 60 | yes | 2026-05-30 |
 | Semana - Nación | traditional | mapped | https://rss.app/feeds/V6fsfQfy4Sb243KA.xml | semana-nacion | 58 | yes | 2026-05-30 |
 | Semana - Estados Unidos | traditional | mapped | https://rss.app/feeds/963PfdJ5Ic33MaL6.xml | semana-estados-unidos | 56 | yes | 2026-05-30 |
+| Silla Nacional | traditional | mapped | https://rss.app/feeds/N37ND11lGU7zb8iG.xml | silla-nacional | 54 | yes | 2026-05-30 |
 
 ## Pending
 
