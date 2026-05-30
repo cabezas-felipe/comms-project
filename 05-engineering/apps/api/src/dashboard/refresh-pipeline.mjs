@@ -26,7 +26,6 @@ import {
 } from "./beat-fit-scorer.mjs";
 import { itemMentionsConfiguredGeography } from "./geo-lexical-match.mjs";
 import {
-  RECALL_MODE,
   resolveRecallConfig,
   runEmbeddingRecall,
 } from "../ingestion/embedding-recall.mjs";
@@ -46,7 +45,6 @@ import {
 } from "./meta-story-semantic-mapper.mjs";
 import {
   WHAT_CHANGED_COPY,
-  WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION,
   aggregateWhatChangedDiagnostics,
   emptyWhatChangedRunDiagnostics,
   resolveWhatChanged,
