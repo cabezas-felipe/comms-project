@@ -144,6 +144,26 @@
       "url": "https://rss.app/feeds/cJ4tzpEQmkl4mZ3z.xml",
       "weight": 66,
       "active": true
+    },
+    {
+      "id": "infobae-estados-unidos",
+      "name": "Infobae - Estados Unidos",
+      "publisher": "Infobae",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/iIoZo4imjvjxpHgo.xml",
+      "weight": 64,
+      "active": true,
+      "lang": "es"
+    },
+    {
+      "id": "infobae-colombia",
+      "name": "Infobae - Colombia",
+      "publisher": "Infobae",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/GKX8SINzUlWW34Kr.xml",
+      "weight": 62,
+      "active": true,
+      "lang": "es"
     }
   ]
 }
