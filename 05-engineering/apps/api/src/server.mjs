@@ -28,6 +28,7 @@ import { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insert
 import { appendRejections as appendStoryRejections } from "./db/story-rejection-log-repo.mjs";
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
+import { resolveProductionTranslateFn } from "./ai/openai-translator.mjs";
 import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
 import {
   createEmbeddingSemanticScorer,
@@ -361,6 +362,14 @@ export const _feedReader = {
 };
 
 /**
+ * Mutable pipeline-runner seam. Pass-through to the imported `runRefreshPipeline`
+ * (behavior identical) — exists so tests can observe the exact opts the wrapper
+ * composes (e.g. the resolved `translateFn`) without running the full pipeline.
+ * Mirrors the other mutable hooks (`_feedReader`, `_geoFilter`, `_rejectionLog`).
+ */
+export const _pipelineRunner = { run: runRefreshPipeline };
+
+/**
  * Mutable refresh pipeline hook. Tests override run to simulate pipeline
  * outcomes (success, fallback, grounding failures) without running the full
  * pipeline.
@@ -383,7 +392,7 @@ export const _refreshPipeline = {
         maxEvidenceChars: runtime.maxEvidenceChars,
       });
     }
-    return runRefreshPipeline({
+    return _pipelineRunner.run({
       ...opts,
       clusterFn: _clusterEngine.cluster,
       geoAssessFn: _geoFilter.assess,
@@ -401,6 +410,14 @@ export const _refreshPipeline = {
       // Embedding-aware recall: in `hybrid_strict` mode the pipeline calls
       // this fn with [profileText, ...itemTexts]; absent/throwing → fail-closed.
       embedFn: (texts) => _embeddings.embed(texts),
+      // Phase 4 S0 — production ES→EN evidence translation. Wires the real
+      // OpenAI-backed translateFn (small/cheap model via TEMPO_OPENAI_API_KEY)
+      // so the translation stage can run for real once TEMPO_TRANSLATION_ENABLED
+      // is flipped on (preview-first). `resolveProductionTranslateFn()` returns
+      // null under mock-only / no-key, which keeps the stage a no-op pass-
+      // through (fail-open). An explicitly injected `opts.translateFn` (tests /
+      // evals) always wins, so hermetic suites are unaffected.
+      translateFn: opts.translateFn ?? resolveProductionTranslateFn(),
       // Phase 5 semantic-tag scorer (config + scorer).  Both may be null /
       // disabled; the pipeline degrades cleanly to the Phase 3 deterministic
       // baseline.  Diagnostics surface the runtime state on every run.
