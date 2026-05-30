@@ -19,10 +19,17 @@ Status values:
 
 | publisher | feed_id (planned) | URL | language | status | notes |
 | --- | --- | --- | --- | --- | --- |
-| Associated Press | `ap-top` | _TODO — supply AP feed URL_ | en | proposed | TODO: confirm canonical AP RSS endpoint + ToS for ingestion. |
-| Associated Press | `ap-world` | _TODO — supply AP feed URL_ | en | proposed | TODO: world/international desk; confirm availability. |
+| Associated Press | `ap-world-latin-america` | https://rss.app/feeds/yTaNDQhAPFcl6x1b.xml | en | activated | AP Latin America hub (`apnews.com/hub/latin-america`). `rss.app` proxy feed — see proxy note below. |
+| Associated Press | `ap-us` | https://rss.app/feeds/kcXOXm8fKxJJcyxX.xml | en | activated | AP U.S. News hub (`apnews.com/us-news`). `rss.app` proxy feed — see proxy note below. |
 | Bloomberg | `bloomberg-markets` | _TODO — supply Bloomberg feed URL_ | en | proposed | TODO: confirm Bloomberg RSS availability (many endpoints are gated). |
 | Bloomberg | `bloomberg-politics` | _TODO — supply Bloomberg feed URL_ | en | proposed | TODO: confirm endpoint + access. |
+
+> **AP pilot proxy note (Slice 9):** The two AP rows use `rss.app` proxy
+> endpoints (mirroring the existing Reuters pilot feeds), not canonical AP
+> enterprise RSS. This is a deliberate prototype constraint to activate the AP
+> pilot now. Migration to canonical AP feeds is a drop-in URL swap on these same
+> `feed_id`s once an approved endpoint + ToS is confirmed — no id/name change
+> required.
 
 ## How to validate a row before Slice 9
 
