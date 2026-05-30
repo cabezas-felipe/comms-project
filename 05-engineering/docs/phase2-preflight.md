@@ -104,7 +104,17 @@ AP enterprise RSS. Slice 9 activated the 2-feed pilot (`ap-world-latin-america`,
 `ap-politics-congress`, `ap-us-immigration`, `ap-business-tariffs`) for **7 AP
 feeds total**. This is a deliberate prototype constraint; migration to an approved
 canonical AP endpoint is a drop-in URL swap on the same `feed_id`s (no manifest
-id/name change). Bloomberg remains out of scope (Slice 11/12). See
+id/name change). See
+[feed-url-matrix.md](feed-url-matrix.md) for per-row status.
+
+## Bloomberg activation note (Slice 11)
+
+Slice 11 activates a single English Bloomberg feed — `bloomberg-politics-us`
+(`publisher = Bloomberg`, `language = en`) — on the same `rss.app` **proxy**
+posture as AP, since canonical Bloomberg RSS is largely gated. Migration to an
+approved Bloomberg endpoint is a drop-in URL swap on the same `feed_id`. The
+remaining Bloomberg rows (`bloomberg-markets`, `bloomberg-politics`) stay
+`proposed` for a later slice. See
 [feed-url-matrix.md](feed-url-matrix.md) for per-row status.
 
 ## Ready for Slice 9 when
