@@ -83,3 +83,31 @@ describe("existing normalizers (smoke)", () => {
     expect(normalizeKeywordLabel("outbreaks")).toBe("outbreak");
   });
 });
+
+// Slice 13: Colombian / Spanish-language outlet aliases. Common spelling and
+// accent variants — plus the legacy (wrong) "Silla Nacional" forms accepted as
+// input only — must all fold onto the canonical publisher strings.
+describe("normalizeSourceName — Spanish outlet aliases (Slice 13)", () => {
+  it("folds La Silla Vacía variants (accent-dropped + lowercase) to the canonical name", () => {
+    expect(normalizeSourceName("la silla vacia")).toBe("La Silla Vacía");
+    expect(normalizeSourceName("la silla vacía")).toBe("La Silla Vacía");
+    expect(normalizeSourceName("La Silla Vacia")).toBe("La Silla Vacía");
+    expect(normalizeSourceName("La Silla Vacía")).toBe("La Silla Vacía");
+  });
+
+  it("folds the legacy (wrong) Silla Nacional spellings to La Silla Vacía", () => {
+    expect(normalizeSourceName("silla nacional")).toBe("La Silla Vacía");
+    expect(normalizeSourceName("la silla nacional")).toBe("La Silla Vacía");
+  });
+
+  it("folds Semana variants to the canonical name", () => {
+    expect(normalizeSourceName("revista semana")).toBe("Semana");
+    expect(normalizeSourceName("Semana")).toBe("Semana");
+  });
+
+  it("folds Infobae variants to the canonical name", () => {
+    expect(normalizeSourceName("infobae colombia")).toBe("Infobae");
+    expect(normalizeSourceName("infobae américa")).toBe("Infobae");
+    expect(normalizeSourceName("Infobae")).toBe("Infobae");
+  });
+});

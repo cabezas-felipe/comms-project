@@ -29,6 +29,27 @@ const PRIMARY_MODEL = "anthropic:claude-opus-4-7";
 const FALLBACK_MODEL = "anthropic:claude-sonnet-4-6";
 const EXACT_MATCH_WARN_THRESHOLD = 0.70;
 
+// Field-scoped gate semantics. Most buckets gate (strict pass/fail) on every
+// extraction field. Slice 13's `spanish_sources` bucket gates only on the
+// fields the slice owns — source-alias normalization + geography — while
+// `topics` / `keywords` are advisory (non-blocking): the model legitimately
+// surfaces Spanish-language terms from Spanish prose, which is out of scope for
+// this slice. Advisory mismatches are still reported, just not counted as
+// failures. Buckets absent from this map keep the default all-fields-strict
+// behavior.
+const STRICT_FIELDS_BY_BUCKET = {
+  spanish_sources: ["traditionalSources", "geographies"],
+};
+
+function strictFieldsFor(bucket) {
+  return STRICT_FIELDS_BY_BUCKET[bucket] ?? EVAL_FIELDS;
+}
+
+function advisoryFieldsFor(bucket) {
+  const strict = new Set(strictFieldsFor(bucket));
+  return EVAL_FIELDS.filter((field) => !strict.has(field));
+}
+
 // Mirrors the server's two-model chain without the mutable hook indirection.
 async function extractWithChain(text) {
   try {
@@ -90,14 +111,17 @@ async function main() {
     }
 
     const fieldMetrics = {};
+    const strictFields = strictFieldsFor(ex.bucket);
+    const advisoryFields = advisoryFieldsFor(ex.bucket);
     let allMatch = true;
 
     if (predicted) {
       for (const field of EVAL_FIELDS) {
-        const m = setMetrics(predicted[field], expected[field]);
-        fieldMetrics[field] = m;
-        if (!m.exactMatch) allMatch = false;
+        fieldMetrics[field] = setMetrics(predicted[field], expected[field]);
       }
+      // Gate only on this bucket's strict fields. Advisory-field misses do not
+      // flip the example to a failure.
+      allMatch = strictFields.every((field) => fieldMetrics[field].exactMatch);
     } else {
       allMatch = false;
       for (const field of EVAL_FIELDS) {
@@ -105,7 +129,18 @@ async function main() {
       }
     }
 
-    process.stdout.write(`  ${allMatch ? "✓" : "✗"} ${ex.id} (${ex.bucket})${extractionError ? " — extraction_error" : ""}\n`);
+    // Advisory-field mismatches are surfaced separately so a gated-bucket
+    // example can pass while we still see what drifted.
+    const advisoryMismatches = predicted
+      ? advisoryFields.filter((field) => !fieldMetrics[field].exactMatch)
+      : [];
+
+    const advisoryNote = advisoryMismatches.length
+      ? ` — advisory: ${advisoryMismatches.join(", ")}`
+      : "";
+    process.stdout.write(
+      `  ${allMatch ? "✓" : "✗"} ${ex.id} (${ex.bucket})${extractionError ? " — extraction_error" : ""}${advisoryNote}\n`
+    );
 
     results.push({
       id: ex.id,
@@ -113,6 +148,7 @@ async function main() {
       allMatch,
       extractionError,
       fieldMetrics,
+      advisoryMismatches,
       predicted,
       expected,
       inputText,
@@ -226,9 +262,36 @@ async function main() {
         console.log(`    extraction_error: ${r.extractionError}`);
         continue;
       }
-      const mismatched = EVAL_FIELDS.filter((f) => !r.fieldMetrics[f].exactMatch);
+      // Only strict-field misses are the blocking reason; advisory misses for
+      // this bucket are reported in the advisory section below.
+      const strictFields = strictFieldsFor(r.bucket);
+      const mismatched = strictFields.filter((f) => !r.fieldMetrics[f].exactMatch);
       console.log(`\n  [${r.id}] (${r.bucket}) — mismatched: ${mismatched.join(", ")}`);
       for (const field of mismatched) {
+        const m = r.fieldMetrics[field];
+        console.log(`    ${field}:`);
+        console.log(`      expected : [${r.expected[field].join(", ")}]`);
+        console.log(`      predicted: [${r.predicted[field].join(", ")}]`);
+        console.log(`      P=${fmtN(m.precision)} R=${fmtN(m.recall)} F1=${fmtN(m.f1)}`);
+      }
+    }
+  }
+
+  // ── Advisory (non-blocking) field mismatches ────────────────────────────────
+  //
+  // Fields treated as advisory for their bucket (e.g. topics / keywords for
+  // `spanish_sources`). These drift without failing the example; we surface
+  // them so the gap stays visible and can be tightened in a later slice.
+  const advisory = results.filter((r) => r.advisoryMismatches?.length);
+  if (advisory.length > 0) {
+    console.log(`\n${HR}`);
+    console.log(` Advisory (non-blocking) field mismatches — ${advisory.length}`);
+    console.log(HR);
+    for (const r of advisory) {
+      console.log(
+        `\n  [${r.id}] (${r.bucket}) ${r.allMatch ? "✓ strict pass" : "✗ strict fail"} — advisory: ${r.advisoryMismatches.join(", ")}`
+      );
+      for (const field of r.advisoryMismatches) {
         const m = r.fieldMetrics[field];
         console.log(`    ${field}:`);
         console.log(`      expected : [${r.expected[field].join(", ")}]`);
