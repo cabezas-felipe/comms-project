@@ -2,6 +2,30 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-30 - D-068 - English meta-story output + translated-evidence writer inputs (Slice 15)
+
+#### Context
+
+- Slice 14 (D-067) normalizes non-English source evidence to English (`normalizedHeadline`/`normalizedBody`) so recall admits Spanish items. But the clustering/writer stages still read raw `headline`/`body` and had no instruction to emit English.
+- Locked product decision: dashboard meta-story fields (`title`, `subtitle`, `summary`, `whatChanged`, `whyItMatters`) stay **English**; Spanish appears only in the source `headline`/`body` shown on the card.
+
+#### Decision
+
+- **Clustering English-output guardrail.** Bumped `CLUSTERING_PROMPT_VERSION` `cluster-v2` → `cluster-v3`. `buildClusteringPrompt` now feeds the model normalized English evidence (`readHeadline`/`readBody`, falling back to originals for English items) and carries an explicit rule: when an article's headline/body is non-English, the meta-story `title`/`subtitle`/`summary`/`factual_claims` MUST still be English.
+- **whatChanged evidence bundle.** The Haiku/Sonnet evidence bundle (`buildDeltaPayload`: headlines, headline-change strings, per-source excerpts) now reads normalized English via `readHeadline`/`readBodyText`. The deterministic **structural gate is unchanged** — it keeps comparing the raw `headline` so delta detection stays language-stable across refreshes (normalized text can re-translate run-to-run; raw text does not). The pipeline passes the writer a normalized-enriched clone of the story (`withNormalizedEvidence`); the response/persisted `story.sources` keep original-language text (no leak, no contract change).
+- **whyItMatters.** The writer grounds on the (already-English) `summary` + `whatChanged` + structural `evidenceRefs` — it has no raw-source-text path — so it inherits English transitively from the two changes above. No why-engine logic change (why-it-matters logic is out of Slice 15 scope); a writer-input test pins that the grounding bundle is English for a Spanish-sourced story.
+
+#### Why
+
+- One narrative dashboard language for a bilingual operator: Spanish sources, English synthesis.
+- Grounding writers on translated English evidence (not raw Spanish) keeps `summary`/`whatChanged` faithful to what recall actually matched.
+- Keeping the structural gate on raw text avoids spurious "changed" flags from translation non-determinism.
+
+#### Consequences
+
+- Normalized fields never reach the client/snapshot — they ride only on the in-pipeline writer clone.
+- Production translation is still default-OFF and Spanish feeds inactive until Phase 4; this slice is the English-output readiness layer.
+
 ### 2026-05-30 - D-067 - Translation-first evidence normalization (ES→EN) for recall
 
 #### Context

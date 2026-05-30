@@ -959,6 +959,33 @@ function computeEvidenceRefsForStory(story, whatChangedState) {
   };
 }
 
+// ─── Slice 15: writer-only normalized-evidence enrichment ────────────────────
+//
+// The response story carries the ORIGINAL (possibly Spanish) source
+// headline/body for display. The what-changed writer, however, must ground its
+// Haiku/Sonnet evidence bundle on the normalized English evidence. This returns
+// a shallow clone whose sources also carry `normalizedHeadline`/`normalizedBody`
+// (looked up from the translated source items by id), so the engine's
+// `readHeadline`/`readBodyText` resolve to English. The original `story` is
+// never mutated — normalized fields stay internal and never reach the payload.
+function withNormalizedEvidence(story, sourceItemsById) {
+  if (!story || !Array.isArray(story.sources) || !(sourceItemsById instanceof Map)) {
+    return story;
+  }
+  let enriched = false;
+  const sources = story.sources.map((s) => {
+    const item = s && typeof s.id === "string" ? sourceItemsById.get(s.id) : null;
+    const hasNormalized =
+      item &&
+      (typeof item.normalizedHeadline === "string" ||
+        (Array.isArray(item.normalizedBody) && item.normalizedBody.length > 0));
+    if (!hasNormalized) return s;
+    enriched = true;
+    return { ...s, normalizedHeadline: item.normalizedHeadline, normalizedBody: item.normalizedBody };
+  });
+  return enriched ? { ...story, sources } : story;
+}
+
 // ─── Main pipeline ────────────────────────────────────────────────────────────
 
 /**
@@ -1955,7 +1982,9 @@ export async function runRefreshPipeline({
     const result = await resolveWhatChanged(
       {
         metaStoryId: story.metaStoryId,
-        currentStory: story,
+        // Slice 15: feed the writer the normalized English evidence (clone);
+        // the response `story` keeps its original-language source text.
+        currentStory: withNormalizedEvidence(story, sourceItemsById),
         priorStory,
         everSeenMetaStoryIds: everSeenMetaStoryIds ?? [],
       },

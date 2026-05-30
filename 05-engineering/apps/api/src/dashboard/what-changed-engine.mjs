@@ -18,6 +18,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 import { normalizeSourceIdentity } from "../contracts-runtime/index.mjs";
+// Slice 15: the LLM evidence bundle (headlines / excerpts sent to Haiku +
+// Sonnet) reads normalized English evidence when present so a Spanish-sourced
+// story is described in English. Structural-gate text comparison is NOT routed
+// through these — it keeps using the raw `headline` so delta detection is
+// language-stable across refreshes.
+import { readHeadline, readBodyText } from "../ingestion/evidence-translator.mjs";
 import { providerFor } from "../ai/model-router.mjs";
 import { withTimeout } from "../ai/guardrails.mjs";
 
@@ -386,19 +392,15 @@ function clampConfidence(n) {
 // can quote without seeing the full body (spec §6 / alignment #5: headline
 // + 400-char excerpt is the grounding ceiling).
 
-function joinBody(body) {
-  if (Array.isArray(body)) return body.join(" ");
-  if (typeof body === "string") return body;
-  return "";
-}
-
 function shapeSourcesForPayload(sources) {
   return (Array.isArray(sources) ? sources : [])
     .filter((s) => s && typeof s === "object")
     .map((s) => ({
       id: typeof s.id === "string" ? s.id : "",
       outlet: typeof s.outlet === "string" ? s.outlet : "",
-      headline: typeof s.headline === "string" ? s.headline : "",
+      // Normalized English headline when present (Slice 14 dual-text), else
+      // the original — so the Haiku/Sonnet evidence bundle is English.
+      headline: readHeadline(s),
     }));
 }
 
@@ -446,8 +448,8 @@ export function buildDeltaPayload({ metaStoryId, priorStory, currentStory, gate,
 
   const headlineChanges = headlineChangeIds.map((id) => ({
     id,
-    priorHeadline: typeof priorById.get(id)?.headline === "string" ? priorById.get(id).headline : "",
-    currentHeadline: typeof currentById.get(id)?.headline === "string" ? currentById.get(id).headline : "",
+    priorHeadline: priorById.has(id) ? readHeadline(priorById.get(id)) : "",
+    currentHeadline: currentById.has(id) ? readHeadline(currentById.get(id)) : "",
   }));
 
   const payload = {
@@ -480,7 +482,8 @@ export function buildDeltaPayload({ metaStoryId, priorStory, currentStory, gate,
     const excerpts = {};
     for (const id of addedSourceIds) {
       const src = currentById.get(id);
-      const text = joinBody(src?.body).trim();
+      // Normalized English body when present (Slice 14), else original.
+      const text = src ? readBodyText(src).trim() : "";
       if (text.length > 0) excerpts[id] = text.slice(0, EXCERPT_MAX_CHARS);
     }
     payload.excerpts = excerpts;
