@@ -586,8 +586,43 @@ test("M8 architecture: importing run-cluster-smoke.mjs does not invoke main()", 
 
 // ─── Clustering prompt (Slice 3: cluster-v2 anti-over-merge guidance) ─────────
 
-test("CLUSTERING_PROMPT_VERSION is cluster-v2", () => {
-  assert.equal(CLUSTERING_PROMPT_VERSION, "cluster-v2");
+test("CLUSTERING_PROMPT_VERSION is cluster-v3", () => {
+  assert.equal(CLUSTERING_PROMPT_VERSION, "cluster-v3");
+});
+
+// ─── Slice 15: English-output guardrail for non-English sources ───────────────
+
+test("buildClusteringPrompt: requires English output even for non-English sources", () => {
+  const prompt = buildClusteringPrompt([makeItem({ sourceId: "src-1" })], BASE_SETTINGS);
+  assert.match(prompt, /Write ALL output in English/);
+  assert.match(prompt, /title, subtitle, summary, and factual_claims MUST be written in English/);
+});
+
+test("buildClusteringPrompt: feeds normalized English evidence for Spanish items (dual-text)", () => {
+  // Spanish original headline/body + Slice 14 normalized English fields. The
+  // prompt must surface the English normalization, not the raw Spanish.
+  const spanishItem = makeItem({
+    sourceId: "es-mig-1",
+    lang: "es",
+    headline: "La migración crece en la frontera norte",
+    body: ["Las autoridades reportan un aumento sostenido de la migración."],
+    normalizedHeadline: "Migration rises at the northern border",
+    normalizedBody: ["Authorities report a sustained increase in migration."],
+  });
+  const prompt = buildClusteringPrompt([spanishItem], BASE_SETTINGS);
+  // Normalized English evidence is what the model sees.
+  assert.match(prompt, /Migration rises at the northern border/);
+  assert.match(prompt, /Authorities report a sustained increase in migration/);
+  // The raw Spanish headline/body must NOT be the evidence surface.
+  assert.doesNotMatch(prompt, /La migración crece en la frontera norte/);
+});
+
+test("buildClusteringPrompt: English items still use their original text (no-op fallback)", () => {
+  const prompt = buildClusteringPrompt(
+    [makeItem({ sourceId: "en-1", headline: "Reuters reports new sanctions", body: ["Details follow."] })],
+    BASE_SETTINGS
+  );
+  assert.match(prompt, /Reuters reports new sanctions/);
 });
 
 test("buildClusteringPrompt: includes anti-over-merge guidance (Slice 3)", () => {

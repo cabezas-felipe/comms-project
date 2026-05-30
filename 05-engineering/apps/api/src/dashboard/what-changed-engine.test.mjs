@@ -625,6 +625,57 @@ test("buildDeltaPayload: headlineChanges carries prior + current headline string
   ]);
 });
 
+// ── Slice 15: evidence bundle reads normalized English (dual-text) ───────────
+
+test("buildDeltaPayload: write stage uses normalized EN headline + body excerpt for Spanish sources", () => {
+  const prior = story({ sources: [src("src-1", "Reuters", "Anchor")] });
+  // Added Spanish source carrying Slice 14 normalized English fields.
+  const esSource = {
+    ...src("es-1", "Semana", "La migración crece en la frontera"),
+    body: ["Las autoridades reportan un aumento de la migración."],
+    normalizedHeadline: "Migration rises at the border",
+    normalizedBody: ["Authorities report an increase in migration."],
+  };
+  const current = story({ sources: [src("src-1", "Reuters", "Anchor"), esSource] });
+  const gate = compareStructuralGate(prior, current);
+  const payload = buildDeltaPayload({
+    metaStoryId: "ms-1",
+    priorStory: prior,
+    currentStory: current,
+    gate,
+    stage: "write",
+  });
+  // Headlines bundle carries the English normalization, not the Spanish original.
+  assert.ok(payload.current.headlines.includes("Migration rises at the border"));
+  assert.ok(!payload.current.headlines.includes("La migración crece en la frontera"));
+  // Excerpt for the added Spanish source is the English normalized body.
+  assert.equal(payload.excerpts["es-1"], "Authorities report an increase in migration.");
+});
+
+test("buildDeltaPayload: English sources fall back to original text (no normalized fields)", () => {
+  const prior = story({ sources: [src("src-1", "Reuters", "Anchor")] });
+  const current = story({
+    sources: [src("src-1", "Reuters", "Anchor"), { ...src("en-1", "AP", "Plain English headline"), body: ["English body."] }],
+  });
+  const gate = compareStructuralGate(prior, current);
+  const payload = buildDeltaPayload({ metaStoryId: "ms-1", priorStory: prior, currentStory: current, gate, stage: "write" });
+  assert.ok(payload.current.headlines.includes("Plain English headline"));
+  assert.equal(payload.excerpts["en-1"], "English body.");
+});
+
+test("buildDeltaPayload: structural gate stays language-stable (raw headline drives delta, not normalized)", () => {
+  // Same Spanish raw headline across refreshes, but normalized text differs.
+  // The gate must NOT flag a headline change — it compares raw `headline`.
+  const base = {
+    ...src("es-1", "Semana", "Titular en español"),
+    body: ["cuerpo"],
+  };
+  const prior = story({ sources: [{ ...base, normalizedHeadline: "English A" }] });
+  const current = story({ sources: [{ ...base, normalizedHeadline: "English B" }] });
+  const gate = compareStructuralGate(prior, current);
+  assert.equal(gate.signal, "none", "raw headline unchanged → no structural delta despite normalized drift");
+});
+
 // ── parseClassifyResponse ───────────────────────────────────────────────────
 
 test("parseClassifyResponse: extracts {material, confidence, reasonCode} from plain JSON", () => {

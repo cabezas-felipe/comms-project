@@ -1,11 +1,20 @@
+import { readHeadline, readBody } from "../ingestion/evidence-translator.mjs";
+
 export const SUMMARY_PROMPT_VERSION = "summary-v1";
-export const CLUSTERING_PROMPT_VERSION = "cluster-v2";
+// Slice 15: bumped cluster-v2 → cluster-v3 — the prompt now reads normalized
+// English evidence for non-English items and requires English meta-story output
+// (title / subtitle / summary / factual_claims) even when sources are Spanish.
+export const CLUSTERING_PROMPT_VERSION = "cluster-v3";
 
 export function buildClusteringPrompt(items, settings) {
+  // Slice 15: feed normalized English evidence (`normalizedHeadline` /
+  // `normalizedBody`) when present so the model clusters and writes in English
+  // even when the original headline/body are Spanish. `readHeadline` /
+  // `readBody` fall back to the untouched originals for English-native items.
   const itemLines = items
     .map(
       (item) =>
-        `sourceId=${item.sourceId} | outlet=${item.outlet} | topic=${item.topic} | geographies=${item.geographies.join(",")} | minutesAgo=${item.minutesAgo}\nHeadline: ${item.headline}\nBody: ${item.body.slice(0, 2).join(" ").slice(0, 400)}`
+        `sourceId=${item.sourceId} | outlet=${item.outlet} | topic=${item.topic} | geographies=${item.geographies.join(",")} | minutesAgo=${item.minutesAgo}\nHeadline: ${readHeadline(item)}\nBody: ${readBody(item).slice(0, 2).join(" ").slice(0, 400)}`
     )
     .join("\n\n");
 
@@ -46,6 +55,7 @@ export function buildClusteringPrompt(items, settings) {
     "- Do NOT merge unrelated event types into one meta-story (e.g. an election, an industrial accident, and a disease outbreak are distinct narratives even when they share a country)",
     "- Prefer separate meta-stories when events are distinct, even if they occur in the same country or geography",
     "- The summary must only describe what is stated in the referenced articles — no speculation",
+    "- Write ALL output in English. Even when an article's headline or body is in another language (e.g. Spanish), the meta-story title, subtitle, summary, and factual_claims MUST be written in English — the dashboard audience reads English.",
     "- factual_claims: list each discrete factual claim made in the summary as a separate string",
     "- claim_evidence_map: map each claim index (\"0\", \"1\", ...) to the sourceId(s) that directly support it",
     "- Every claim MUST be backed by at least one sourceId that appears in source_item_ids",

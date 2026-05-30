@@ -690,3 +690,43 @@ test("constants: WHY_TAXONOMY contains the six MVP categories", () => {
 test("constants: WHY_STATES = intro/steady/evolving", () => {
   assert.deepEqual(WHY_STATES.slice().sort(), ["evolving", "intro", "steady"]);
 });
+
+// ─── Slice 15: writer grounding bundle carries English translated evidence ───
+//
+// The why-this-matters writer grounds on the meta-story `summary` + `whatChanged`
+// (+ structural `evidenceRefs`) — NOT raw source text. For a Spanish-sourced
+// story those upstream fields are already English (clustering English-output
+// guardrail + whatChanged normalized-EN evidence bundle, Slice 15). This pins
+// that the writer input the engine assembles is English, with no Spanish leak.
+test("resolver: writer input bundle carries English summary + whatChanged for a Spanish-sourced story", async () => {
+  await withWhyEnv(() => { process.env.TEMPO_AI_WHY_IT_MATTERS_ENABLED = "true"; }, async () => {
+    let captured = null;
+    const writeFn = (payload) => {
+      captured = payload;
+      return {
+        text: "Early multi-outlet pickup on border migration — hold baseline monitoring, not escalation.",
+        taxonomyPrimary: "monitoring_intensity",
+        confidence: "medium",
+      };
+    };
+    const englishInput = {
+      ...sampleInput,
+      metaStoryId: "es-why-1",
+      state: "evolving",
+      whatChangedState: "changed",
+      // English meta-story copy derived from translated Spanish sources.
+      summary: "Authorities report a sustained increase in migration along the northern border.",
+      whatChanged: "Two outlets added coverage of the migration increase.",
+    };
+    await resolveWhyItMatters(englishInput, { writeFn, generatedAt: FIXED_NOW });
+
+    assert.ok(captured, "writer must be invoked with a grounding payload");
+    assert.equal(
+      captured.summary,
+      "Authorities report a sustained increase in migration along the northern border."
+    );
+    assert.equal(captured.whatChanged, "Two outlets added coverage of the migration increase.");
+    // No Spanish evidence leaks into the writer grounding bundle.
+    assert.doesNotMatch(`${captured.summary} ${captured.whatChanged}`, /migraci[oó]n|frontera|aumento/i);
+  });
+});
