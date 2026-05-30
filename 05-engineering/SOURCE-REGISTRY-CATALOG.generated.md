@@ -15,9 +15,9 @@
 
 | Metric | Count |
 | ------ | ----- |
-| Total | 18 |
+| Total | 21 |
 | Verified | 0 |
-| Mapped | 18 |
+| Mapped | 21 |
 | Pending | 0 |
 | Rejected | 0 |
 
@@ -47,6 +47,9 @@ _No entries._
 | Bloomberg — Politics (Trump's Trade War) | traditional | mapped | https://rss.app/feeds/cJ4tzpEQmkl4mZ3z.xml | bloomberg-politics-trump-trade-war | 66 | yes | 2026-05-30 |
 | Infobae - Estados Unidos | traditional | mapped | https://rss.app/feeds/iIoZo4imjvjxpHgo.xml | infobae-estados-unidos | 64 | yes | 2026-05-30 |
 | Infobae - Colombia | traditional | mapped | https://rss.app/feeds/GKX8SINzUlWW34Kr.xml | infobae-colombia | 62 | yes | 2026-05-30 |
+| Semana - Política | traditional | mapped | https://rss.app/feeds/QaXDt18tvtzcS8Gn.xml | semana-politica | 60 | yes | 2026-05-30 |
+| Semana - Nación | traditional | mapped | https://rss.app/feeds/V6fsfQfy4Sb243KA.xml | semana-nacion | 58 | yes | 2026-05-30 |
+| Semana - Estados Unidos | traditional | mapped | https://rss.app/feeds/963PfdJ5Ic33MaL6.xml | semana-estados-unidos | 56 | yes | 2026-05-30 |
 
 ## Pending
 

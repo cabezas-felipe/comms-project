@@ -164,6 +164,36 @@
       "weight": 62,
       "active": true,
       "lang": "es"
+    },
+    {
+      "id": "semana-politica",
+      "name": "Semana - Política",
+      "publisher": "Semana",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/QaXDt18tvtzcS8Gn.xml",
+      "weight": 60,
+      "active": true,
+      "lang": "es"
+    },
+    {
+      "id": "semana-nacion",
+      "name": "Semana - Nación",
+      "publisher": "Semana",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/V6fsfQfy4Sb243KA.xml",
+      "weight": 58,
+      "active": true,
+      "lang": "es"
+    },
+    {
+      "id": "semana-estados-unidos",
+      "name": "Semana - Estados Unidos",
+      "publisher": "Semana",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/963PfdJ5Ic33MaL6.xml",
+      "weight": 56,
+      "active": true,
+      "lang": "es"
     }
   ]
 }
