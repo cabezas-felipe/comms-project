@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _refreshExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
 
@@ -4932,4 +4932,82 @@ test("Slice 7: POST refresh _meta.timings.ingestionMs is server-measured (live f
     _recentItemsCache.enabled = prevCacheEnabled;
     _recentItemsCache.read = prevCacheRead;
   }
+});
+
+// ── Phase 4 S0: translateFn wiring in _refreshPipeline.run ───────────────────
+//
+// The wrapper composes `translateFn: opts.translateFn ?? resolveProductionTranslateFn()`
+// and hands it to the pipeline runner. We stub `_pipelineRunner.run` (a thin
+// pass-through seam to runRefreshPipeline) to capture the composed opts WITHOUT
+// running the full pipeline, and drive `_refreshPipeline.run` directly so the
+// test stays isolated from the HTTP route / persistence stack. Env for the
+// production resolver is snapshotted and restored per test.
+
+const TRANSLATE_ENV_KEYS = ["TEMPO_AI_MOCK_ONLY", "TEMPO_OPENAI_API_KEY", "OPENAI_API_KEY"];
+
+async function withTranslateWiringHarness(fn) {
+  const prevRunner = _pipelineRunner.run;
+  const savedEnv = {};
+  for (const k of TRANSLATE_ENV_KEYS) savedEnv[k] = process.env[k];
+  let captured = null;
+  _pipelineRunner.run = async (opts) => {
+    captured = opts;
+    return {
+      payload: { contractVersion: opts.contractVersion ?? "test", stories: [] },
+      log: { selection: {}, watermark: "translate-wiring", candidateCount: 0, selectedFeedCount: 0 },
+    };
+  };
+  try {
+    await fn({ getCaptured: () => captured });
+  } finally {
+    _pipelineRunner.run = prevRunner;
+    for (const k of TRANSLATE_ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  }
+}
+
+const TRANSLATE_BASE_OPTS = { settings: { topics: [] }, rawItems: [], contractVersion: "test" };
+
+test("translateFn wiring: an explicitly provided opts.translateFn wins over the resolver", async () => {
+  await withTranslateWiringHarness(async ({ getCaptured }) => {
+    // Even with a real key present (resolver would return a function), the
+    // explicit injection must take precedence.
+    process.env.TEMPO_OPENAI_API_KEY = "sk-test";
+    delete process.env.TEMPO_AI_MOCK_ONLY;
+    const sentinel = () => ["injected"];
+    await _refreshPipeline.run({ ...TRANSLATE_BASE_OPTS, translateFn: sentinel });
+    assert.equal(getCaptured().translateFn, sentinel, "explicit translateFn must be forwarded unchanged");
+  });
+});
+
+test("translateFn wiring: absent injection + key present → pipeline receives the resolver's function", async () => {
+  await withTranslateWiringHarness(async ({ getCaptured }) => {
+    process.env.TEMPO_OPENAI_API_KEY = "sk-test";
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.TEMPO_AI_MOCK_ONLY;
+    await _refreshPipeline.run({ ...TRANSLATE_BASE_OPTS });
+    assert.equal(typeof getCaptured().translateFn, "function", "resolver-produced translateFn must reach the pipeline");
+  });
+});
+
+test("translateFn wiring: resolver returns null (no key) → pipeline receives null, no crash", async () => {
+  await withTranslateWiringHarness(async ({ getCaptured }) => {
+    delete process.env.TEMPO_OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.TEMPO_AI_MOCK_ONLY;
+    const res = await _refreshPipeline.run({ ...TRANSLATE_BASE_OPTS });
+    assert.equal(getCaptured().translateFn, null, "missing key → null translateFn (no-op pass-through)");
+    assert.ok(res && res.payload, "pipeline call still resolves cleanly");
+  });
+});
+
+test("translateFn wiring: resolver returns null under mock-only even with a key → pipeline receives null", async () => {
+  await withTranslateWiringHarness(async ({ getCaptured }) => {
+    process.env.TEMPO_OPENAI_API_KEY = "sk-test";
+    process.env.TEMPO_AI_MOCK_ONLY = "true";
+    await _refreshPipeline.run({ ...TRANSLATE_BASE_OPTS });
+    assert.equal(getCaptured().translateFn, null, "mock-only forces the no-op pass-through path");
+  });
 });
