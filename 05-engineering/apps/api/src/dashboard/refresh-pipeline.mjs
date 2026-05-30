@@ -1067,6 +1067,12 @@ export async function runRefreshPipeline({
   // fallback / kill-switch path.
   whyWriteFn = null,
   whyConfig = null,
+  // Test seam for the implications resolver itself (not just its writer).
+  // Defaults to the imported `resolveWhyItMatters`; tests inject a wrapper to
+  // exercise the rejected-settle defensive path in the Phase 5 parallel apply
+  // (a throwing `whyWriteFn` is caught inside the resolver, so it cannot
+  // produce a rejected pMap settle on its own). Zero behavior change when null.
+  resolveWhyItMattersFn = null,
   // Doctrine retrieval injection point (spec §5).  Production reads the
   // hand-curated `doctrine-snippets.v0.json` allowlist via
   // `retrieveDoctrineSnippetsForStory`; tests pass a stub here to control
@@ -1978,10 +1984,11 @@ export async function runRefreshPipeline({
   // `whyConcurrency`.  `whyMs` is the wall-clock for the whole stage.
   const { concurrency: whyConcurrency } = resolveWhyConcurrencyConfig();
   const whyStartedAt = Date.now();
+  const whyResolver = resolveWhyItMattersFn ?? resolveWhyItMatters;
   const whySettled = await pMap(
     preparedWhy,
     ({ resolveArgs }) =>
-      resolveWhyItMatters(resolveArgs, {
+      whyResolver(resolveArgs, {
         writeFn: whyWriteFn ?? undefined,
         config: effectiveWhyConfig,
       }),
