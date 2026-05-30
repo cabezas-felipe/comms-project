@@ -7,13 +7,14 @@
  *   2. dashboard-spanish-recall  (translation-first recall guard, Slice 14)
  *   3. dashboard-calibration     (embed-floor guardrail sweep, Slice 5)
  *
- * Both cores are imported and run in-process (hermetic — no provider keys, no
- * network). The calibration run is also persisted as a machine-readable JSON
+ * All three cores are imported and run in-process (hermetic — no provider keys,
+ * no network). The calibration run is also persisted as a machine-readable JSON
  * artifact so CI and reviewers can diff runs over time.
  *
  * Exit code:
- *   0  — golden passed AND calibration guardrails held at every floor
- *   1  — either harness failed (or a runner error)
+ *   0  — golden passed AND spanish-recall passed AND calibration guardrails held
+ *        at every floor
+ *   1  — any harness failed (or a runner error)
  *
  * Changes NO runtime defaults — this only observes/asserts. The calibration
  * floor metrics are advisory; only the hard guardrails gate.
@@ -50,7 +51,7 @@ async function main() {
   console.log(HR);
 
   // ── 1. Golden eval ──────────────────────────────────────────────────────
-  console.log("[quality-gate] (1/2) running dashboard-refresh-golden …");
+  console.log("[quality-gate] (1/3) running dashboard-refresh-golden …");
   const golden = await runDashboardRefreshGolden();
   const goldenPass = !golden.summary.hardFail;
   for (const r of golden.results) {

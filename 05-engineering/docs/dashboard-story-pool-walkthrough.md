@@ -901,3 +901,17 @@ Design walkthrough chunks **A–N** and commit map **M** (**M1b**) are locked. *
 - **Chunk N** consolidates the model matrix (**locked** — **N1a**, **N2**, **N3a**); **Chunk L** owns suite map and scenarios.
 
 (See project plan in Cursor: `dashboard_pool_walkthrough` plan file if present.)
+
+---
+
+## Phase 3 addendum — Spanish-readiness (Slices 13–15)
+
+Phase 3 adds non-English source support **without** changing the funnel chunks above. The pipeline gains one new stage and an output guardrail; everything else (recall, beat-fit, clustering, grounding) is unchanged.
+
+- **Translation stage — post-geo, pre-recall.** [`evidence-translator.mjs`](../apps/api/src/ingestion/evidence-translator.mjs) runs after the geo filter and **before** lexical + embedding recall, so English settings can match Spanish items. It translates only non-English items (keyed on `item.lang`, e.g. `es`) on a bounded evidence budget (headline + first 2 snippets, ~700 chars). Execution is bounded (concurrency + per-item timeout) and **fail-open**: a translation error/timeout leaves the item untranslated and never blocks the refresh.
+- **Dual-text retention.** Originals (`headline`/`body`) are untouched for **display**; the English normalization lands on `normalizedHeadline`/`normalizedBody`. Recall + writers read normalized-when-present via `readHeadline`/`readBodyText` (English-native items fall back to originals — a no-op).
+- **`_meta.translation` diagnostics.** Per-run coverage + per-story translated-source coverage. A story is full-confidence at **≥ 60%** translated-source coverage; below that it is flagged degraded/low-confidence (the translated subset still ships — no hard block).
+- **English-output guardrail (Slice 15).** Clustering (`CLUSTERING_PROMPT_VERSION = cluster-v3`) and the whatChanged writer emit English `title`/`subtitle`/`summary`/`whatChanged` even when sources are Spanish, grounding on the normalized EN evidence. The whatChanged **structural gate stays on the raw headline** so delta detection is language-stable across refreshes. Meta-story copy is English; Spanish appears only in source headlines/bodies.
+- **Default OFF.** Production translation is gated by `TEMPO_TRANSLATION_ENABLED` (default OFF) and no production `translateFn` is wired yet. The 6 Spanish feeds activate in **Phase 4 (Slices 16–18)**.
+
+Rationale: [D-067](../DECISIONS.md) (translation-first normalization), [D-068](../DECISIONS.md) (English meta-story output + translated-evidence writer inputs).
