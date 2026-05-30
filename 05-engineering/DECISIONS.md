@@ -2,6 +2,32 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-29 - D-066 - Source-expansion latency posture: parallel why, manifest-derived allowlist, warm/cadence ops
+
+#### Context
+
+Source expansion landed across Phase 1 slices 1–7: scoped fetch on cache miss (matched `feedIds`), an ingestion cache warmer on an hourly schedule, a shared bounded-concurrency [`pMap`](apps/api/src/util/p-map.mjs), bounded-parallel why-it-matters generation, and `_meta.timings` latency instrumentation. Two operational hazards surfaced. (1) The per-story why writer was serial and dominated refresh wall-clock as story counts grew. (2) A narrowed env allowlist (e.g. `TEMPO_RSS_ALLOWLIST=washington post,reuters`) silently blocks newly-activated publishers — the "Reuters-class block" — because the env list overrides the manifest-derived default.
+
+#### Decision
+
+1. **Bounded parallel why.** The why writer runs in a bounded parallel pool over `pMap`, sized by `TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY` (default `4`, clamped `1..6`; invalid → default). It wins back latency without an uncontrolled provider fan-out, and **response story order stays deterministic (R1)** — per-story results are written back into the canonical story order, independent of completion order. See [why-this-matters spec §12.2](docs/why-this-matters-spec.md).
+2. **Manifest-derived allowlist for expansion.** For multi-publisher expansion, leave `TEMPO_RSS_ALLOWLIST` **unset** so the allowlist derives from the active manifest feeds; newly-activated publishers then ingest automatically. Set the env only to *intentionally* constrain fetch scope, as temporary/explicit narrowing.
+3. **Warm/cadence operational posture.** The cadence tick ([`.github/workflows/cadence-tick.yml`](../.github/workflows/cadence-tick.yml)) and the ingestion warmer ([`.github/workflows/ingestion-warm.yml`](../.github/workflows/ingestion-warm.yml)) are complementary scheduled jobs — the tick drives due-user refreshes, the warmer keeps the recent-items cache primed so cache-miss latency stays low. Their log tags `[cadence-tick]` and `[ingestion-warm]` are the first debugging surface.
+
+#### Operator do / don't
+
+- **Do** leave `TEMPO_RSS_ALLOWLIST` unset during a source-expansion rollout (manifest-derived default).
+- **Don't** carry a legacy narrow allowlist env into an expansion rollout — a stale value silently blocks new feeds (Reuters-class block).
+- **Do** keep `TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY` within `1..6`; raising it trades provider fan-out for latency.
+- **Do** read per-stage refresh latency off `_meta.timings` (persisted via `_lastRunMeta.timings`): `ingestionMs`, `preClusterMs`, `recallMs`, `clusterMs`, `whatChangedMs`, `whyMs`, `pipelineMs`.
+
+#### Why
+
+- The serial why loop was the dominant enabled-path latency cost on multi-story refreshes; a bounded pool removes it while the R1 re-sort keeps ordering deterministic and the clamp keeps provider load predictable.
+- Env allowlists were originally a narrowing override, but during expansion they invert into a silent block list. Defaulting to the manifest-derived set makes "activate a feed in the manifest" the single lever, with the env reserved for deliberate constraint.
+
+See [README § Refresh latency & expansion-safe ingestion](README.md#refresh-latency--expansion-safe-ingestion-phase-1-slices-58) and [`apps/api/.env.example`](apps/api/.env.example) for operator-facing guidance.
+
 ### 2026-05-18 - D-065 - What-changed delta engine (3-state hybrid)
 
 #### Context

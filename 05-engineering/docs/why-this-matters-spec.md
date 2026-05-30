@@ -489,11 +489,17 @@ Under strict mode the gate behavior matches the original spec (label mismatches 
 
 **Defer:** Hybrid markdown-chunk index (option C) until corpus exceeds ~15 snippets.
 
-### 12.2 · Per-story LLM concurrency — **locked: serial**
+### 12.2 · Per-story LLM concurrency — **resolved: bounded parallel (Slice 6, D-066)**
 
-**Decision:** Run implications **one story at a time** in `metaStoryId` order (same posture as the what-changed per-story loop).
+**Original decision (MVP):** run implications **one story at a time** in `metaStoryId` order. Simplest failure semantics, but the serial loop became the dominant enabled-path latency cost as story counts grew.
 
-**Rationale:** Simplest failure semantics, predictable refresh latency, avoids Anthropic rate-limit spikes on large dashboards. Revisit bounded parallel (e.g. pool of 3) only if measured refresh p95 exceeds product budget.
+**Current decision:** the per-story writer runs in a **bounded parallel pool** over the shared [`pMap`](../apps/api/src/util/p-map.mjs) helper.
+
+- **Env knob:** `TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY` — max concurrent writer calls. **Default `4`, clamped to `1..6`.** Invalid / unparseable values fall back to the default `4` (fractional values are truncated toward zero before clamping). Bounding the pool wins back latency without an uncontrolled fan-out / rate-limit spike against Anthropic.
+- **Ordering guarantee:** response story order is **deterministic (R1) and independent of writer completion order**. Per-story results are written back into the canonical (R1-sorted) story order, so parallelism never reorders the dashboard.
+- **Telemetry:** the why stage's wall-clock time is surfaced as `whyMs` in pipeline diagnostics (`_meta.timings.whyMs`, persisted via `_lastRunMeta.timings`).
+
+**Rationale for the bound:** a fixed small pool keeps provider load predictable (no spikes on large dashboards) while removing the serial latency tail; the R1 re-sort keeps ordering and diagnostics simple.
 
 ### 12.3 · Trace retention — **locked: replace per run (A)**
 
