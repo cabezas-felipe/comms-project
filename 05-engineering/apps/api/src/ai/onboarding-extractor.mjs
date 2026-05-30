@@ -62,7 +62,10 @@ import { withTimeout } from "./guardrails.mjs";
 // "country names belong in geographies, not keywords" hygiene line.
 // Slice 13: bumped to extract-v6 when the prompt added canonical guidance for
 // Colombian / Spanish-language outlets (La Silla Vacía, Semana, Infobae).
-export const EXTRACT_PROMPT_VERSION = "extract-v6";
+// Slice 14: bumped to extract-v7 — topics/keywords are now normalized to
+// English even for non-English input (translation-first posture), so the
+// onboarding `spanish_sources` eval can gate topics/keywords strictly.
+export const EXTRACT_PROMPT_VERSION = "extract-v7";
 
 export const extractionOutputSchema = z.object({
   topics: z.array(z.string().min(1)),
@@ -291,6 +294,12 @@ const SYSTEM_PROMPT = [
   "                       Prefer verbatim terms from user text; do not invent synonyms not present in text.",
   "                       Include high-signal nouns/acronyms when present (e.g. WHO, DHS, ICE, DIAN, migration, border, sanctions, vaccine, outbreak).",
   '                       Keep each entry short (1–3 words).',
+  "  ── Language normalization (topics + keywords): always emit topics and keywords in ENGLISH,",
+  "                       even when the input text is in another language. Translate the salient",
+  "                       term to its English equivalent — e.g. \"migración\" → \"migration\",",
+  "                       \"seguridad\" → \"security\", \"elecciones\" → \"elections\", \"aranceles\" → \"tariffs\".",
+  "                       Geographies and source/outlet names are NOT translated — they keep their",
+  "                       proper names (e.g. \"Colombia\", \"La Silla Vacía\", \"Semana\").",
   '  geographies        — country or region names mentioned (e.g. "US", "Colombia").',
   "                       Country and region names belong in geographies, not in keywords. Do not duplicate a country across both fields.",
   '  traditionalSources — full outlet names without "The" prefix (e.g. "Reuters", "New York Times", "Wall Street Journal", "Associated Press", "BBC", "El Tiempo").',

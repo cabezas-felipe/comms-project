@@ -38,6 +38,11 @@ export function normalizeSourceItem(raw) {
     feedId: raw.feedId != null && String(raw.feedId).length > 0 ? String(raw.feedId) : undefined,
     outlet: String(raw.outlet),
     byline: raw.byline != null ? String(raw.byline) : undefined,
+    // Optional BCP-47-ish language tag from the feed (e.g. "es", "es-CO").
+    // Preserved so the translation-first normalization stage (Slice 14) can
+    // tell non-English evidence apart from English. Absent → undefined →
+    // treated as English downstream (no translation).
+    lang: raw.lang != null && String(raw.lang).trim().length > 0 ? String(raw.lang).trim() : undefined,
     kind: String(raw.kind),
     weight: Number(raw.weight),
     url: String(raw.url),

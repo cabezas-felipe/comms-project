@@ -23,6 +23,8 @@
 // Operationally the route handler injects `embedFn` (resolved from the env-aware
 // router in src/ai/embeddings.mjs); tests inject deterministic stubs.
 
+import { readHeadline, readBodyText } from "./evidence-translator.mjs";
+
 export const RECALL_MODE = Object.freeze({
   HYBRID_STRICT: "hybrid_strict",
   KEYWORD: "keyword",
@@ -142,12 +144,17 @@ export function summarizeProfileContent(settings) {
  * Compose per-item text from real ingested fields only.  Never includes
  * model-derived fields (summary/takeaway/etc.) — those would be empty at
  * recall time and would dilute the vector.
+ *
+ * Slice 14: reads the normalized English evidence (`normalizedHeadline` /
+ * `normalizedBody`) when present so semantic recall scores non-English items
+ * against the (English) profile vector; falls back to the untouched originals
+ * for English-native items.
  */
 export function buildItemText(item) {
   if (!item || typeof item !== "object") return "";
   const outlet = String(item.outlet ?? "").trim();
-  const headline = String(item.headline ?? "").trim();
-  const body = Array.isArray(item.body) ? item.body.join(" ") : String(item.body ?? "");
+  const headline = String(readHeadline(item)).trim();
+  const body = readBodyText(item);
   const trimmedBody = body.trim();
   const parts = [];
   if (outlet) parts.push(outlet);

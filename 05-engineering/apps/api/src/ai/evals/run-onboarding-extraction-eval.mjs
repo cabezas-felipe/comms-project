@@ -29,17 +29,18 @@ const PRIMARY_MODEL = "anthropic:claude-opus-4-7";
 const FALLBACK_MODEL = "anthropic:claude-sonnet-4-6";
 const EXACT_MATCH_WARN_THRESHOLD = 0.70;
 
-// Field-scoped gate semantics. Most buckets gate (strict pass/fail) on every
-// extraction field. Slice 13's `spanish_sources` bucket gates only on the
-// fields the slice owns — source-alias normalization + geography — while
-// `topics` / `keywords` are advisory (non-blocking): the model legitimately
-// surfaces Spanish-language terms from Spanish prose, which is out of scope for
-// this slice. Advisory mismatches are still reported, just not counted as
-// failures. Buckets absent from this map keep the default all-fields-strict
-// behavior.
-const STRICT_FIELDS_BY_BUCKET = {
-  spanish_sources: ["traditionalSources", "geographies"],
-};
+// Field-scoped gate semantics. Every bucket gates (strict pass/fail) on every
+// extraction field.
+//
+// Slice 13 introduced a temporary carve-out: `spanish_sources` gated only on
+// `traditionalSources` + `geographies` (strict) while `topics` / `keywords`
+// were advisory, because the extractor emitted Spanish-language terms from
+// Spanish prose. Slice 14 closes that gap — the extractor now normalizes
+// topics/keywords to English (translation-first), so `spanish_sources` is
+// re-tightened to all-fields-strict by removing its entry here. The map is kept
+// (empty) as the seam for any future per-bucket carve-out; with no entries,
+// every bucket uses the default all-fields-strict gate.
+const STRICT_FIELDS_BY_BUCKET = {};
 
 function strictFieldsFor(bucket) {
   return STRICT_FIELDS_BY_BUCKET[bucket] ?? EVAL_FIELDS;

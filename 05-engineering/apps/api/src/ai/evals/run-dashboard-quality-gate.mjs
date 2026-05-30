@@ -1,10 +1,11 @@
 /**
  * Dashboard Quality Gate — CLI runner (Slice 6)
  *
- * Single CI-grade gate that runs the two dashboard quality harnesses in order
- * and fails the build if either regresses:
+ * Single CI-grade gate that runs the dashboard quality harnesses in order and
+ * fails the build if any regresses:
  *   1. dashboard-refresh-golden  (E2E regression guard, Slice 2)
- *   2. dashboard-calibration     (embed-floor guardrail sweep, Slice 5)
+ *   2. dashboard-spanish-recall  (translation-first recall guard, Slice 14)
+ *   3. dashboard-calibration     (embed-floor guardrail sweep, Slice 5)
  *
  * Both cores are imported and run in-process (hermetic — no provider keys, no
  * network). The calibration run is also persisted as a machine-readable JSON
@@ -26,6 +27,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runDashboardRefreshGolden } from "./dashboard-refresh-golden-core.mjs";
+import { runDashboardSpanishRecall } from "./dashboard-spanish-recall-core.mjs";
 import { runDashboardCalibration } from "./dashboard-calibration-core.mjs";
 import { writeCalibrationArtifact } from "./run-dashboard-calibration.mjs";
 
@@ -44,7 +46,7 @@ function parseJsonOut(argv) {
 async function main() {
   const jsonOut = parseJsonOut(process.argv);
   const HR = "─".repeat(72);
-  console.log("\n[quality-gate] Dashboard quality gate — golden + calibration");
+  console.log("\n[quality-gate] Dashboard quality gate — golden + spanish-recall + calibration");
   console.log(HR);
 
   // ── 1. Golden eval ──────────────────────────────────────────────────────
@@ -60,8 +62,21 @@ async function main() {
   );
   console.log(HR);
 
-  // ── 2. Calibration eval ─────────────────────────────────────────────────
-  console.log("[quality-gate] (2/2) running dashboard-calibration …");
+  // ── 2. Spanish recall eval (Slice 14) ───────────────────────────────────
+  console.log("[quality-gate] (2/3) running dashboard-spanish-recall …");
+  const spanish = await runDashboardSpanishRecall();
+  const spanishPass = !spanish.summary.hardFail;
+  for (const r of spanish.results) {
+    console.log(`    ${r.ok ? "✓" : "✗"} ${r.id}`);
+    if (!r.ok) for (const reason of r.reasons) console.error(`        • ${reason}`);
+  }
+  console.log(
+    `[quality-gate] spanish-recall: ${spanishPass ? "PASS" : "FAIL"} (${spanish.summary.passed}/${spanish.summary.total} scenarios)`
+  );
+  console.log(HR);
+
+  // ── 3. Calibration eval ─────────────────────────────────────────────────
+  console.log("[quality-gate] (3/3) running dashboard-calibration …");
   const calibration = await runDashboardCalibration();
   const calibrationPass = !calibration.hardFail;
   for (const row of calibration.rows) {
@@ -78,12 +93,13 @@ async function main() {
 
   // ── Summary ─────────────────────────────────────────────────────────────
   console.log("[quality-gate] SUMMARY");
-  console.log(`    golden ........ ${goldenPass ? "PASS" : "FAIL"}`);
-  console.log(`    calibration ... ${calibrationPass ? "PASS" : "FAIL"}`);
-  console.log(`    artifact ...... ${artifactPath}`);
+  console.log(`    golden ......... ${goldenPass ? "PASS" : "FAIL"}`);
+  console.log(`    spanish-recall . ${spanishPass ? "PASS" : "FAIL"}`);
+  console.log(`    calibration .... ${calibrationPass ? "PASS" : "FAIL"}`);
+  console.log(`    artifact ....... ${artifactPath}`);
   console.log(HR);
 
-  if (!goldenPass || !calibrationPass) {
+  if (!goldenPass || !spanishPass || !calibrationPass) {
     console.error("[quality-gate] FAIL — dashboard quality gate did not pass. See failures above.");
     process.exit(1);
   }
