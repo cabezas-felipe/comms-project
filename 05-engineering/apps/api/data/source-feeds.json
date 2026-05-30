@@ -54,6 +54,24 @@
       "url": "https://rss.app/feeds/koJlvT7N07pEmc09.xml",
       "weight": 86,
       "active": true
+    },
+    {
+      "id": "ap-world-latin-america",
+      "name": "Associated Press — World (Latin America)",
+      "publisher": "Associated Press",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/yTaNDQhAPFcl6x1b.xml",
+      "weight": 84,
+      "active": true
+    },
+    {
+      "id": "ap-us",
+      "name": "Associated Press — U.S.",
+      "publisher": "Associated Press",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/kcXOXm8fKxJJcyxX.xml",
+      "weight": 82,
+      "active": true
     }
   ]
 }
