@@ -60,7 +60,9 @@ import { withTimeout } from "./guardrails.mjs";
 
 // D-064: bumped from extract-v4 when the system prompt added the
 // "country names belong in geographies, not keywords" hygiene line.
-export const EXTRACT_PROMPT_VERSION = "extract-v5";
+// Slice 13: bumped to extract-v6 when the prompt added canonical guidance for
+// Colombian / Spanish-language outlets (La Silla Vacía, Semana, Infobae).
+export const EXTRACT_PROMPT_VERSION = "extract-v6";
 
 export const extractionOutputSchema = z.object({
   topics: z.array(z.string().min(1)),
@@ -293,6 +295,10 @@ const SYSTEM_PROMPT = [
   "                       Country and region names belong in geographies, not in keywords. Do not duplicate a country across both fields.",
   '  traditionalSources — full outlet names without "The" prefix (e.g. "Reuters", "New York Times", "Wall Street Journal", "Associated Press", "BBC", "El Tiempo").',
   '                       Do NOT abbreviate: write "New York Times" not "NYT", "Associated Press" not "AP", "Wall Street Journal" not "WSJ".',
+  "                       Spanish-language and Colombian outlets keep their proper publication names. Use the canonical form:",
+  '                         "La Silla Vacía" (also written "La Silla Vacia" without the accent),',
+  '                         "Semana" (also written "Revista Semana"),',
+  '                         "Infobae" (also written "Infobae Colombia" / "Infobae América").',
   '  socialSources      — social media accounts or platform-based sources (e.g. "@stateDept", "@latamwatcher").',
   "",
   "Source classification rules:",
@@ -340,9 +346,16 @@ function mockExtract(text) {
   if (lower.includes("colombia")) geographies.push("Colombia");
 
   const traditionalSources = [];
-  for (const src of ["Reuters", "NYT", "Washington Post", "El Tiempo", "El País", "Semana"]) {
+  for (const src of ["Reuters", "NYT", "Washington Post", "El Tiempo", "El País", "Semana", "La Silla Vacía", "Infobae"]) {
     if (text.includes(src)) traditionalSources.push(src);
   }
+  // Slice 13: surface the accent-dropped / qualified / legacy variants too so
+  // `normalizeSourceName` can fold them onto the canonical publisher string.
+  if (lower.includes("la silla vacia")) traditionalSources.push("La Silla Vacia");
+  // Legacy (wrong) spelling accepted as input only — folded to canonical.
+  if (lower.includes("silla nacional")) traditionalSources.push("La Silla Vacía");
+  if (lower.includes("revista semana")) traditionalSources.push("Revista Semana");
+  if (lower.includes("infobae colombia")) traditionalSources.push("Infobae Colombia");
 
   const socialSources = text.match(/@\w+/g) ?? [];
 

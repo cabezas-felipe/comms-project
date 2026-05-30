@@ -238,5 +238,41 @@
       "traditionalSources": ["Associated Press"],
       "socialSources": ["@WHO"]
     }
+  },
+  {
+    "id": "ex-21",
+    "bucket": "spanish_sources",
+    "inputText": "Lidero la comunicación de una ONG enfocada en la migración entre Colombia y Estados Unidos. Cada mañana leo La Silla Vacía y Semana para seguir cómo cambia la narrativa.",
+    "expected": {
+      "topics": ["Migration policy"],
+      "keywords": ["migration"],
+      "geographies": ["Colombia", "US"],
+      "traditionalSources": ["La Silla Vacía", "Semana"],
+      "socialSources": []
+    }
+  },
+  {
+    "id": "ex-22",
+    "bucket": "spanish_sources",
+    "inputText": "Hago seguimiento de la seguridad y las elecciones en Colombia. Mis fuentes principales son Semana, Infobae y La Silla Vacía para el análisis político.",
+    "expected": {
+      "topics": ["Security policy"],
+      "keywords": ["elections", "security"],
+      "geographies": ["Colombia"],
+      "traditionalSources": ["Infobae", "La Silla Vacía", "Semana"],
+      "socialSources": []
+    }
+  },
+  {
+    "id": "ex-23",
+    "bucket": "spanish_sources",
+    "inputText": "Para el contexto migratorio en Colombia confío en Revista Semana, Infobae Colombia y La Silla Vacia.",
+    "expected": {
+      "topics": ["Migration policy"],
+      "keywords": ["migration"],
+      "geographies": ["Colombia"],
+      "traditionalSources": ["Infobae", "La Silla Vacía", "Semana"],
+      "socialSources": []
+    }
   }
 ]

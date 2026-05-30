@@ -57,6 +57,17 @@ export const SOURCE_NAME_ALIASES = Object.freeze({
   "bbc world": "BBC",
   "hill": "The Hill",
   "the hill": "The Hill",
+  // Slice 13: Colombian / Spanish-language outlets. Map the common
+  // article-prefixed and qualified variants onto the canonical publisher
+  // strings used downstream. Accent-dropped and legacy (wrong) spellings are
+  // accepted as inputs only and folded onto the canonical name.
+  "la silla vacia": "La Silla Vacía",
+  "la silla vacía": "La Silla Vacía",
+  "silla nacional": "La Silla Vacía",
+  "la silla nacional": "La Silla Vacía",
+  "revista semana": "Semana",
+  "infobae colombia": "Infobae",
+  "infobae américa": "Infobae",
 });
 
 export function normalizeTopicLabel(topic) {
