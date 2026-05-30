@@ -6618,3 +6618,91 @@ test("runRefreshPipeline (Slice 2): a same-event election pair is not split", as
   assert.equal(payload.stories.length, 1, "high-overlap same-event pair must stay merged");
   assert.equal(log.clusterSplit.splitCount, 0);
 });
+test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats serial wall-clock (order preserved)", async () => {
+  // Slice 6: Phase 5 now fans the per-story why-it-matters resolver calls out
+  // through a bounded `pMap` pool instead of awaiting them serially.  Pins:
+  //   1. every story still gets a non-empty whyItMatters,
+  //   2. payload story order is the deterministic R1 order (unaffected by why
+  //      completion order),
+  //   3. wall-clock for the stage reflects parallel waves, not the serial sum.
+  const STORY_COUNT = 6;
+  const PER_STORY_DELAY_MS = 100;
+  const localDelay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Six distinct stories so none get merged/deduped before Phase 5.  Built off
+  // MOCK_META_STORIES[0] (which grounds against the rawItems) with unique
+  // ids/titles/sources.  Ids are lexically ascending so the R1 tiebreaker
+  // (metaStoryId) yields the same order as construction.
+  const clusterStories = Array.from({ length: STORY_COUNT }, (_, i) => ({
+    ...MOCK_META_STORIES[0],
+    meta_story_id: `ms-why-par-${i}`,
+    title: `Parallel why story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i} - multiple outlets report on developments`,
+    summary: `Summary ${i}: diplomatic relations updates tracked across outlets.`,
+    source_item_ids: ["src-1"],
+  }));
+
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  const prevConc = process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
+  process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = "4";
+  try {
+    const { payload, log } = await runRefreshPipeline({
+      settings: BASE_SETTINGS,
+      rawItems: [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })],
+      clusterFn: async () => clusterStories,
+      clusterModel: "mock-anthropic-haiku",
+      contractVersion: "2026-05-19-meta-story-fields",
+      deltaConfig: { enabled: false },
+      whyConfig: PHASE5_WHY_ENABLED_CONFIG,
+      whyWriteFn: async (payload) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await localDelay(PER_STORY_DELAY_MS);
+        inFlight -= 1;
+        return {
+          text: `Parallel implications copy for ${payload?.state ?? "steady"} state, sufficiently long to pass the validation gates.`,
+          taxonomyPrimary: "monitoring_intensity",
+          confidence: "medium",
+        };
+      },
+    });
+
+    const whyStories = payload.stories.filter((s) => s.metaStoryId.startsWith("ms-why-par-"));
+    assert.equal(whyStories.length, STORY_COUNT, "all six stories survive to the payload");
+    for (const s of whyStories) {
+      assert.ok(s.whyItMatters && s.whyItMatters.length > 0, `whyItMatters populated for ${s.metaStoryId}`);
+    }
+
+    // R1: payload order is the deterministic server-canonical order.  With
+    // equal beat-fit / recency, the metaStoryId tiebreaker yields ascending
+    // ms-why-par-0..5 — and crucially it is NOT driven by why completion order
+    // (the Slice 6 invariant: parallel apply preserves order).
+    const expectedOrder = clusterStories.map((s) => s.meta_story_id).slice().sort();
+    assert.deepEqual(
+      payload.stories.map((s) => s.metaStoryId),
+      expectedOrder,
+      "story order in payload is the deterministic R1 order, independent of parallel completion order (R1)"
+    );
+
+    // Concurrency cap honored — at most 4 why writers in flight; with 6 stories
+    // and cap 4 the ceiling is actually reached.
+    assert.ok(maxInFlight <= 4, `max in-flight why writers must be <= 4, saw ${maxInFlight}`);
+    assert.equal(maxInFlight, 4, "concurrency 4 with 6 stories must reach the cap");
+
+    // Stage telemetry surfaced on the returned log.
+    assert.equal(log.whyItMatters.whyConcurrency, 4, "whyConcurrency surfaced on log.whyItMatters");
+    assert.equal(typeof log.whyItMatters.whyMs, "number", "whyMs surfaced on log.whyItMatters");
+
+    // Wall-clock proof: serial would be 6 * 100 = ~600ms; parallel with cap 4
+    // is two waves (4 then 2) ~ 200ms.  Generous threshold well under serial.
+    assert.ok(
+      log.whyItMatters.whyMs < 450,
+      `parallel why wall-clock (${log.whyItMatters.whyMs}ms) must beat serial ~600ms`
+    );
+  } finally {
+    if (prevConc === undefined) delete process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
+    else process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = prevConc;
+  }
+});

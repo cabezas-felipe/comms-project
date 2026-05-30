@@ -17,7 +17,9 @@
  *     `items.length` (no idle workers spun up).
  *   - `concurrency <= 0` (or any value `< 1`) is clamped up to 1 worker, so a
  *     misconfigured cap degrades to sequential rather than deadlocking.
- *   - an empty `items` array spins up zero workers and resolves to `[]`.
+ *   - an empty `items` array still spins up one worker (the formula clamps to
+ *     `Math.max(1, …)`), but that worker reads `nextIndex (0) >= length (0)`
+ *     and returns immediately without ever calling `fn`; the result is `[]`.
  *
  * Result order follows input order (a worker writes to `results[i]` for the
  * index `i` it claimed), independent of completion order.
