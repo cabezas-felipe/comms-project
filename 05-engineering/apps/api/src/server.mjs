@@ -1272,6 +1272,7 @@ async function executeRefreshFlow(identity) {
     if (log.clusteringLatencyMs !== undefined) lastRunMeta.clusteringLatencyMs = log.clusteringLatencyMs;
     if (log.funnel !== undefined) lastRunMeta.funnel = log.funnel;
     if (log.recall !== undefined) lastRunMeta.recall = log.recall;
+    if (log.translation !== undefined) lastRunMeta.translation = log.translation;
     if (log.beatFit !== undefined) lastRunMeta.beatFit = log.beatFit;
     if (log.decisionTrace !== undefined) lastRunMeta.decisionTrace = log.decisionTrace;
     // Phase 4: per-axis semantic tag-mapping aggregate (topics/keywords) and
@@ -1348,6 +1349,10 @@ async function executeRefreshFlow(identity) {
           // Backwards-compatible: clients ignore unknown _meta keys.
           beatFit: log.beatFit,
           recall: log.recall,
+          // Slice 14: translation-first normalization diagnostics (coverage,
+          // translated/failed/timeout counts, degraded rate, latency p50/p95,
+          // per-story coverage). Backwards-compatible; OFF by default in prod.
+          translation: log.translation,
           funnel: log.funnel,
           // Clustering fail-closed diagnostics (Slice 1) — also surfaced on
           // the immediate refresh response so the first read after a failed

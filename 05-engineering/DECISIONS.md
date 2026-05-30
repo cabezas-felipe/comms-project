@@ -2,6 +2,35 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-05-30 - D-067 - Translation-first evidence normalization (ES→EN) for recall
+
+#### Context
+
+- Phase 3 adds Spanish publishers (La Silla Vacía, Semana, Infobae). Recall — the lexical keyword/topic gate plus embedding similarity — consumes source item *text*. A Spanish RSS item never matches an English user keyword ("migración" ≠ "migration"), so it is dropped before the precision stages (beat-fit, clustering, grounding) can see it.
+- A bilingual keyword dictionary as the primary mechanism doesn't scale across beats/languages and duplicates the recall machinery.
+
+#### Decision
+
+- **Translation-first**: normalize non-English evidence to English BEFORE recall, then run the existing (English) recall machinery unchanged. New stage [`evidence-translator.mjs`](apps/api/src/ingestion/evidence-translator.mjs), wired into [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) after the geo filter and before semantic scoring + recall.
+- **Bounded evidence budget**: translate `headline + first 2 body snippets`, capped at ~700 chars.
+- **Dual-text retention**: originals (`headline`/`body`) are never mutated; English lands on `normalizedHeadline`/`normalizedBody`. Text-consuming recall surfaces (`buildItemText`, `applyTopicKeywordFilter`, `analyzeTopicKeywordStage`, `joinGeoText`) read normalized-when-present and fall back to originals, so English items are untouched.
+- **Bounded + fail-open**: bounded concurrency + per-call timeout + cache keyed by stable source id + text hash. A translation error/timeout leaves the item untranslated (recall still decides admission) and is recorded in diagnostics — translation NEVER blocks a refresh.
+- **Coverage / confidence**: per-story translated-source coverage; `≥60%` → full confidence, `<60%` → degraded/low-confidence markers in `_meta.translation.stories` (the translated subset still ships — no hard block, no blank-by-default).
+- **Observability**: `_meta.translation` surfaces coverage, translated/failed/timeout counts, cache hits, degraded fallback rate, and latency p50/p95.
+- **Default OFF** in production (`TEMPO_TRANSLATION_ENABLED`); Spanish feeds remain inactive until Phase 4. Tests inject a deterministic `translateFn` + enabled config.
+- **Onboarding extraction** now normalizes `topics`/`keywords` to English even for non-English input (prompt bumped `extract-v6` → `extract-v7`), so the onboarding `spanish_sources` eval bucket is re-tightened to all-fields-strict (topics/keywords no longer advisory).
+
+#### Why
+
+- Reuses one recall path for every language instead of forking a bilingual keyword path.
+- Dual-text keeps Spanish source headlines/bodies intact for display while giving recall an English signal; meta-story copy stays English (Slice 15 owns cluster/writer guardrails).
+- Fail-open + bounded execution protect refresh latency/availability; coverage markers keep trust honest when translation is partial.
+
+#### Consequences
+
+- New hermetic eval `eval:dashboard-spanish-recall` proves Spanish items reach clustering via normalized EN (and would not without it), plus the degraded partial-failure path.
+- No feed-manifest/activation change in this slice; Spanish feeds ship in Phase 4. Slice 15 adds the clustering English-output + translated-evidence writer guardrails.
+
 ### 2026-05-29 - D-066 - Source-expansion latency posture: parallel why, manifest-derived allowlist, warm/cadence ops
 
 #### Context

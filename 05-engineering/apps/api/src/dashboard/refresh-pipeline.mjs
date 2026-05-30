@@ -30,6 +30,14 @@ import {
   runEmbeddingRecall,
 } from "../ingestion/embedding-recall.mjs";
 import {
+  TRANSLATION_COVERAGE_THRESHOLD,
+  computeStoryCoverage,
+  readBodyText,
+  readHeadline,
+  resolveTranslationConfig,
+  translateEvidenceItems,
+} from "../ingestion/evidence-translator.mjs";
+import {
   SEMANTIC_BEAT_FIT_VERSION,
   attachSemanticScores,
   computeSemanticBeatFitScores,
@@ -617,9 +625,12 @@ function buildKeywordTokenRegex(keywords) {
 // the recall geo gate never narrows what beat-fit would later geo-match — geo
 // recall stays at least as wide as the downstream scorer's geo signal.
 function joinGeoText(item) {
-  const headline = item?.headline ?? "";
+  // Slice 14: read normalized English evidence when present (falls back to the
+  // untouched originals for English items) so the geo lexical gate stays in
+  // lockstep with the keyword/embedding recall surfaces.
+  const headline = readHeadline(item);
   const subtitle = item?.subtitle ?? "";
-  const body = Array.isArray(item?.body) ? item.body.join(" ") : (item?.body ?? "");
+  const body = readBodyText(item);
   const url = typeof item?.url === "string" ? item.url : "";
   return `${headline} ${subtitle} ${body} ${url}`.trim();
 }
@@ -654,7 +665,10 @@ export function applyTopicKeywordFilter(items, settings) {
   return items.filter((item) => {
     if (topics.size > 0 && topics.has(normalizeTopicLabel(item.topic))) return true;
     if (keywordRegex) {
-      const text = (item.headline ?? "") + " " + (Array.isArray(item.body) ? item.body.join(" ") : (item.body ?? ""));
+      // Slice 14: keyword recall reads normalized English evidence when present
+      // so a Spanish item whose translation contains "migration" matches the
+      // English user keyword. English items fall back to their originals.
+      const text = readHeadline(item) + " " + readBodyText(item);
       if (keywordRegex.test(text)) return true;
     }
     if (hasGeographies && itemMentionsConfiguredGeography(joinGeoText(item), geographies)) {
@@ -732,10 +746,9 @@ export function analyzeTopicKeywordStage(items, settings) {
     const topicMatch = hasTopics && topics.has(normalizeTopicLabel(item?.topic ?? ""));
     let keywordMatch = false;
     if (hasKeywords) {
-      const text =
-        (item?.headline ?? "") +
-        " " +
-        (Array.isArray(item?.body) ? item.body.join(" ") : (item?.body ?? ""));
+      // Slice 14: mirror applyTopicKeywordFilter — read normalized English
+      // evidence when present so the diagnostic breakdown matches the filter.
+      const text = readHeadline(item) + " " + readBodyText(item);
       keywordMatch = keywordRegex.test(text);
     }
     const geoMatch =
@@ -1027,6 +1040,16 @@ export async function runRefreshPipeline({
   beatFitEnabled = true,
   embedFn = null,
   recallConfig = null,
+  // Slice 14 — translation-first evidence normalization (ES→EN). `translateFn`
+  // is the injected batch segment translator; production wraps the AI router,
+  // tests pass a deterministic stub. `translationConfig` overrides
+  // `resolveTranslationConfig()` (default OFF) so tests enable the stage without
+  // env mutation. `translationCache` lets tests assert cache hits across runs.
+  // When disabled / no translateFn, the stage is a no-op pass-through and the
+  // pipeline behaves exactly as before (English-only posture).
+  translateFn = null,
+  translationConfig = null,
+  translationCache = null,
   // Phase 4: optional semantic tag-mapping config + scorer.  When omitted,
   // `resolveSemanticTagConfig()` reads env (defaults OFF), and no scorer is
   // present — the pipeline degrades cleanly to the Phase 3 deterministic
@@ -1263,6 +1286,47 @@ export async function runRefreshPipeline({
     console.log(`[pipeline] ${geoHeldItems.length} item(s) in geo hold bucket after this refresh`);
   }
 
+  // 4b-bis. Translation-first evidence normalization (Slice 14).
+  //
+  //     Runs over the post-geo candidate set, BEFORE semantic intent scoring
+  //     and recall, so every text-consuming stage downstream (lexical
+  //     keyword/topic recall, embedding `buildItemText`, the geo lexical gate)
+  //     reads normalized English evidence for non-English items. Originals are
+  //     never mutated — the English text lands on `normalizedHeadline` /
+  //     `normalizedBody`, and the readers fall back to originals for English
+  //     items so this is a no-op for the all-English pool.
+  //
+  //     Bounded + fail-open: bounded concurrency + per-call timeout; a
+  //     translation error/timeout leaves the item untranslated (recall still
+  //     decides admission) and is recorded in diagnostics. It NEVER blocks the
+  //     refresh. Default OFF — Spanish feeds are inactive until Phase 4, so
+  //     production runs are no-ops until an operator wires `translateFn` and
+  //     enables the stage.
+  const effectiveTranslationConfig = translationConfig ?? resolveTranslationConfig();
+  const translationStartedAt = Date.now();
+  const { items: translatedGeoItems, diagnostics: translationStageDiagnostics } =
+    await translateEvidenceItems({
+      items: geoPassedItems,
+      translateFn,
+      config: effectiveTranslationConfig,
+      cache: translationCache ?? undefined,
+    });
+  const translationMs = Math.max(0, Date.now() - translationStartedAt);
+  console.log(
+    `[pipeline.translation] version=${translationStageDiagnostics.version}` +
+      ` enabled=${translationStageDiagnostics.enabled}` +
+      ` candidates=${translationStageDiagnostics.candidateCount}` +
+      ` needed=${translationStageDiagnostics.neededCount}` +
+      ` translated=${translationStageDiagnostics.translatedCount}` +
+      ` failed=${translationStageDiagnostics.failedCount}` +
+      ` timeouts=${translationStageDiagnostics.timeoutCount}` +
+      ` cache_hits=${translationStageDiagnostics.cacheHits}` +
+      ` fallback_rate=${translationStageDiagnostics.degradedFallbackRate.toFixed(3)}` +
+      ` p50_ms=${translationStageDiagnostics.latencyMsP50}` +
+      ` p95_ms=${translationStageDiagnostics.latencyMsP95}` +
+      ` latency_ms=${translationMs}`
+  );
+
   // 4c. Semantic intent scoring (Option A — semantic BeatFit uplift).
   //
   //     Runs over ALL post-geo candidates (deliberately *before* the recall
@@ -1276,7 +1340,7 @@ export async function runRefreshPipeline({
   //     The BeatFit scorer then runs in pure deterministic mode for the rest
   //     of the refresh (graceful degradation, no broken snapshot).
   const semanticBeatFitResult = await computeSemanticBeatFitScores({
-    items: geoPassedItems,
+    items: translatedGeoItems,
     settings,
     embedFn: effectiveSemanticBeatFitEmbedFn,
     config: effectiveSemanticBeatFitConfig,
@@ -1284,7 +1348,7 @@ export async function runRefreshPipeline({
   });
   const semanticBeatFitDiagnostics = semanticBeatFitResult.diagnostics;
   const semanticAnnotatedGeoItems = attachSemanticScores(
-    geoPassedItems,
+    translatedGeoItems,
     semanticBeatFitResult.scoresBySourceId
   );
   console.log(
@@ -1559,6 +1623,10 @@ export async function runRefreshPipeline({
           collapsedCount: dedupeResult.duplicateCount,
         },
         recall: recallDiagnostics,
+        // Translation ran before recall (and thus before this short-circuit),
+        // so the run-level normalization stats are honest even on a skip. No
+        // per-story coverage — clustering never ran.
+        translation: { ...translationStageDiagnostics, translationMs, stories: {} },
         funnel: skipFunnel,
         // Phase 2 lightweight decision trace.  Beat-fit ran before we decided
         // to short-circuit, so the trace surfaces the same explainability
@@ -2124,6 +2192,40 @@ export async function runRefreshPipeline({
   // source of truth.
   const pipelineMs = Math.max(0, Date.now() - pipelineStartedAt);
   const pipelineTimings = { preClusterMs, recallMs, clusterMs, whatChangedMs, whyMs, pipelineMs };
+
+  // ── Slice 14: per-story translated-source coverage + degraded markers ───────
+  // A story is full-confidence when ≥60% of its sources carry usable English
+  // evidence (English-native OR successfully translated). Below threshold it is
+  // marked degraded/low-confidence in `_meta.translation.stories` — never
+  // hard-blocked (the translated subset still ships). Per-story coverage lives
+  // in `_meta` (NOT on the story payload) so the dashboard schema is untouched
+  // and meta-story copy stays English (Slice 15 owns cluster/writer guardrails).
+  const perStoryTranslation = {};
+  let degradedStoryCount = 0;
+  for (const ms of groundedStories) {
+    const storyItems = (ms.source_item_ids ?? [])
+      .map((id) => sourceItemsById.get(id))
+      .filter(Boolean);
+    const coverage = computeStoryCoverage(storyItems);
+    perStoryTranslation[ms.meta_story_id] = coverage;
+    if (coverage.degraded) degradedStoryCount++;
+  }
+  const translationDiagnostics = {
+    ...translationStageDiagnostics,
+    coverageThreshold: TRANSLATION_COVERAGE_THRESHOLD,
+    translationMs,
+    degraded: {
+      storyCount: degradedStoryCount,
+      rate: stories.length > 0 ? degradedStoryCount / stories.length : 0,
+    },
+    stories: perStoryTranslation,
+  };
+  if (degradedStoryCount > 0) {
+    console.warn(
+      `[pipeline.translation] ${degradedStoryCount}/${stories.length} story(ies) below ` +
+        `${TRANSLATION_COVERAGE_THRESHOLD * 100}% translated-source coverage — marked low-confidence (degraded subset still shipped)`
+    );
+  }
   console.log(
     `[pipeline.timings] preClusterMs=${preClusterMs} recallMs=${recallMs}` +
       ` clusterMs=${clusterMs} whatChangedMs=${whatChangedMs} whyMs=${whyMs} pipelineMs=${pipelineMs}`
@@ -2204,6 +2306,12 @@ export async function runRefreshPipeline({
     // operators can answer "did embeddings widen recall this run, or did the
     // run fall through fail-closed?" from logs alone.
     recall: recallDiagnostics,
+    // Slice 14: translation-first normalization diagnostics. Run-level
+    // (coverage, translated/failed/timeout counts, cache hits, degraded
+    // fallback rate, latency p50/p95) plus per-story translated-source coverage
+    // + degraded/low-confidence markers under `stories`. Surfaced under
+    // `_meta.translation`.
+    translation: translationDiagnostics,
     // Phase 4: per-axis semantic tag-mapping diagnostics aggregated across
     // shipped stories.  `enabled` reflects the configured state; `accepted`/
     // `rejected`/`belowThresholdCount` show how often the uplift fired and

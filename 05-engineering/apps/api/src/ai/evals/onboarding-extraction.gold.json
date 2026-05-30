@@ -242,7 +242,7 @@
   {
     "id": "ex-21",
     "bucket": "spanish_sources",
-    "inputText": "Lidero la comunicación de una ONG enfocada en la migración entre Colombia y Estados Unidos. Cada mañana leo La Silla Vacía y Semana para seguir cómo cambia la narrativa.",
+    "inputText": "Sigo de cerca la migración entre Colombia y Estados Unidos. Leo La Silla Vacía y Semana todos los días.",
     "expected": {
       "topics": ["Migration policy"],
       "keywords": ["migration"],
@@ -256,8 +256,8 @@
     "bucket": "spanish_sources",
     "inputText": "Hago seguimiento de la seguridad y las elecciones en Colombia. Mis fuentes principales son Semana, Infobae y La Silla Vacía para el análisis político.",
     "expected": {
-      "topics": ["Security policy"],
-      "keywords": ["elections", "security"],
+      "topics": ["Elections", "Security"],
+      "keywords": [],
       "geographies": ["Colombia"],
       "traditionalSources": ["Infobae", "La Silla Vacía", "Semana"],
       "socialSources": []

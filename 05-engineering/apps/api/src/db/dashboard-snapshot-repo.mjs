@@ -115,6 +115,9 @@ function liftSnapshotMeta(payload, refreshed_at) {
   if (_lastRunMeta && typeof _lastRunMeta === "object") {
     if (_lastRunMeta.funnel !== undefined) meta.funnel = _lastRunMeta.funnel;
     if (_lastRunMeta.recall !== undefined) meta.recall = _lastRunMeta.recall;
+    // Slice 14: translation-first normalization diagnostics. Optional for
+    // backward compat with snapshots written before the translation stage.
+    if (_lastRunMeta.translation !== undefined) meta.translation = _lastRunMeta.translation;
     if (_lastRunMeta.beatFit !== undefined) meta.beatFit = _lastRunMeta.beatFit;
     if (_lastRunMeta.clusterModel !== undefined) meta.clusterModel = _lastRunMeta.clusterModel;
     if (_lastRunMeta.embeddingModel !== undefined) meta.embeddingModel = _lastRunMeta.embeddingModel;

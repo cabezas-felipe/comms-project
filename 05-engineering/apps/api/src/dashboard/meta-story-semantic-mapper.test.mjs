@@ -641,9 +641,9 @@ test("createEmbeddingSemanticScorer: throws on construction when embedFn is not 
 
 // ─── resolveSemanticScorerRuntimeConfig ─────────────────────────────────────
 
-test("resolveSemanticScorerRuntimeConfig: defaults are sane (1500ms timeout, 4000-char evidence cap)", () => {
+test("resolveSemanticScorerRuntimeConfig: defaults are sane (3000ms timeout, 4000-char evidence cap)", () => {
   const cfg = resolveSemanticScorerRuntimeConfig({});
-  assert.equal(cfg.timeoutMs, 1500);
+  assert.equal(cfg.timeoutMs, 3000);
   assert.equal(cfg.maxEvidenceChars, 4000);
 });
 
@@ -661,7 +661,7 @@ test("resolveSemanticScorerRuntimeConfig: out-of-range / non-numeric env values 
     TEMPO_TAG_SEMANTIC_SCORER_TIMEOUT_MS: "-1",
     TEMPO_TAG_SEMANTIC_MAX_EVIDENCE_CHARS: "abc",
   });
-  assert.equal(cfg.timeoutMs, 1500);
+  assert.equal(cfg.timeoutMs, 3000);
   assert.equal(cfg.maxEvidenceChars, 4000);
 });
 
