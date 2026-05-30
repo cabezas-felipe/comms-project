@@ -117,6 +117,15 @@
       "url": "https://rss.app/feeds/qYDIDwmHpIDvosjo.xml",
       "weight": 72,
       "active": true
+    },
+    {
+      "id": "bloomberg-politics-us",
+      "name": "Bloomberg — Politics (US)",
+      "publisher": "Bloomberg",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/UazFLROXqfvuIKqG.xml",
+      "weight": 70,
+      "active": true
     }
   ]
 }
