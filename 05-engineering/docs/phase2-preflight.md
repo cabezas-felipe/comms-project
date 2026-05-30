@@ -95,15 +95,16 @@ vercel env ls
 Redeploy/restart so the running instance picks up the unset value, then confirm a
 `[refresh]` line shows the expected `matchedFeeds` count.
 
-## Slice 9 — AP pilot activation note
+## AP activation note (Slice 9 pilot → Slice 10 full set)
 
-The AP pilot (Slice 9) activates two feeds — `ap-world-latin-america` and
-`ap-us` (`publisher = Associated Press`, `language = en`) — sourced from
-`rss.app` **proxy** endpoints, mirroring the existing Reuters pilot feeds rather
-than canonical AP enterprise RSS. This is a deliberate prototype constraint to
-activate the pilot now; migration to an approved canonical AP endpoint is a
-drop-in URL swap on the same `feed_id`s (no manifest id/name change). Bloomberg
-remains out of scope (Slice 11/12). See
+AP runs on `rss.app` **proxy** endpoints (`publisher = Associated Press`,
+`language = en`), mirroring the existing Reuters pilot feeds rather than canonical
+AP enterprise RSS. Slice 9 activated the 2-feed pilot (`ap-world-latin-america`,
+`ap-us`); Slice 10 adds the remaining 5 (`ap-politics`, `ap-politics-white-house`,
+`ap-politics-congress`, `ap-us-immigration`, `ap-business-tariffs`) for **7 AP
+feeds total**. This is a deliberate prototype constraint; migration to an approved
+canonical AP endpoint is a drop-in URL swap on the same `feed_id`s (no manifest
+id/name change). Bloomberg remains out of scope (Slice 11/12). See
 [feed-url-matrix.md](feed-url-matrix.md) for per-row status.
 
 ## Ready for Slice 9 when

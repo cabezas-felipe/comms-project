@@ -72,6 +72,51 @@
       "url": "https://rss.app/feeds/kcXOXm8fKxJJcyxX.xml",
       "weight": 82,
       "active": true
+    },
+    {
+      "id": "ap-politics",
+      "name": "Associated Press — Politics",
+      "publisher": "Associated Press",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/Q0eTIJF29inHFABU.xml",
+      "weight": 80,
+      "active": true
+    },
+    {
+      "id": "ap-politics-white-house",
+      "name": "Associated Press — Politics (White House)",
+      "publisher": "Associated Press",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/XNymhkWTHdSXFabC.xml",
+      "weight": 78,
+      "active": true
+    },
+    {
+      "id": "ap-politics-congress",
+      "name": "Associated Press — Politics (Congress)",
+      "publisher": "Associated Press",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/6hROpUYxMB8H10ZM.xml",
+      "weight": 76,
+      "active": true
+    },
+    {
+      "id": "ap-us-immigration",
+      "name": "Associated Press — U.S. (Immigration)",
+      "publisher": "Associated Press",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/rBxffpzA3aoenCVN.xml",
+      "weight": 74,
+      "active": true
+    },
+    {
+      "id": "ap-business-tariffs",
+      "name": "Associated Press — Business (Tariffs and Global Trade)",
+      "publisher": "Associated Press",
+      "kind": "rss",
+      "url": "https://rss.app/feeds/qYDIDwmHpIDvosjo.xml",
+      "weight": 72,
+      "active": true
     }
   ]
 }

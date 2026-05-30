@@ -21,15 +21,21 @@ Status values:
 | --- | --- | --- | --- | --- | --- |
 | Associated Press | `ap-world-latin-america` | https://rss.app/feeds/yTaNDQhAPFcl6x1b.xml | en | activated | AP Latin America hub (`apnews.com/hub/latin-america`). `rss.app` proxy feed — see proxy note below. |
 | Associated Press | `ap-us` | https://rss.app/feeds/kcXOXm8fKxJJcyxX.xml | en | activated | AP U.S. News hub (`apnews.com/us-news`). `rss.app` proxy feed — see proxy note below. |
+| Associated Press | `ap-politics` | https://rss.app/feeds/Q0eTIJF29inHFABU.xml | en | activated | AP Politics. `rss.app` proxy feed — see proxy note below. |
+| Associated Press | `ap-politics-white-house` | https://rss.app/feeds/XNymhkWTHdSXFabC.xml | en | activated | AP Politics — White House. `rss.app` proxy feed — see proxy note below. |
+| Associated Press | `ap-politics-congress` | https://rss.app/feeds/6hROpUYxMB8H10ZM.xml | en | activated | AP Politics — Congress. `rss.app` proxy feed — see proxy note below. |
+| Associated Press | `ap-us-immigration` | https://rss.app/feeds/rBxffpzA3aoenCVN.xml | en | activated | AP U.S. — Immigration. `rss.app` proxy feed — see proxy note below. |
+| Associated Press | `ap-business-tariffs` | https://rss.app/feeds/qYDIDwmHpIDvosjo.xml | en | activated | AP Business — Tariffs and global trade. `rss.app` proxy feed — see proxy note below. |
 | Bloomberg | `bloomberg-markets` | _TODO — supply Bloomberg feed URL_ | en | proposed | TODO: confirm Bloomberg RSS availability (many endpoints are gated). |
 | Bloomberg | `bloomberg-politics` | _TODO — supply Bloomberg feed URL_ | en | proposed | TODO: confirm endpoint + access. |
 
-> **AP pilot proxy note (Slice 9):** The two AP rows use `rss.app` proxy
-> endpoints (mirroring the existing Reuters pilot feeds), not canonical AP
-> enterprise RSS. This is a deliberate prototype constraint to activate the AP
-> pilot now. Migration to canonical AP feeds is a drop-in URL swap on these same
-> `feed_id`s once an approved endpoint + ToS is confirmed — no id/name change
-> required.
+> **AP proxy note (Slice 9 pilot → Slice 10 full set):** All AP rows use
+> `rss.app` proxy endpoints (mirroring the existing Reuters pilot feeds), not
+> canonical AP enterprise RSS. Slice 9 activated the first 2 (`ap-world-latin-america`,
+> `ap-us`); Slice 10 adds the remaining 5 for **7 AP feeds total**. This is a
+> deliberate prototype constraint to activate AP now. Migration to canonical AP
+> feeds is a drop-in URL swap on these same `feed_id`s once an approved endpoint
+> + ToS is confirmed — no id/name change required.
 
 ## How to validate a row before Slice 9
 
