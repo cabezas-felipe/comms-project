@@ -25,6 +25,7 @@
     "eval:dashboard-calibration:verbose": "node src/ai/evals/run-dashboard-calibration.mjs --verbose",
     "eval:dashboard-calibration:json": "node src/ai/evals/run-dashboard-calibration.mjs --json-out tmp/dashboard-calibration.json",
     "eval:dashboard-quality-gate": "node src/ai/evals/run-dashboard-quality-gate.mjs",
+    "eval:dashboard-embassy-beat": "node src/ai/evals/run-dashboard-embassy-beat.mjs",
     "eval:relevance-precision": "NODE_ENV=test node --test src/dashboard/relevance-precision-eval.test.mjs",
     "eval:why-this-matters": "node src/ai/evals/run-why-this-matters-eval.mjs",
     "source-catalog:generate": "node src/ops/source-registry-catalog-generate.mjs"

@@ -13,6 +13,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Dashboard Spanish recall (Slice 14)** | Hermetic regression: Spanish RSS-shaped items + English settings reach the clustering pool via translation-first normalized English evidence (and do NOT without it); plus a degraded partial-translation-failure path where the refresh still completes and affected stories are marked low-confidence in `_meta.translation` | `npm run eval:dashboard-spanish-recall` | Smoke gate (non-zero on any scenario failure) |
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
 | **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR calibration guardrails regress |
+| **Dashboard embassy beat (Sprint C3)** | Hermetic golden: synthetic mixed EN/ES, multi-geo (Colombia/LatAm + Kenya/Africa style) embassy beat still produces usable output after the Sprint C cluster-reliability changes (C1 input cap + C2 JSON safe-trim repair). Minimum-presence only: `stories.length >= 1` AND `usedFallbackClustering === false`. Diagnostics retained but not gated. | `npm run eval:dashboard-embassy-beat` | Standalone smoke (non-zero on unmet criteria); **not** wired into `eval:dashboard-quality-gate` |
 
 ---
 
@@ -399,6 +400,44 @@ calibration pass/fail, artifact path).
    tying `similarityRejected` movement to the manual review.
 
 Absent all three, keep 0.35.
+
+---
+
+## Dashboard Embassy Beat (Sprint C3)
+
+Golden smoke that the Sprint C cluster-reliability changes — C1 deterministic
+cluster input cap and C2 clustering JSON safe-trim repair — still yield usable
+story output under a realistic embassy beat. Fully synthetic and deterministic:
+in-code fixture (`dashboard-embassy-beat-core.mjs`), keyword recall, a
+deterministic ES→EN translation stub, and a grounded cluster stub — no network,
+no Anthropic, no env.
+
+```sh
+cd 05-engineering/apps/api && npm run eval:dashboard-embassy-beat
+```
+
+### Fixture
+
+Five synthetic items: mixed EN/ES, multi-geo — Colombia (Reuters / Semana /
+El Tiempo, explicit `Colombia`/`US` geographies) plus Kenya/Africa-style context
+(Daily Nation / The Standard, implicit geo with Nairobi / African Union in the
+text, since the geography enum is US/Colombia only).
+
+### What it asserts (minimum presence only)
+
+- `stories.length >= 1`
+- `usedFallbackClustering === false` (clustering did not fail closed)
+
+Rich diagnostics (cluster cap, repair flags, translation counts, funnel, story
+titles/geographies) are printed for debugging but **not** gated — no outlet
+representation or coverage thresholds yet.
+
+### Exit codes
+
+- `0` — both criteria met.
+- `1` — either criterion unmet (or a runner error); unmet reasons + diagnostics print inline.
+
+Standalone only — **not** wired into `eval:dashboard-quality-gate`.
 
 ---
 
