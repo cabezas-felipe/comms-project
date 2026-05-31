@@ -15,6 +15,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR calibration guardrails regress |
 | **Dashboard embassy beat (Sprint C3)** | Hermetic golden: synthetic mixed EN/ES, multi-geo (Colombia/LatAm + Kenya/Africa style) embassy beat still produces usable output after the Sprint C cluster-reliability changes (C1 input cap + C2 JSON safe-trim repair). Minimum-presence only: `stories.length >= 1` AND `usedFallbackClustering === false`. Diagnostics retained but not gated. | `npm run eval:dashboard-embassy-beat` | Standalone smoke (non-zero on unmet criteria); **not** wired into `eval:dashboard-quality-gate` |
 | **Cache-benefit advisory (Sprint D1)** | Hermetic, deterministic check of the ingestion-cache benefit window logic (`dashboard/cache-benefit-window.mjs`): cache_hit p50 >= 20% faster than live_scoped p50, cache-hit rate >= 60%, >= 5 samples/mode in a 5-run window. Synthetic run windows; **measurement + guardrails only, no runtime behavior**. | `npm run eval:cache-benefit-advisory` | **Advisory** — standalone, non-zero only if the window logic regresses; **not** wired into any blocking gate |
+| **D2 narrative stability (Sprint D2)** | Hermetic failure-injection over the real pipeline: fail-closed-per-story for what-changed + why-it-matters (one retry per failing stage, then drop the story; never fail the global refresh). Asserts per-story drop, single-retry recovery, per-stage retry/drop tallies, and the >=50% retention guardrail. | `npm run eval:d2-narrative-stability` | **Advisory** — standalone, non-zero only if the D2 stability logic regresses; **not** wired into any blocking gate |
 
 ---
 
@@ -575,4 +576,99 @@ the eval is the deterministic, reproducible surface for the criteria.
 
 - After touching `dashboard/cache-benefit-window.mjs` or the
   `emitRefreshObservability` wiring in `server.mjs`.
+- Before proposing the advisory → blocking promotion.
+
+---
+
+## D2 Narrative Stability (Sprint D2)
+
+### Why this exists
+
+D2 hardens the two post-clustering narrative stages — **what-changed** and
+**why-it-matters** — against transient generation failures with a
+**fail-closed-per-story** policy. Before D2 both stages were fail-open (a failed
+writer shipped degraded/fallback copy). After D2:
+
+1. **Fail-closed per story** — a stage that cannot produce content for a story
+   drops only that story; the global refresh still succeeds (the other stories
+   ship).
+2. **One retry per failing stage** — a failing stage is retried exactly once;
+   if it still fails, the story is dropped.
+3. **Silent drop** — no user-facing notice or new UX messaging for a dropped
+   story (additive operator diagnostics only).
+
+The runtime policy lives in
+[`dashboard/narrative-stability.mjs`](../../dashboard/narrative-stability.mjs)
+(failure predicates + the single-retry helper) and the per-story drop +
+`log.narrativeStability` rollup in `refresh-pipeline.mjs`. **No timeout values
+were changed.**
+
+The failure trigger is deliberately NARROW — only transient *execution* failures
+drop a story:
+- what-changed: a failed **write** call (`llmFailed.write`). Classify failures
+  and hallucination-guard hits still degrade gracefully to "unchanged" copy.
+- why-it-matters: transport fallbacks (`write_failed` / `rewrite_failed` /
+  `resolver_threw`). Config fallbacks (`disabled` / `mock_only`) and
+  content-validation fallbacks (`write_validation_failed`) are NOT drops.
+
+So healthy, default-off, and validation paths behave exactly as before.
+
+### How to run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:d2-narrative-stability
+```
+
+Hermetic: runs the **real** `runRefreshPipeline` with controlled per-story
+failures injected via the `resolveWhatChangedFn` / `resolveWhyItMattersFn` test
+seams (so the eval exercises the actual retry/drop orchestration, not a copy of
+it). No network, no LLM, no env.
+
+### Scenarios
+
+| ID | Intent | Expected |
+|---|---|---|
+| `what-changed-persistent-drop` | what-changed write fails persistently for 1/4 | 1 dropped after retry, 3 survive (75%) — guardrail PASS |
+| `why-persistent-drop-boundary` | why fails persistently for 2/4 | 2 dropped, 2 survive (50%) — guardrail boundary PASS |
+| `both-stages-mixed-drop` | what-changed drops 1, why drops 1 (different stories) | 2 survive (50%) — guardrail PASS |
+| `single-retry-recovery` | transient failures recover on the single retry | 0 drops, all 4 survive, retries counted |
+| `retention-guardrail-breach-detected` | 3/4 fail | only 1 survives (25%) — guardrail correctly **FLAGS** the breach, global refresh still succeeds |
+
+Each scenario asserts the published survivor set, the per-stage retry/drop
+tallies on `log.narrativeStability`, and the `>= 50%` retention guardrail
+verdict (locked decision #5).
+
+### Exit codes
+
+- `0` — every scenario matched the locked fail-closed-per-story behavior.
+- `1` — a scenario diverged (the D2 stability logic regressed); the failing
+  scenario + mismatch print inline.
+
+### Rollout posture — advisory, with a path to blocking
+
+This eval is **advisory** (locked decision #7): standalone, **not** wired into
+`eval:dashboard-quality-gate` or any other blocking gate. The runtime
+fail-closed behavior itself is active; the *eval* is what stays advisory for now.
+
+**To promote this eval to blocking later**, all of:
+
+1. **Stable green in preview** — the eval passes for **1 consecutive week** of
+   preview runs with no flakiness.
+2. **Runtime retention telemetry** — `log.narrativeStability.retentionRate` from
+   real refreshes is durably aggregated (not just the per-process value) and
+   sits comfortably above the 50% floor in production traffic, confirming drops
+   are rare and the guardrail is not chronically near breach.
+3. **Wire into the gate** — add `eval:d2-narrative-stability` to
+   `run-dashboard-quality-gate.mjs` (or CI) as a hard-fail step, and document the
+   block threshold (e.g. fail the build if any scenario regresses, or if a
+   real-traffic window dips below the retention floor).
+
+Absent (1) and (2), keep it advisory.
+
+### When to run
+
+- After touching `dashboard/narrative-stability.mjs`, the what-changed/why
+  stages in `refresh-pipeline.mjs`, or either engine
+  (`what-changed-engine.mjs` / `why-this-matters-engine.mjs`).
 - Before proposing the advisory → blocking promotion.
