@@ -3,7 +3,7 @@ import {
   verifyGrounding,
   generateMetaStoryId,
 } from "../ai/cluster-engine.mjs";
-import { applyGeoFilter, mockAssessGeoConfidence } from "./geo-filter.mjs";
+import { applyGeoFilter, mockAssessGeoConfidence, GEO_CATEGORY } from "./geo-filter.mjs";
 import {
   normalizeTopicLabel,
   normalizeSourceIdentity,
@@ -1306,6 +1306,15 @@ export async function runRefreshPipeline({
   );
   const geoEndedAt = Date.now();
   const geoMs = Math.max(0, geoEndedAt - geoStartedAt);
+  // How many items actually hit the (Haiku) assessor — explicit_match items
+  // pass through without a call, and an empty configuredGeos set assesses
+  // nothing.  Observability only: lets an operator confirm the assess pool's
+  // workload against geoMs (Slice 3).
+  const geoAssessedCount = [...geoPassedItems, ...geoHeldItems].filter(
+    (i) =>
+      i.geoCategory === GEO_CATEGORY.EXPLICIT_CONFLICT ||
+      i.geoCategory === GEO_CATEGORY.IMPLICIT_GEO
+  ).length;
 
   if (writeHeldFn) {
     try {
@@ -1625,6 +1634,17 @@ export async function runRefreshPipeline({
         // Clustering never ran on the watermark short-circuit.
         clusteringFailureReason: null,
         clusteringAttempts: 0,
+        // Slice 3: outcome rollup on the short-circuit branch too, so the
+        // summary/SLO surfaces have a consistent shape across both paths.
+        // Geo + beat-fit ran before the watermark decision; clustering did not.
+        outcomes: {
+          storiesPublished: 0,
+          clusteringAttempts: 0,
+          clusteringFailureReason: null,
+          usedFallbackClustering: false,
+          geoAssessedCount,
+          geoHeldCount: geoHeldItems.length,
+        },
         clusteringLatencyMs: [],
         groundingFailures: 0,
         droppedUngroundedStoryCount: 0,
@@ -2284,6 +2304,18 @@ export async function runRefreshPipeline({
     clusteringFailureReason,
     clusteringAttempts,
     timings: pipelineTimings,
+    // Slice 3: run-level outcome rollup — the handful of fields an operator (or
+    // the SLO log line / summary) needs to judge "did this refresh do its job?"
+    // without walking the full diagnostics tree.  Additive; mirrors values
+    // already present elsewhere in this log.
+    outcomes: {
+      storiesPublished: stories.length,
+      clusteringAttempts,
+      clusteringFailureReason,
+      usedFallbackClustering,
+      geoAssessedCount,
+      geoHeldCount: geoHeldItems.length,
+    },
     clusteringLatencyMs: clusteringAttemptLatencyMs,
     // Slice 2 — post-cluster split healer diagnostics. `enabled` reflects the
     // resolved config; `splitCount` / `splitReasons` show how many over-merged

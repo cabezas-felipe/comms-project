@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
 
@@ -474,6 +474,66 @@ test("GET /api/dashboard returns persisted snapshot when one exists", async () =
   }
 });
 
+test("GET /api/dashboard lifts persisted _lastRunMeta.outcomes + ingestionSource into _meta (Slice 3 read path)", async () => {
+  // Persist a real snapshot carrying Slice 3 run-level observability under
+  // `_lastRunMeta`, then read it back through the LIVE read path (no stubbing)
+  // so the assertion exercises liftSnapshotMeta — proving the persisted
+  // metadata surfaces on a subsequent dashboard load, not just on the
+  // immediate refresh response. Isolated under a unique user id so the
+  // file-backed write doesn't bleed into other tests' real read paths.
+  const LIFT_USER = "slice3-lift-user";
+  const payload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "lift-story-1",
+        metaStoryId: "lift-story-1",
+        title: "Lift Story",
+        subtitle: "A subtitle.",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        summary: "Summary.",
+        whyItMatters: "Why.",
+        whatChanged: "No material update since your last refresh.",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        sources: [{ id: "src-1", outlet: "Reuters", kind: "traditional", weight: 75, url: "#", minutesAgo: 30, headline: "Headline", body: ["Body."] }],
+      },
+    ],
+    _lastRunMeta: {
+      ingestionSource: "live_scoped",
+      outcomes: {
+        storiesPublished: 1,
+        clusteringAttempts: 1,
+        clusteringFailureReason: null,
+        usedFallbackClustering: false,
+        geoAssessedCount: 4,
+        geoHeldCount: 0,
+      },
+    },
+  };
+  const prevResolver = _auth.resolver;
+  _auth.resolver = async () => ({ userId: LIFT_USER, source: "bearer" });
+  await _snapshotRepo.write(LIFT_USER, payload);
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta?.hasSnapshot, true);
+    // ingestionSource lifted out of _lastRunMeta by the read path.
+    assert.equal(res.body._meta?.ingestionSource, "live_scoped");
+    // outcomes object lifted with its run-level fields intact.
+    assert.ok(res.body._meta?.outcomes, "_meta.outcomes present on the read path");
+    assert.equal(res.body._meta.outcomes.storiesPublished, 1);
+    assert.equal(res.body._meta.outcomes.clusteringAttempts, 1);
+    assert.equal(res.body._meta.outcomes.geoAssessedCount, 4);
+    // Internal persistence field must never leak to clients.
+    assert.equal(res.body._lastRunMeta, undefined, "_lastRunMeta must not leak at top level");
+  } finally {
+    _auth.resolver = prevResolver;
+  }
+});
+
 // ─── Topic taxonomy backward compatibility ─────────────────────────────────────
 // These tests verify that normalizeTopicLabel is applied during relevance filtering
 // so legacy item labels ("Security cooperation") match settings written in normalized
@@ -808,6 +868,183 @@ test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns 
     assert.equal(res.body._selectionMeta, undefined, "_selectionMeta must not leak at top level");
     assert.ok(!Object.prototype.hasOwnProperty.call(res.body, "_selectionMeta"), "_selectionMeta key must be absent");
   } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── Slice 3: structured refresh summary + balanced SLO alerts ───────────────
+
+test("Slice 3 SLO: a single slow pipeline (>90s) emits breach=pipeline_slow", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const { breaches } = _refreshSlo.evaluate(
+    { pipelineMs: 90_001, clusteringFailureReason: null },
+    { warn: (m) => lines.push(m) }
+  );
+  assert.ok(breaches.includes("pipeline_slow"));
+  assert.ok(
+    lines.includes("[refresh.slo] breach=pipeline_slow pipelineMs=90001"),
+    `expected pipeline_slow line, got: ${JSON.stringify(lines)}`
+  );
+});
+
+test("Slice 3 SLO: a pipeline at the 90s boundary does NOT breach pipeline_slow", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const { breaches } = _refreshSlo.evaluate(
+    { pipelineMs: 90_000, clusteringFailureReason: null },
+    { warn: (m) => lines.push(m) }
+  );
+  assert.ok(!breaches.includes("pipeline_slow"));
+  assert.equal(lines.length, 0);
+});
+
+test("Slice 3 SLO: sustained cluster timeouts (>0.2 over a full window of 10) emit breach=cluster_timeout_rate", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const logger = { warn: (m) => lines.push(m) };
+  // 3 timeouts / 10 = 0.30 > 0.20. The breach must NOT fire before the window
+  // is full — a single cold-start timeout can't trip it (balanced, not noisy).
+  // Each refresh here attempted clustering (clusteringAttempts=1), so every
+  // call contributes a sample.
+  const reasons = ["timeout", "timeout", "timeout", null, null, null, null, null, null, null];
+  let last;
+  reasons.forEach((r, i) => {
+    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 }, logger);
+    if (i < 9) {
+      assert.ok(
+        !last.breaches.includes("cluster_timeout_rate"),
+        `no cluster_timeout_rate breach before the window is full (call ${i})`
+      );
+    }
+  });
+  assert.ok(last.breaches.includes("cluster_timeout_rate"));
+  assert.equal(last.windowSize, 10);
+  assert.ok(
+    lines.includes("[refresh.slo] breach=cluster_timeout_rate rate=0.30 window=10"),
+    `expected cluster_timeout_rate line, got: ${JSON.stringify(lines)}`
+  );
+});
+
+test("Slice 3 SLO: timeout rate exactly at 0.2 across a full window does NOT breach", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const logger = { warn: (m) => lines.push(m) };
+  // 2 timeouts / 10 = 0.20, NOT strictly greater than the 0.20 threshold.
+  const reasons = ["timeout", "timeout", null, null, null, null, null, null, null, null];
+  let last;
+  reasons.forEach((r) => {
+    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 }, logger);
+  });
+  assert.ok(!last.breaches.includes("cluster_timeout_rate"));
+  assert.equal(lines.length, 0);
+});
+
+test("Slice 3 SLO: no-attempt refreshes (clusteringAttempts=0) never sample the timeout window", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const logger = { warn: (m) => lines.push(m) };
+  // 9 no-attempt refreshes (watermark short-circuit / zero candidates) plus one
+  // real timeout attempt. Under an attempt-only denominator the window holds a
+  // SINGLE sample, so it's nowhere near full and must NOT breach — the no-op
+  // refreshes neither fill the window nor dilute the rate (no false calm,
+  // no false alarm).
+  let last;
+  for (let i = 0; i < 9; i++) {
+    last = _refreshSlo.evaluate(
+      { pipelineMs: 10, clusteringFailureReason: null, clusteringAttempts: 0 },
+      logger
+    );
+    assert.equal(last.windowSize, 0, `no-attempt refresh ${i} must not be sampled`);
+  }
+  last = _refreshSlo.evaluate(
+    { pipelineMs: 10, clusteringFailureReason: "timeout", clusteringAttempts: 2 },
+    logger
+  );
+  assert.equal(last.windowSize, 1, "only the attempting refresh is sampled");
+  assert.ok(!last.breaches.includes("cluster_timeout_rate"), "window not full → no breach");
+  assert.equal(lines.length, 0, "no breach line emitted while the attempt window is still filling");
+
+  // Now drive a clean window of 10 attempting refreshes with 3 timeouts
+  // (0.30 > 0.20). With an attempt-only denominator the window fills and
+  // breaches exactly once.
+  _refreshSlo.reset();
+  const reasons = ["timeout", "timeout", "timeout", null, null, null, null, null, null, null];
+  reasons.forEach((r) => {
+    last = _refreshSlo.evaluate(
+      { pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 },
+      logger
+    );
+  });
+  assert.equal(last.windowSize, 10, "attempt-only window is full");
+  assert.ok(last.breaches.includes("cluster_timeout_rate"));
+  const breachLines = lines.filter((l) => l.startsWith("[refresh.slo] breach=cluster_timeout_rate"));
+  assert.deepEqual(breachLines, ["[refresh.slo] breach=cluster_timeout_rate rate=0.30 window=10"]);
+});
+
+test("POST /api/dashboard/refresh: emits a structured [refresh.summary] line and surfaces outcomes + ingestionSource in _meta", async () => {
+  _refreshSlo.reset();
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevLog = console.log;
+  const captured = [];
+  _refreshPipeline.run = async (opts) => ({
+    payload: {
+      contractVersion: opts.contractVersion,
+      stories: [{
+        id: "s1", metaStoryId: "s1", title: "T", subtitle: "sub",
+        geographies: ["US"], topic: "Diplomatic relations", summary: "x",
+        whyItMatters: "y", whatChanged: "z", priority: "standard",
+        outletCount: 1, tags: { topics: [], keywords: [], geographies: ["US"] }, sources: [],
+      }],
+    },
+    log: {
+      unchanged: false,
+      poolCount: 5, relevantCount: 3, metaStoryCount: 1,
+      usedFallbackClustering: false, clusteringFailureReason: null,
+      clusteringAttempts: 1, clusteringLatencyMs: [12],
+      groundingFailures: 0, droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+      watermark: "wm-1", candidateCount: 3, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "test" },
+      funnel: { primaryDropStage: "none" },
+      timings: { preClusterMs: 1, geoMs: 2, recallMs: 3, clusterMs: 4, whatChangedMs: 0, whyMs: 0, pipelineMs: 30 },
+      outcomes: {
+        storiesPublished: 1, clusteringAttempts: 1, clusteringFailureReason: null,
+        usedFallbackClustering: false, geoAssessedCount: 2, geoHeldCount: 0,
+      },
+    },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  console.log = (...args) => { captured.push(args.join(" ")); };
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    console.log = prevLog;
+    assert.equal(res.status, 200);
+    // _meta surfaces the new observability keys (additive, backward-compatible).
+    assert.ok(res.body._meta?.outcomes, "_meta.outcomes present");
+    assert.equal(res.body._meta.outcomes.storiesPublished, 1);
+    assert.equal(res.body._meta.outcomes.geoAssessedCount, 2);
+    assert.equal(typeof res.body._meta.ingestionSource, "string");
+    assert.equal(typeof res.body._meta.timings?.geoMs, "number", "_meta.timings.geoMs present");
+    // The structured summary line is emitted exactly once and parses as JSON.
+    const summaryLine = captured.find((l) => l.startsWith("[refresh.summary] "));
+    assert.ok(summaryLine, `expected a [refresh.summary] line, got: ${JSON.stringify(captured)}`);
+    const summary = JSON.parse(summaryLine.slice("[refresh.summary] ".length));
+    assert.equal(summary.stories, 1);
+    assert.equal(summary.pipelineMs, 30);
+    assert.equal(summary.geoMs, 2);
+    assert.equal(typeof summary.ingestionSource, "string");
+    assert.equal(summary.outcomes.geoAssessedCount, 2);
+    assert.ok(summary.funnel, "summary carries funnel");
+  } finally {
+    console.log = prevLog;
+    _refreshPipeline.run = prevRun;
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;

@@ -145,6 +145,10 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // Slice 7: per-stage wall-clock timings (ingestion + pipeline). Optional —
     // absent on pre-Slice-7 snapshots, so older reads simply omit the key.
     if (_lastRunMeta.timings !== undefined) meta.timings = _lastRunMeta.timings;
+    // Slice 3: run-level outcome rollup + the server-resolved ingestion source.
+    // Optional for back-compat with snapshots written before Slice 3.
+    if (_lastRunMeta.outcomes !== undefined) meta.outcomes = _lastRunMeta.outcomes;
+    if (_lastRunMeta.ingestionSource !== undefined) meta.ingestionSource = _lastRunMeta.ingestionSource;
   }
   // `_everSeenMetaStoryIds` (what-changed history set) and
   // `_whyItMattersTraces` (why-this-matters trace map) pass through via
