@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { runIngestionWarm } from "./ingestion-warm.mjs";
+import { runIngestionWarm, normalizeErrorDetail } from "./ingestion-warm.mjs";
 
 function makeLogger() {
   const lines = [];
@@ -187,6 +187,97 @@ test("runIngestionWarm: write throws → exit 1, skippedReason=write_threw", asy
   assert.equal(summary.ok, false);
   assert.equal(summary.skippedReason, "write_threw");
   assert.match(summary.error, /connection reset/);
+});
+
+// ─── Actionable error serialization (object-like supabase errors) ────────────
+
+test("runIngestionWarm: write error envelope with a PostgREST object → serialized, actionable (never [object Object])", async () => {
+  // The regression we're guarding: writeRecentItems returns the raw supabase
+  // error object (a plain { message, code, details, hint }, NOT an Error). The
+  // old String(err) rendered it as "[object Object]", which is what made the
+  // scheduled warmer failures impossible to diagnose from the log.
+  const pgError = {
+    message: "permission denied for table ingestion_recent_items",
+    code: "42501",
+    details: "service role lacks INSERT",
+    hint: "grant insert on ingestion_recent_items",
+  };
+  const logger = makeLogger();
+  const result = await runIngestionWarm({
+    readFeedItemsFn: async () => TWO_RAW_ITEMS,
+    writeRecentItemsFn: async () => ({ written: 0, error: pgError }),
+    supabase: {},
+    logger: logger.log,
+    envGet: makeEnv(),
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.reason, "write_error");
+  const summary = logger.parseSummary();
+  assert.equal(summary.ok, false);
+  assert.equal(summary.skippedReason, "write_error");
+  // error must be a string and must NOT be the opaque object marker.
+  assert.equal(typeof summary.error, "string");
+  assert.doesNotMatch(summary.error, /\[object Object\]/, "must not render as [object Object]");
+  // All actionable fields survive into the log line.
+  assert.match(summary.error, /permission denied for table ingestion_recent_items/);
+  assert.match(summary.error, /42501/);
+  assert.match(summary.error, /service role lacks INSERT/);
+  assert.match(summary.error, /grant insert on ingestion_recent_items/);
+  // Counts still reported on a write error.
+  assert.equal(summary.itemCount, 2);
+  assert.equal(summary.feedCount, 2);
+  assert.equal(summary.written, 0);
+});
+
+test("runIngestionWarm: write throws a non-Error object → exit 1, write_threw, serialized details", async () => {
+  const logger = makeLogger();
+  const result = await runIngestionWarm({
+    readFeedItemsFn: async () => TWO_RAW_ITEMS,
+    writeRecentItemsFn: async () => { throw { message: "socket hang up", code: "ECONNRESET" }; },
+    supabase: {},
+    logger: logger.log,
+    envGet: makeEnv(),
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.reason, "write_threw");
+  const summary = logger.parseSummary();
+  assert.equal(summary.skippedReason, "write_threw");
+  assert.equal(typeof summary.error, "string");
+  assert.doesNotMatch(summary.error, /\[object Object\]/);
+  assert.match(summary.error, /socket hang up/);
+  assert.match(summary.error, /ECONNRESET/);
+});
+
+test("normalizeErrorDetail: covers string / Error / PostgREST object / fallback / nullish", () => {
+  // string → itself
+  assert.equal(normalizeErrorDetail("plain string"), "plain string");
+
+  // Error → message (kept greppable for the existing assert.match contracts)
+  assert.match(normalizeErrorDetail(new Error("upsert rejected")), /upsert rejected/);
+
+  // PostgREST object → compact JSON preserving message/code/details/hint
+  const serialized = normalizeErrorDetail({
+    message: "undefined table",
+    code: "42P01",
+    details: null, // null fields are dropped, not rendered as "null"
+    hint: "run migrations",
+  });
+  assert.doesNotMatch(serialized, /\[object Object\]/);
+  const parsed = JSON.parse(serialized);
+  assert.equal(parsed.message, "undefined table");
+  assert.equal(parsed.code, "42P01");
+  assert.equal(parsed.hint, "run migrations");
+  assert.equal("details" in parsed, false, "null fields are omitted");
+
+  // status/statusCode (transport-level) are preserved when present
+  assert.match(normalizeErrorDetail({ message: "Bad Gateway", status: 502 }), /502/);
+
+  // nullish → undefined (so the field is simply absent from the payload)
+  assert.equal(normalizeErrorDetail(null), undefined);
+  assert.equal(normalizeErrorDetail(undefined), undefined);
+
+  // pathological empty object → labelled fallback, never "[object Object]"
+  assert.doesNotMatch(normalizeErrorDetail({}), /\[object Object\]/);
 });
 
 // ─── Log shape stability ─────────────────────────────────────────────────────

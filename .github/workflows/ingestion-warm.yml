@@ -30,6 +30,12 @@ name: Ingestion cache warmer
 #     variables → Actions before enabling the schedule.  The warm exits `1` with
 #     skippedReason="missing_supabase_env" if either is absent, so the failure
 #     surface is loud.
+#
+# Troubleshooting:
+#   - On `skippedReason=write_error` (or any failure) the `[ingestion-warm]`
+#     line's `error` field carries the serialized supabase error
+#     (message/code/details/hint).  See the operator checklist in
+#     05-engineering/docs/runbook-ingestion-warm.md.
 
 on:
   schedule:
