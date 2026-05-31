@@ -42,7 +42,7 @@ test("isWhyItMattersFailure fires only on transient execution fallbacks", () => 
   const ok = { diagnostics: { fallbackUsed: false } };
   assert.equal(isWhyItMattersFailure(ok), false);
 
-  for (const reason of ["disabled", "mock_only", "force_writer_fail", "write_validation_failed"]) {
+  for (const reason of ["disabled", "mock_only", "force_writer_fail", "rewrite_validation_failed"]) {
     assert.equal(
       isWhyItMattersFailure({ diagnostics: { fallbackUsed: true, fallbackReason: reason } }),
       false,

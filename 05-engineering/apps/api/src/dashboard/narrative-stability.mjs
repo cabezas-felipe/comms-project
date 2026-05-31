@@ -4,11 +4,12 @@
  * Pure helpers that implement the locked D2 failure policy for the two
  * post-clustering narrative stages (what-changed and why-it-matters):
  *
- *   1. Failure policy: fail-closed PER STORY — a stage that cannot produce
- *      content for a story drops only that story; it never fails the global
- *      refresh.
- *   3. Retry policy: one retry per failing stage, then drop the story if it
- *      still fails.
+ *   • Failure policy (locked decision #1): fail-closed PER STORY — a stage that
+ *     cannot produce content for a story drops only that story; it never fails
+ *     the global refresh.
+ *   • Retry policy (locked decision #3): one retry per failing stage, then drop
+ *     the story if it still fails.
+ *   (Silent drop — no user-facing messaging — is locked decision #2; see NOTE.)
  *
  * This module owns only the *detection* and *retry orchestration*; the pipeline
  * (`refresh-pipeline.mjs`) owns the actual drop (filtering the story out of the
@@ -20,7 +21,7 @@
  *   • what-changed → a classify failure or a hallucination guard still routes to
  *     the "unchanged" copy and is NOT a drop; only a failed write call is.
  *   • why-it-matters → config fallbacks (`disabled`/`mock_only`/`force_writer_fail`)
- *     and content-validation fallbacks (`write_validation_failed`) are NOT drops;
+ *     and content-validation fallbacks (`rewrite_validation_failed`) are NOT drops;
  *     only transport-level failures (`write_failed`/`rewrite_failed`/
  *     `resolver_threw`) are.
  *
