@@ -36,13 +36,23 @@ function withWhyEnv(setup, run) {
   delete process.env.ANTHROPIC_API_KEY;
   setup();
   const restore = () => {
+    // Restore each key to its captured value, or DELETE it when it was unset
+    // before the test.  Without the `else delete`, a var the test newly set
+    // (e.g. TEMPO_AI_MOCK_ONLY) would leak into every later test in the suite.
     if (saved.enabled !== undefined) process.env.TEMPO_AI_WHY_IT_MATTERS_ENABLED = saved.enabled;
+    else delete process.env.TEMPO_AI_WHY_IT_MATTERS_ENABLED;
     if (saved.model !== undefined) process.env.TEMPO_AI_WHY_IT_MATTERS_MODEL = saved.model;
+    else delete process.env.TEMPO_AI_WHY_IT_MATTERS_MODEL;
     if (saved.timeout !== undefined) process.env.TEMPO_AI_WHY_IT_MATTERS_TIMEOUT_MS = saved.timeout;
+    else delete process.env.TEMPO_AI_WHY_IT_MATTERS_TIMEOUT_MS;
     if (saved.concurrency !== undefined) process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = saved.concurrency;
+    else delete process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
     if (saved.mockOnly !== undefined) process.env.TEMPO_AI_MOCK_ONLY = saved.mockOnly;
+    else delete process.env.TEMPO_AI_MOCK_ONLY;
     if (saved.apiKey !== undefined) process.env.TEMPO_ANTHROPIC_API_KEY = saved.apiKey;
+    else delete process.env.TEMPO_ANTHROPIC_API_KEY;
     if (saved.altKey !== undefined) process.env.ANTHROPIC_API_KEY = saved.altKey;
+    else delete process.env.ANTHROPIC_API_KEY;
   };
   return Promise.resolve(run()).finally(restore);
 }

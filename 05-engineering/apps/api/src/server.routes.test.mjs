@@ -1,4 +1,4 @@
-import { after, test } from "node:test";
+import { after, test, beforeEach, afterEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -163,6 +163,40 @@ const VALID_BODY = {
   traditionalSources: ["Reuters"],
   socialSources: ["@latamwatcher"],
 };
+
+// Deterministic env baseline for every test in this file.
+//
+// TEMPO_DATA_DIR: sibling repo test files (settings-repo, dashboard-snapshot-
+// repo, story-rejection-log-repo, server.resolve-destination) each set this to
+// their own temp dir at module load.  In a single-process full-suite run every
+// module body executes before any test, so the last loader wins and our seeded
+// fixtures become unreachable — settings reads return DEFAULT_SETTINGS and
+// refresh collapses to zero stories.  We re-pin our dir before each test.
+//
+// TEMPO_AI_MOCK_ONLY: a developer .env / CI may export real models + keys with
+// mock-only off, which routes the refresh pipeline onto real providers and
+// breaks the deterministic mock contract these route tests rely on (e.g. the
+// lexical-fallback test surfaces zero stories).  We force mock-only on so the
+// pipeline is hermetic regardless of inherited env; the handful of tests that
+// exercise real-provider routing set their own values on top of this baseline.
+//
+// Both are SNAPSHOTTED per test and fully restored (delete-when-undefined) in
+// afterEach so we never leave a pinned value that leaks to sibling files.
+const _ROUTES_ENV_KEYS = ["TEMPO_DATA_DIR", "TEMPO_AI_MOCK_ONLY"];
+let _routesEnvSnapshot;
+describe("server.routes", () => {
+  beforeEach(() => {
+    _routesEnvSnapshot = {};
+    for (const k of _ROUTES_ENV_KEYS) _routesEnvSnapshot[k] = process.env[k];
+    process.env.TEMPO_DATA_DIR = tmpDir;
+    process.env.TEMPO_AI_MOCK_ONLY = "true";
+  });
+  afterEach(() => {
+    for (const k of _ROUTES_ENV_KEYS) {
+      if (_routesEnvSnapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = _routesEnvSnapshot[k];
+    }
+  });
 
 // ─── Public routes ────────────────────────────────────────────────────────────
 
@@ -5010,4 +5044,6 @@ test("translateFn wiring: resolver returns null under mock-only even with a key 
     await _refreshPipeline.run({ ...TRANSLATE_BASE_OPTS });
     assert.equal(getCaptured().translateFn, null, "mock-only forces the no-op pass-through path");
   });
+});
+
 });
