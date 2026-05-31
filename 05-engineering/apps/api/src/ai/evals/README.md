@@ -609,8 +609,9 @@ drop a story:
 - what-changed: a failed **write** call (`llmFailed.write`). Classify failures
   and hallucination-guard hits still degrade gracefully to "unchanged" copy.
 - why-it-matters: transport fallbacks (`write_failed` / `rewrite_failed` /
-  `resolver_threw`). Config fallbacks (`disabled` / `mock_only`) and
-  content-validation fallbacks (`write_validation_failed`) are NOT drops.
+  `resolver_threw`). Config fallbacks (`disabled` / `mock_only` /
+  `force_writer_fail`) and content-validation fallbacks
+  (`rewrite_validation_failed`) are NOT drops.
 
 So healthy, default-off, and validation paths behave exactly as before.
 
