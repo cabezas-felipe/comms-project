@@ -10,7 +10,7 @@ production now**, under controlled monitoring. This is intentional —
 multilingual handling is core product behavior, not optional. The Spanish feeds
 (La Silla Vacía, Semana, Infobae — 6 feeds, `active=true`, `lang=es`) are live
 in `source-feeds.json`, so refreshes now carry real `lang=es` items to
-translate. **Rollback is instant and env-only** (see [Rollback](#4-rollback-env-only)).
+translate. **Rollback is env-only** — a single flag, no code change (see [Rollback](#4-rollback-env-only)).
 
 ## What is wired
 
@@ -32,7 +32,7 @@ translate. **Rollback is instant and env-only** (see [Rollback](#4-rollback-env-
 | Enable flag (both envs) | `TEMPO_TRANSLATION_ENABLED=true` |
 | Failure posture | fail-open (untranslated passthrough; never blocks a refresh) |
 | Guardrails | monitor `[pipeline.translation]` + refresh diagnostics per checklist below |
-| Rollback | instant, env-only: `TEMPO_TRANSLATION_ENABLED=false` |
+| Rollback | env-only (no code change), applied on redeploy/restart: `TEMPO_TRANSLATION_ENABLED=false` |
 
 ## No-op safety
 

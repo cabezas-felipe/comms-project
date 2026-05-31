@@ -83,12 +83,8 @@ function indexManifest(manifestFeeds) {
     .map((f) => ({
       feed: f,
       normalized: normalizeForMatching(f.name ?? f.id ?? ""),
-      // Second, equally-strict match target: the curated publisher brand. Every
-      // manifest row carries `publisher` (file feeds + Supabase rows via
-      // feed-manifest-repo). Indexing it lets a publisher-level selection
-      // resolve even when the feed `name` is a bare section label that does not
-      // embed the publisher (e.g. "Silla Nacional" / publisher "La Silla Vacía").
-      // Empty/absent publisher → "" (never matches a non-empty needle).
+      // Second, equally-strict match target: the curated `publisher` brand (see
+      // header step 3 for why). Empty/absent → "" (never matches a non-empty needle).
       normalizedPublisher: f.publisher ? normalizeForMatching(f.publisher) : "",
     }));
 }
@@ -166,9 +162,8 @@ export function resolveSelectedSources(opts) {
       unmatched.push(name);
       continue;
     }
-    // Strict substring match against either curated target: the feed name or
-    // the feed's publisher brand. No fuzzy/approximate logic — the needle must
-    // be a literal substring of an explicit canonical field.
+    // Strict substring match against either curated target (feed name or
+    // publisher brand) — no fuzzy/approximate logic.
     const allMatches = indexed.filter(
       ({ normalized, normalizedPublisher }) =>
         normalized.includes(needle) ||
