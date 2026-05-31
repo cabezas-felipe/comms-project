@@ -2,6 +2,7 @@ import { normalizeSourceItems } from "../ingestion/source-normalizer.mjs";
 import {
   verifyGrounding,
   generateMetaStoryId,
+  readClusteringRepairDiagnostics,
 } from "../ai/cluster-engine.mjs";
 import {
   applyGeoFilter,
@@ -1906,6 +1907,11 @@ export async function runRefreshPipeline({
         // Clustering never ran on the watermark short-circuit.
         clusteringFailureReason: null,
         clusteringAttempts: 0,
+        // C2: clustering never ran, so no repair was attempted — defaults keep
+        // the `_meta` shape consistent across both paths.
+        clusteringRepairAttempted: false,
+        clusteringRepairSucceeded: false,
+        clusteringRepairFailureReason: null,
         // Slice 3: outcome rollup on the short-circuit branch too, so the
         // summary/SLO surfaces have a consistent shape across both paths.
         // Geo + beat-fit ran before the watermark decision; clustering did not.
@@ -2018,6 +2024,9 @@ export async function runRefreshPipeline({
   let clusteringFailureReason = null; // 'timeout' | 'error' | null
   let clusteringAttempts = 0;
   const clusteringAttemptLatencyMs = [];
+  // C2: clustering JSON safe-trim repair diagnostics for the last attempt
+  // (success or failure both carry them via `_clusteringRepair`).
+  let clusteringRepair = { attempted: false, succeeded: false, failureReason: null };
   if (clusterInputItems.length === 0) {
     rawMetaStories = [];
   } else {
@@ -2029,11 +2038,15 @@ export async function runRefreshPipeline({
       try {
         rawMetaStories = await clusterFn(clusterInputItems, settings, clusterModel);
         clusteringAttemptLatencyMs.push(Date.now() - attemptStartedAt);
+        clusteringRepair = readClusteringRepairDiagnostics(rawMetaStories);
         lastErr = null;
         break;
       } catch (clusterErr) {
         clusteringAttemptLatencyMs.push(Date.now() - attemptStartedAt);
         lastErr = clusterErr;
+        // C2: a parse failure carries repair diagnostics on the error; the last
+        // attempt's value wins (mirrors clusteringAttempts/clusteringLatencyMs).
+        clusteringRepair = readClusteringRepairDiagnostics(clusterErr);
         const msg = clusterErr instanceof Error ? clusterErr.message : String(clusterErr);
         console.warn(
           `[pipeline] clustering attempt ${attempt}/${MAX_CLUSTER_ATTEMPTS} failed: ${msg}`
@@ -2583,6 +2596,15 @@ export async function runRefreshPipeline({
     // before the timeout/error.
     clusteringFailureReason,
     clusteringAttempts,
+    // C2 (clustering JSON resilience): single safe-trim repair diagnostics for
+    // the last clustering attempt.  `clusteringRepairAttempted` is true when the
+    // strict parse failed and the one repair pass ran; `clusteringRepairSucceeded`
+    // true when that pass parsed cleanly; `clusteringRepairFailureReason` is a
+    // concise classification (`json_parse_error` | `schema_validation_error` |
+    // `no_json_region` | `parse_error`) or null.
+    clusteringRepairAttempted: clusteringRepair.attempted,
+    clusteringRepairSucceeded: clusteringRepair.succeeded,
+    clusteringRepairFailureReason: clusteringRepair.failureReason,
     timings: pipelineTimings,
     // Slice 3: run-level outcome rollup — the handful of fields an operator (or
     // the SLO log line / summary) needs to judge "did this refresh do its job?"

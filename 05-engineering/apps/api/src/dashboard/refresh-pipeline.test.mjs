@@ -7283,4 +7283,61 @@ test("C1 integration: no cap effect when dedupedItems <= 15", async () => {
   assert.deepEqual(log.clusterCap.clusterDroppedSourceIds, []);
 });
 
+// ─── C2: clustering repair diagnostics plumbing ──────────────────────────────
+
+test("C2 plumbing: repair diagnostics from a successful clusterFn surface on _meta", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  // Simulate clusterItems attaching repair diagnostics to the returned array
+  // (the production path uses a non-enumerable property; an own property reads
+  // identically through readClusteringRepairDiagnostics).
+  const clusterFn = async () => {
+    const stories = MOCK_META_STORIES.slice();
+    stories._clusteringRepair = { attempted: true, succeeded: true, failureReason: null };
+    return stories;
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1, "stories still publish when repair succeeded");
+  assert.equal(log.clusteringRepairAttempted, true);
+  assert.equal(log.clusteringRepairSucceeded, true);
+  assert.equal(log.clusteringRepairFailureReason, null);
+  // Fail-closed policy untouched: a successful (repaired) run is not a fallback.
+  assert.equal(log.usedFallbackClustering, false);
+});
+
+test("C2 plumbing: failed-repair diagnostics ride the thrown error and surface fail-closed", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  // Both attempts throw an error carrying repair diagnostics (mirrors the
+  // parser attaching `_clusteringRepair` to the thrown error).
+  let attempts = 0;
+  const clusterFn = async () => {
+    attempts++;
+    const err = new Error("Clustering response parse failed after safe-trim repair: bad json");
+    err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "json_parse_error" };
+    throw err;
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  // Fail-closed semantics intact: retried once (2 attempts) then zero stories.
+  assert.equal(attempts, 2, "retry count behavior unchanged (initial + one retry)");
+  assert.equal(payload.stories.length, 0, "fail-closed: zero stories published");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringAttempts, 2);
+  assert.equal(log.clusteringFailureReason, "error");
+  // C2 repair diagnostics reflect the last attempt.
+  assert.equal(log.clusteringRepairAttempted, true);
+  assert.equal(log.clusteringRepairSucceeded, false);
+  assert.equal(log.clusteringRepairFailureReason, "json_parse_error");
+});
+
 });
