@@ -102,6 +102,83 @@ export function resolveGeoStageBudgetMs() {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : GEO_STAGE_BUDGET_MS_DEFAULT;
 }
 
+// ─── C1: deterministic cluster input cap ─────────────────────────────────────
+//
+// Clustering is the single largest AI round-trip (whole candidate pool in one
+// prompt) and the publish path fails closed after one retry.  Sending an
+// unbounded candidate set is the main timeout/fail-closed risk.  C1 caps the
+// set passed to `clusterFn` at CLUSTER_INPUT_CAP items, applied AFTER beat-fit
+// and cross-feed dedupe so we keep the highest-value candidates rather than an
+// arbitrary prefix.  Applied in ALL environments — there is no env gate — so
+// behavior is identical everywhere.  Story output max is unchanged: the
+// clustering contract still emits up to 5 meta-stories.
+//
+// Ranking (deterministic, total order over the deduped set):
+//   1. beatFitScore descending      — best-fitting candidates survive the cap
+//   2. minutesAgo ascending          — fresher item wins ties
+//   3. sourceId ascending            — stable final tie-break
+// Items missing a numeric beatFitScore (e.g. when beat-fit is disabled in a
+// test) sort as score 0; missing minutesAgo sorts last (oldest).
+export const CLUSTER_INPUT_CAP = 15;
+
+/**
+ * Total-order comparator for cluster-input ranking (see C1 note above).
+ * Pure; callers sort a copy so the input array stays untouched.  Exported for
+ * unit testing of the ranking contract.
+ */
+export function compareClusterInputItems(a, b) {
+  const as =
+    typeof a?.beatFitScore === "number" && Number.isFinite(a.beatFitScore)
+      ? a.beatFitScore
+      : 0;
+  const bs =
+    typeof b?.beatFitScore === "number" && Number.isFinite(b.beatFitScore)
+      ? b.beatFitScore
+      : 0;
+  if (as !== bs) return bs - as;
+  const am =
+    typeof a?.minutesAgo === "number" && Number.isFinite(a.minutesAgo)
+      ? a.minutesAgo
+      : Number.POSITIVE_INFINITY;
+  const bm =
+    typeof b?.minutesAgo === "number" && Number.isFinite(b.minutesAgo)
+      ? b.minutesAgo
+      : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm;
+  const aid = a?.sourceId ?? "";
+  const bid = b?.sourceId ?? "";
+  if (aid < bid) return -1;
+  if (aid > bid) return 1;
+  return 0;
+}
+
+/**
+ * Rank `dedupedItems` per the C1 contract and slice to `cap`.  Returns the
+ * capped `clusterInputItems` (what `clusterFn` actually sees) plus deterministic
+ * diagnostics consistent with that slice.  Never mutates the input array.
+ *
+ * @param {Array}  dedupedItems — post-beat-fit, post-dedupe candidate set
+ * @param {number} [cap]        — max items to keep (default CLUSTER_INPUT_CAP)
+ */
+export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
+  const items = Array.isArray(dedupedItems) ? dedupedItems : [];
+  const ranked = items.slice().sort(compareClusterInputItems);
+  const clusterInputItems = ranked.slice(0, cap);
+  const dropped = ranked.slice(cap);
+  return {
+    clusterInputItems,
+    diagnostics: {
+      dedupedCount: items.length,
+      clusterInputCount: clusterInputItems.length,
+      clusterDroppedCount: dropped.length,
+      // IDs of the candidates ranked beyond the cap, in drop (rank) order.
+      clusterDroppedSourceIds: dropped
+        .map((it) => it?.sourceId)
+        .filter((id) => typeof id === "string"),
+    },
+  };
+}
+
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
 // Why a Jaccard-based merge instead of pure evidence hashing:
@@ -1720,6 +1797,24 @@ export async function runRefreshPipeline({
   //     by buildStory's explicit field whitelist).
   const dedupeResult = dedupeSourceItems(relevantItems);
   const dedupedItems = dedupeResult.unique;
+  // C1: deterministic cluster input cap.  Applied AFTER beat-fit + dedupe so we
+  // bound the clustering round-trip to the highest-value candidates without
+  // touching recall/beat-fit thresholds.  `clusterInputItems` is the exact set
+  // passed to `clusterFn`; `clusterCapDiagnostics` is consistent with it and is
+  // surfaced on `_meta.clusterCap` for both the full-run and watermark-skip
+  // paths.  Watermarking still keys off `dedupedItems` (clusterInputItems is a
+  // deterministic function of it, so the skip decision is unchanged).
+  const clusterCapResult = applyClusterInputCap(dedupedItems);
+  const clusterInputItems = clusterCapResult.clusterInputItems;
+  const clusterCapDiagnostics = clusterCapResult.diagnostics;
+  if (clusterCapDiagnostics.clusterDroppedCount > 0) {
+    console.log(
+      `[pipeline.cluster-cap] deduped=${clusterCapDiagnostics.dedupedCount} ` +
+        `clusterInput=${clusterCapDiagnostics.clusterInputCount} ` +
+        `dropped=${clusterCapDiagnostics.clusterDroppedCount} ` +
+        `cap=${CLUSTER_INPUT_CAP}`
+    );
+  }
   // Slice 7 (non-overlap): the pre-cluster stage is the two spans that bracket
   // the recall block — [pipelineStartedAt → recallStartedAt] (normalize → time
   // window → source selection → semantic prep → topic/keyword) plus
@@ -1852,6 +1947,11 @@ export async function runRefreshPipeline({
           uniqueCount: dedupedItems.length,
           collapsedCount: dedupeResult.duplicateCount,
         },
+        // C1: clustering never ran on this short-circuit, but the cap is a
+        // deterministic function of `dedupedItems`, so the diagnostics describe
+        // exactly what clustering WOULD have seen — surfaced for a consistent
+        // `_meta.clusterCap` shape across both paths.
+        clusterCap: clusterCapDiagnostics,
         recall: recallDiagnostics,
         // Translation ran before recall (and thus before this short-circuit),
         // so the run-level normalization stats are honest even on a skip. No
@@ -1918,7 +2018,7 @@ export async function runRefreshPipeline({
   let clusteringFailureReason = null; // 'timeout' | 'error' | null
   let clusteringAttempts = 0;
   const clusteringAttemptLatencyMs = [];
-  if (dedupedItems.length === 0) {
+  if (clusterInputItems.length === 0) {
     rawMetaStories = [];
   } else {
     const MAX_CLUSTER_ATTEMPTS = 2; // initial try + one retry
@@ -1927,7 +2027,7 @@ export async function runRefreshPipeline({
       clusteringAttempts = attempt;
       const attemptStartedAt = Date.now();
       try {
-        rawMetaStories = await clusterFn(dedupedItems, settings, clusterModel);
+        rawMetaStories = await clusterFn(clusterInputItems, settings, clusterModel);
         clusteringAttemptLatencyMs.push(Date.now() - attemptStartedAt);
         lastErr = null;
         break;
@@ -1962,7 +2062,10 @@ export async function runRefreshPipeline({
   //     Source index is built over the DEDUPED set (the only IDs clustering
   //     saw) and reused by grounding + buildStory below. Default ENABLED;
   //     `TEMPO_CLUSTER_SPLIT_HEALER_ENABLED=false` is the instant rollback.
-  const sourceItemsById = new Map(dedupedItems.map((item) => [item.sourceId, item]));
+  // C1: built over `clusterInputItems` (the exact set clustering saw) — the only
+  // IDs a meta-story's `source_item_ids` can reference post-cap.  Reused by the
+  // split healer, grounding, and buildStory below.
+  const sourceItemsById = new Map(clusterInputItems.map((item) => [item.sourceId, item]));
   const effectiveClusterSplitConfig = clusterSplitConfig ?? resolveClusterSplitConfig();
   const clusterSplitResult = splitOverMergedClusters(
     rawMetaStories,
@@ -2545,6 +2648,11 @@ export async function runRefreshPipeline({
       uniqueCount: dedupedItems.length,
       collapsedCount: dedupeResult.duplicateCount,
     },
+    // C1: deterministic cluster input cap.  `dedupedCount` is the post-dedupe
+    // pool, `clusterInputCount` what `clusterFn` actually saw (≤ CLUSTER_INPUT_CAP),
+    // `clusterDroppedCount` / `clusterDroppedSourceIds` the candidates ranked
+    // beyond the cap.  Operator-facing only; never surfaced in the response.
+    clusterCap: clusterCapDiagnostics,
     // Embedding-aware recall observability — mode, embedded/keyword counts,
     // top-K kept, and any fail-closed `degraded_reason` bubble up here so
     // operators can answer "did embeddings widen recall this run, or did the

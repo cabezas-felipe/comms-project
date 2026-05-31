@@ -36,6 +36,9 @@ import {
   compareSourcesT1,
   compareStoriesR1,
   resolveGeoStageBudgetMs,
+  compareClusterInputItems,
+  applyClusterInputCap,
+  CLUSTER_INPUT_CAP,
 } from "./refresh-pipeline.mjs";
 import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
 // Hoisted from further down the file: ESM imports must sit at module top level,
@@ -7143,6 +7146,141 @@ test("Slice 3: log.outcomes rolls up stories, clustering, and geo-assess counts 
   // Only the implicit_geo item was assessed; the explicit_match item bypassed
   // the assessor entirely.
   assert.equal(log.outcomes.geoAssessedCount, 1, "exactly one item hit the geo assessor");
+});
+
+// ─── C1: deterministic cluster input cap ─────────────────────────────────────
+
+test("C1 ranking: compareClusterInputItems orders by beatFitScore desc, then minutesAgo asc, then sourceId asc", () => {
+  // beatFitScore dominates regardless of recency / id.
+  const byScore = [
+    { sourceId: "low", beatFitScore: 0.1, minutesAgo: 5 },
+    { sourceId: "high", beatFitScore: 0.9, minutesAgo: 500 },
+    { sourceId: "mid", beatFitScore: 0.5, minutesAgo: 1 },
+  ].slice().sort(compareClusterInputItems);
+  assert.deepEqual(byScore.map((i) => i.sourceId), ["high", "mid", "low"]);
+
+  // Equal score → fresher (smaller minutesAgo) wins.
+  const byRecency = [
+    { sourceId: "older", beatFitScore: 0.5, minutesAgo: 50 },
+    { sourceId: "fresher", beatFitScore: 0.5, minutesAgo: 10 },
+  ].slice().sort(compareClusterInputItems);
+  assert.deepEqual(byRecency.map((i) => i.sourceId), ["fresher", "older"]);
+
+  // Equal score AND recency → sourceId ascending is the stable final tie-break.
+  const byId = [
+    { sourceId: "zeta", beatFitScore: 0.5, minutesAgo: 10 },
+    { sourceId: "alpha", beatFitScore: 0.5, minutesAgo: 10 },
+  ].slice().sort(compareClusterInputItems);
+  assert.deepEqual(byId.map((i) => i.sourceId), ["alpha", "zeta"]);
+
+  // Missing beatFitScore sorts as 0 (below any positive-scored item).
+  const missingScore = [
+    { sourceId: "scored", beatFitScore: 0.01, minutesAgo: 100 },
+    { sourceId: "unscored", minutesAgo: 1 },
+  ].slice().sort(compareClusterInputItems);
+  assert.deepEqual(missingScore.map((i) => i.sourceId), ["scored", "unscored"]);
+});
+
+test("C1 cap: applyClusterInputCap slices to 15 and reports dropped IDs beyond the cap", () => {
+  assert.equal(CLUSTER_INPUT_CAP, 15);
+  // 20 items, beatFitScore descending with sourceId so the rank order is
+  // unambiguous: src-00 (highest score) … src-19 (lowest).
+  const items = Array.from({ length: 20 }, (_, i) => ({
+    sourceId: `src-${String(i).padStart(2, "0")}`,
+    beatFitScore: (20 - i) / 20,
+    minutesAgo: 30,
+  }));
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(items);
+  assert.equal(clusterInputItems.length, 15);
+  assert.deepEqual(
+    clusterInputItems.map((i) => i.sourceId),
+    Array.from({ length: 15 }, (_, i) => `src-${String(i).padStart(2, "0")}`)
+  );
+  assert.equal(diagnostics.dedupedCount, 20);
+  assert.equal(diagnostics.clusterInputCount, 15);
+  assert.equal(diagnostics.clusterDroppedCount, 5);
+  assert.deepEqual(diagnostics.clusterDroppedSourceIds, [
+    "src-15",
+    "src-16",
+    "src-17",
+    "src-18",
+    "src-19",
+  ]);
+});
+
+test("C1 cap: applyClusterInputCap is a no-op when input is at/under the cap", () => {
+  const items = Array.from({ length: 10 }, (_, i) => ({
+    sourceId: `src-${i}`,
+    beatFitScore: 0.5,
+    minutesAgo: i,
+  }));
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(items);
+  assert.equal(clusterInputItems.length, 10);
+  assert.equal(diagnostics.dedupedCount, 10);
+  assert.equal(diagnostics.clusterInputCount, 10);
+  assert.equal(diagnostics.clusterDroppedCount, 0);
+  assert.deepEqual(diagnostics.clusterDroppedSourceIds, []);
+});
+
+test("C1 integration: exactly 15 items reach clusterFn when dedupedItems > 15", async () => {
+  // 20 relevant items, fresher = smaller minutesAgo. With beat-fit bypassed all
+  // scores tie at 0, so the cap ranking falls to minutesAgo asc — the 15
+  // freshest survive and the 5 oldest are dropped.
+  const rawItems = Array.from({ length: 20 }, (_, i) =>
+    makeItem({ sourceId: `src-${String(i).padStart(2, "0")}`, minutesAgo: i * 10 })
+  );
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+  assert.ok(clusterInput, "clusterFn must be invoked");
+  assert.equal(clusterInput.length, 15, "exactly 15 candidates passed to clustering");
+  assert.deepEqual(
+    clusterInput.map((i) => i.sourceId).sort(),
+    Array.from({ length: 15 }, (_, i) => `src-${String(i).padStart(2, "0")}`),
+    "the 15 freshest candidates survive the cap"
+  );
+  // Diagnostics consistent with the actual clusterInput slice.
+  assert.equal(log.clusterCap.dedupedCount, 20);
+  assert.equal(log.clusterCap.clusterInputCount, 15);
+  assert.equal(log.clusterCap.clusterDroppedCount, 5);
+  assert.deepEqual(
+    log.clusterCap.clusterDroppedSourceIds.slice().sort(),
+    ["src-15", "src-16", "src-17", "src-18", "src-19"],
+    "dropped IDs are the 5 oldest, beyond the cap"
+  );
+});
+
+test("C1 integration: no cap effect when dedupedItems <= 15", async () => {
+  const rawItems = Array.from({ length: 10 }, (_, i) =>
+    makeItem({ sourceId: `src-${i}`, minutesAgo: i })
+  );
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+  assert.ok(clusterInput, "clusterFn must be invoked");
+  assert.equal(clusterInput.length, 10, "all candidates passed through when under the cap");
+  assert.equal(log.clusterCap.dedupedCount, 10);
+  assert.equal(log.clusterCap.clusterInputCount, 10);
+  assert.equal(log.clusterCap.clusterDroppedCount, 0);
+  assert.deepEqual(log.clusterCap.clusterDroppedSourceIds, []);
 });
 
 });

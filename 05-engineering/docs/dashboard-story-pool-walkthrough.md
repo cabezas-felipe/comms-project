@@ -383,12 +383,12 @@ Default **true** in production pipeline; **`false`** only for **narrow tests** t
 
 | # | Topic | Decision |
 |---|--------|----------|
-| **I1** | On LLM cluster failure | **I1a — Fail closed (Slice 1):** retry clustering **once** (`TEMPO_AI_CLUSTER_TIMEOUT_MS`, default 25s); if both attempts fail → publish **zero** meta-stories. **Do not** ship `gracefulFallbackClustering` to users (ops/tests only). Surface `usedFallbackClustering`, `clusteringFailureReason`, `clusteringAttempts`, `clusteringLatencyMs` on `_meta`. |
+| **I1** | On LLM cluster failure | **I1a — Fail closed (Slice 1):** retry clustering **once** (`TEMPO_AI_CLUSTER_TIMEOUT_MS`, default 60s); if both attempts fail → publish **zero** meta-stories. **Do not** ship `gracefulFallbackClustering` to users (ops/tests only). Surface `usedFallbackClustering`, `clusteringFailureReason`, `clusteringAttempts`, `clusteringLatencyMs` on `_meta`. |
 | **I2** | Output caps | **I2a — Keep** at most **5** meta-stories, **1–5** `source_item_ids` each. |
 | **I3** | Merge bias | **I3a — Posture:** bias **against** merging unless items clearly support **one** narrative; prompt + **Chunk L** goldens implement detail. |
 | **I4** | Clustering model SKU | **I4a — Defer to Chunk N** (same pattern as **E4a**): interim behavior stays **env-driven**; **canonical** clustering model, failover, logging, and code SSOT are fixed when the **full dashboard model matrix** is written in **N** (and code updated in one pass). **Rationale (pre-launch):** solo build, no external users — no separate “pick clustering SKU now” carve-out. |
 
-**Providers (reference):** `anthropic:` → Anthropic + **`TEMPO_AI_CLUSTER_TIMEOUT_MS`** (cluster-only, default 25s); `mock-*` / `TEMPO_AI_MOCK_ONLY` → **`mockCluster`**; unknown → mock-like path. **On throw/timeout after retry:** **I1a** fail closed (empty dashboard).
+**Providers (reference):** `anthropic:` → Anthropic + **`TEMPO_AI_CLUSTER_TIMEOUT_MS`** (cluster-only, default 60s); `mock-*` / `TEMPO_AI_MOCK_ONLY` → **`mockCluster`**; unknown → mock-like path. **On throw/timeout after retry:** **I1a** fail closed (empty dashboard).
 
 ### Golden / eval hooks (Chunk I scope)
 
