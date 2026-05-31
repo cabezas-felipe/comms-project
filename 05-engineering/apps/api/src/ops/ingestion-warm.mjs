@@ -44,6 +44,53 @@ const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..", "..");
 const DEFAULT_DATA_DIR = process.env.TEMPO_DATA_DIR ?? path.join(ROOT, "data");
 
+// Fields a PostgREST / Supabase error carries.  We surface all of them (when
+// present) so a warmer failure is actionable from the log alone: `code` pins
+// the Postgres/PostgREST class (e.g. 42501 permission denied, 42P01 undefined
+// table, PGRST204 schema-cache miss), while `details`/`hint` carry the
+// server-side specifics.  `status`/`statusCode` cover transport-level failures.
+const ERROR_DETAIL_FIELDS = ["message", "code", "details", "hint", "status", "statusCode"];
+
+/**
+ * Normalize an unknown error value into a concise, log-safe string.
+ *
+ * The cache write path (`writeRecentItems`) returns the raw supabase error
+ * object — a plain `{ message, code, details, hint }`, NOT an `Error`.  The
+ * old `String(err)` rendered that as the useless `"[object Object]"`, which is
+ * exactly what made the scheduled warmer failures non-actionable.  This helper:
+ *   - string            → itself
+ *   - Error             → `message` (plus any supabase-style fields it carries)
+ *   - supabase/PostgREST → compact JSON of message/code/details/hint/status
+ *   - anything else     → best-effort JSON, else a labelled fallback
+ * It never returns `"[object Object]"`.
+ *
+ * @param {unknown} err
+ * @returns {string|undefined} undefined only when `err` is null/undefined.
+ */
+export function normalizeErrorDetail(err) {
+  if (err === null || err === undefined) return undefined;
+  if (typeof err === "string") return err;
+  if (typeof err === "object") {
+    const compact = {};
+    for (const field of ERROR_DETAIL_FIELDS) {
+      const value = err[field];
+      if (value !== undefined && value !== null && value !== "") compact[field] = value;
+    }
+    if (Object.keys(compact).length > 0) return JSON.stringify(compact);
+    if (err instanceof Error && err.message) return err.message;
+    // No recognized fields — best-effort serialize the enumerable own props
+    // rather than fall back to the opaque "[object Object]".
+    try {
+      const json = JSON.stringify(err);
+      if (json && json !== "{}") return json;
+    } catch {
+      /* circular / non-serializable — fall through to the labelled fallback */
+    }
+    return `unserializable error (${err?.constructor?.name ?? "object"})`;
+  }
+  return String(err);
+}
+
 /**
  * Count the distinct, non-empty `feedId` values across a batch of raw items.
  * Reported as `feedCount` in the summary so operators can see how many feeds
@@ -111,8 +158,12 @@ export async function runIngestionWarm({
     try {
       client = getSupabaseClient();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      emit({ startedAt, ok: false, skippedReason: "supabase_client_failed", error: message });
+      emit({
+        startedAt,
+        ok: false,
+        skippedReason: "supabase_client_failed",
+        error: normalizeErrorDetail(err),
+      });
       return { exitCode: 1, summary: null, reason: "supabase_client_failed" };
     }
   }
@@ -122,12 +173,11 @@ export async function runIngestionWarm({
   try {
     rawItems = await readFeedItemsFn(dataDir);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
     emit({
       startedAt,
       ok: false,
       skippedReason: "read_threw",
-      error: message,
+      error: normalizeErrorDetail(err),
       durationMs: Date.now() - startMs,
     });
     return { exitCode: 1, summary: null, reason: "read_threw" };
@@ -141,12 +191,11 @@ export async function runIngestionWarm({
   try {
     writeResult = await writeRecentItemsFn({ supabase: client, items });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
     emit({
       startedAt,
       ok: false,
       skippedReason: "write_threw",
-      error: message,
+      error: normalizeErrorDetail(err),
       itemCount,
       feedCount,
       durationMs: Date.now() - startMs,
@@ -157,14 +206,12 @@ export async function runIngestionWarm({
   // writeRecentItems returns an error envelope rather than throwing on a
   // supabase failure — treat a non-null `error` as fatal so cron retries.
   if (writeResult?.error) {
-    const message =
-      writeResult.error instanceof Error ? writeResult.error.message : String(writeResult.error);
     const written = writeResult.written ?? 0;
     emit({
       startedAt,
       ok: false,
       skippedReason: "write_error",
-      error: message,
+      error: normalizeErrorDetail(writeResult.error),
       itemCount,
       feedCount,
       written,
@@ -191,8 +238,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       // Defensive net: runIngestionWarm is supposed to translate all internal
       // errors into the structured log + exit-code contract.  If it ever
       // rejects, log + exit 1 so cron has a fingerprint to grep on.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[ingestion-warm] Fatal (uncaught): ${message}`);
+      console.error(`[ingestion-warm] Fatal (uncaught): ${normalizeErrorDetail(err)}`);
       process.exit(1);
     });
 }
