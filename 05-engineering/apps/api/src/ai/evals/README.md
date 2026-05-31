@@ -16,6 +16,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Dashboard embassy beat (Sprint C3)** | Hermetic golden: synthetic mixed EN/ES, multi-geo (Colombia/LatAm + Kenya/Africa style) embassy beat still produces usable output after the Sprint C cluster-reliability changes (C1 input cap + C2 JSON safe-trim repair). Minimum-presence only: `stories.length >= 1` AND `usedFallbackClustering === false`. Diagnostics retained but not gated. | `npm run eval:dashboard-embassy-beat` | Standalone smoke (non-zero on unmet criteria); **not** wired into `eval:dashboard-quality-gate` |
 | **Cache-benefit advisory (Sprint D1)** | Hermetic, deterministic check of the ingestion-cache benefit window logic (`dashboard/cache-benefit-window.mjs`): cache_hit p50 >= 20% faster than live_scoped p50, cache-hit rate >= 60%, >= 5 samples/mode in a 5-run window. Synthetic run windows; **measurement + guardrails only, no runtime behavior**. | `npm run eval:cache-benefit-advisory` | **Advisory** — standalone, non-zero only if the window logic regresses; **not** wired into any blocking gate |
 | **D2 narrative stability (Sprint D2)** | Hermetic failure-injection over the real pipeline: fail-closed-per-story for what-changed + why-it-matters (one retry per failing stage, then drop the story; never fail the global refresh). Asserts per-story drop, single-retry recovery, per-stage retry/drop tallies, and the >=50% retention guardrail. | `npm run eval:d2-narrative-stability` | **Advisory** — standalone, non-zero only if the D2 stability logic regresses; **not** wired into any blocking gate |
+| **D3 quality advisory (Sprint D3)** | Composite orchestrator: runs the quality stack end-to-end (quality-gate + embassy-beat + cache-benefit + d2-narrative-stability), prints per-check status + duration + a final rollup, and writes a lightweight JSON artifact. Continue-all, then non-zero exit if any check failed. Changes no included eval's logic. | `npm run eval:d3-quality-advisory` | **Advisory, LOCAL-ONLY** — non-zero if any included check fails; **not** wired into CI / any blocking gate |
 
 ---
 
@@ -672,3 +673,88 @@ Absent (1) and (2), keep it advisory.
   stages in `refresh-pipeline.mjs`, or either engine
   (`what-changed-engine.mjs` / `why-this-matters-engine.mjs`).
 - Before proposing the advisory → blocking promotion.
+
+---
+
+## D3 Quality Advisory (Sprint D3)
+
+### Why this exists
+
+A single **local-only** command that runs the quality stack end-to-end and gives
+one scannable rollup — so a developer can sanity-check the whole guardrail set
+before opening a PR without remembering four separate commands. It is a
+**balanced composite advisory**: it orchestrates existing runners (changing none
+of their logic), captures per-check status + duration, and exits non-zero if any
+check failed — but only **after running all of them** (continue-all).
+
+### How to run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:d3-quality-advisory
+# optional custom artifact path:
+node src/ai/evals/run-d3-quality-advisory.mjs --json-out .artifacts/d3.json
+```
+
+### Included checks (in order)
+
+| # | id | Command | What it covers |
+|---|---|---|---|
+| 1 | `dashboard-quality-gate` | `node src/ai/evals/run-dashboard-quality-gate.mjs` | Golden + spanish-recall + calibration guardrails |
+| 2 | `dashboard-embassy-beat` | `node src/ai/evals/run-dashboard-embassy-beat.mjs` | C3 mixed EN/ES multi-geo presence smoke |
+| 3 | `cache-benefit-advisory` | `node src/ai/evals/run-cache-benefit-advisory.mjs` | D1 ingestion-cache benefit window logic |
+| 4 | `d2-narrative-stability` | `node src/ai/evals/run-d2-narrative-stability.mjs` | D2 fail-closed-per-story narrative stability |
+
+Each check runs as its own child process; a failing check prints its exit code
+and a short tail of its output, and the run **continues** to the next check.
+
+### Output (sample)
+
+```
+✓ dashboard-quality-gate   PASS  (128ms)  [node src/ai/evals/run-dashboard-quality-gate.mjs]
+✓ dashboard-embassy-beat   PASS  (77ms)   [node src/ai/evals/run-dashboard-embassy-beat.mjs]
+✓ cache-benefit-advisory   PASS  (31ms)   [node src/ai/evals/run-cache-benefit-advisory.mjs]
+✓ d2-narrative-stability   PASS  (74ms)   [node src/ai/evals/run-d2-narrative-stability.mjs]
+────────────────────────────────────────────────────────────────────────
+ROLLUP: 4/4 checks passed — OVERALL PASS
+artifact: …/.artifacts/d3-quality-advisory.json
+```
+
+### JSON artifact
+
+Written to `.artifacts/d3-quality-advisory.json` by default (override with
+`--json-out <path>`). Both `.artifacts/` and `tmp/` are gitignored — re-create
+anytime; do not commit. The artifact is **lightweight** (status + duration per
+check + overall status; **no raw logs**):
+
+```jsonc
+{
+  "schemaVersion": "d3-quality-advisory-v1",
+  "startedAt": "2026-05-31T…Z",
+  "finishedAt": "2026-05-31T…Z",
+  "overallOk": true,
+  "checks": [
+    { "id": "dashboard-quality-gate", "command": "node src/ai/evals/run-dashboard-quality-gate.mjs", "ok": true, "durationMs": 128 },
+    { "id": "dashboard-embassy-beat", "command": "node src/ai/evals/run-dashboard-embassy-beat.mjs", "ok": true, "durationMs": 77 },
+    { "id": "cache-benefit-advisory", "command": "node src/ai/evals/run-cache-benefit-advisory.mjs", "ok": true, "durationMs": 31 },
+    { "id": "d2-narrative-stability", "command": "node src/ai/evals/run-d2-narrative-stability.mjs", "ok": true, "durationMs": 74 }
+  ]
+}
+```
+
+### Exit codes
+
+- `0` — all four checks passed.
+- `1` — at least one check failed (reported **after** all checks ran).
+
+### Rollout posture — local-only
+
+This command is **LOCAL-ONLY** (locked decision #4). It is intentionally **not**
+wired into CI or any blocking quality gate in this slice — it composes the other
+advisories without changing their (already advisory) posture. CI wiring is a
+deliberate future step, not part of D3.
+
+### When to run
+
+- Before opening a PR that touches the dashboard pipeline, the narrative stages,
+  or the ingestion cache — as a one-command local sanity sweep.
