@@ -1294,12 +1294,18 @@ export async function runRefreshPipeline({
   const candidateItems = [...recentItems, ...previouslyHeld];
 
   // 4b. Geo-confidence filter (categorize → assess → apply thresholds → persist hold bucket)
+  //     The per-item assessor (Haiku) runs as a bounded-concurrency pool, so we
+  //     bracket the whole stage as its own `geoMs` span — like recallMs, it is
+  //     measured separately and excluded from preClusterMs (no double-count).
   const configuredGeos = settings.geographies ?? [];
+  const geoStartedAt = Date.now();
   const { included: geoPassedItems, held: geoHeldItems } = await applyGeoFilter(
     candidateItems,
     configuredGeos,
     geoAssessFn
   );
+  const geoEndedAt = Date.now();
+  const geoMs = Math.max(0, geoEndedAt - geoStartedAt);
 
   if (writeHeldFn) {
     try {
@@ -1531,14 +1537,15 @@ export async function runRefreshPipeline({
   const dedupedItems = dedupeResult.unique;
   // Slice 7 (non-overlap): the pre-cluster stage is the two spans that bracket
   // the recall block — [pipelineStartedAt → recallStartedAt] (normalize → time
-  // window → source selection → geo → semantic prep → topic/keyword) plus
+  // window → source selection → semantic prep → topic/keyword) plus
   // [recallEndedAt → preClusterEndedAt] (beat-fit + cross-feed dedupe). Recall
-  // itself is reported separately as `recallMs`, so the two stages never
-  // overlap.
+  // (recallMs) AND geo-assess (geoMs) each get their own bracket, so geoMs —
+  // which lives inside the first span — is subtracted out to avoid
+  // double-counting, the same way recallMs is carved out.
   const preClusterEndedAt = Date.now();
   const preClusterMs = Math.max(
     0,
-    (recallStartedAt - pipelineStartedAt) + (preClusterEndedAt - recallEndedAt)
+    (recallStartedAt - pipelineStartedAt) - geoMs + (preClusterEndedAt - recallEndedAt)
   );
   if (dedupeResult.duplicateCount > 0) {
     console.log(
@@ -2213,14 +2220,14 @@ export async function runRefreshPipeline({
   }
 
   // Slice 7: unified per-stage wall-clock timings (additive). Stages are
-  // NON-OVERLAPPING brackets — preClusterMs, recallMs, clusterMs,
+  // NON-OVERLAPPING brackets — preClusterMs, geoMs, recallMs, clusterMs,
   // whatChangedMs, whyMs each cover a disjoint span — and `pipelineMs` is the
   // outer envelope (their sum <= pipelineMs; the remainder is bracket overhead
   // plus the unattributed build/sort/tag span between clusterMs and
   // whatChangedMs). whyMs reuses the Slice 6 measurement so it stays a single
   // source of truth.
   const pipelineMs = Math.max(0, Date.now() - pipelineStartedAt);
-  const pipelineTimings = { preClusterMs, recallMs, clusterMs, whatChangedMs, whyMs, pipelineMs };
+  const pipelineTimings = { preClusterMs, geoMs, recallMs, clusterMs, whatChangedMs, whyMs, pipelineMs };
 
   // ── Slice 14: per-story translated-source coverage + degraded markers ───────
   // A story is full-confidence when ≥60% of its sources carry usable English
@@ -2256,7 +2263,7 @@ export async function runRefreshPipeline({
     );
   }
   console.log(
-    `[pipeline.timings] preClusterMs=${preClusterMs} recallMs=${recallMs}` +
+    `[pipeline.timings] preClusterMs=${preClusterMs} geoMs=${geoMs} recallMs=${recallMs}` +
       ` clusterMs=${clusterMs} whatChangedMs=${whatChangedMs} whyMs=${whyMs} pipelineMs=${pipelineMs}`
   );
   const log = {

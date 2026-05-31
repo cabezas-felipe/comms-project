@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { providerFor } from "../ai/model-router.mjs";
 import { withTimeout } from "../ai/guardrails.mjs";
+import { pMap } from "../util/p-map.mjs";
 
 export const GEO_CATEGORY = {
   EXPLICIT_MATCH: "explicit_match",
@@ -97,6 +98,17 @@ export function parseGeoAssessResponse(raw) {
     .trim();
   const parsed = JSON.parse(clean);
   return clampConfidence(parsed?.confidence);
+}
+
+/**
+ * Resolve the bounded-concurrency cap for the geo-assess worker pool from
+ * `TEMPO_AI_GEO_ASSESS_CONCURRENCY`.  Defaults to 8 (locked default) when unset
+ * or misconfigured (non-finite / <= 0).  Exported so tests can pin the default
+ * without exercising the full pMap path.
+ */
+export function resolveGeoAssessConcurrency() {
+  const n = Number(process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 8;
 }
 
 function resolveModelName(model) {
@@ -208,6 +220,7 @@ export async function applyGeoFilter(items, configuredGeos, assessFn = mockAsses
 
   const included = [];
   const held = [];
+  const assessQueue = [];
 
   for (const item of items) {
     const category = categorizeItem(item, configuredGeos);
@@ -216,16 +229,38 @@ export async function applyGeoFilter(items, configuredGeos, assessFn = mockAsses
       included.push({ ...item, geoCategory: category, geoConfidence: 1.0 });
       continue;
     }
+    assessQueue.push({ item, category });
+  }
 
-    const { confidence } = await assessFn(item, configuredGeos);
+  if (assessQueue.length === 0) {
+    return { included, held };
+  }
+
+  const settled = await pMap(
+    assessQueue,
+    async ({ item, category }) => {
+      const { confidence } = await assessFn(item, configuredGeos);
+      return { item, category, confidence };
+    },
+    resolveGeoAssessConcurrency()
+  );
+
+  // pMap returns index-aligned settled results, so walk by index and read the
+  // matching queue entry directly — `indexOf` would mis-map when more than one
+  // task rejects (duplicate result objects collapse to the first match).
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i];
+    if (result.status === "rejected") {
+      // Defensive fallback for custom assessFn stubs that throw: fail safe.
+      const { item, category } = assessQueue[i];
+      held.push({ ...item, geoCategory: category, geoConfidence: 0 });
+      continue;
+    }
+    const { item, category, confidence } = result.value;
     const threshold =
       category === GEO_CATEGORY.EXPLICIT_CONFLICT ? CONFLICT_THRESHOLD : IMPLICIT_THRESHOLD;
-
-    if (confidence >= threshold) {
-      included.push({ ...item, geoCategory: category, geoConfidence: confidence });
-    } else {
-      held.push({ ...item, geoCategory: category, geoConfidence: confidence });
-    }
+    if (confidence >= threshold) included.push({ ...item, geoCategory: category, geoConfidence: confidence });
+    else held.push({ ...item, geoCategory: category, geoConfidence: confidence });
   }
 
   return { included, held };

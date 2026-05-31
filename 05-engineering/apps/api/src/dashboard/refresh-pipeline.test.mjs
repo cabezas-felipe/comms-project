@@ -6857,7 +6857,7 @@ test("Slice 7: log.timings exposes non-negative integer per-stage wall-clock; wh
   });
   assert.ok(log.timings && typeof log.timings === "object", "log.timings present on a full run");
   assert.equal(typeof log.timings.whyMs, "number"); // plan-required
-  for (const k of ["preClusterMs", "recallMs", "clusterMs", "whatChangedMs", "whyMs", "pipelineMs"]) {
+  for (const k of ["preClusterMs", "geoMs", "recallMs", "clusterMs", "whatChangedMs", "whyMs", "pipelineMs"]) {
     const v = log.timings[k];
     assert.equal(typeof v, "number", `${k} is a number`);
     assert.ok(Number.isFinite(v) && v >= 0, `${k} >= 0`);
@@ -6868,7 +6868,7 @@ test("Slice 7: log.timings exposes non-negative integer per-stage wall-clock; wh
   // for inter-bracket overhead). Under-counting is fine: the build/sort/tag
   // span between clusterMs and whatChangedMs is intentionally unattributed.
   assert.ok(
-    log.timings.preClusterMs + log.timings.recallMs + log.timings.clusterMs +
+    log.timings.preClusterMs + log.timings.geoMs + log.timings.recallMs + log.timings.clusterMs +
       log.timings.whatChangedMs + log.timings.whyMs <= log.timings.pipelineMs + 50,
     "non-overlapping stage timings should not exceed pipelineMs by much"
   );

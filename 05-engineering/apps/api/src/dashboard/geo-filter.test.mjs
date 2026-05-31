@@ -10,6 +10,7 @@ import {
   applyGeoFilter,
   assessGeoConfidence,
   parseGeoAssessResponse,
+  resolveGeoAssessConcurrency,
   _geoAssessClient,
 } from "./geo-filter.mjs";
 
@@ -164,6 +165,100 @@ test("applyGeoFilter: held items preserve original item fields", async () => {
   const { held } = await applyGeoFilter([item], CONFIGURED_GEOS, async () => ({ confidence: 0.0 }));
   assert.equal(held[0].sourceId, "held-item");
   assert.equal(held[0].headline, "Original headline");
+});
+
+// ─── Slice 1: bounded-concurrency geo-assess pool ────────────────────────────
+//
+// geo-assess runs one Haiku call per implicit/conflict item.  Slice 1 pushes
+// those calls through a bounded worker pool (default 8) instead of sequentially
+// so the stage stops starving clustering on a first-run refresh.
+
+function withGeoConcurrencyEnv(value, run) {
+  const saved = process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY;
+  if (value === undefined) delete process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY;
+  else process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY = value;
+  return run().finally(() => {
+    if (saved !== undefined) process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY = saved;
+    else delete process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY;
+  });
+}
+
+test("resolveGeoAssessConcurrency: unset env → default concurrency 8", () => {
+  const saved = process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY;
+  delete process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY;
+  try {
+    assert.equal(resolveGeoAssessConcurrency(), 8);
+  } finally {
+    if (saved !== undefined) process.env.TEMPO_AI_GEO_ASSESS_CONCURRENCY = saved;
+  }
+});
+
+test("applyGeoFilter: runs the assess pool concurrently (8 at a time, not sequential)", async () => {
+  // 16 implicit_geo items, each assess call sleeps 50ms. With concurrency=8
+  // they complete in two waves (~100ms) rather than 16 sequential calls
+  // (~800ms). Generous upper bound keeps the test stable on slow CI.
+  const items = Array.from({ length: 16 }, (_, i) =>
+    makeItem({ sourceId: `imp-${i}`, geographies: [] })
+  );
+  const assessFn = async () => {
+    await new Promise((r) => setTimeout(r, 50));
+    return { confidence: 0.85 }; // >= IMPLICIT_THRESHOLD → included
+  };
+
+  await withGeoConcurrencyEnv("8", async () => {
+    const start = Date.now();
+    const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, assessFn);
+    const elapsed = Date.now() - start;
+    assert.equal(included.length, 16);
+    assert.equal(held.length, 0);
+    assert.ok(
+      elapsed < 400,
+      `expected ~2 waves (~100ms) with concurrency=8, got ${elapsed}ms (sequential would be ~800ms)`
+    );
+  });
+});
+
+test("applyGeoFilter: a single rejecting assess call holds only that item (index-aligned, fail-safe)", async () => {
+  // assessFn throws for exactly one item; pMap captures it as a per-index
+  // rejection. The rejected item must land in `held` with geoConfidence 0 and
+  // its own sourceId — never mis-attributed to another item via indexOf.
+  const items = [
+    makeItem({ sourceId: "ok-0", geographies: [] }),
+    makeItem({ sourceId: "boom-1", geographies: [] }),
+    makeItem({ sourceId: "ok-2", geographies: [] }),
+  ];
+  const assessFn = async (item) => {
+    if (item.sourceId === "boom-1") throw new Error("assess blew up");
+    return { confidence: 0.85 };
+  };
+
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, assessFn);
+  assert.deepEqual(included.map((i) => i.sourceId).sort(), ["ok-0", "ok-2"]);
+  assert.equal(held.length, 1);
+  assert.equal(held[0].sourceId, "boom-1");
+  assert.equal(held[0].geoConfidence, 0);
+  assert.equal(held[0].geoCategory, GEO_CATEGORY.IMPLICIT_GEO);
+});
+
+test("applyGeoFilter: multiple rejecting assess calls each map to their own item", async () => {
+  // Two rejections in one batch — the bug indexOf would have masked: both
+  // rejected results compare equal-ish and indexOf returns the first match for
+  // every one, mis-mapping the second. Index-aligned iteration keeps them
+  // distinct.
+  const items = [
+    makeItem({ sourceId: "boom-a", geographies: [] }),
+    makeItem({ sourceId: "ok", geographies: [] }),
+    makeItem({ sourceId: "boom-b", geographies: [] }),
+  ];
+  const assessFn = async (item) => {
+    if (item.sourceId.startsWith("boom")) throw new Error("nope");
+    return { confidence: 0.85 };
+  };
+
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, assessFn);
+  assert.deepEqual(included.map((i) => i.sourceId), ["ok"]);
+  assert.deepEqual(held.map((i) => i.sourceId).sort(), ["boom-a", "boom-b"]);
+  assert.ok(held.every((i) => i.geoConfidence === 0));
 });
 
 // ─── M4 / F3b: real Anthropic assessGeoConfidence ────────────────────────────
