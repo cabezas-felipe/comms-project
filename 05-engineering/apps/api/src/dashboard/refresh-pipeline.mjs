@@ -1282,8 +1282,16 @@ export async function runRefreshPipeline({
       unavailableConnectorSources: selection.unavailableConnectorSources,
       matchedFeedIds: selection.matchedFeeds.map((f) => f.id),
     };
+    // Low-noise diagnostic: counts always; the actual unmatched/unavailable
+    // source NAMES only when non-zero, so a mismatch (e.g. the embassy
+    // `matched=6/7`) names the culprit without grepping per-item logs. The
+    // happy path (all matched) stays a single clean counts line.
+    const unmatchedNames = selection.unmatchedSelectedSources;
+    const unavailableNames = selection.unavailableConnectorSources;
     console.log(
-      `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${selection.matchedSourceCount}/${selection.selectedSourceCount} unmatched=${selection.unmatchedSelectedSources.length} unavailable=${selection.unavailableConnectorCount}`
+      `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${selection.matchedSourceCount}/${selection.selectedSourceCount} unmatched=${unmatchedNames.length} unavailable=${selection.unavailableConnectorCount} feeds=${selectionMeta.matchedFeedIds.length}` +
+        (unmatchedNames.length > 0 ? ` unmatchedSources=${JSON.stringify(unmatchedNames)}` : "") +
+        (unavailableNames.length > 0 ? ` unavailableSources=${JSON.stringify(unavailableNames)}` : "")
     );
   } else {
     recentItems = selectSourcePool(recentNormalizedItems, settings);

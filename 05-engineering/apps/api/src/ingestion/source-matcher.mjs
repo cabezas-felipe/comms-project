@@ -5,9 +5,14 @@
 //   1. Alias mapping (canonical aliases from Supabase registry when available;
 //      otherwise repo's SOURCE_NAME_ALIASES from ../contracts-runtime).
 //   2. Normalization (lowercase, drop "the ", strip punctuation, collapse spaces).
-//   3. Substring matching against normalized feed names — so a publisher-level
-//      selection like "Washington Post" matches every section feed (Politics,
-//      World, Business, ...) in the manifest.
+//   3. Substring matching against normalized feed names AND the feed's curated
+//      `publisher` brand — so a publisher-level selection like "Washington Post"
+//      matches every section feed (Politics, World, Business, ...) in the
+//      manifest.  Most feed names already embed the publisher ("The Washington
+//      Post — Politics"), but a section-only name that omits it ("Silla
+//      Nacional", publisher "La Silla Vacía") would otherwise never resolve
+//      from a publisher-level selection.  Matching the curated `publisher` field
+//      closes that gap; it is strict curated-field matching, NOT fuzzy widening.
 //   4. Connector availability filtering — only feeds whose `kind` has an
 //      implemented connector (currently `rss`) are eligible.  Selected sources
 //      that match the manifest but only via unimplemented connectors are
@@ -78,6 +83,13 @@ function indexManifest(manifestFeeds) {
     .map((f) => ({
       feed: f,
       normalized: normalizeForMatching(f.name ?? f.id ?? ""),
+      // Second, equally-strict match target: the curated publisher brand. Every
+      // manifest row carries `publisher` (file feeds + Supabase rows via
+      // feed-manifest-repo). Indexing it lets a publisher-level selection
+      // resolve even when the feed `name` is a bare section label that does not
+      // embed the publisher (e.g. "Silla Nacional" / publisher "La Silla Vacía").
+      // Empty/absent publisher → "" (never matches a non-empty needle).
+      normalizedPublisher: f.publisher ? normalizeForMatching(f.publisher) : "",
     }));
 }
 
@@ -154,7 +166,14 @@ export function resolveSelectedSources(opts) {
       unmatched.push(name);
       continue;
     }
-    const allMatches = indexed.filter(({ normalized }) => normalized.includes(needle));
+    // Strict substring match against either curated target: the feed name or
+    // the feed's publisher brand. No fuzzy/approximate logic — the needle must
+    // be a literal substring of an explicit canonical field.
+    const allMatches = indexed.filter(
+      ({ normalized, normalizedPublisher }) =>
+        normalized.includes(needle) ||
+        (normalizedPublisher !== "" && normalizedPublisher.includes(needle))
+    );
     if (allMatches.length === 0) {
       unmatched.push(name);
       continue;
