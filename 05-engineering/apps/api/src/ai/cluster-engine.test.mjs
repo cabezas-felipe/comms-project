@@ -7,6 +7,9 @@ import {
   extractiveSummary,
   clusterItems,
   metaStoryOutputSchema,
+  parseClusteringResponse,
+  safeTrimRepair,
+  readClusteringRepairDiagnostics,
 } from "./cluster-engine.mjs";
 import { validateSmokeOutput, runClusterSmoke } from "./evals/cluster-smoke-core.mjs";
 import { buildClusteringPrompt, CLUSTERING_PROMPT_VERSION } from "./prompts.mjs";
@@ -666,4 +669,146 @@ test("buildClusteringPrompt: retains the JSON contract and grounded-evidence rul
   assert.match(prompt, /factual_claims/);
   assert.match(prompt, /claim_evidence_map/);
   assert.match(prompt, /Every claim MUST be backed by at least one sourceId/);
+});
+
+// ─── C2: clustering JSON resilience (safe-trim repair) ───────────────────────
+
+const VALID_CLUSTER_OBJECT = {
+  meta_stories: [
+    {
+      title: "Diplomatic Relations Developments",
+      subtitle: "Recent diplomatic updates.",
+      source_item_ids: ["src-1"],
+      summary: "Diplomatic relations updates tracked.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      factual_claims: ["Reuters reports a diplomatic meeting."],
+      claim_evidence_map: { "0": ["src-1"] },
+    },
+  ],
+};
+const VALID_CLUSTER_JSON = JSON.stringify(VALID_CLUSTER_OBJECT);
+
+test("C2 parse: plain valid JSON parses with NO repair attempted", () => {
+  const { stories, repair } = parseClusteringResponse(VALID_CLUSTER_JSON);
+  assert.equal(stories.length, 1);
+  assert.equal(stories[0].title, "Diplomatic Relations Developments");
+  assert.ok(/^[0-9a-f]{16}$/.test(stories[0].meta_story_id), "meta_story_id assigned");
+  assert.equal(repair.attempted, false);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.failureReason, null);
+});
+
+test("C2 parse: markdown-fenced JSON succeeds via the single safe-trim repair", () => {
+  const fenced = "```json\n" + VALID_CLUSTER_JSON + "\n```";
+  const { stories, repair } = parseClusteringResponse(fenced);
+  assert.equal(stories.length, 1);
+  assert.equal(repair.attempted, true, "strict parse fails on the backticks → repair runs");
+  assert.equal(repair.succeeded, true);
+  assert.equal(repair.failureReason, null);
+});
+
+test("C2 parse: extra prefix/suffix prose succeeds via safe outer-JSON extraction", () => {
+  const wrapped =
+    "Here is the clustering output you asked for:\n\n" +
+    VALID_CLUSTER_JSON +
+    "\n\nLet me know if you need anything else.";
+  const { stories, repair } = parseClusteringResponse(wrapped);
+  assert.equal(stories.length, 1);
+  assert.equal(repair.attempted, true);
+  assert.equal(repair.succeeded, true);
+  assert.equal(repair.failureReason, null);
+});
+
+test("C2 parse: truly malformed JSON still throws after one repair attempt (fail-closed)", () => {
+  // Outer region isolates to `{ "meta_stories": [ {bad json} ] }` — bounded but
+  // still invalid JSON because safe-trim never rewrites content (no quote/comma
+  // surgery), so JSON.parse on the isolated region throws a SyntaxError.
+  const broken = "```json\n{ \"meta_stories\": [ {bad json} ] }\n```";
+  let thrown = null;
+  assert.throws(
+    () => parseClusteringResponse(broken),
+    (err) => {
+      thrown = err;
+      return /parse failed after safe-trim repair/i.test(err.message);
+    }
+  );
+  // Diagnostics ride along on the thrown error for the pipeline to surface.
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.attempted, true);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.failureReason, "json_parse_error");
+});
+
+test("C2 parse: schema-valid JSON shape but contract violation fails with schema reason", () => {
+  // Well-formed JSON, but `meta_stories` is missing → zod schema rejects. Repair
+  // can't help (it never rewrites content), so it fails with a schema reason.
+  const wrongShape = "```json\n" + JSON.stringify({ stories: [] }) + "\n```";
+  let thrown = null;
+  assert.throws(
+    () => parseClusteringResponse(wrongShape),
+    (err) => {
+      thrown = err;
+      return true;
+    }
+  );
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.attempted, true);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.failureReason, "schema_validation_error");
+});
+
+test("C2 parse: response with no JSON region fails with no_json_region", () => {
+  let thrown = null;
+  assert.throws(
+    () => parseClusteringResponse("I could not produce any clusters this run."),
+    (err) => {
+      thrown = err;
+      return /no JSON region/i.test(err.message);
+    }
+  );
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.attempted, true);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.failureReason, "no_json_region");
+});
+
+test("C2 safeTrimRepair: structural-trim only — strips fences, isolates outer region, no content rewrite", () => {
+  // Strips fences + isolates the outermost object region.
+  assert.equal(
+    safeTrimRepair("```json\n{\"a\":1}\n```"),
+    '{"a":1}'
+  );
+  // Prefix/suffix prose trimmed down to the bounded region.
+  assert.equal(
+    safeTrimRepair("prefix {\"a\":1} suffix"),
+    '{"a":1}'
+  );
+  // Top-level array region isolated symmetrically.
+  assert.equal(safeTrimRepair("```\n[1, 2, 3]\n```"), "[1, 2, 3]");
+  // No JSON region → null (repair cannot proceed).
+  assert.equal(safeTrimRepair("no json at all"), null);
+  assert.equal(safeTrimRepair("   "), null);
+  // Content inside the region is preserved verbatim — trailing comma is NOT
+  // rewritten (proves we do not do comma/quote surgery).
+  assert.equal(safeTrimRepair("{\"a\":1,}"), '{"a":1,}');
+});
+
+test("C2 readClusteringRepairDiagnostics: defaults to no-repair for plain arrays/objects", () => {
+  const plain = readClusteringRepairDiagnostics([]);
+  assert.deepEqual(plain, { attempted: false, succeeded: false, failureReason: null });
+  assert.deepEqual(readClusteringRepairDiagnostics(null), {
+    attempted: false,
+    succeeded: false,
+    failureReason: null,
+  });
+});
+
+test("C2 clusterItems (mock provider): attaches no-repair diagnostics", async () => {
+  const items = [makeItem({ sourceId: "src-1" })];
+  const stories = await clusterItems(items, BASE_SETTINGS, "mock-anthropic-haiku");
+  // Mock path never parses LLM text, so repair diagnostics read as defaults.
+  const repair = readClusteringRepairDiagnostics(stories);
+  assert.equal(repair.attempted, false);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.failureReason, null);
 });

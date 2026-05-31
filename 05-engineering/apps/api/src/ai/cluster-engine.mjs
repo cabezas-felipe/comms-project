@@ -93,17 +93,171 @@ function mockCluster(items, settings) {
 
 // ─── Real Anthropic clustering ────────────────────────────────────────────────
 
-function parseClusteringResponse(raw) {
-  const clean = raw
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```\s*$/i, "")
-    .trim();
-  const parsed = JSON.parse(clean);
+// ─── C2: clustering JSON resilience (safe-trim repair) ───────────────────────
+//
+// Empty repair diagnostics — the default state surfaced on `_meta` whenever no
+// repair was needed (or the mock path ran).  Frozen so callers can't mutate the
+// shared default; the pipeline reads a normalized copy via
+// `readClusteringRepairDiagnostics`.
+export const EMPTY_CLUSTERING_REPAIR = Object.freeze({
+  attempted: false,
+  succeeded: false,
+  failureReason: null,
+});
+
+// Stage-1 (strict) normalization: whitespace trim only.  Markdown-fence
+// stripping is deliberately a REPAIR transformation (C2 §2), not part of the
+// strict path — so a fenced/wrapped response flows through the single repair
+// attempt and is surfaced via `clusteringRepairAttempted`, while clean raw JSON
+// parses with no repair.
+function normalizeNormalPath(raw) {
+  return String(raw ?? "").trim();
+}
+
+// Parse + schema-validate a candidate string into meta-stories.  Throws on
+// either a JSON syntax error or a schema mismatch.
+function validateClusteringText(text) {
+  const parsed = JSON.parse(text);
   const result = clusteringOutputSchema.parse(parsed);
   return result.meta_stories.map((ms) => ({
     ...ms,
     meta_story_id: generateMetaStoryId(ms),
   }));
+}
+
+// Concise classification of a failed parse for `clusteringRepairFailureReason`.
+function classifyParseFailure(err) {
+  if (err instanceof SyntaxError) return "json_parse_error";
+  // Zod validation errors expose an `issues` array.
+  if (err && Array.isArray(err.issues)) return "schema_validation_error";
+  return "parse_error";
+}
+
+/**
+ * C2 safe-trim repair — STRUCTURAL TRIMMING ONLY, never content rewriting.
+ *
+ * Allowed transformations:
+ *   - strip markdown code-fence wrappers (``` / ```json) wherever they bracket
+ *     the payload
+ *   - trim surrounding whitespace
+ *   - isolate the outermost bounded JSON region: from the first `{`/`[` to the
+ *     matching last `}`/`]` (whichever bracket opens first wins)
+ *
+ * Explicitly NOT done: trailing-comma rewrites, quote insertion, key/value
+ * rewrites, or any heuristic text surgery inside the region.  Returns the
+ * trimmed candidate string, or `null` when no plausible JSON region exists.
+ * Exported for unit testing of the trim contract.
+ */
+export function safeTrimRepair(raw) {
+  // Strip every code-fence marker, then trim. Fences are wrappers, not content.
+  const text = String(raw ?? "")
+    .replace(/```(?:json)?/gi, "")
+    .trim();
+  if (!text) return null;
+
+  // Isolate the outermost bounded region. Pick the bracket type that opens
+  // first so a top-level object or array is handled symmetrically; slice from
+  // that opener to the last matching closer. This is a substring isolation —
+  // no characters inside the region are inserted or rewritten.
+  const firstObj = text.indexOf("{");
+  const firstArr = text.indexOf("[");
+  if (firstObj === -1 && firstArr === -1) return null;
+  let closer, start;
+  if (firstArr === -1 || (firstObj !== -1 && firstObj < firstArr)) {
+    closer = "}";
+    start = firstObj;
+  } else {
+    closer = "]";
+    start = firstArr;
+  }
+  const end = text.lastIndexOf(closer);
+  if (end <= start) return null;
+  const region = text.slice(start, end + 1).trim();
+  return region.length > 0 ? region : null;
+}
+
+/**
+ * Parse a raw clustering response into validated meta-stories.
+ *
+ * C2 (clustering JSON resilience): two-stage parse, single repair attempt.
+ *   1. Normal parse — the strict current path (`normalizeNormalPath` + parse).
+ *   2. On ANY failure, ONE safe-trim repair attempt (`safeTrimRepair`), then
+ *      parse once more.  No second repair, no content rewriting.
+ * If the repaired text still fails we throw exactly as before so the refresh
+ * pipeline fails closed.  The thrown error carries `_clusteringRepair` so the
+ * pipeline can surface the attempt/failure diagnostics on `_meta`.
+ *
+ * Returns `{ stories, repair }`; `repair` is `{ attempted, succeeded,
+ * failureReason }`.  Exported for unit testing.
+ */
+export function parseClusteringResponse(raw) {
+  const repair = { attempted: false, succeeded: false, failureReason: null };
+
+  // Stage 1: strict normal parse — unchanged happy path.
+  try {
+    return { stories: validateClusteringText(normalizeNormalPath(raw)), repair };
+  } catch {
+    repair.attempted = true;
+  }
+
+  // Stage 2: exactly one safe-trim repair attempt.
+  console.warn("[cluster-engine] initial clustering parse failed — attempting safe-trim repair");
+  const repaired = safeTrimRepair(raw);
+  if (repaired === null) {
+    repair.failureReason = "no_json_region";
+    console.warn("[cluster-engine] safe-trim repair failed (reason=no_json_region)");
+    const err = new Error("Clustering response parse failed: no JSON region after safe-trim repair");
+    err._clusteringRepair = repair;
+    throw err;
+  }
+  try {
+    const stories = validateClusteringText(repaired);
+    repair.succeeded = true;
+    console.log("[cluster-engine] safe-trim repair succeeded — clustering response parsed after repair");
+    return { stories, repair };
+  } catch (secondErr) {
+    repair.failureReason = classifyParseFailure(secondErr);
+    console.warn(`[cluster-engine] safe-trim repair failed (reason=${repair.failureReason})`);
+    const msg = secondErr instanceof Error ? secondErr.message : String(secondErr);
+    const err = new Error(`Clustering response parse failed after safe-trim repair: ${msg}`);
+    err._clusteringRepair = repair;
+    throw err;
+  }
+}
+
+// Attach C2 repair diagnostics to the returned meta-story array as a
+// non-enumerable property so the pipeline can read them without polluting
+// iteration/serialization of the stories.
+function attachRepairDiagnostics(stories, repair) {
+  try {
+    Object.defineProperty(stories, "_clusteringRepair", {
+      value: { ...repair },
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  } catch {
+    // Non-fatal: diagnostics are best-effort; never block clustering on them.
+  }
+  return stories;
+}
+
+/**
+ * Read C2 repair diagnostics off a clustering result (the returned array) or a
+ * thrown clustering error.  Always returns a normalized
+ * `{ attempted, succeeded, failureReason }` shape, defaulting to "no repair"
+ * when the source carries none (mock path, empty input, etc.).
+ */
+export function readClusteringRepairDiagnostics(source) {
+  const r = source && source._clusteringRepair;
+  if (r && typeof r === "object") {
+    return {
+      attempted: !!r.attempted,
+      succeeded: !!r.succeeded,
+      failureReason: r.failureReason ?? null,
+    };
+  }
+  return { ...EMPTY_CLUSTERING_REPAIR };
 }
 
 async function clusterWithAnthropic({ apiKey, model, items, settings, timeoutMs }) {
@@ -118,7 +272,8 @@ async function clusterWithAnthropic({ apiKey, model, items, settings, timeoutMs 
   if (!block || block.type !== "text" || !block.text.trim()) {
     throw new Error("Anthropic returned empty clustering response");
   }
-  return parseClusteringResponse(block.text);
+  const { stories, repair } = parseClusteringResponse(block.text);
+  return attachRepairDiagnostics(stories, repair);
 }
 
 // ─── Fallback: graceful grouping without LLM ─────────────────────────────────
@@ -340,13 +495,15 @@ export async function clusterItems(items, settings, model) {
 
   const provider = providerFor(model);
   const modelName = model.includes(":") ? model.slice(model.indexOf(":") + 1) : model;
-  // Clustering gets its own timeout budget (default 25s) — larger than the
+  // Clustering gets its own timeout budget (default 60s) — larger than the
   // global TEMPO_AI_TIMEOUT_MS because the cluster prompt is the single
   // largest AI round-trip (whole candidate pool) and the publish path retries
-  // it once before failing closed (see refresh-pipeline.mjs). Only this stage
+  // it once before failing closed (see refresh-pipeline.mjs). The candidate set
+  // is capped (C1) so the round-trip is bounded, but the timeout default is
+  // raised to 60s to cut spurious timeout/fail-closed runs. Only this stage
   // reads TEMPO_AI_CLUSTER_TIMEOUT_MS; other AI stages keep TEMPO_AI_TIMEOUT_MS.
   const timeoutMs = Number(
-    process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS || 25000
+    process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS || 60000
   );
 
   if (provider === "mock-anthropic" || provider === "mock-openai") {
