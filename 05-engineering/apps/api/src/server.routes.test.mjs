@@ -474,6 +474,66 @@ test("GET /api/dashboard returns persisted snapshot when one exists", async () =
   }
 });
 
+test("GET /api/dashboard lifts persisted _lastRunMeta.outcomes + ingestionSource into _meta (Slice 3 read path)", async () => {
+  // Persist a real snapshot carrying Slice 3 run-level observability under
+  // `_lastRunMeta`, then read it back through the LIVE read path (no stubbing)
+  // so the assertion exercises liftSnapshotMeta — proving the persisted
+  // metadata surfaces on a subsequent dashboard load, not just on the
+  // immediate refresh response. Isolated under a unique user id so the
+  // file-backed write doesn't bleed into other tests' real read paths.
+  const LIFT_USER = "slice3-lift-user";
+  const payload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "lift-story-1",
+        metaStoryId: "lift-story-1",
+        title: "Lift Story",
+        subtitle: "A subtitle.",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        summary: "Summary.",
+        whyItMatters: "Why.",
+        whatChanged: "No material update since your last refresh.",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        sources: [{ id: "src-1", outlet: "Reuters", kind: "traditional", weight: 75, url: "#", minutesAgo: 30, headline: "Headline", body: ["Body."] }],
+      },
+    ],
+    _lastRunMeta: {
+      ingestionSource: "live_scoped",
+      outcomes: {
+        storiesPublished: 1,
+        clusteringAttempts: 1,
+        clusteringFailureReason: null,
+        usedFallbackClustering: false,
+        geoAssessedCount: 4,
+        geoHeldCount: 0,
+      },
+    },
+  };
+  const prevResolver = _auth.resolver;
+  _auth.resolver = async () => ({ userId: LIFT_USER, source: "bearer" });
+  await _snapshotRepo.write(LIFT_USER, payload);
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta?.hasSnapshot, true);
+    // ingestionSource lifted out of _lastRunMeta by the read path.
+    assert.equal(res.body._meta?.ingestionSource, "live_scoped");
+    // outcomes object lifted with its run-level fields intact.
+    assert.ok(res.body._meta?.outcomes, "_meta.outcomes present on the read path");
+    assert.equal(res.body._meta.outcomes.storiesPublished, 1);
+    assert.equal(res.body._meta.outcomes.clusteringAttempts, 1);
+    assert.equal(res.body._meta.outcomes.geoAssessedCount, 4);
+    // Internal persistence field must never leak to clients.
+    assert.equal(res.body._lastRunMeta, undefined, "_lastRunMeta must not leak at top level");
+  } finally {
+    _auth.resolver = prevResolver;
+  }
+});
+
 // ─── Topic taxonomy backward compatibility ─────────────────────────────────────
 // These tests verify that normalizeTopicLabel is applied during relevance filtering
 // so legacy item labels ("Security cooperation") match settings written in normalized
@@ -847,10 +907,12 @@ test("Slice 3 SLO: sustained cluster timeouts (>0.2 over a full window of 10) em
   const logger = { warn: (m) => lines.push(m) };
   // 3 timeouts / 10 = 0.30 > 0.20. The breach must NOT fire before the window
   // is full — a single cold-start timeout can't trip it (balanced, not noisy).
+  // Each refresh here attempted clustering (clusteringAttempts=1), so every
+  // call contributes a sample.
   const reasons = ["timeout", "timeout", "timeout", null, null, null, null, null, null, null];
   let last;
   reasons.forEach((r, i) => {
-    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r }, logger);
+    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 }, logger);
     if (i < 9) {
       assert.ok(
         !last.breaches.includes("cluster_timeout_rate"),
@@ -874,10 +936,52 @@ test("Slice 3 SLO: timeout rate exactly at 0.2 across a full window does NOT bre
   const reasons = ["timeout", "timeout", null, null, null, null, null, null, null, null];
   let last;
   reasons.forEach((r) => {
-    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r }, logger);
+    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 }, logger);
   });
   assert.ok(!last.breaches.includes("cluster_timeout_rate"));
   assert.equal(lines.length, 0);
+});
+
+test("Slice 3 SLO: no-attempt refreshes (clusteringAttempts=0) never sample the timeout window", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const logger = { warn: (m) => lines.push(m) };
+  // 9 no-attempt refreshes (watermark short-circuit / zero candidates) plus one
+  // real timeout attempt. Under an attempt-only denominator the window holds a
+  // SINGLE sample, so it's nowhere near full and must NOT breach — the no-op
+  // refreshes neither fill the window nor dilute the rate (no false calm,
+  // no false alarm).
+  let last;
+  for (let i = 0; i < 9; i++) {
+    last = _refreshSlo.evaluate(
+      { pipelineMs: 10, clusteringFailureReason: null, clusteringAttempts: 0 },
+      logger
+    );
+    assert.equal(last.windowSize, 0, `no-attempt refresh ${i} must not be sampled`);
+  }
+  last = _refreshSlo.evaluate(
+    { pipelineMs: 10, clusteringFailureReason: "timeout", clusteringAttempts: 2 },
+    logger
+  );
+  assert.equal(last.windowSize, 1, "only the attempting refresh is sampled");
+  assert.ok(!last.breaches.includes("cluster_timeout_rate"), "window not full → no breach");
+  assert.equal(lines.length, 0, "no breach line emitted while the attempt window is still filling");
+
+  // Now drive a clean window of 10 attempting refreshes with 3 timeouts
+  // (0.30 > 0.20). With an attempt-only denominator the window fills and
+  // breaches exactly once.
+  _refreshSlo.reset();
+  const reasons = ["timeout", "timeout", "timeout", null, null, null, null, null, null, null];
+  reasons.forEach((r) => {
+    last = _refreshSlo.evaluate(
+      { pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 },
+      logger
+    );
+  });
+  assert.equal(last.windowSize, 10, "attempt-only window is full");
+  assert.ok(last.breaches.includes("cluster_timeout_rate"));
+  const breachLines = lines.filter((l) => l.startsWith("[refresh.slo] breach=cluster_timeout_rate"));
+  assert.deepEqual(breachLines, ["[refresh.slo] breach=cluster_timeout_rate rate=0.30 window=10"]);
 });
 
 test("POST /api/dashboard/refresh: emits a structured [refresh.summary] line and surfaces outcomes + ingestionSource in _meta", async () => {

@@ -917,6 +917,7 @@ function emitRefreshObservability({ userId, log, ingestionSource }) {
   evaluateRefreshSlo({
     pipelineMs: timings.pipelineMs,
     clusteringFailureReason: outcomes?.clusteringFailureReason ?? log?.clusteringFailureReason ?? null,
+    clusteringAttempts: outcomes?.clusteringAttempts ?? log?.clusteringAttempts ?? 0,
   });
 }
 
