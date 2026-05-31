@@ -14,6 +14,9 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
 | **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR calibration guardrails regress |
 | **Dashboard embassy beat (Sprint C3)** | Hermetic golden: synthetic mixed EN/ES, multi-geo (Colombia/LatAm + Kenya/Africa style) embassy beat still produces usable output after the Sprint C cluster-reliability changes (C1 input cap + C2 JSON safe-trim repair). Minimum-presence only: `stories.length >= 1` AND `usedFallbackClustering === false`. Diagnostics retained but not gated. | `npm run eval:dashboard-embassy-beat` | Standalone smoke (non-zero on unmet criteria); **not** wired into `eval:dashboard-quality-gate` |
+| **Cache-benefit advisory (Sprint D1)** | Hermetic, deterministic check of the ingestion-cache benefit window logic (`dashboard/cache-benefit-window.mjs`): cache_hit p50 >= 20% faster than live_scoped p50, cache-hit rate >= 60%, >= 5 samples/mode in a 5-run window. Synthetic run windows; **measurement + guardrails only, no runtime behavior**. | `npm run eval:cache-benefit-advisory` | **Advisory** — standalone, non-zero only if the window logic regresses; **not** wired into any blocking gate |
+| **D2 narrative stability (Sprint D2)** | Hermetic failure-injection over the real pipeline: fail-closed-per-story for what-changed + why-it-matters (one retry per failing stage, then drop the story; never fail the global refresh). Asserts per-story drop, single-retry recovery, per-stage retry/drop tallies, and the >=50% retention guardrail. | `npm run eval:d2-narrative-stability` | **Advisory** — standalone, non-zero only if the D2 stability logic regresses; **not** wired into any blocking gate |
+| **D3 quality advisory (Sprint D3)** | Composite orchestrator: runs the quality stack end-to-end (quality-gate + embassy-beat + cache-benefit + d2-narrative-stability), prints per-check status + duration + a final rollup, and writes a lightweight JSON artifact. Continue-all, then non-zero exit if any check failed. Changes no included eval's logic. | `npm run eval:d3-quality-advisory` | **Advisory, LOCAL-ONLY** — non-zero if any included check fails; **not** wired into CI / any blocking gate |
 
 ---
 
@@ -492,3 +495,266 @@ Per the Phase 5b policy, the suite combines **two advisory layers** on top of th
 
 - `0` — all 8 scenarios passed. Release gate PASS.
 - `1` — at least one scenario failed (or a runner error). Release gate FAIL; PR blocked.
+
+---
+
+## Cache-Benefit Advisory (Sprint D1)
+
+### Why this exists
+
+D1 proves the ingestion cache is actually buying us latency, with runtime
+observability plus a standalone advisory eval. This harness is **measurement +
+guardrails only** — it changes **no runtime policy** (no TTL, cadence, warmer
+scheduling, or cache read/write behavior). It validates the pure window logic in
+[`dashboard/cache-benefit-window.mjs`](../../dashboard/cache-benefit-window.mjs),
+the same module the server uses to emit the live advisory.
+
+### Locked criteria (the verdict)
+
+A measured window **passes** only when all three hold:
+
+1. **Success threshold** — cache-hit refresh p50 is **>= 20% faster** than
+   live-scoped p50: `improvement% = (live_p50 - cache_p50) / live_p50 >= 0.20`.
+2. **Extra guardrail** — cache-hit rate in the measured window is **>= 60%**.
+3. **Sample floor** — at least **5 runs per mode** in the comparison window.
+
+**Comparison window:** median of the **last 5 runs per mode** (`cache_hit` vs
+`live_scoped`). Full-manifest `live` fetches are non-comparable and excluded.
+The **hit-rate window** is the most recent `2 × 5 = 10` comparable runs, so it
+reflects the real arrival mix rather than the balanced per-mode medians.
+
+### How to run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:cache-benefit-advisory
+```
+
+Fully synthetic + deterministic — no network, no LLM, no env, no Supabase. Each
+scenario feeds a fixed chronological run window through `computeCacheBenefit` and
+asserts the verdict (`ok` + reason codes) matches the locked expectation.
+
+### Scenarios
+
+| ID | Intent | Expected verdict |
+|---|---|---|
+| `headline-healthy-pass` | Representative healthy window: cache ~2× faster, cache-heavy traffic | **PASS** (proof the criteria are met on realistic data) |
+| `improvement-below-threshold` | Cache only ~9% faster | FAIL — `improvement_below_threshold` |
+| `hit-rate-below-threshold` | Cache fast but recent traffic live-heavy (50%) | FAIL — `hit_rate_below_threshold` |
+| `insufficient-sample` | Only 3 runs per mode | FAIL — `insufficient_sample` |
+
+Reason codes: `insufficient_sample`, `improvement_below_threshold`,
+`improvement_unmeasurable` (live p50 = 0), `hit_rate_below_threshold`.
+
+### Exit codes
+
+- `0` — every scenario produced its expected verdict (the window logic is intact).
+- `1` — a scenario diverged from expectation (the measurement logic regressed);
+  the failing scenario + mismatch print inline.
+
+**Advisory by intent (hybrid):** advisory now, path to blocking later. This
+runner is standalone and is **not** wired into `eval:dashboard-quality-gate` or
+any other blocking gate. Per the locked promotion rule, recommend advisory →
+blocking only after **1 consecutive week of stable pass in preview**.
+
+### Runtime surface (where the live numbers come from)
+
+On every refresh settle, the server (`emitRefreshObservability` in `server.mjs`)
+classifies the run (`cache_hit` / `live_scoped`), records its `pipelineMs` into a
+bounded in-memory window, and emits:
+
+```
+[cache.benefit.window] {"userId":"…","runMode":"cache_hit","ok":true,"improvementPct":0.57,"hitRate":0.6,"cacheP50":182,"liveP50":425,"samples":{…},"reasonCodes":[]}
+```
+
+The same verdict is attached additively to the refresh response under
+`_meta.cacheBenefit` (both the full-run and watermark-skip branches). It is
+observability only — it never gates the response or alters cache behavior. The
+in-memory window is per-process and non-authoritative (it resets on restart);
+the eval is the deterministic, reproducible surface for the criteria.
+
+### When to run
+
+- After touching `dashboard/cache-benefit-window.mjs` or the
+  `emitRefreshObservability` wiring in `server.mjs`.
+- Before proposing the advisory → blocking promotion.
+
+---
+
+## D2 Narrative Stability (Sprint D2)
+
+### Why this exists
+
+D2 hardens the two post-clustering narrative stages — **what-changed** and
+**why-it-matters** — against transient generation failures with a
+**fail-closed-per-story** policy. Before D2 both stages were fail-open (a failed
+writer shipped degraded/fallback copy). After D2:
+
+1. **Fail-closed per story** — a stage that cannot produce content for a story
+   drops only that story; the global refresh still succeeds (the other stories
+   ship).
+2. **One retry per failing stage** — a failing stage is retried exactly once;
+   if it still fails, the story is dropped.
+3. **Silent drop** — no user-facing notice or new UX messaging for a dropped
+   story (additive operator diagnostics only).
+
+The runtime policy lives in
+[`dashboard/narrative-stability.mjs`](../../dashboard/narrative-stability.mjs)
+(failure predicates + the single-retry helper) and the per-story drop +
+`log.narrativeStability` rollup in `refresh-pipeline.mjs`. **No timeout values
+were changed.**
+
+The failure trigger is deliberately NARROW — only transient *execution* failures
+drop a story:
+- what-changed: a failed **write** call (`llmFailed.write`). Classify failures
+  and hallucination-guard hits still degrade gracefully to "unchanged" copy.
+- why-it-matters: transport fallbacks (`write_failed` / `rewrite_failed` /
+  `resolver_threw`). Config fallbacks (`disabled` / `mock_only`) and
+  content-validation fallbacks (`write_validation_failed`) are NOT drops.
+
+So healthy, default-off, and validation paths behave exactly as before.
+
+### How to run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:d2-narrative-stability
+```
+
+Hermetic: runs the **real** `runRefreshPipeline` with controlled per-story
+failures injected via the `resolveWhatChangedFn` / `resolveWhyItMattersFn` test
+seams (so the eval exercises the actual retry/drop orchestration, not a copy of
+it). No network, no LLM, no env.
+
+### Scenarios
+
+| ID | Intent | Expected |
+|---|---|---|
+| `what-changed-persistent-drop` | what-changed write fails persistently for 1/4 | 1 dropped after retry, 3 survive (75%) — guardrail PASS |
+| `why-persistent-drop-boundary` | why fails persistently for 2/4 | 2 dropped, 2 survive (50%) — guardrail boundary PASS |
+| `both-stages-mixed-drop` | what-changed drops 1, why drops 1 (different stories) | 2 survive (50%) — guardrail PASS |
+| `single-retry-recovery` | transient failures recover on the single retry | 0 drops, all 4 survive, retries counted |
+| `retention-guardrail-breach-detected` | 3/4 fail | only 1 survives (25%) — guardrail correctly **FLAGS** the breach, global refresh still succeeds |
+
+Each scenario asserts the published survivor set, the per-stage retry/drop
+tallies on `log.narrativeStability`, and the `>= 50%` retention guardrail
+verdict (locked decision #5).
+
+### Exit codes
+
+- `0` — every scenario matched the locked fail-closed-per-story behavior.
+- `1` — a scenario diverged (the D2 stability logic regressed); the failing
+  scenario + mismatch print inline.
+
+### Rollout posture — advisory, with a path to blocking
+
+This eval is **advisory** (locked decision #7): standalone, **not** wired into
+`eval:dashboard-quality-gate` or any other blocking gate. The runtime
+fail-closed behavior itself is active; the *eval* is what stays advisory for now.
+
+**To promote this eval to blocking later**, all of:
+
+1. **Stable green in preview** — the eval passes for **1 consecutive week** of
+   preview runs with no flakiness.
+2. **Runtime retention telemetry** — `log.narrativeStability.retentionRate` from
+   real refreshes is durably aggregated (not just the per-process value) and
+   sits comfortably above the 50% floor in production traffic, confirming drops
+   are rare and the guardrail is not chronically near breach.
+3. **Wire into the gate** — add `eval:d2-narrative-stability` to
+   `run-dashboard-quality-gate.mjs` (or CI) as a hard-fail step, and document the
+   block threshold (e.g. fail the build if any scenario regresses, or if a
+   real-traffic window dips below the retention floor).
+
+Absent (1) and (2), keep it advisory.
+
+### When to run
+
+- After touching `dashboard/narrative-stability.mjs`, the what-changed/why
+  stages in `refresh-pipeline.mjs`, or either engine
+  (`what-changed-engine.mjs` / `why-this-matters-engine.mjs`).
+- Before proposing the advisory → blocking promotion.
+
+---
+
+## D3 Quality Advisory (Sprint D3)
+
+### Why this exists
+
+A single **local-only** command that runs the quality stack end-to-end and gives
+one scannable rollup — so a developer can sanity-check the whole guardrail set
+before opening a PR without remembering four separate commands. It is a
+**balanced composite advisory**: it orchestrates existing runners (changing none
+of their logic), captures per-check status + duration, and exits non-zero if any
+check failed — but only **after running all of them** (continue-all).
+
+### How to run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:d3-quality-advisory
+# optional custom artifact path:
+node src/ai/evals/run-d3-quality-advisory.mjs --json-out .artifacts/d3.json
+```
+
+### Included checks (in order)
+
+| # | id | Command | What it covers |
+|---|---|---|---|
+| 1 | `dashboard-quality-gate` | `node src/ai/evals/run-dashboard-quality-gate.mjs` | Golden + spanish-recall + calibration guardrails |
+| 2 | `dashboard-embassy-beat` | `node src/ai/evals/run-dashboard-embassy-beat.mjs` | C3 mixed EN/ES multi-geo presence smoke |
+| 3 | `cache-benefit-advisory` | `node src/ai/evals/run-cache-benefit-advisory.mjs` | D1 ingestion-cache benefit window logic |
+| 4 | `d2-narrative-stability` | `node src/ai/evals/run-d2-narrative-stability.mjs` | D2 fail-closed-per-story narrative stability |
+
+Each check runs as its own child process; a failing check prints its exit code
+and a short tail of its output, and the run **continues** to the next check.
+
+### Output (sample)
+
+```
+✓ dashboard-quality-gate   PASS  (128ms)  [node src/ai/evals/run-dashboard-quality-gate.mjs]
+✓ dashboard-embassy-beat   PASS  (77ms)   [node src/ai/evals/run-dashboard-embassy-beat.mjs]
+✓ cache-benefit-advisory   PASS  (31ms)   [node src/ai/evals/run-cache-benefit-advisory.mjs]
+✓ d2-narrative-stability   PASS  (74ms)   [node src/ai/evals/run-d2-narrative-stability.mjs]
+────────────────────────────────────────────────────────────────────────
+ROLLUP: 4/4 checks passed — OVERALL PASS
+artifact: …/.artifacts/d3-quality-advisory.json
+```
+
+### JSON artifact
+
+Written to `.artifacts/d3-quality-advisory.json` by default (override with
+`--json-out <path>`). Both `.artifacts/` and `tmp/` are gitignored — re-create
+anytime; do not commit. The artifact is **lightweight** (status + duration per
+check + overall status; **no raw logs**):
+
+```jsonc
+{
+  "schemaVersion": "d3-quality-advisory-v1",
+  "startedAt": "2026-05-31T…Z",
+  "finishedAt": "2026-05-31T…Z",
+  "overallOk": true,
+  "checks": [
+    { "id": "dashboard-quality-gate", "command": "node src/ai/evals/run-dashboard-quality-gate.mjs", "ok": true, "durationMs": 128 },
+    { "id": "dashboard-embassy-beat", "command": "node src/ai/evals/run-dashboard-embassy-beat.mjs", "ok": true, "durationMs": 77 },
+    { "id": "cache-benefit-advisory", "command": "node src/ai/evals/run-cache-benefit-advisory.mjs", "ok": true, "durationMs": 31 },
+    { "id": "d2-narrative-stability", "command": "node src/ai/evals/run-d2-narrative-stability.mjs", "ok": true, "durationMs": 74 }
+  ]
+}
+```
+
+### Exit codes
+
+- `0` — all four checks passed.
+- `1` — at least one check failed (reported **after** all checks ran).
+
+### Rollout posture — local-only
+
+This command is **LOCAL-ONLY** (locked decision #4). It is intentionally **not**
+wired into CI or any blocking quality gate in this slice — it composes the other
+advisories without changing their (already advisory) posture. CI wiring is a
+deliberate future step, not part of D3.
+
+### When to run
+
+- Before opening a PR that touches the dashboard pipeline, the narrative stages,
+  or the ingestion cache — as a one-command local sanity sweep.

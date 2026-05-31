@@ -6961,12 +6961,12 @@ test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats se
 });
 
 
-test("runRefreshPipeline Phase 5: rejected settle uses safeWhyFallbackForState (resolver_threw)", async () => {
-  // A throwing `whyWriteFn` is caught inside resolveWhyItMatters (returns an
-  // internal fallback), so it cannot produce a *rejected* pMap settle.  We use
-  // the `resolveWhyItMattersFn` seam to make the resolver itself throw for one
-  // story, hitting the pipeline's defensive rejected-settle branch.
-  const { safeWhyFallbackForState } = await import("./why-this-matters-engine.mjs");
+test("runRefreshPipeline Phase 5 (D2): persistent resolver throw → story dropped after one retry, others survive", async () => {
+  // D2 fail-closed-per-story: a resolver that throws even after the single
+  // retry is an unrecoverable transient failure — the story is DROPPED from the
+  // published set (not shipped with safe-fallback copy), while the global
+  // refresh succeeds and the other stories ship normally.  This pins the policy
+  // change vs the pre-D2 fail-open behavior.
   const REJECT_ID = "ms-why-reject-1";
   const stories = [0, 1, 2].map((i) => ({
     ...MOCK_META_STORIES[0],
@@ -6976,10 +6976,12 @@ test("runRefreshPipeline Phase 5: rejected settle uses safeWhyFallbackForState (
     summary: `Summary ${i}: diplomatic relations updates tracked across outlets.`,
     source_item_ids: ["src-1"],
   }));
-  // Throws for one story (forcing a rejected settle); returns a valid
-  // resolver-shaped result for the others (the non-throwing stub).
+  // Always throws for one story (both the initial attempt AND the D2 retry);
+  // returns a valid resolver-shaped result for the others.
+  let rejectCalls = 0;
   const resolveWhyItMattersFn = (input) => {
     if (input.metaStoryId === REJECT_ID) {
+      rejectCalls += 1;
       throw new Error("synthetic resolver explosion");
     }
     return {
@@ -7000,29 +7002,103 @@ test("runRefreshPipeline Phase 5: rejected settle uses safeWhyFallbackForState (
     resolveWhyItMattersFn,
   });
 
-  // Failing story still ships with a non-empty, state-aware safe fallback.
+  // The persistently-failing story is dropped — not in the payload, no trace.
   const failed = payload.stories.find((s) => s.metaStoryId === REJECT_ID);
-  assert.ok(failed, "the failing story must still ship");
-  const failedTrace = payload._whyItMattersTraces[REJECT_ID];
-  assert.ok(failedTrace, "trace recorded for the failed story");
-  assert.equal(failedTrace.fallback_used, true, "rejected settle marks trace.fallback_used");
-  assert.ok(failed.whyItMatters && failed.whyItMatters.length > 0, "fallback copy is non-empty");
-  assert.equal(
-    failed.whyItMatters,
-    safeWhyFallbackForState(failedTrace.state),
-    "rejected settle uses safeWhyFallbackForState for the pipeline-derived state"
-  );
+  assert.equal(failed, undefined, "the persistently-failing story is dropped from the payload");
+  assert.equal(payload._whyItMattersTraces[REJECT_ID], undefined, "no trace persisted for a dropped story");
 
-  // Other stories still get normal copy from the non-throwing stub.
+  // Single retry: the resolver was invoked exactly twice for the failing story.
+  assert.equal(rejectCalls, 2, "exactly one retry — initial attempt + one retry, then drop");
+
+  // The global refresh still succeeds and the other two stories ship normally.
   const others = payload.stories.filter((s) => s.metaStoryId !== REJECT_ID);
-  assert.equal(others.length, 2, "two non-failing stories ship");
+  assert.equal(others.length, 2, "two non-failing stories ship (global refresh not failed)");
   for (const s of others) {
     assert.equal(s.whyItMatters, `OK copy for ${s.metaStoryId}`, `normal copy for ${s.metaStoryId}`);
     assert.equal(payload._whyItMattersTraces[s.metaStoryId].fallback_used, false, `${s.metaStoryId} did not fall back`);
   }
 
-  // Run-level diagnostics count the rejected story as a fallback.
-  assert.ok(log.whyItMatters.fallback >= 1, "fallback count includes the rejected story");
+  // D2 stability diagnostics: 3 eligible, 1 dropped by the why stage, 2 survive
+  // (retention 2/3 ≈ 0.667 ≥ the 0.5 guardrail).
+  assert.equal(log.narrativeStability.policy, "fail_closed_per_story");
+  assert.equal(log.narrativeStability.eligible, 3);
+  assert.equal(log.narrativeStability.survived, 2);
+  assert.equal(log.narrativeStability.dropped, 1);
+  assert.equal(log.narrativeStability.whyItMatters.retried, 1, "one why-stage retry recorded");
+  assert.equal(log.narrativeStability.whyItMatters.dropped, 1);
+  assert.deepEqual(log.narrativeStability.droppedStoryIds, [REJECT_ID]);
+  assert.ok(log.narrativeStability.retentionRate >= 0.5, "retention clears the 50% guardrail");
+});
+
+
+test("runRefreshPipeline (D2): what-changed write failure → story dropped after one retry; others survive", async () => {
+  // Drive the what-changed stage via the `resolveWhatChangedFn` seam so the
+  // failure is deterministic without setting up a structural-gate prior. The
+  // targeted story returns a write-failure result on EVERY attempt; the others
+  // return a healthy result. Expect: targeted story dropped after exactly one
+  // retry, global refresh succeeds, the rest ship.
+  const FAIL_ID = "ms-wc-fail-1";
+  const stories = [0, 1, 2].map((i) => ({
+    ...MOCK_META_STORIES[0],
+    meta_story_id: `ms-wc-fail-${i}`,
+    title: `WC-fail story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i} - outlets report developments`,
+    summary: `Summary ${i}: diplomatic relations updates tracked across outlets.`,
+    source_item_ids: ["src-1"],
+  }));
+  let failCalls = 0;
+  const wcWriteFailed = {
+    state: "unchanged",
+    whatChanged: "",
+    gate: { signal: "strong", reasons: ["stub_fail"] },
+    diagnostics: {
+      classifySkipped: false, classifyCalled: true, classifyMaterial: true,
+      writeCalled: true, writeOk: false,
+      llmFailed: { classify: false, write: true, hallucination: false },
+      latencyMs: { classify: 0, write: 0 },
+    },
+  };
+  const wcOk = (id) => ({
+    state: "changed",
+    whatChanged: `Changed copy for ${id}.`,
+    gate: { signal: "strong", reasons: ["stub_ok"] },
+    diagnostics: {
+      classifySkipped: false, classifyCalled: true, classifyMaterial: true,
+      writeCalled: true, writeOk: true,
+      llmFailed: { classify: false, write: false, hallucination: false },
+      latencyMs: { classify: 0, write: 0 },
+    },
+  });
+  const resolveWhatChangedFn = (input) => {
+    if (input.metaStoryId === FAIL_ID) { failCalls += 1; return Promise.resolve(wcWriteFailed); }
+    return Promise.resolve(wcOk(input.metaStoryId));
+  };
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })],
+    clusterFn: async () => stories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    deltaConfig: { enabled: true },
+    everSeenMetaStoryIds: stories.map((s) => s.meta_story_id),
+    resolveWhatChangedFn,
+  });
+
+  // Targeted story dropped; others survive; one retry only.
+  assert.equal(payload.stories.find((s) => s.metaStoryId === FAIL_ID), undefined, "failing story dropped");
+  assert.equal(failCalls, 2, "exactly one retry for the failing story (initial + retry)");
+  assert.equal(payload.stories.length, 2, "two stories survive — global refresh not failed");
+  for (const s of payload.stories) {
+    assert.equal(s.whatChanged, `Changed copy for ${s.metaStoryId}.`, `survivor ${s.metaStoryId} keeps its copy`);
+  }
+  // D2 diagnostics reflect the what-changed-stage drop.
+  assert.equal(log.narrativeStability.eligible, 3);
+  assert.equal(log.narrativeStability.survived, 2);
+  assert.equal(log.narrativeStability.whatChanged.retried, 1);
+  assert.equal(log.narrativeStability.whatChanged.dropped, 1);
+  assert.equal(log.narrativeStability.whyItMatters.dropped, 0);
+  assert.deepEqual(log.narrativeStability.droppedStoryIds, [FAIL_ID]);
 });
 
 

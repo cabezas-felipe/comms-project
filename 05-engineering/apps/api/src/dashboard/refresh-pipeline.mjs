@@ -81,6 +81,12 @@ import {
   resolveClusterSplitConfig,
 } from "./cluster-split-healer.mjs";
 import { pMap } from "../util/p-map.mjs";
+import {
+  isWhatChangedFailure,
+  isWhyItMattersFailure,
+  runStageWithSingleRetry,
+  buildNarrativeStabilityDiagnostics,
+} from "./narrative-stability.mjs";
 
 // ─── A1.1: geo-stage time budget ─────────────────────────────────────────────
 //
@@ -1218,6 +1224,12 @@ export async function runRefreshPipeline({
   classifyFn = null,
   writeFn = null,
   deltaConfig = null,
+  // Test seam for the what-changed resolver itself (not just its classify/write
+  // stubs). Defaults to the imported `resolveWhatChanged`; mirrors
+  // `resolveWhyItMattersFn` so the D2 advisory eval can inject deterministic
+  // per-story failures without driving the structural gate. Zero behavior
+  // change when null.
+  resolveWhatChangedFn = null,
   // Why-this-matters engine inputs (spec §6, §9).  `whyWriteFn` is a test
   // injection for the Sonnet writer; production reads model + key from env
   // via `resolveWhyConfig()`.  `whyConfig` lets tests enable the LLM path
@@ -2192,7 +2204,11 @@ export async function runRefreshPipeline({
     };
   });
   storiesWithSortKeys.sort((a, b) => compareStoriesR1(a.sortKey, b.sortKey));
-  const stories = storiesWithSortKeys.map(({ story }) => story);
+  // `let` (not const): D2 fail-closed-per-story may filter unrecoverable stories
+  // out of this array after the narrative stages (see the `narrativeStability`
+  // block below). Everything downstream (funnel, metaStoryCount, payload) then
+  // reflects the published survivor set.
+  let stories = storiesWithSortKeys.map(({ story }) => story);
 
   // ── Phase 4: optional semantic tag uplift (topics + keywords only) ──────
   // Runs AFTER the deterministic stories are built and sorted — the overlay
@@ -2289,6 +2305,12 @@ export async function runRefreshPipeline({
   // alone — no LLM calls in CI/prod.
   const whatChangedStartedAt = Date.now();
   const perStoryWhatChanged = [];
+  // D2: pre-D2 eligible (post-cluster) story count + per-story drop set shared
+  // across both narrative stages. Drops are silent (no user-facing notice).
+  const narrativeEligibleCount = stories.length;
+  const narrativeDroppedStoryIds = new Set();
+  const d2WhatChanged = { eligible: stories.length, retried: 0, dropped: 0, droppedIds: [] };
+  const whatChangedResolver = resolveWhatChangedFn ?? resolveWhatChanged;
   for (const story of stories) {
     const priorStory = priorStoriesById && typeof priorStoriesById.get === "function"
       ? priorStoriesById.get(story.metaStoryId) ?? null
@@ -2297,20 +2319,53 @@ export async function runRefreshPipeline({
     // is small (~≤10 stories), and serializing keeps log/diagnostics
     // ordering deterministic.  Revisit if Haiku/Sonnet latency becomes a
     // dominant pipeline contributor.
+    // D2: fail-closed per story with one retry. A failed write call (transient
+    // execution failure) is retried once; if it still fails, the story is
+    // dropped from the published set rather than shipped with degraded content
+    // or failing the whole refresh. Classify/hallucination still degrade
+    // gracefully to "unchanged" copy (not a drop) — see narrative-stability.mjs.
     // eslint-disable-next-line no-await-in-loop
-    const result = await resolveWhatChanged(
-      {
-        metaStoryId: story.metaStoryId,
-        // Slice 15: feed the writer the normalized English evidence (clone);
-        // the response `story` keeps its original-language source text.
-        currentStory: withNormalizedEvidence(story, sourceItemsById),
-        priorStory,
-        everSeenMetaStoryIds: everSeenMetaStoryIds ?? [],
-      },
-      { classifyFn, writeFn, config: deltaConfig ?? undefined }
+    const { result, retried, failed } = await runStageWithSingleRetry(
+      () =>
+        whatChangedResolver(
+          {
+            metaStoryId: story.metaStoryId,
+            // Slice 15: feed the writer the normalized English evidence (clone);
+            // the response `story` keeps its original-language source text.
+            currentStory: withNormalizedEvidence(story, sourceItemsById),
+            priorStory,
+            everSeenMetaStoryIds: everSeenMetaStoryIds ?? [],
+          },
+          { classifyFn, writeFn, config: deltaConfig ?? undefined }
+        ),
+      isWhatChangedFailure,
+      // Defensive: engine normally never throws. Normalize a throw into an
+      // aggregate-friendly write-failure result so diagnostics stay coherent.
+      () => ({
+        state: "unchanged",
+        whatChanged: "",
+        gate: { signal: "none", reasons: ["resolve_threw"] },
+        diagnostics: {
+          classifySkipped: false, classifyCalled: false, classifyMaterial: false,
+          writeCalled: true, writeOk: false,
+          llmFailed: { classify: false, write: true, hallucination: false },
+          latencyMs: { classify: 0, write: 0 },
+        },
+      })
     );
-    story.whatChanged = result.whatChanged;
+    if (retried) d2WhatChanged.retried += 1;
+    // Always record the result for aggregate diagnostics + why-stage index
+    // alignment (perStoryWhatChanged[i] is read by the why prep pass).
     perStoryWhatChanged.push(result);
+    if (failed) {
+      d2WhatChanged.dropped += 1;
+      if (typeof story.metaStoryId === "string" && story.metaStoryId.length > 0) {
+        narrativeDroppedStoryIds.add(story.metaStoryId);
+        d2WhatChanged.droppedIds.push(story.metaStoryId);
+      }
+      continue; // do not apply whatChanged; story will be filtered post-stages
+    }
+    story.whatChanged = result.whatChanged;
   }
   const whatChangedMs = Math.max(0, Date.now() - whatChangedStartedAt);
   const whatChangedDiagnostics = aggregateWhatChangedDiagnostics(perStoryWhatChanged, {
@@ -2404,6 +2459,10 @@ export async function runRefreshPipeline({
       index: i,
       story,
       whyState,
+      // D2: stories already dropped by the what-changed stage skip the why
+      // stage entirely (no wasted writer calls, no double-counted drops).
+      dropped:
+        typeof story.metaStoryId === "string" && narrativeDroppedStoryIds.has(story.metaStoryId),
       resolveArgs: {
         metaStoryId: story.metaStoryId,
         title: story.title,
@@ -2418,49 +2477,81 @@ export async function runRefreshPipeline({
       },
     };
   });
+  const d2WhyItMatters = {
+    eligible: preparedWhy.filter((p) => !p.dropped).length,
+    retried: 0,
+    dropped: 0,
+    droppedIds: [],
+  };
 
   // Parallel fan-out — bounded worker pool caps in-flight resolver calls at
   // `whyConcurrency`.  `whyMs` is the wall-clock for the whole stage.
   const { concurrency: whyConcurrency } = resolveWhyConcurrencyConfig();
   const whyStartedAt = Date.now();
   const whyResolver = resolveWhyItMattersFn ?? resolveWhyItMatters;
+  const runWhyOnce = (prep) =>
+    whyResolver(prep.resolveArgs, {
+      writeFn: whyWriteFn ?? undefined,
+      config: effectiveWhyConfig,
+    });
+  // A `rejected` settle means `resolveWhyItMatters` itself threw; it normally
+  // fail-closes internally, so this is a defensive net: synthesize the same
+  // state-aware safe fallback the resolver would have returned (marked as a
+  // transient failure in diagnostics so the D2 retry/drop logic engages).
+  const synthWhyResolverThrew = (prep) => ({
+    whyItMatters: safeWhyFallbackForState(prep.whyState),
+    trace: {
+      metaStoryId: typeof prep.story.metaStoryId === "string" ? prep.story.metaStoryId : "",
+      state: prep.whyState,
+      fallback_used: true,
+    },
+    diagnostics: { fallbackUsed: true, fallbackReason: "resolver_threw", llmFailed: { write: true } },
+  });
   const whySettled = await pMap(
     preparedWhy,
-    ({ resolveArgs }) =>
-      whyResolver(resolveArgs, {
-        writeFn: whyWriteFn ?? undefined,
-        config: effectiveWhyConfig,
-      }),
+    // D2: skip the writer entirely for stories already dropped upstream.
+    (prep) => (prep.dropped ? Promise.resolve(null) : runWhyOnce(prep)),
     whyConcurrency
   );
+  // Collapse settled → plain results (index-aligned). Dropped stories carry a
+  // null placeholder; rejected settles synthesize the resolver-threw fallback.
+  const whyResults = preparedWhy.map((prep, i) => {
+    if (prep.dropped) return null;
+    const settled = whySettled[i];
+    return settled.status === "fulfilled" ? settled.value : synthWhyResolverThrew(prep);
+  });
+  // D2: one retry per failing story (locked decision #3). Re-run the resolver
+  // once for any non-dropped story whose first attempt was a transient failure.
+  for (let i = 0; i < preparedWhy.length; i += 1) {
+    const prep = preparedWhy[i];
+    if (prep.dropped) continue;
+    if (!isWhyItMattersFailure(whyResults[i])) continue;
+    d2WhyItMatters.retried += 1;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      whyResults[i] = await runWhyOnce(prep);
+    } catch {
+      whyResults[i] = synthWhyResolverThrew(prep);
+    }
+  }
   const whyMs = Date.now() - whyStartedAt;
 
-  // Apply pass — walk settled results in input index order so story order is
-  // unchanged (R1).  A `rejected` settle means `resolveWhyItMatters` itself
-  // threw; it normally fail-closes internally, so this is a defensive net:
-  // synthesize the same state-aware safe fallback the resolver would have
-  // returned (marked as a fallback in diagnostics) so `story.whyItMatters` is
-  // never left empty.
+  // Apply pass — walk results in input index order so story order is unchanged
+  // (R1). A story whose why stage still fails after the retry is dropped from
+  // the published set (fail-closed per story); survivors get their copy/trace.
   for (let i = 0; i < preparedWhy.length; i += 1) {
-    const { story, whyState } = preparedWhy[i];
-    const settled = whySettled[i];
-    let why;
-    if (settled.status === "fulfilled") {
-      why = settled.value;
-    } else {
-      why = {
-        whyItMatters: safeWhyFallbackForState(whyState),
-        trace: {
-          metaStoryId: typeof story.metaStoryId === "string" ? story.metaStoryId : "",
-          state: whyState,
-          fallback_used: true,
-        },
-        diagnostics: {
-          fallbackUsed: true,
-          fallbackReason: "resolver_threw",
-          llmFailed: { write: true },
-        },
-      };
+    const prep = preparedWhy[i];
+    if (prep.dropped) continue; // already dropped by what-changed
+    const { story } = prep;
+    const why = whyResults[i];
+    if (isWhyItMattersFailure(why)) {
+      d2WhyItMatters.dropped += 1;
+      if (typeof story.metaStoryId === "string" && story.metaStoryId.length > 0) {
+        narrativeDroppedStoryIds.add(story.metaStoryId);
+        d2WhyItMatters.droppedIds.push(story.metaStoryId);
+      }
+      perStoryWhyItMatters.push(why); // count the failed attempt in aggregate
+      continue;
     }
     story.whyItMatters = why.whyItMatters;
     if (typeof story.metaStoryId === "string" && story.metaStoryId.length > 0) {
@@ -2492,6 +2583,32 @@ export async function runRefreshPipeline({
       ` why_concurrency=${whyConcurrency}` +
       ` why_ms=${whyMs}`
   );
+
+  // ── D2: fail-closed-per-story drop + stability diagnostics ───────────────
+  // Remove the stories a narrative stage could not produce content for (after
+  // one retry). Silent drop — no user-facing notice (locked decision #2). All
+  // downstream counts (funnel finalStories, metaStoryCount, outcomes) reflect
+  // the published survivor set. A global refresh is never failed by per-story
+  // narrative failures (locked decision #1).
+  if (narrativeDroppedStoryIds.size > 0) {
+    const before = stories.length;
+    stories = stories.filter(
+      (s) => !(typeof s.metaStoryId === "string" && narrativeDroppedStoryIds.has(s.metaStoryId))
+    );
+    console.log(
+      `[pipeline.narrativeStability] policy=fail_closed_per_story` +
+        ` eligible=${narrativeEligibleCount} dropped=${before - stories.length}` +
+        ` survived=${stories.length}` +
+        ` whatChangedDropped=${d2WhatChanged.dropped} whyDropped=${d2WhyItMatters.dropped}` +
+        ` ids=${[...narrativeDroppedStoryIds].join(",")}`
+    );
+  }
+  const narrativeStabilityDiagnostics = buildNarrativeStabilityDiagnostics({
+    eligible: narrativeEligibleCount,
+    droppedStoryIds: narrativeDroppedStoryIds,
+    whatChanged: d2WhatChanged,
+    whyItMatters: d2WhyItMatters,
+  });
 
   const payload = {
     contractVersion,
@@ -2731,6 +2848,10 @@ export async function runRefreshPipeline({
     // lowConfidence + write/rewrite latency.  Persisted via
     // `_lastRunMeta.whyItMatters` and surfaced under `_meta.whyItMatters`.
     whyItMatters: whyItMattersDiagnostics,
+    // D2: per-story narrative-stability rollup (fail-closed policy, per-stage
+    // retry/drop tallies, retention rate). Additive; surfaced for operators and
+    // the standalone advisory eval. No user-facing messaging is derived from it.
+    narrativeStability: narrativeStabilityDiagnostics,
   };
 
   return { payload, log };
