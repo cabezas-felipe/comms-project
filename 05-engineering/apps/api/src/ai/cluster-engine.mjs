@@ -327,17 +327,6 @@ export function extractiveSummary(title, sourceItems) {
   return `${title}. ${headlines}.`;
 }
 
-/**
- * Deterministic subtitle text from source headlines only (no model prose).
- * Callers may use this for safe copy paths; the refresh pipeline does **not**
- * ship `partial_source_ids` stories (**J1a** — they are invalid / dropped).
- */
-export function extractiveSubtitle(sourceItems) {
-  const headlines = (sourceItems ?? []).map((i) => i?.headline).filter(Boolean);
-  if (headlines.length === 0) return "";
-  return headlines[0];
-}
-
 // ─── Grounding verifier ───────────────────────────────────────────────────────
 
 // C0 summary cap — meta-story summary is a deterministic join of grounded
