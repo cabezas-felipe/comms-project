@@ -21,6 +21,24 @@ const MANIFEST = [
   { id: "social-x", name: "@latamwatcher", kind: "social", url: "https://twitter.com/latamwatcher", weight: 60, active: true },
 ];
 
+// Snapshot mirroring the real data/source-feeds.json shape for the "embassy
+// narrative" 7-outlet selection: each row carries a curated `publisher` brand,
+// and — like production — most feed names embed the publisher EXCEPT the La
+// Silla Vacía row, whose name is the bare section label "Silla Nacional".
+// This is the exact shape that produced `matched=6/7 unmatched=1` before the
+// publisher-field match landed.
+const EMBASSY_MANIFEST = [
+  { id: "wapo-politics", name: "The Washington Post — Politics", publisher: "The Washington Post", kind: "rss", url: "https://wapo/pol", weight: 95, active: true },
+  { id: "reuters-world-americas", name: "Reuters — World (Americas)", publisher: "Reuters", kind: "rss", url: "https://reuters/am", weight: 92, active: true },
+  { id: "ap-world-latin-america", name: "Associated Press — World (Latin America)", publisher: "Associated Press", kind: "rss", url: "https://ap/latam", weight: 90, active: true },
+  { id: "ap-us-immigration", name: "Associated Press — U.S. (Immigration)", publisher: "Associated Press", kind: "rss", url: "https://ap/imm", weight: 90, active: true },
+  { id: "bloomberg-politics-americas", name: "Bloomberg — Politics (Americas)", publisher: "Bloomberg", kind: "rss", url: "https://bbg/am", weight: 88, active: true },
+  { id: "infobae-colombia", name: "Infobae - Colombia", publisher: "Infobae", kind: "rss", url: "https://infobae/co", weight: 80, active: true, lang: "es" },
+  { id: "semana-politica", name: "Semana - Política", publisher: "Semana", kind: "rss", url: "https://semana/pol", weight: 80, active: true, lang: "es" },
+  // The mismatch case: section-only name, publisher carried separately.
+  { id: "silla-nacional", name: "Silla Nacional", publisher: "La Silla Vacía", kind: "rss", url: "https://silla/nac", weight: 80, active: true, lang: "es" },
+];
+
 // ─── normalizeForMatching ────────────────────────────────────────────────────
 
 test("normalizeForMatching: lowercases and drops 'the' prefix", () => {
@@ -92,6 +110,114 @@ test("resolveSelectedSources: deduplicates feeds when multiple selections conver
   // No double-counting in matchedFeeds.
   const ids = result.matchedFeeds.map((f) => f.id).sort();
   assert.deepEqual(ids, ["wapo-business", "wapo-politics", "wapo-world"]);
+});
+
+// ─── B2: Source matching audit (7/7 outlets) ────────────────────────────────
+
+test("B2: embassy-narrative 7-outlet selection resolves with zero unmatched (was 6/7)", () => {
+  // Reproduces the embassy-narrative failure: publisher-level selection of all
+  // seven outlets. Pre-fix, "La Silla Vacía" matched zero feeds because the only
+  // La Silla Vacía row is named "Silla Nacional" (no embedded publisher) →
+  // matched=6/7 unmatched=1. Curated publisher-field matching closes the gap.
+  const selected = [
+    "The Washington Post",
+    "Reuters",
+    "Associated Press",
+    "Bloomberg",
+    "Infobae",
+    "Semana",
+    "La Silla Vacía",
+  ];
+  const result = resolveSelectedSources({
+    selectedSources: selected,
+    manifestFeeds: EMBASSY_MANIFEST,
+  });
+  assert.equal(result.mode, SELECTION_MODE.STRICT);
+  assert.equal(result.fallbackUsed, false);
+  assert.equal(result.selectedSourceCount, 7);
+  assert.equal(result.matchedSourceCount, 7, "all 7 outlets must match");
+  assert.deepEqual(result.unmatchedSelectedSources, [], "no unmatched selected sources");
+  assert.equal(result.unavailableConnectorCount, 0);
+  // The previously-unmatched La Silla Vacía feed is now in the matched set.
+  assert.ok(
+    result.matchedFeeds.some((f) => f.id === "silla-nacional"),
+    "La Silla Vacía publisher selection must resolve to the silla-nacional feed"
+  );
+});
+
+test("B2: La Silla Vacía resolves via curated publisher field, not the section name", () => {
+  // Pin the root-cause fix in isolation: the feed NAME ("Silla Nacional") does
+  // not contain the needle ("la silla vacía"); only the curated `publisher`
+  // brand does. This must match — and a feed WITHOUT the publisher field must
+  // still NOT match (proving we match the curated field, not fuzzy on tokens).
+  const withPublisher = resolveSelectedSources({
+    selectedSources: ["La Silla Vacía"],
+    manifestFeeds: [EMBASSY_MANIFEST.find((f) => f.id === "silla-nacional")],
+  });
+  assert.deepEqual(withPublisher.matchedFeeds.map((f) => f.id), ["silla-nacional"]);
+  assert.equal(withPublisher.unmatchedSelectedSources.length, 0);
+
+  const noPublisher = resolveSelectedSources({
+    selectedSources: ["La Silla Vacía"],
+    manifestFeeds: [{ id: "silla-nacional", name: "Silla Nacional", kind: "rss", url: "https://silla/nac", weight: 80, active: true }],
+  });
+  assert.deepEqual(noPublisher.unmatchedSelectedSources, ["La Silla Vacía"]);
+});
+
+test("B2: AP naming variants map correctly under curated aliases", () => {
+  // "AP" / "AP News" alias → "Associated Press"; "The Associated Press" drops
+  // the leading article in normalization. All resolve to the AP feeds via the
+  // curated alias map + publisher/name match — no fuzzy logic.
+  for (const variant of ["AP", "AP News", "Associated Press", "The Associated Press", "associated press"]) {
+    const result = resolveSelectedSources({
+      selectedSources: [variant],
+      manifestFeeds: EMBASSY_MANIFEST,
+    });
+    assert.equal(result.unmatchedSelectedSources.length, 0, `"${variant}" should match`);
+    assert.deepEqual(
+      result.matchedFeeds.map((f) => f.id).sort(),
+      ["ap-us-immigration", "ap-world-latin-america"],
+      `"${variant}" must resolve to both AP section feeds`
+    );
+  }
+});
+
+test("B2: Spanish outlet naming + diacritics variants map correctly under curated aliases", () => {
+  // Accent-dropped, article-prefixed, and qualified variants all fold onto the
+  // canonical publisher via the curated alias map, then match the feed's
+  // publisher/name. Diacritics must not be required for a match.
+  const cases = [
+    { input: "La Silla Vacia", id: "silla-nacional" },   // accent dropped
+    { input: "la silla vacía", id: "silla-nacional" },   // lowercase + accent
+    { input: "Silla Nacional", id: "silla-nacional" },   // legacy section spelling → alias → La Silla Vacía
+    { input: "Revista Semana", id: "semana-politica" },  // qualified → Semana
+    { input: "Infobae Colombia", id: "infobae-colombia" }, // qualified → Infobae
+  ];
+  for (const { input, id } of cases) {
+    const result = resolveSelectedSources({
+      selectedSources: [input],
+      manifestFeeds: EMBASSY_MANIFEST,
+    });
+    assert.equal(result.unmatchedSelectedSources.length, 0, `"${input}" should match`);
+    assert.ok(
+      result.matchedFeeds.some((f) => f.id === id),
+      `"${input}" must resolve to feed ${id}`
+    );
+  }
+});
+
+test("B2: unknown source stays unmatched — strict policy still enforced (no fuzzy fallback)", () => {
+  // A plausible-but-unknown outlet must NOT match any feed. This proves the
+  // publisher-field addition did not loosen the policy into approximate/fuzzy
+  // matching: "El Espectador" shares tokens with nothing curated and stays out.
+  const result = resolveSelectedSources({
+    selectedSources: ["The Washington Post", "El Espectador"],
+    manifestFeeds: EMBASSY_MANIFEST,
+  });
+  assert.equal(result.mode, SELECTION_MODE.STRICT);
+  assert.deepEqual(result.unmatchedSelectedSources, ["El Espectador"]);
+  assert.equal(result.matchedSourceCount, 1);
+  assert.equal(result.selectedSourceCount, 2);
 });
 
 // ─── resolveSelectedSources: unmatched / unavailable connector ──────────────

@@ -16,9 +16,9 @@ The Lovable reference UI stays in [`../04-prototype`](../04-prototype) and depen
 | What-changed delta engine — 3-state `story.whatChanged` (first-seen / unchanged / changed) via deterministic gate + optional Haiku + Sonnet. **Default ON for prototype dev** via `bootstrapApiEnv()` in [`server.mjs`](apps/api/src/server.mjs); tests (`NODE_ENV=test`) and `TEMPO_AI_MOCK_ONLY=true` still skip the LLM-bound stages. Set `TEMPO_AI_DELTA_ENABLED=false` to disable explicitly. | [`what-changed-engine.mjs`](apps/api/src/dashboard/what-changed-engine.mjs), pipeline call site in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) | [what-changed spec](docs/what-changed-spec.md), [handoff](docs/what-changed-handoff.md), [D-065](DECISIONS.md) |
 | Server-side refresh cadence — `REFRESH_INTERVAL_MS` (1h) drives both the client heartbeat and the scheduled cadence-tick orchestrator; both branches converge on `_lastCheckedAt` and the shared `_refreshExecutor.execute` path. | [`refresh-cadence.mjs`](apps/api/src/contracts-runtime/refresh-cadence.mjs), [`due-user-orchestrator.mjs`](apps/api/src/dashboard/due-user-orchestrator.mjs), [`cadence-tick.mjs`](apps/api/src/ops/cadence-tick.mjs) | [Server-side cadence tick](#server-side-cadence-tick-sub-slice-25) |
 | Ingestion cache warmer — scheduled full-manifest fetch (no `feedIds`) that keeps `ingestion_recent_items` warm so refreshes hit the cache instead of a live RSS fetch; runs hourly at `:35` via GHA. | [`ingestion-warm.mjs`](apps/api/src/ops/ingestion-warm.mjs), [`.github/workflows/ingestion-warm.yml`](../.github/workflows/ingestion-warm.yml) | [Ingestion cache warmer](#ingestion-cache-warmer-phase-1-slice-34) |
-| Translation-first normalization (Phase 3) — non-English source evidence (`item.lang`) is translated ES→EN **post-geo, pre-recall** so English settings match Spanish items; dual-text retains original `headline`/`body` + adds `normalizedHeadline`/`normalizedBody`; bounded + fail-open; coverage/degraded in `_meta.translation`. **Default OFF** (`TEMPO_TRANSLATION_ENABLED`). | [`evidence-translator.mjs`](apps/api/src/ingestion/evidence-translator.mjs), wired in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) | [D-067](DECISIONS.md), [`.env.example`](apps/api/.env.example) |
+| Translation-first normalization (Phase 3) — non-English source evidence (`item.lang`) is translated ES→EN **post-geo, pre-recall** so English settings match Spanish items; dual-text retains original `headline`/`body` + adds `normalizedHeadline`/`normalizedBody`; bounded + fail-open; coverage/degraded in `_meta.translation`. Code default OFF; **enabled in preview + production now (Sprint B1, controlled rollout)** via `TEMPO_TRANSLATION_ENABLED=true`; rollback is the same flag set to `false`. | [`evidence-translator.mjs`](apps/api/src/ingestion/evidence-translator.mjs), wired in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) | [D-067](DECISIONS.md), [`.env.example`](apps/api/.env.example), [runbook](docs/runbook-translation-activation.md) |
 | English meta-story from non-English sources (Phase 3) — clustering (`cluster-v3`) and the whatChanged writer emit English `title`/`subtitle`/`summary`/`whatChanged` even when sources are Spanish, grounding on normalized EN evidence; the whatChanged **structural gate stays on the raw headline** (language-stable deltas). | [`prompts.mjs`](apps/api/src/ai/prompts.mjs) (`CLUSTERING_PROMPT_VERSION`), [`what-changed-engine.mjs`](apps/api/src/dashboard/what-changed-engine.mjs), `withNormalizedEvidence` in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) | [D-068](DECISIONS.md) |
-| Spanish readiness status (Phase 3) — extraction, translation-first normalization, and English-output guardrails are **code-complete**; the 6 Spanish feeds (La Silla Vacía, Semana, Infobae) are now **activated in the manifest across Phase 4 Slices 16–18 (complete)** — all enumerated in `source-feeds.json` as `active=true`, `lang=es`; production translation is wired and remains gated behind `TEMPO_TRANSLATION_ENABLED` (default off). | [`evidence-translator.mjs`](apps/api/src/ingestion/evidence-translator.mjs) | [D-067](DECISIONS.md), [D-068](DECISIONS.md) |
+| Spanish readiness status (Phase 3) — extraction, translation-first normalization, and English-output guardrails are **code-complete**; the 6 Spanish feeds (La Silla Vacía, Semana, Infobae) are now **activated in the manifest across Phase 4 Slices 16–18 (complete)** — all enumerated in `source-feeds.json` as `active=true`, `lang=es`; production translation is wired and **enabled in preview + production (Sprint B1)** via `TEMPO_TRANSLATION_ENABLED=true` under controlled monitoring (rollback: set it to `false`). | [`evidence-translator.mjs`](apps/api/src/ingestion/evidence-translator.mjs) | [D-067](DECISIONS.md), [D-068](DECISIONS.md), [runbook](docs/runbook-translation-activation.md) |
 
 Detailed rationale: [dashboard-story-pool-walkthrough.md](docs/dashboard-story-pool-walkthrough.md). Operator scenarios: [dashboard-story-pool-scenario-map.md](docs/dashboard-story-pool-scenario-map.md).
 
@@ -177,6 +177,51 @@ Three knobs and one locked policy govern how the refresh pipeline fails safe so 
 **Slice 5 — embed-floor calibration harness.** `npm run eval:dashboard-calibration` sweeps `TEMPO_EMBED_MIN_SIMILARITY` across **0 / 0.35 / 0.40 / 0.45** and prints an objective table (`similarityRejected`, `finalStories`, `finalRelevant`, Reuters count, liveblog collapse) per floor, so a default change is evidence-driven rather than guessed. It enforces the same hard guardrails as the golden eval (no fail-closed clustering, no degraded titles, Reuters present, liveblog collapses) at every floor; the floor metrics themselves are advisory. **Production default is 0.35; change it only when a committed run shows systematic loss at 0.35.** See [evals README → Embed-floor Calibration](apps/api/src/ai/evals/README.md#embed-floor-calibration-slice-5).
 
 **Slice 6 — CI dashboard quality gate + JSON artifacts.** `npm run eval:dashboard-quality-gate` is the single CI-grade entry point: it runs the golden eval **and** the calibration sweep in one hermetic command, exits non-zero if either regresses, and writes a machine-readable calibration JSON artifact (default `.artifacts/dashboard-calibration.json`; `npm run eval:dashboard-calibration:json` writes `tmp/dashboard-calibration.json`). The JSON (`harness`/`version`-stamped, per-floor metrics + guardrail pass/reasons + `overall`) lets CI and reviewers diff runs over time. **Floor-change ship/no-ship policy:** changing `DEFAULT_EMBED_MIN_SIMILARITY` off **0.35** requires (1) the quality gate green at the candidate floor, (2) a manual `?debug=1` quality review confirming rejected items are genuinely off-beat, and (3) committed evidence (the calibration artifact for 0.35 vs the candidate) in the PR notes. See [evals README → Dashboard Quality Gate](apps/api/src/ai/evals/README.md#dashboard-quality-gate-slice-6).
+
+### Recall tuning band + validation (Sprint B3)
+
+Guidance for **safely tuning recall** on multi-geo beats (e.g. the Colombia–US embassy beat) **without changing runtime defaults**. The default `TEMPO_EMBED_MIN_SIMILARITY=0.35` stays as-is; this is a measure-first workflow, not a default flip.
+
+**Three separate stages — do not conflate them.** Recall is a pipeline, not one knob. An item reaches clustering only after clearing all three, in order:
+
+1. **Lexical pass** — `applyTopicKeywordFilter` (+ the geo *lexical* gate). Whole-word topic/keyword hits, plus a configured-geography lexical mention, admit an item. This pass is **not** controlled by `TEMPO_EMBED_MIN_SIMILARITY`. Diagnostics: `recall.topicKeywordBreakdown` (`topicOnly` / `keywordOnly` / `both` / `geoLexicalOnly` / `neither` / `pass`) and the `[pipeline.topic-keyword]` log line.
+2. **Semantic widening** — `hybrid_strict` embedding union. *Adds* semantic-only neighbors that the lexical pass missed, gated by the **cosine similarity floor** `TEMPO_EMBED_MIN_SIMILARITY`. Lexical hits always pass regardless of score; the floor gates **only** the embedding-driven additions. Diagnostics: `recall.minSimilarityThreshold`, `recall.similarityRejected`, `recall.finalRelevant`.
+3. **Beat-fit threshold** — `TEMPO_BEAT_FIT_THRESHOLD` (default `0.20`, [D-063](DECISIONS.md)). A blended **precision** score applied *after* recall, on a **different scale**. Diagnostics: the `[pipeline.beat-fit]` log line.
+
+> ⚠️ **The similarity floor is not the beat-fit threshold.** `TEMPO_EMBED_MIN_SIMILARITY` (cosine `[0,1]`, recall *widening* stage) and `TEMPO_BEAT_FIT_THRESHOLD` (blended precision, recall *narrowing* stage) are different stages on different scales. Never copy a value from one to the other — e.g. setting the cosine floor to `0.20` because that is the beat-fit default would silently collapse the floor. See [DECISIONS.md → D-063 addendum](DECISIONS.md).
+
+**Recommended exploratory band:** `TEMPO_EMBED_MIN_SIMILARITY` **0.35 → 0.40**. `0.35` is the production default (recall-widening, low end of the band). `0.40` is the conservative upper end for an exploratory tightening run. Going above `0.45` over-trims semantic adds; `0` disables the floor (debug baseline only). Multi-geo embassy beats lean on semantic widening to bridge Spanish↔English phrasing that the lexical pass misses, so they are **more sensitive to floor changes than single-geo beats** — measure before tightening.
+
+**Validation checklist (compare candidates without committing a default):**
+
+```bash
+cd 05-engineering/apps/api
+# 1. Hermetic floor sweep — guardrails + per-floor metrics across 0 / 0.35 / 0.40 / 0.45
+npm run eval:dashboard-calibration            # add :verbose for per-row detail
+# 2. CI-grade gate (golden + sweep in one) — must stay green at the candidate floor
+npm run eval:dashboard-quality-gate
+# 3. Multi-beat recall-widening guard (proves a tighter floor didn't starve a beat)
+npm run eval:dashboard-dual-beat
+# 4. Optional manual run: restart the API with a candidate floor, open ?debug=1
+#    TEMPO_EMBED_MIN_SIMILARITY=0.40 npm run dev   # then read the diag-recall panel
+```
+
+Inspect these diagnostics (in `_meta` / the run-diagnostics `?debug=1` panel / server logs) at each candidate floor:
+
+| Diagnostic | Where | Read it for |
+|---|---|---|
+| `recall.finalRelevant` | `_meta.recall` / `[pipeline.recall]` | total items that survived recall — the headline recall volume |
+| `recall.similarityRejected` | `_meta.recall` / calibration table | semantic-only adds the floor held back this run |
+| `recall.topicKeywordBreakdown` | `_meta.recall` / `[pipeline.topic-keyword]` | whether loss is lexical (`neither`/`geoLexicalOnly`) vs semantic |
+| `geoLane2DeferredCount` | `_meta.geoLane2DeferredCount` / `[pipeline.geo] lane2_deferred=` | geo-stage budget shedding — deferred items never reached recall (rule out before blaming the floor) |
+| `usedFallbackClustering` | `_meta.usedFallbackClustering` | must be `false`; `true` means clustering fail-closed (0 stories) — unrelated to the floor, but invalidates the comparison |
+| `pipelineMs` | `_meta.timings.pipelineMs` / `[pipeline.timings]` | refresh latency stayed within SLO at the candidate floor |
+
+**What "good" looks like:** guardrails **PASS** at the candidate floor (no fail-closed clustering, no degraded titles, Reuters/must-see sources still present, liveblog still collapses); `similarityRejected` rises gently as the floor rises; rejected items are genuinely off-beat on `?debug=1` review; `finalRelevant` and story count stay healthy; `geoLane2DeferredCount` ≈ 0 and `usedFallbackClustering=false` (so the comparison is apples-to-apples).
+
+**Too strict** (floor too high): `similarityRejected` climbs sharply, `finalRelevant`/story count drops, must-see or cross-language sources disappear, and `?debug=1` shows on-beat items being rejected. **Too loose** (floor too low / `0`): `similarityRejected` ≈ 0 but off-beat neighbors leak into clustering — thin/incoherent stories, noise the lexical pass would never have admitted.
+
+**Suggested next-step experiment (no default change):** Run the calibration sweep against a captured embassy-beat fixture (mixed `lang=es`/`en`, implicit geo) and read `0.35` vs `0.40`. If `0.40` holds all guardrails AND its extra `similarityRejected` items are off-beat on `?debug=1` review, that is *evidence toward* a future tightening — but per the [Slice 6 ship/no-ship policy](#dashboard-trust-controls-slice-1) a default change still requires the quality gate green plus the committed calibration artifact (`0.35` vs candidate) in the PR. B3 stops at the evidence; it does not flip the default.
 
 ### Manual golden re-test
 

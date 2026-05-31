@@ -302,6 +302,12 @@ admitted at 0.35 — then propose a higher floor.
 Before proposing any change to `DEFAULT_EMBED_MIN_SIMILARITY`, and after touching
 `embedding-recall.mjs` recall/union logic.
 
+For the operator-facing tuning band (exploratory **0.35 → 0.40**), the
+lexical-pass / semantic-widening / beat-fit relationship, the "floor ≠ beat-fit"
+warning, and the full validation checklist (which diagnostics to read and what
+"good" vs "too strict / too loose" looks like), see
+[README → Recall tuning band + validation (Sprint B3)](../../../../../README.md#recall-tuning-band--validation-sprint-b3).
+
 ### JSON artifact
 
 Pass `--json-out <path>` to also write a machine-readable artifact (the human
