@@ -49,6 +49,11 @@ import {
 import { assessGeoConfidence } from "./dashboard/geo-filter.mjs";
 import { evaluateRefreshSlo, _resetSloState } from "./ops/refresh-slo.mjs";
 import {
+  classifyRunMode,
+  recordCacheBenefitRun,
+  summarizeCacheBenefitWindow,
+} from "./dashboard/cache-benefit-window.mjs";
+import {
   parseFallbackFeedIdsEnv,
   parseFallbackEnabledEnv,
   resolveSelectedSources,
@@ -919,6 +924,30 @@ function emitRefreshObservability({ userId, log, ingestionSource }) {
     clusteringFailureReason: outcomes?.clusteringFailureReason ?? log?.clusteringFailureReason ?? null,
     clusteringAttempts: outcomes?.clusteringAttempts ?? log?.clusteringAttempts ?? 0,
   });
+
+  // D1: ingestion-cache benefit advisory (measurement + guardrails only — no
+  // policy change). Record this run's pipeline latency under its comparison
+  // mode (cache_hit vs live_scoped; full-manifest "live" is non-comparable and
+  // ignored), then emit the windowed advisory verdict. Pure observability: the
+  // verdict never alters cache reads/writes or the refresh outcome. Returns the
+  // verdict so callers can surface it additively on `_meta.cacheBenefit`.
+  const runMode = classifyRunMode(ingestionSource);
+  recordCacheBenefitRun({ mode: runMode, pipelineMs: timings.pipelineMs });
+  const cacheBenefit = summarizeCacheBenefitWindow();
+  console.log(
+    `[cache.benefit.window] ${JSON.stringify({
+      userId,
+      runMode,
+      ok: cacheBenefit.ok,
+      improvementPct: cacheBenefit.improvementPct,
+      hitRate: cacheBenefit.hitRate,
+      cacheP50: cacheBenefit.cacheP50,
+      liveP50: cacheBenefit.liveP50,
+      samples: cacheBenefit.sampleCounts,
+      reasonCodes: cacheBenefit.reasonCodes,
+    })}`
+  );
+  return { runMode, cacheBenefit };
 }
 
 /**
@@ -1252,7 +1281,15 @@ async function executeRefreshFlow(identity) {
       skipMeta.ingestionSource = ingestionSource;
       // Structured summary + SLO eval on the skip settle too — a skip is a fast,
       // non-timeout refresh, so it adds a healthy sample to the rolling window.
-      emitRefreshObservability({ userId: identity.userId, log, ingestionSource });
+      const { cacheBenefit: skipCacheBenefit } = emitRefreshObservability({
+        userId: identity.userId,
+        log,
+        ingestionSource,
+      });
+      // D1: surface the windowed cache-benefit advisory on the skip branch _meta
+      // too, so the diagnostic surface stays consistent across branches.
+      // Additive only — consumers ignore unknown _meta keys.
+      if (skipCacheBenefit) skipMeta.cacheBenefit = skipCacheBenefit;
       if (priorSnapshot) {
         // Persist the bumped lastCheckedAt onto the existing snapshot so a
         // full page reload reflects this check.  refreshedAt stays pinned to
@@ -1371,7 +1408,12 @@ async function executeRefreshFlow(identity) {
       `[dashboard.refresh] user=${identity.userId} stories=${finalPayload.stories.length} pool=${log.poolCount} relevant=${log.relevantCount} elapsed=${elapsedMs}ms fallback=${log.usedFallbackClustering} groundingFail=${log.groundingFailures} dropped=${log.droppedUngroundedStoryCount ?? 0} selectionMode=${sel.sourceSelectionMode} sourceFallback=${sel.sourceFallbackUsed} watermark=${log.watermark}`
     );
     // Slice 3: structured refresh summary + balanced SLO breach evaluation.
-    emitRefreshObservability({ userId: identity.userId, log, ingestionSource });
+    // D1: capture the windowed cache-benefit advisory to surface on _meta below.
+    const { cacheBenefit: ranCacheBenefit } = emitRefreshObservability({
+      userId: identity.userId,
+      log,
+      ingestionSource,
+    });
 
     trackServerEvent("dashboard_refreshed", {
       storyCount: finalPayload.stories.length,
@@ -1415,6 +1457,10 @@ async function executeRefreshFlow(identity) {
           // clients ignore unknown _meta keys.
           outcomes: log.outcomes,
           ingestionSource,
+          // D1: windowed ingestion-cache benefit advisory (measurement only).
+          // Additive; consumers ignore unknown _meta keys. Reflects the rolling
+          // 5-run-per-mode window as of this run — never gates the response.
+          cacheBenefit: ranCacheBenefit,
           unchanged: false,
           watermark: log.watermark,
           candidateCount: log.candidateCount,

@@ -63,6 +63,20 @@ const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
 
+// D1: shared shape guard for the additive `_meta.cacheBenefit` advisory.
+// Asserts the runtime observability object is present and well-formed on a
+// refresh response without pinning rolling-window p50 values (the in-memory
+// window is a per-process singleton, so exact medians vary across tests).
+function assertCacheBenefitShape(meta, label) {
+  const cb = meta?.cacheBenefit;
+  assert.ok(cb && typeof cb === "object", `${label}: _meta.cacheBenefit present`);
+  assert.equal(typeof cb.ok, "boolean", `${label}: cacheBenefit.ok is boolean`);
+  assert.ok(Array.isArray(cb.reasonCodes), `${label}: cacheBenefit.reasonCodes is array`);
+  assert.ok(cb.sampleCounts && typeof cb.sampleCounts === "object", `${label}: cacheBenefit.sampleCounts present`);
+  assert.equal(typeof cb.sampleCounts.cacheHit, "number", `${label}: sampleCounts.cacheHit is number`);
+  assert.equal(typeof cb.sampleCounts.liveScoped, "number", `${label}: sampleCounts.liveScoped is number`);
+}
+
 // Stabilization helper (added for cross-test isolation): scopes a block of
 // test code to a unique synthetic userId so the per-user settings file
 // (`settings_user_<id>.json`) cannot collide with the suite-wide TEST_USER_ID
@@ -1032,6 +1046,8 @@ test("POST /api/dashboard/refresh: emits a structured [refresh.summary] line and
     assert.equal(res.body._meta.outcomes.geoAssessedCount, 2);
     assert.equal(typeof res.body._meta.ingestionSource, "string");
     assert.equal(typeof res.body._meta.timings?.geoMs, "number", "_meta.timings.geoMs present");
+    // D1: additive cache-benefit advisory present + well-formed on the ran branch.
+    assertCacheBenefitShape(res.body._meta, "ran branch");
     // The structured summary line is emitted exactly once and parses as JSON.
     const summaryLine = captured.find((l) => l.startsWith("[refresh.summary] "));
     assert.ok(summaryLine, `expected a [refresh.summary] line, got: ${JSON.stringify(captured)}`);
@@ -2353,6 +2369,9 @@ test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior snaps
     assert.equal(res.body._meta.watermark, "wm-stable-123");
     assert.equal(res.body._meta.candidateCount, 5);
     assert.equal(res.body._meta.selectedFeedCount, 1);
+    // D1: additive cache-benefit advisory present + well-formed on the
+    // watermark-skip branch too (parity with the ran branch).
+    assertCacheBenefitShape(res.body._meta, "watermark-skip branch");
     // Idempotency: NO snapshot writes, NO lock churn under short-circuit.
     assert.equal(writeCalls, 0, "no snapshot write under short-circuit");
     assert.equal(lockCalls, 0, "no lock churn under short-circuit");

@@ -14,6 +14,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
 | **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR calibration guardrails regress |
 | **Dashboard embassy beat (Sprint C3)** | Hermetic golden: synthetic mixed EN/ES, multi-geo (Colombia/LatAm + Kenya/Africa style) embassy beat still produces usable output after the Sprint C cluster-reliability changes (C1 input cap + C2 JSON safe-trim repair). Minimum-presence only: `stories.length >= 1` AND `usedFallbackClustering === false`. Diagnostics retained but not gated. | `npm run eval:dashboard-embassy-beat` | Standalone smoke (non-zero on unmet criteria); **not** wired into `eval:dashboard-quality-gate` |
+| **Cache-benefit advisory (Sprint D1)** | Hermetic, deterministic check of the ingestion-cache benefit window logic (`dashboard/cache-benefit-window.mjs`): cache_hit p50 >= 20% faster than live_scoped p50, cache-hit rate >= 60%, >= 5 samples/mode in a 5-run window. Synthetic run windows; **measurement + guardrails only, no runtime behavior**. | `npm run eval:cache-benefit-advisory` | **Advisory** — standalone, non-zero only if the window logic regresses; **not** wired into any blocking gate |
 
 ---
 
@@ -492,3 +493,86 @@ Per the Phase 5b policy, the suite combines **two advisory layers** on top of th
 
 - `0` — all 8 scenarios passed. Release gate PASS.
 - `1` — at least one scenario failed (or a runner error). Release gate FAIL; PR blocked.
+
+---
+
+## Cache-Benefit Advisory (Sprint D1)
+
+### Why this exists
+
+D1 proves the ingestion cache is actually buying us latency, with runtime
+observability plus a standalone advisory eval. This harness is **measurement +
+guardrails only** — it changes **no runtime policy** (no TTL, cadence, warmer
+scheduling, or cache read/write behavior). It validates the pure window logic in
+[`dashboard/cache-benefit-window.mjs`](../../dashboard/cache-benefit-window.mjs),
+the same module the server uses to emit the live advisory.
+
+### Locked criteria (the verdict)
+
+A measured window **passes** only when all three hold:
+
+1. **Success threshold** — cache-hit refresh p50 is **>= 20% faster** than
+   live-scoped p50: `improvement% = (live_p50 - cache_p50) / live_p50 >= 0.20`.
+2. **Extra guardrail** — cache-hit rate in the measured window is **>= 60%**.
+3. **Sample floor** — at least **5 runs per mode** in the comparison window.
+
+**Comparison window:** median of the **last 5 runs per mode** (`cache_hit` vs
+`live_scoped`). Full-manifest `live` fetches are non-comparable and excluded.
+The **hit-rate window** is the most recent `2 × 5 = 10` comparable runs, so it
+reflects the real arrival mix rather than the balanced per-mode medians.
+
+### How to run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:cache-benefit-advisory
+```
+
+Fully synthetic + deterministic — no network, no LLM, no env, no Supabase. Each
+scenario feeds a fixed chronological run window through `computeCacheBenefit` and
+asserts the verdict (`ok` + reason codes) matches the locked expectation.
+
+### Scenarios
+
+| ID | Intent | Expected verdict |
+|---|---|---|
+| `headline-healthy-pass` | Representative healthy window: cache ~2× faster, cache-heavy traffic | **PASS** (proof the criteria are met on realistic data) |
+| `improvement-below-threshold` | Cache only ~9% faster | FAIL — `improvement_below_threshold` |
+| `hit-rate-below-threshold` | Cache fast but recent traffic live-heavy (50%) | FAIL — `hit_rate_below_threshold` |
+| `insufficient-sample` | Only 3 runs per mode | FAIL — `insufficient_sample` |
+
+Reason codes: `insufficient_sample`, `improvement_below_threshold`,
+`improvement_unmeasurable` (live p50 = 0), `hit_rate_below_threshold`.
+
+### Exit codes
+
+- `0` — every scenario produced its expected verdict (the window logic is intact).
+- `1` — a scenario diverged from expectation (the measurement logic regressed);
+  the failing scenario + mismatch print inline.
+
+**Advisory by intent (hybrid):** advisory now, path to blocking later. This
+runner is standalone and is **not** wired into `eval:dashboard-quality-gate` or
+any other blocking gate. Per the locked promotion rule, recommend advisory →
+blocking only after **1 consecutive week of stable pass in preview**.
+
+### Runtime surface (where the live numbers come from)
+
+On every refresh settle, the server (`emitRefreshObservability` in `server.mjs`)
+classifies the run (`cache_hit` / `live_scoped`), records its `pipelineMs` into a
+bounded in-memory window, and emits:
+
+```
+[cache.benefit.window] {"userId":"…","runMode":"cache_hit","ok":true,"improvementPct":0.57,"hitRate":0.6,"cacheP50":182,"liveP50":425,"samples":{…},"reasonCodes":[]}
+```
+
+The same verdict is attached additively to the refresh response under
+`_meta.cacheBenefit` (both the full-run and watermark-skip branches). It is
+observability only — it never gates the response or alters cache behavior. The
+in-memory window is per-process and non-authoritative (it resets on restart);
+the eval is the deterministic, reproducible surface for the criteria.
+
+### When to run
+
+- After touching `dashboard/cache-benefit-window.mjs` or the
+  `emitRefreshObservability` wiring in `server.mjs`.
+- Before proposing the advisory → blocking promotion.
