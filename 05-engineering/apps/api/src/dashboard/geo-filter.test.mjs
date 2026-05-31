@@ -13,6 +13,7 @@ import {
   resolveGeoAssessConcurrency,
   resolveGeoAssessRpmCap,
   createGeoDiagnostics,
+  hasStrongLexicalGeoSignal,
   _resetGeoRateLimiter,
   _geoTiming,
   _geoAssessClient,
@@ -169,6 +170,113 @@ test("applyGeoFilter: held items preserve original item fields", async () => {
   const { held } = await applyGeoFilter([item], CONFIGURED_GEOS, async () => ({ confidence: 0.0 }));
   assert.equal(held[0].sourceId, "held-item");
   assert.equal(held[0].headline, "Original headline");
+});
+
+// ─── A2: lexical geo pre-pass ────────────────────────────────────────────────
+//
+// Before queuing an implicit/conflict candidate for the (rate-limited, LLM)
+// assessor, `applyGeoFilter` checks for a strong lexical geo signal — a
+// configured-geography mention in the item text via the shared
+// `itemMentionsConfiguredGeography` matcher. A hit admits the item without an
+// assess call and bumps `diag.lexicalBypassCount`. These tests pin the bypass,
+// the no-signal fall-through, that explicit_match is untouched, and that the
+// counter is request-scoped (no cross-run bleed).
+
+// An assessor that throws if ever called — proves the pre-pass admitted the
+// item WITHOUT touching the LLM path.
+const FAIL_IF_ASSESSED = async () => {
+  throw new Error("assessFn must not be called when the lexical pre-pass admits the item");
+};
+
+test("hasStrongLexicalGeoSignal: true when text names a configured geography, false otherwise", () => {
+  assert.equal(
+    hasStrongLexicalGeoSignal(makeItem({ headline: "Colombia readies new policy", body: [] }), CONFIGURED_GEOS),
+    true
+  );
+  assert.equal(
+    hasStrongLexicalGeoSignal(makeItem({ headline: "Local fisheries report", body: ["No geo here."] }), CONFIGURED_GEOS),
+    false
+  );
+  // No configured geographies → never a strong signal.
+  assert.equal(hasStrongLexicalGeoSignal(makeItem({ headline: "Colombia news" }), []), false);
+});
+
+test("applyGeoFilter: implicit_geo item with a lexical geo mention bypasses assess and is included", async () => {
+  const items = [makeItem({ sourceId: "a", geographies: [], headline: "US Treasury weighs new package", body: ["Details."] })];
+  const diag = createGeoDiagnostics();
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, FAIL_IF_ASSESSED, diag);
+  assert.equal(included.length, 1, "lexical geo mention must admit without an assess call");
+  assert.equal(held.length, 0);
+  assert.equal(included[0].geoLexicalBypass, true);
+  assert.equal(included[0].geoConfidence, 1.0);
+  assert.equal(included[0].geoCategory, GEO_CATEGORY.IMPLICIT_GEO);
+  assert.equal(diag.lexicalBypassCount, 1);
+});
+
+test("applyGeoFilter: explicit_conflict item with a lexical geo mention bypasses assess and is included", async () => {
+  // Tagged geographies conflict (France), but the text clearly names a
+  // configured geography (Colombia) → admit via the pre-pass.
+  const items = [makeItem({ sourceId: "a", geographies: ["France"], headline: "Colombia and France sign accord", body: [] })];
+  const diag = createGeoDiagnostics();
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, FAIL_IF_ASSESSED, diag);
+  assert.equal(included.length, 1);
+  assert.equal(held.length, 0);
+  assert.equal(included[0].geoLexicalBypass, true);
+  assert.equal(included[0].geoCategory, GEO_CATEGORY.EXPLICIT_CONFLICT);
+  assert.equal(diag.lexicalBypassCount, 1);
+});
+
+test("applyGeoFilter: item without a lexical geo signal still goes through assess", async () => {
+  let assessCalls = 0;
+  const items = [makeItem({ sourceId: "a", geographies: [], headline: "Local council budget talks", body: ["No geo."] })];
+  const diag = createGeoDiagnostics();
+  const assessFn = async () => { assessCalls += 1; return { confidence: 0.82 }; };
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, assessFn, diag);
+  assert.equal(assessCalls, 1, "no lexical signal → assessor must run");
+  assert.equal(included.length, 1, "0.82 >= implicit threshold → included");
+  assert.equal(held.length, 0);
+  assert.equal(included[0].geoLexicalBypass, undefined, "assessed item is not flagged as a lexical bypass");
+  assert.equal(diag.lexicalBypassCount, 0);
+});
+
+test("applyGeoFilter: explicit_match behavior unchanged — no assess, not flagged as lexical bypass", async () => {
+  const items = [makeItem({ sourceId: "a", geographies: ["US"], headline: "US Treasury weighs new package" })];
+  const diag = createGeoDiagnostics();
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, FAIL_IF_ASSESSED, diag);
+  assert.equal(included.length, 1);
+  assert.equal(held.length, 0);
+  assert.equal(included[0].geoCategory, GEO_CATEGORY.EXPLICIT_MATCH);
+  assert.equal(included[0].geoConfidence, 1.0);
+  assert.equal(included[0].geoLexicalBypass, undefined, "explicit_match must not be tagged as a lexical bypass");
+  assert.equal(diag.lexicalBypassCount, 0, "explicit_match does not count as a lexical bypass");
+});
+
+test("applyGeoFilter: lexicalBypassCount counts each bypass and does not bleed across runs", async () => {
+  const items = [
+    makeItem({ sourceId: "a", geographies: [], headline: "US sanctions debated" }),       // bypass
+    makeItem({ sourceId: "b", geographies: ["France"], headline: "Colombia accord signed" }), // bypass
+    makeItem({ sourceId: "c", geographies: [], headline: "Local weather report", body: ["No geo."] }), // assessed
+  ];
+  const diagA = createGeoDiagnostics();
+  await applyGeoFilter(items, CONFIGURED_GEOS, async () => ({ confidence: 0.85 }), diagA);
+  assert.equal(diagA.lexicalBypassCount, 2, "two items admitted via the pre-pass");
+
+  // A fresh run with a fresh diag starts at zero — no cross-run bleed.
+  const diagB = createGeoDiagnostics();
+  await applyGeoFilter(
+    [makeItem({ sourceId: "d", geographies: [], headline: "Local weather report", body: ["No geo."] })],
+    CONFIGURED_GEOS,
+    async () => ({ confidence: 0.85 }),
+    diagB
+  );
+  assert.equal(diagB.lexicalBypassCount, 0, "run B owns its own counter — Run A's bypasses must not bleed in");
+});
+
+test("applyGeoFilter: pre-pass works without a diag context (counter optional)", async () => {
+  const items = [makeItem({ sourceId: "a", geographies: [], headline: "US sanctions debated" })];
+  const { included } = await applyGeoFilter(items, CONFIGURED_GEOS, FAIL_IF_ASSESSED);
+  assert.equal(included.length, 1, "bypass must still admit the item when no diag is provided");
+  assert.equal(included[0].geoLexicalBypass, true);
 });
 
 // ─── Slice 1: bounded-concurrency geo-assess pool ────────────────────────────
@@ -673,9 +781,9 @@ test("assessGeoConfidence: diagnostics are request-local — two runs don't blee
       });
       await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS, diagB);
 
-      assert.deepEqual(diagA, { rateLimitedCount: 1, retryCount: 1, backoffMsTotal: diagA.backoffMsTotal });
+      assert.deepEqual(diagA, { rateLimitedCount: 1, retryCount: 1, backoffMsTotal: diagA.backoffMsTotal, lexicalBypassCount: 0 });
       assert.ok(diagA.backoffMsTotal > 0, "Run A recorded backoff");
-      assert.deepEqual(diagB, { rateLimitedCount: 0, retryCount: 0, backoffMsTotal: 0 },
+      assert.deepEqual(diagB, { rateLimitedCount: 0, retryCount: 0, backoffMsTotal: 0, lexicalBypassCount: 0 },
         "Run B's diagnostics must be untouched by Run A");
     }
   );

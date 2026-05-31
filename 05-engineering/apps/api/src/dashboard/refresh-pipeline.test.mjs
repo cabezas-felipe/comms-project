@@ -764,27 +764,58 @@ test("resolveGeoStageBudgetMs: unset/invalid env → default 25000, valid honore
   }
 });
 
-test("runRefreshPipeline: Lane 1 (must-see) candidates are assessed before Lane 2", async () => {
-  // Lane 1: implicit_geo item whose text mentions a configured geography ("US")
-  // → has a geo signal → must-see (and implicit_geo, so it DOES hit the
-  // assessor). Lane 2: implicit_geo item with no geo mention. Both from the
-  // selected source (Reuters). Lane 1's assessment must complete first.
+test("runRefreshPipeline: Lane 1 is processed before Lane 2 in the geo stage (A1.1 ordering)", async () => {
+  // A1.1 sequencing contract, asserted independently of the A2 bypass: the geo
+  // lane split must emit Lane 1 (must-see) ahead of Lane 2 regardless of input
+  // order. Lane 1 here is an explicit_match item — must-see by tagged geography,
+  // so the lexical pre-pass plays no part (it neither short-circuits nor masks
+  // ordering). Lane 2 is an implicit_geo item with no geo signal that hits the
+  // assessor. The input is deliberately ordered Lane 2 first, so a passing
+  // assertion can only come from the split reordering Lane 1 ahead.
   const assessOrder = [];
+  let clusterOrder = [];
   const rawItems = [
-    // deliberately list the Lane 2 item FIRST so order can't be an accident of
-    // input position — the lane split must reorder it after Lane 1.
     makeItem({ sourceId: "lane2", outlet: "Reuters", geographies: [], headline: "Local council budget talks" }),
-    makeItem({ sourceId: "lane1", outlet: "Reuters", geographies: [], headline: "US sanctions package debated" }),
+    makeItem({ sourceId: "lane1", outlet: "Reuters", geographies: ["US"] }),
   ];
   await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { clusterOrder = items.map((i) => i.sourceId); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async (item) => { assessOrder.push(item.sourceId); return { confidence: 0.85 }; },
+    beatFitEnabled: false, // isolate lane ordering from the relevance gate
+  });
+  assert.deepEqual(clusterOrder, ["lane1", "lane2"], "geo lane split must place Lane 1 ahead of Lane 2");
+  // The Lane 1 must-see item is admitted without an assess call (explicit_match
+  // short-circuits the assessor); only the no-signal Lane 2 item is assessed.
+  assert.deepEqual(assessOrder, ["lane2"], "only the Lane 2 candidate reaches the assessor");
+});
+
+test("runRefreshPipeline: A2 lexical pre-pass admits a Lane 1 geo-mention item without an assess call", async () => {
+  // Lane 1: implicit_geo item whose text names a configured geography ("US") →
+  // must-see. Under A2 its lexical signal admits it WITHOUT an assess call.
+  // Lane 2: implicit_geo item with no geo mention → still hits the assessor.
+  // Both from the selected source (Reuters).
+  const assessed = [];
+  const rawItems = [
+    // Order the Lane 2 (assessed) item first so the result can't be an accident
+    // of input position — the lane split reorders Lane 1 ahead of it anyway.
+    makeItem({ sourceId: "assessed", outlet: "Reuters", geographies: [], headline: "Local council budget talks" }),
+    makeItem({ sourceId: "bypass", outlet: "Reuters", geographies: [], headline: "US sanctions package debated" }),
+  ];
+  const { log } = await runRefreshPipeline({
     settings: BASE_SETTINGS,
     rawItems,
     clusterFn: async () => [],
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
-    geoAssessFn: async (item) => { assessOrder.push(item.sourceId); return { confidence: 0.85 }; },
+    geoAssessFn: async (item) => { assessed.push(item.sourceId); return { confidence: 0.85 }; },
   });
-  assert.deepEqual(assessOrder, ["lane1", "lane2"], "Lane 1 must be assessed before Lane 2");
+  assert.deepEqual(assessed, ["assessed"], "only the no-mention item hits the assessor; the geo-mention item bypasses");
+  assert.equal(log.geo.geoLexicalBypassCount, 1, "the Lane 1 geo-mention item is admitted via the lexical pre-pass");
+  assert.equal(log.geo.geoAssessedCount, 1, "exactly one assess call — the no-signal Lane 2 item");
 });
 
 test("runRefreshPipeline: Lane 1 still completes when budget is already exhausted (budget=0)", async () => {

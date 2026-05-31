@@ -1396,17 +1396,22 @@ export async function runRefreshPipeline({
   const geoRateLimitedCount = geoDiag.rateLimitedCount;
   const geoRetryCount = geoDiag.retryCount;
   const geoBackoffMsTotal = geoDiag.backoffMsTotal;
+  // A2: items admitted by the lexical pre-pass (configured-geography mention in
+  // text) without spending an assess call. Request-scoped via `geoDiag`.
+  const geoLexicalBypassCount = geoDiag.lexicalBypassCount;
   const geoLane1Count = lane1Items.length;
   const geoLane2Count = lane2Items.length;
   const geoLane2DeferredCount = geoLane2DeferredItems.length;
   // How many items actually hit the (Haiku) assessor — explicit_match items
-  // pass through without a call, an empty configuredGeos set assesses nothing,
-  // and budget-deferred Lane 2 items are never assessed.  Observability only:
-  // lets an operator confirm the assess pool's workload against geoMs (Slice 3).
+  // pass through without a call, A2 lexical-bypass items skip the call, an empty
+  // configuredGeos set assesses nothing, and budget-deferred Lane 2 items are
+  // never assessed.  Observability only: lets an operator confirm the assess
+  // pool's workload against geoMs (Slice 3) and the pre-pass's effect (A2).
   const geoAssessedCount = [...geoPassedItems, ...geoHeldItems].filter(
     (i) =>
-      i.geoCategory === GEO_CATEGORY.EXPLICIT_CONFLICT ||
-      i.geoCategory === GEO_CATEGORY.IMPLICIT_GEO
+      !i.geoLexicalBypass &&
+      (i.geoCategory === GEO_CATEGORY.EXPLICIT_CONFLICT ||
+        i.geoCategory === GEO_CATEGORY.IMPLICIT_GEO)
   ).length;
 
   // A1.1 — per-refresh geo diagnostics, surfaced in `_meta`/logs on both the
@@ -1419,6 +1424,7 @@ export async function runRefreshPipeline({
     geoBudgetMs: effectiveGeoBudgetMs,
     geoBudgetHit,
     geoAssessedCount,
+    geoLexicalBypassCount,
     geoHeldCount: geoHeldItems.length,
     geoRateLimitedCount,
     geoRetryCount,
@@ -1450,7 +1456,8 @@ export async function runRefreshPipeline({
   console.log(
     `[pipeline.geo] lane1=${geoLane1Count} lane2=${geoLane2Count}` +
       ` lane2_deferred=${geoLane2DeferredCount} budget_ms=${effectiveGeoBudgetMs}` +
-      ` budget_hit=${geoBudgetHit} assessed=${geoAssessedCount} held=${geoHeldItems.length}` +
+      ` budget_hit=${geoBudgetHit} assessed=${geoAssessedCount}` +
+      ` lexical_bypass=${geoLexicalBypassCount} held=${geoHeldItems.length}` +
       ` rate_limited=${geoRateLimitedCount} retries=${geoRetryCount}` +
       ` backoff_ms=${geoBackoffMsTotal} latency_ms=${geoMs}`
   );

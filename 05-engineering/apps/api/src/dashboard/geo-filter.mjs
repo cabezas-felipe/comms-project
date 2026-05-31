@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { providerFor } from "../ai/model-router.mjs";
 import { withTimeout } from "../ai/guardrails.mjs";
 import { pMap } from "../util/p-map.mjs";
+import { itemMentionsConfiguredGeography } from "./geo-lexical-match.mjs";
 
 export const GEO_CATEGORY = {
   EXPLICIT_MATCH: "explicit_match",
@@ -189,7 +190,40 @@ async function acquireGeoRateSlot() {
 // (`acquireGeoRateSlot`) stays global on purpose — the rate ceiling is an
 // org-level concern shared across runs, not a per-run one.
 export function createGeoDiagnostics() {
-  return { rateLimitedCount: 0, retryCount: 0, backoffMsTotal: 0 };
+  return { rateLimitedCount: 0, retryCount: 0, backoffMsTotal: 0, lexicalBypassCount: 0 };
+}
+
+// ─── A2: lexical geo pre-pass ─────────────────────────────────────────────────
+//
+// Before spending an LLM assess call on an implicit/conflict candidate, check
+// whether the item's text already names one of the user's configured
+// geographies. A clear lexical mention is a strong-enough signal to admit the
+// item outright — the SAME deterministic bar the recall gate
+// (`applyTopicKeywordFilter`) and the Lane 1 must-see classification already
+// use via `itemMentionsConfiguredGeography`. Reusing that shared matcher (no
+// duplicated geo logic) keeps the pre-pass from drifting from those stages.
+//
+// Text surface mirrors the pipeline's `joinGeoText` (headline + subtitle +
+// body + url). The geo stage runs BEFORE translation, so no normalized-English
+// evidence exists yet at this point — reading the raw fields here matches what
+// the recall gate's lexical classifier sees one stage earlier.
+function joinGeoPrePassText(item) {
+  const headline = String(item?.headline ?? "");
+  const subtitle = String(item?.subtitle ?? "");
+  const body = Array.isArray(item?.body) ? item.body.join(" ") : String(item?.body ?? "");
+  const url = typeof item?.url === "string" ? item.url : "";
+  return `${headline} ${subtitle} ${body} ${url}`.trim();
+}
+
+/**
+ * Does this item carry a strong lexical geo signal for the configured
+ * geographies?  True when its text mentions any configured geography (canonical
+ * token + GEOGRAPHY_SYNONYMS + settings-gated GEOGRAPHY_ALIASES).  Exported so
+ * the pre-pass decision is unit-testable in isolation.
+ */
+export function hasStrongLexicalGeoSignal(item, configuredGeos) {
+  if (!Array.isArray(configuredGeos) || configuredGeos.length === 0) return false;
+  return itemMentionsConfiguredGeography(joinGeoPrePassText(item), configuredGeos) !== null;
 }
 
 /**
@@ -340,8 +374,12 @@ export async function assessGeoConfidence(item, configuredGeos, diag = null) {
  * Rules:
  * - If configuredGeos is empty, all items are included (topic+keyword-only mode).
  * - explicit_match items are always included (confidence = 1.0).
- * - explicit_conflict items: call assessFn; include if confidence >= CONFLICT_THRESHOLD (0.90).
- * - implicit_geo items:      call assessFn; include if confidence >= IMPLICIT_THRESHOLD (0.80).
+ * - A2 lexical pre-pass: an explicit_conflict or implicit_geo item whose text
+ *   names a configured geography is admitted WITHOUT an assessFn call
+ *   (`geoConfidence = 1.0`, `geoLexicalBypass = true`), and `diag.lexicalBypassCount`
+ *   is incremented. This cuts geo-assess load for obvious geography matches.
+ * - explicit_conflict items (no lexical signal): call assessFn; include if confidence >= CONFLICT_THRESHOLD (0.90).
+ * - implicit_geo items (no lexical signal):      call assessFn; include if confidence >= IMPLICIT_THRESHOLD (0.80).
  * - Items below threshold go into the held array (hold bucket).
  *
  * @param {object[]} items
@@ -366,6 +404,14 @@ export async function applyGeoFilter(items, configuredGeos, assessFn = mockAsses
 
     if (category === GEO_CATEGORY.EXPLICIT_MATCH) {
       included.push({ ...item, geoCategory: category, geoConfidence: 1.0 });
+      continue;
+    }
+    // A2: lexical geo pre-pass — a clear configured-geography mention admits the
+    // item without an LLM assess call. Applies to both assess paths
+    // (explicit_conflict and implicit_geo); explicit_match above is untouched.
+    if (hasStrongLexicalGeoSignal(item, configuredGeos)) {
+      if (diag) diag.lexicalBypassCount += 1;
+      included.push({ ...item, geoCategory: category, geoConfidence: 1.0, geoLexicalBypass: true });
       continue;
     }
     assessQueue.push({ item, category });
