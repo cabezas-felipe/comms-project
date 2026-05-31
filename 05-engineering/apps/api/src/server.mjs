@@ -47,6 +47,7 @@ import {
   runDueRefreshes as orchestratorRunDueRefreshes,
 } from "./dashboard/due-user-orchestrator.mjs";
 import { assessGeoConfidence } from "./dashboard/geo-filter.mjs";
+import { evaluateRefreshSlo, _resetSloState } from "./ops/refresh-slo.mjs";
 import {
   parseFallbackFeedIdsEnv,
   parseFallbackEnabledEnv,
@@ -893,6 +894,33 @@ app.get("/api/dashboard", async (req, res) => {
 });
 
 /**
+ * Slice 3: emit one structured, grep-friendly observability line per refresh
+ * settle and run the balanced SLO breach evaluation.  `timings`/`funnel`/
+ * `outcomes` come straight off the pipeline log; `ingestionSource` is
+ * resolved at the server layer (cache vs live).  Pure logging — never throws
+ * into the refresh path.
+ */
+function emitRefreshObservability({ userId, log, ingestionSource }) {
+  const timings = (log && typeof log === "object" && log.timings) || {};
+  const outcomes = (log && typeof log === "object" && log.outcomes) || null;
+  const summary = {
+    userId,
+    ingestionMs: timings.ingestionMs ?? null,
+    pipelineMs: timings.pipelineMs ?? null,
+    geoMs: timings.geoMs ?? null,
+    ingestionSource,
+    stories: outcomes?.storiesPublished ?? log?.metaStoryCount ?? 0,
+    funnel: log?.funnel ?? null,
+    outcomes,
+  };
+  console.log(`[refresh.summary] ${JSON.stringify(summary)}`);
+  evaluateRefreshSlo({
+    pipelineMs: timings.pipelineMs,
+    clusteringFailureReason: outcomes?.clusteringFailureReason ?? log?.clusteringFailureReason ?? null,
+  });
+}
+
+/**
  * Phase 5: shared refresh executor used by both POST /api/dashboard/refresh
  * and the bootstrap route's "stale or missing snapshot → run refresh" path.
  *
@@ -1217,6 +1245,13 @@ async function executeRefreshFlow(identity) {
       // and partial returns may omit it; consumers ignore unknown _meta keys.
       if (log.decisionTrace) skipMeta.decisionTrace = log.decisionTrace;
       if (log.selection) skipMeta.selection = log.selection;
+      // Slice 3: outcome rollup + ingestion source on the watermark-skip
+      // response, so observability surfaces stay consistent across branches.
+      if (log.outcomes) skipMeta.outcomes = log.outcomes;
+      skipMeta.ingestionSource = ingestionSource;
+      // Structured summary + SLO eval on the skip settle too — a skip is a fast,
+      // non-timeout refresh, so it adds a healthy sample to the rolling window.
+      emitRefreshObservability({ userId: identity.userId, log, ingestionSource });
       if (priorSnapshot) {
         // Persist the bumped lastCheckedAt onto the existing snapshot so a
         // full page reload reflects this check.  refreshedAt stays pinned to
@@ -1319,6 +1354,12 @@ async function executeRefreshFlow(identity) {
     // Slice 7: per-stage wall-clock timings (ingestion + pipeline). Optional —
     // surfaced under `_meta.timings` on subsequent reads via liftSnapshotMeta.
     if (log.timings !== undefined) lastRunMeta.timings = log.timings;
+    // Slice 3: run-level outcome rollup + the server-resolved ingestion source
+    // (cache | live | live_scoped). Persisted so GET /api/dashboard can answer
+    // "did this refresh do its job, and where did the items come from?" without
+    // a replay. Optional for back-compat with pre-Slice-3 pipeline returns.
+    if (log.outcomes !== undefined) lastRunMeta.outcomes = log.outcomes;
+    lastRunMeta.ingestionSource = ingestionSource;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
@@ -1328,6 +1369,8 @@ async function executeRefreshFlow(identity) {
     console.log(
       `[dashboard.refresh] user=${identity.userId} stories=${finalPayload.stories.length} pool=${log.poolCount} relevant=${log.relevantCount} elapsed=${elapsedMs}ms fallback=${log.usedFallbackClustering} groundingFail=${log.groundingFailures} dropped=${log.droppedUngroundedStoryCount ?? 0} selectionMode=${sel.sourceSelectionMode} sourceFallback=${sel.sourceFallbackUsed} watermark=${log.watermark}`
     );
+    // Slice 3: structured refresh summary + balanced SLO breach evaluation.
+    emitRefreshObservability({ userId: identity.userId, log, ingestionSource });
 
     trackServerEvent("dashboard_refreshed", {
       storyCount: finalPayload.stories.length,
@@ -1366,6 +1409,11 @@ async function executeRefreshFlow(identity) {
           hasSnapshot: true,
           selection: log.selection,
           timings: log.timings,
+          // Slice 3: run-level outcome rollup + server-resolved ingestion
+          // source on the immediate refresh response. Backward-compatible;
+          // clients ignore unknown _meta keys.
+          outcomes: log.outcomes,
+          ingestionSource,
           unchanged: false,
           watermark: log.watermark,
           candidateCount: log.candidateCount,
@@ -1450,6 +1498,14 @@ async function executeRefreshFlow(identity) {
  * tests replace it inside a `try/finally` and restore the prior reference.
  */
 export const _refreshExecutor = { execute: executeRefreshFlow };
+
+/**
+ * Slice 3 test hook: direct access to the refresh SLO evaluator and its
+ * in-process rolling-window reset, so suites can drive breach conditions
+ * deterministically (and clear state between tests) without going through the
+ * full route.
+ */
+export const _refreshSlo = { evaluate: evaluateRefreshSlo, reset: _resetSloState };
 
 /**
  * Sub-slice 2.4: server-side due-user orchestrator hook.

@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
 
@@ -808,6 +808,139 @@ test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns 
     assert.equal(res.body._selectionMeta, undefined, "_selectionMeta must not leak at top level");
     assert.ok(!Object.prototype.hasOwnProperty.call(res.body, "_selectionMeta"), "_selectionMeta key must be absent");
   } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── Slice 3: structured refresh summary + balanced SLO alerts ───────────────
+
+test("Slice 3 SLO: a single slow pipeline (>90s) emits breach=pipeline_slow", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const { breaches } = _refreshSlo.evaluate(
+    { pipelineMs: 90_001, clusteringFailureReason: null },
+    { warn: (m) => lines.push(m) }
+  );
+  assert.ok(breaches.includes("pipeline_slow"));
+  assert.ok(
+    lines.includes("[refresh.slo] breach=pipeline_slow pipelineMs=90001"),
+    `expected pipeline_slow line, got: ${JSON.stringify(lines)}`
+  );
+});
+
+test("Slice 3 SLO: a pipeline at the 90s boundary does NOT breach pipeline_slow", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const { breaches } = _refreshSlo.evaluate(
+    { pipelineMs: 90_000, clusteringFailureReason: null },
+    { warn: (m) => lines.push(m) }
+  );
+  assert.ok(!breaches.includes("pipeline_slow"));
+  assert.equal(lines.length, 0);
+});
+
+test("Slice 3 SLO: sustained cluster timeouts (>0.2 over a full window of 10) emit breach=cluster_timeout_rate", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const logger = { warn: (m) => lines.push(m) };
+  // 3 timeouts / 10 = 0.30 > 0.20. The breach must NOT fire before the window
+  // is full — a single cold-start timeout can't trip it (balanced, not noisy).
+  const reasons = ["timeout", "timeout", "timeout", null, null, null, null, null, null, null];
+  let last;
+  reasons.forEach((r, i) => {
+    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r }, logger);
+    if (i < 9) {
+      assert.ok(
+        !last.breaches.includes("cluster_timeout_rate"),
+        `no cluster_timeout_rate breach before the window is full (call ${i})`
+      );
+    }
+  });
+  assert.ok(last.breaches.includes("cluster_timeout_rate"));
+  assert.equal(last.windowSize, 10);
+  assert.ok(
+    lines.includes("[refresh.slo] breach=cluster_timeout_rate rate=0.30 window=10"),
+    `expected cluster_timeout_rate line, got: ${JSON.stringify(lines)}`
+  );
+});
+
+test("Slice 3 SLO: timeout rate exactly at 0.2 across a full window does NOT breach", () => {
+  _refreshSlo.reset();
+  const lines = [];
+  const logger = { warn: (m) => lines.push(m) };
+  // 2 timeouts / 10 = 0.20, NOT strictly greater than the 0.20 threshold.
+  const reasons = ["timeout", "timeout", null, null, null, null, null, null, null, null];
+  let last;
+  reasons.forEach((r) => {
+    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r }, logger);
+  });
+  assert.ok(!last.breaches.includes("cluster_timeout_rate"));
+  assert.equal(lines.length, 0);
+});
+
+test("POST /api/dashboard/refresh: emits a structured [refresh.summary] line and surfaces outcomes + ingestionSource in _meta", async () => {
+  _refreshSlo.reset();
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevLog = console.log;
+  const captured = [];
+  _refreshPipeline.run = async (opts) => ({
+    payload: {
+      contractVersion: opts.contractVersion,
+      stories: [{
+        id: "s1", metaStoryId: "s1", title: "T", subtitle: "sub",
+        geographies: ["US"], topic: "Diplomatic relations", summary: "x",
+        whyItMatters: "y", whatChanged: "z", priority: "standard",
+        outletCount: 1, tags: { topics: [], keywords: [], geographies: ["US"] }, sources: [],
+      }],
+    },
+    log: {
+      unchanged: false,
+      poolCount: 5, relevantCount: 3, metaStoryCount: 1,
+      usedFallbackClustering: false, clusteringFailureReason: null,
+      clusteringAttempts: 1, clusteringLatencyMs: [12],
+      groundingFailures: 0, droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+      watermark: "wm-1", candidateCount: 3, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "test" },
+      funnel: { primaryDropStage: "none" },
+      timings: { preClusterMs: 1, geoMs: 2, recallMs: 3, clusterMs: 4, whatChangedMs: 0, whyMs: 0, pipelineMs: 30 },
+      outcomes: {
+        storiesPublished: 1, clusteringAttempts: 1, clusteringFailureReason: null,
+        usedFallbackClustering: false, geoAssessedCount: 2, geoHeldCount: 0,
+      },
+    },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  console.log = (...args) => { captured.push(args.join(" ")); };
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    console.log = prevLog;
+    assert.equal(res.status, 200);
+    // _meta surfaces the new observability keys (additive, backward-compatible).
+    assert.ok(res.body._meta?.outcomes, "_meta.outcomes present");
+    assert.equal(res.body._meta.outcomes.storiesPublished, 1);
+    assert.equal(res.body._meta.outcomes.geoAssessedCount, 2);
+    assert.equal(typeof res.body._meta.ingestionSource, "string");
+    assert.equal(typeof res.body._meta.timings?.geoMs, "number", "_meta.timings.geoMs present");
+    // The structured summary line is emitted exactly once and parses as JSON.
+    const summaryLine = captured.find((l) => l.startsWith("[refresh.summary] "));
+    assert.ok(summaryLine, `expected a [refresh.summary] line, got: ${JSON.stringify(captured)}`);
+    const summary = JSON.parse(summaryLine.slice("[refresh.summary] ".length));
+    assert.equal(summary.stories, 1);
+    assert.equal(summary.pipelineMs, 30);
+    assert.equal(summary.geoMs, 2);
+    assert.equal(typeof summary.ingestionSource, "string");
+    assert.equal(summary.outcomes.geoAssessedCount, 2);
+    assert.ok(summary.funnel, "summary carries funnel");
+  } finally {
+    console.log = prevLog;
+    _refreshPipeline.run = prevRun;
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;

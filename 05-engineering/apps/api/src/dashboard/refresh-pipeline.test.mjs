@@ -6878,4 +6878,31 @@ test("Slice 7: log.timings exposes non-negative integer per-stage wall-clock; wh
   assert.ok("clusteringLatencyMs" in log, "clusteringLatencyMs preserved");
 });
 
+test("Slice 3: log.outcomes rolls up stories, clustering, and geo-assess counts coherently", async () => {
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [
+      // explicit_match (geographies overlap configured) — included WITHOUT an
+      // assess call, so it must NOT count toward geoAssessedCount.
+      makeItem({ sourceId: "match-1", outlet: "Reuters", minutesAgo: 30, geographies: ["US"] }),
+      // implicit_geo (no geographies) — hits the assessor (mock → 0.85 ≥ 0.80).
+      makeItem({ sourceId: "implicit-1", outlet: "Reuters", minutesAgo: 30, geographies: [] }),
+    ],
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.ok(log.outcomes && typeof log.outcomes === "object", "log.outcomes present on a full run");
+  // Each outcome mirrors the authoritative top-level field — a single source of
+  // truth, just rolled up for the summary/SLO surfaces.
+  assert.equal(log.outcomes.storiesPublished, log.metaStoryCount, "storiesPublished mirrors metaStoryCount");
+  assert.equal(log.outcomes.clusteringAttempts, log.clusteringAttempts);
+  assert.equal(log.outcomes.clusteringFailureReason, log.clusteringFailureReason);
+  assert.equal(log.outcomes.usedFallbackClustering, log.usedFallbackClustering);
+  assert.equal(log.outcomes.geoHeldCount, log.geoHeldCount, "geoHeldCount mirrors top-level count");
+  // Only the implicit_geo item was assessed; the explicit_match item bypassed
+  // the assessor entirely.
+  assert.equal(log.outcomes.geoAssessedCount, 1, "exactly one item hit the geo assessor");
+});
+
 });
