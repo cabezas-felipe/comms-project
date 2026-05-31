@@ -3,7 +3,14 @@ import {
   verifyGrounding,
   generateMetaStoryId,
 } from "../ai/cluster-engine.mjs";
-import { applyGeoFilter, mockAssessGeoConfidence, GEO_CATEGORY } from "./geo-filter.mjs";
+import {
+  applyGeoFilter,
+  mockAssessGeoConfidence,
+  GEO_CATEGORY,
+  categorizeItem,
+  resolveGeoAssessConcurrency,
+  createGeoDiagnostics,
+} from "./geo-filter.mjs";
 import {
   normalizeTopicLabel,
   normalizeSourceIdentity,
@@ -73,6 +80,27 @@ import {
   resolveClusterSplitConfig,
 } from "./cluster-split-healer.mjs";
 import { pMap } from "../util/p-map.mjs";
+
+// ─── A1.1: geo-stage time budget ─────────────────────────────────────────────
+//
+// The geo stage assesses every implicit/conflict candidate through the (rate-
+// limited, retrying) Haiku assessor.  Under heavy load that pool can run long
+// enough to push total refresh latency past what a user will wait.  A1.1 caps
+// the stage with a wall-clock budget: Lane 1 (protected must-see) always
+// finishes, and Lane 2 (opportunistic) is processed only while the budget
+// holds — the remainder is deferred to the hold path for next refresh.
+export const GEO_STAGE_BUDGET_MS_DEFAULT = 25000;
+
+/**
+ * Resolve the geo-stage wall-clock budget (ms) from
+ * `TEMPO_AI_GEO_STAGE_BUDGET_MS`.  Defaults to 25000 when unset or misconfigured
+ * (non-finite / <= 0).  Exported so tests can pin the default without driving
+ * the full pipeline.
+ */
+export function resolveGeoStageBudgetMs() {
+  const n = Number(process.env.TEMPO_AI_GEO_STAGE_BUDGET_MS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : GEO_STAGE_BUDGET_MS_DEFAULT;
+}
 
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
@@ -1054,6 +1082,10 @@ export async function runRefreshPipeline({
   clusterModel,
   contractVersion,
   geoAssessFn = mockAssessGeoConfidence,
+  // A1.1 — geo-stage wall-clock budget override (ms). Tests pin it (e.g. 0 to
+  // force a post-Lane-1 budget hit) without env mutation; production falls
+  // through to `resolveGeoStageBudgetMs()` (default 25000).
+  geoStageBudgetMs = null,
   readHeldFn = null,
   writeHeldFn = null,
   readPriorSnapshotFn = null,
@@ -1297,36 +1329,131 @@ export async function runRefreshPipeline({
   //     The per-item assessor (Haiku) runs as a bounded-concurrency pool, so we
   //     bracket the whole stage as its own `geoMs` span — like recallMs, it is
   //     measured separately and excluded from preClusterMs (no double-count).
+  //
+  //     A1.1 — two protected lanes under a wall-clock budget:
+  //       • Lane 1 (must-see): from a SELECTED source AND with a geo signal
+  //         (explicit `item.geographies` overlap OR a configured-geography
+  //         lexical mention). Topic/keyword are NOT required. Lane 1 is ALWAYS
+  //         processed to completion, even if it alone blows the budget — these
+  //         are the stories the user most expects to see.
+  //       • Lane 2 (opportunistic): every other candidate (no geo signal, or a
+  //         re-evaluation pulled back from the hold bucket). Processed in
+  //         concurrency-sized waves only while the budget holds; once the budget
+  //         is exhausted the remainder is deferred to the hold path so it is
+  //         re-evaluated next refresh (never dropped).
   const configuredGeos = settings.geographies ?? [];
+  const effectiveGeoBudgetMs = geoStageBudgetMs ?? resolveGeoStageBudgetMs();
+  // "Selected source" = present in the current source-selected pool. Held-bucket
+  // re-evaluations (previouslyHeld) are deliberately Lane 2: fresh must-see
+  // content takes priority over re-litigating the backlog under load.
+  const selectedSourceIds = new Set(recentItems.map((i) => i.sourceId));
+  const hasGeoSignal = (item) => {
+    if (configuredGeos.length === 0) return false;
+    if (categorizeItem(item, configuredGeos) === GEO_CATEGORY.EXPLICIT_MATCH) return true;
+    return itemMentionsConfiguredGeography(joinGeoText(item), configuredGeos) !== null;
+  };
+  const lane1Items = [];
+  const lane2Items = [];
+  for (const item of candidateItems) {
+    if (selectedSourceIds.has(item.sourceId) && hasGeoSignal(item)) lane1Items.push(item);
+    else lane2Items.push(item);
+  }
+  // A1.1 (recall protection): the set of must-see sourceIds, used after the
+  // recall gate to union Lane 1 survivors that topic/keyword recall would
+  // otherwise drop (an explicit-geo item whose *text* never names the geo).
+  const lane1SourceIds = new Set(lane1Items.map((i) => i.sourceId));
+
+  // A1.2: request-scoped geo diagnostics — created per run and threaded into
+  // `applyGeoFilter`, so 429/retry counts can't bleed across overlapping
+  // refreshes the way the old global-snapshot delta could.
+  const geoDiag = createGeoDiagnostics();
   const geoStartedAt = Date.now();
-  const { included: geoPassedItems, held: geoHeldItems } = await applyGeoFilter(
-    candidateItems,
-    configuredGeos,
-    geoAssessFn
-  );
+
+  // Lane 1 always runs to completion (budget does not interrupt it).
+  const lane1Result = await applyGeoFilter(lane1Items, configuredGeos, geoAssessFn, geoDiag);
+  const geoPassedItems = [...lane1Result.included];
+  const geoHeldItems = [...lane1Result.held];
+
+  // Lane 2 runs in concurrency-sized waves; the budget is re-checked before each
+  // wave so the stage stops cleanly at a pool boundary instead of mid-flight.
+  const geoLane2DeferredItems = [];
+  let geoBudgetHit = false;
+  const lane2WaveSize = Math.max(1, resolveGeoAssessConcurrency());
+  for (let i = 0; i < lane2Items.length; i += lane2WaveSize) {
+    if (Date.now() - geoStartedAt >= effectiveGeoBudgetMs) {
+      geoBudgetHit = true;
+      geoLane2DeferredItems.push(...lane2Items.slice(i));
+      break;
+    }
+    const wave = lane2Items.slice(i, i + lane2WaveSize);
+    const waveResult = await applyGeoFilter(wave, configuredGeos, geoAssessFn, geoDiag);
+    geoPassedItems.push(...waveResult.included);
+    geoHeldItems.push(...waveResult.held);
+  }
+
   const geoEndedAt = Date.now();
   const geoMs = Math.max(0, geoEndedAt - geoStartedAt);
+  const geoRateLimitedCount = geoDiag.rateLimitedCount;
+  const geoRetryCount = geoDiag.retryCount;
+  const geoBackoffMsTotal = geoDiag.backoffMsTotal;
+  const geoLane1Count = lane1Items.length;
+  const geoLane2Count = lane2Items.length;
+  const geoLane2DeferredCount = geoLane2DeferredItems.length;
   // How many items actually hit the (Haiku) assessor — explicit_match items
-  // pass through without a call, and an empty configuredGeos set assesses
-  // nothing.  Observability only: lets an operator confirm the assess pool's
-  // workload against geoMs (Slice 3).
+  // pass through without a call, an empty configuredGeos set assesses nothing,
+  // and budget-deferred Lane 2 items are never assessed.  Observability only:
+  // lets an operator confirm the assess pool's workload against geoMs (Slice 3).
   const geoAssessedCount = [...geoPassedItems, ...geoHeldItems].filter(
     (i) =>
       i.geoCategory === GEO_CATEGORY.EXPLICIT_CONFLICT ||
       i.geoCategory === GEO_CATEGORY.IMPLICIT_GEO
   ).length;
 
+  // A1.1 — per-refresh geo diagnostics, surfaced in `_meta`/logs on both the
+  // normal and watermark-skip return paths so lane/budget behavior is auditable
+  // without re-deriving it. Retains the A1 rate-limit/retry counters.
+  const geoDiagnostics = {
+    geoLane1Count,
+    geoLane2Count,
+    geoLane2DeferredCount,
+    geoBudgetMs: effectiveGeoBudgetMs,
+    geoBudgetHit,
+    geoAssessedCount,
+    geoHeldCount: geoHeldItems.length,
+    geoRateLimitedCount,
+    geoRetryCount,
+    geoBackoffMsTotal,
+  };
+
+  // Persist BOTH the low-confidence holds and the budget-deferred Lane 2 items
+  // to the hold path. Deferred items carry no geo metadata yet — the hold reader
+  // strips geoCategory/geoConfidence anyway, so a bare item re-enters next
+  // refresh's candidate pool cleanly for a fresh assessment.
+  const geoHoldToWrite = [...geoHeldItems, ...geoLane2DeferredItems];
   if (writeHeldFn) {
     try {
-      await writeHeldFn(geoHeldItems);
+      await writeHeldFn(geoHoldToWrite);
     } catch (err) {
       console.warn(`[pipeline] hold bucket write failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 
-  if (geoHeldItems.length > 0) {
-    console.log(`[pipeline] ${geoHeldItems.length} item(s) in geo hold bucket after this refresh`);
+  if (geoHoldToWrite.length > 0) {
+    console.log(
+      `[pipeline] ${geoHoldToWrite.length} item(s) in geo hold bucket after this refresh` +
+        ` (${geoHeldItems.length} low-confidence, ${geoLane2DeferredCount} budget-deferred)`
+    );
   }
+
+  // A1.1 + A1: one concise line that makes lane split, budget behavior, and
+  // rate-limit pressure obvious in prod logs.
+  console.log(
+    `[pipeline.geo] lane1=${geoLane1Count} lane2=${geoLane2Count}` +
+      ` lane2_deferred=${geoLane2DeferredCount} budget_ms=${effectiveGeoBudgetMs}` +
+      ` budget_hit=${geoBudgetHit} assessed=${geoAssessedCount} held=${geoHeldItems.length}` +
+      ` rate_limited=${geoRateLimitedCount} retries=${geoRetryCount}` +
+      ` backoff_ms=${geoBackoffMsTotal} latency_ms=${geoMs}`
+  );
 
   // 4b-bis. Translation-first evidence normalization (Slice 14).
   //
@@ -1454,13 +1581,47 @@ export async function runRefreshPipeline({
   });
   const recallEndedAt = Date.now();
   const recallMs = Math.max(0, recallEndedAt - recallStartedAt);
-  const recallItems = recallResult.items;
+
+  // A1.1 (recall protection): Lane 1 (must-see) items survive recall end-to-end.
+  // The recall gate is text-driven (topic/keyword/geo-lexical), so an explicit-
+  // geo Lane 1 item whose body never *names* the geography would be dropped here
+  // even though the user explicitly tracks that geography from a selected
+  // source. Union any such Lane 1 survivor — already past the geo stage, so we
+  // pull the enriched copy from `semanticAnnotatedGeoItems` — back into the
+  // recall set, deduped by sourceId, preserving recall order then appending. The
+  // lexical gate's own diagnostics (`topicKeywordBreakdown`) are left untouched
+  // so they keep faithfully describing the gate; this is an additive override,
+  // not a change to recall semantics. Lane 1 items still face beat-fit, dedupe,
+  // grounding, and clustering unchanged.
+  //
+  // Exception — recall fail-closed wins: when the embedding stage degraded
+  // (e.g. embedFn threw in hybrid_strict), recall deliberately returns nothing
+  // rather than leak unverified content. Lane protection must NOT paper over
+  // that safety state, so we skip the union when `recall.degraded` is set.
+  const recallDegraded = recallResult.diagnostics?.degraded === true;
+  const recalledIds = new Set(recallResult.items.map((i) => i.sourceId));
+  const lane1Protected = recallDegraded
+    ? []
+    : semanticAnnotatedGeoItems.filter(
+        (it) => lane1SourceIds.has(it.sourceId) && !recalledIds.has(it.sourceId)
+      );
+  const recallItems = lane1Protected.length > 0
+    ? [...recallResult.items, ...lane1Protected]
+    : recallResult.items;
+  if (lane1Protected.length > 0) {
+    console.log(
+      `[pipeline.recall] lane1_protected=${lane1Protected.length} must-see item(s) ` +
+        `re-admitted past the topic/keyword gate`
+    );
+  }
   const recallDiagnostics = {
     ...recallResult.diagnostics,
     // Surface the lexical-stage breakdown alongside the embedding stats so
     // operators get a single `_meta.recall` object that answers both "how
     // did the lexical gate behave?" and "did embeddings widen recall?".
     topicKeywordBreakdown,
+    // A1.1: count of must-see items re-admitted past the recall gate this run.
+    lane1Protected: lane1Protected.length,
   };
   console.log(
     `[pipeline.recall] mode=${recallDiagnostics.mode}` +
@@ -1627,6 +1788,7 @@ export async function runRefreshPipeline({
         poolCount: recentItems.length,
         recentCount: recentItems.length,
         geoHeldCount: geoHeldItems.length,
+        geo: geoDiagnostics,
         relevantCount: relevantItems.length,
         relevantItemCount: relevantItems.length,
         metaStoryCount: 0,
@@ -1642,8 +1804,7 @@ export async function runRefreshPipeline({
           clusteringAttempts: 0,
           clusteringFailureReason: null,
           usedFallbackClustering: false,
-          geoAssessedCount,
-          geoHeldCount: geoHeldItems.length,
+          ...geoDiagnostics,
         },
         clusteringLatencyMs: [],
         groundingFailures: 0,
@@ -2291,6 +2452,7 @@ export async function runRefreshPipeline({
     poolCount: recentItems.length,
     recentCount: recentItems.length,
     geoHeldCount: geoHeldItems.length,
+    geo: geoDiagnostics,
     relevantCount: relevantItems.length,
     relevantItemCount: relevantItems.length, // alias surfaced in `_meta.selection`
     metaStoryCount: stories.length,
@@ -2313,8 +2475,7 @@ export async function runRefreshPipeline({
       clusteringAttempts,
       clusteringFailureReason,
       usedFallbackClustering,
-      geoAssessedCount,
-      geoHeldCount: geoHeldItems.length,
+      ...geoDiagnostics,
     },
     clusteringLatencyMs: clusteringAttemptLatencyMs,
     // Slice 2 — post-cluster split healer diagnostics. `enabled` reflects the

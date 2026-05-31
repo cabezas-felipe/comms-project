@@ -170,9 +170,7 @@
     "sourceId": "weak-semantic-1",
     "outlet": "Reuters",
     "topic": "Other",
-    "geographies": [
-      "US"
-    ],
+    "geographies": [],
     "weight": 60,
     "minutesAgo": 20,
     "url": "https://www.reuters.com/lifestyle/garden-plant-sale",
