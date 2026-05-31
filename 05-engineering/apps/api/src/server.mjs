@@ -67,7 +67,15 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
-const DATA_DIR = process.env.TEMPO_DATA_DIR ?? path.join(ROOT, "data");
+// Resolve the data dir at call time rather than freezing it at import.  In
+// production TEMPO_DATA_DIR is set once before startup and never changes, so
+// this is behaviourally identical to the old module-level const.  Reading it
+// per call (the same pattern settings-repo / dashboard-snapshot-repo already
+// use) lets the test suite point distinct files at distinct temp dirs even when
+// they share this module singleton in a single-process run.
+function dataDir() {
+  return process.env.TEMPO_DATA_DIR ?? path.join(ROOT, "data");
+}
 const PORT = Number(process.env.TEMPO_API_PORT || 8787);
 
 let _envBootstrapAttempted = false;
@@ -516,7 +524,7 @@ async function loadManifestForSelection() {
     if (isSupabaseEnabled()) {
       return await _feedManifest.list({ supabase: getSupabaseClient() });
     }
-    const file = path.join(DATA_DIR, "source-feeds.json");
+    const file = path.join(dataDir(), "source-feeds.json");
     const content = await fs.readFile(file, "utf8");
     const parsed = JSON.parse(content);
     return Array.isArray(parsed?.feeds) ? parsed.feeds : [];
@@ -778,7 +786,7 @@ app.get("/api/ingestion/sources", async (_req, res) => {
   }
 
   try {
-    const feedsFile = path.join(DATA_DIR, "source-feeds.json");
+    const feedsFile = path.join(dataDir(), "source-feeds.json");
     const content = await fs.readFile(feedsFile, "utf8");
     res.json(JSON.parse(content));
   } catch (error) {
@@ -1055,10 +1063,10 @@ async function executeRefreshFlow(identity) {
       // `feedIds` entirely so readFeedItems keeps its full-manifest behavior.
       // cacheFeedIds is already filtered to non-empty strings above.
       if (cacheFeedIds.length > 0) {
-        rawItems = await _feedReader.read(DATA_DIR, { feedIds: cacheFeedIds });
+        rawItems = await _feedReader.read(dataDir(), { feedIds: cacheFeedIds });
         ingestionSource = "live_scoped";
       } else {
-        rawItems = await _feedReader.read(DATA_DIR);
+        rawItems = await _feedReader.read(dataDir());
       }
     }
     const ingestionMs = Math.max(0, Date.now() - ingestionStartedAt);

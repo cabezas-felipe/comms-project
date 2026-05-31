@@ -195,11 +195,20 @@ function withGeoAssessEnv(setup, run) {
   setup();
   return run().finally(() => {
     _geoAssessClient.create = prevCreate;
+    // Restore each key to its captured value, or DELETE it when it was unset
+    // before the test.  Without the `else delete`, a var the test newly set
+    // (e.g. TEMPO_AI_GEO_ASSESS_MODEL / API keys) would leak into every later
+    // test in the suite and silently flip downstream geo-assessment routing.
     if (saved.model !== undefined) process.env.TEMPO_AI_GEO_ASSESS_MODEL = saved.model;
+    else delete process.env.TEMPO_AI_GEO_ASSESS_MODEL;
     if (saved.timeout !== undefined) process.env.TEMPO_AI_GEO_ASSESS_TIMEOUT_MS = saved.timeout;
+    else delete process.env.TEMPO_AI_GEO_ASSESS_TIMEOUT_MS;
     if (saved.apiKey !== undefined) process.env.TEMPO_ANTHROPIC_API_KEY = saved.apiKey;
+    else delete process.env.TEMPO_ANTHROPIC_API_KEY;
     if (saved.altKey !== undefined) process.env.ANTHROPIC_API_KEY = saved.altKey;
+    else delete process.env.ANTHROPIC_API_KEY;
     if (saved.mockOnly !== undefined) process.env.TEMPO_AI_MOCK_ONLY = saved.mockOnly;
+    else delete process.env.TEMPO_AI_MOCK_ONLY;
   });
 }
 

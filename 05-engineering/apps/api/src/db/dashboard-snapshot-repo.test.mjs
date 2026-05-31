@@ -1,4 +1,4 @@
-import { test, after } from "node:test";
+import { test, after, beforeEach, afterEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +19,24 @@ const { readSnapshot, writeSnapshot, writeSnapshotMeta, getLockedTitles, insertT
 after(async () => {
   await rm(tmpDir, { recursive: true, force: true });
 });
+
+// Pin TEMPO_DATA_DIR to this file's temp dir before every test, and restore the
+// prior value after.  Several sibling test files set this same env var at module
+// load to their own temp dir; when the whole suite runs in a single process
+// (e.g. package.json order, no per-file process isolation) the last module-load
+// wins and clobbers ours.  Snapshotting + restoring per test (delete-when-
+// undefined) keeps our dir active for our reads without leaving a pinned value
+// that would leak to sibling files that run after us.
+let _snapshotRepoDataDir;
+describe("dashboard-snapshot-repo", () => {
+  beforeEach(() => {
+    _snapshotRepoDataDir = process.env.TEMPO_DATA_DIR;
+    process.env.TEMPO_DATA_DIR = tmpDir;
+  });
+  afterEach(() => {
+    if (_snapshotRepoDataDir === undefined) delete process.env.TEMPO_DATA_DIR;
+    else process.env.TEMPO_DATA_DIR = _snapshotRepoDataDir;
+  });
 
 const USER_ID = "test-user-snapshot";
 
@@ -644,4 +662,6 @@ test("writeSnapshot + readSnapshot: _everSeenMetaStoryIds round-trips on the sna
   // But it must NOT appear under _meta — _meta is what clients see.
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "everSeenMetaStoryIds"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "_everSeenMetaStoryIds"), false);
+});
+
 });

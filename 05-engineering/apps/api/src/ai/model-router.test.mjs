@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach, afterEach, describe } from "node:test";
 import {
   getAiCapabilityMap,
   getAiMetrics,
@@ -26,7 +26,32 @@ const SAMPLE_CLUSTER = {
   ],
 };
 
+// Capture the AI-routing env as inherited at load (a developer .env or CI can
+// export TEMPO_AI_SUMMARY_MODEL=anthropic:... / TEMPO_AI_MOCK_ONLY, which would
+// route summarizeCluster onto a real provider and flip the success-path
+// `fallbackUsed` assertions).  A describe-scoped beforeEach clears these to the
+// shipped mock defaults before every test, and afterEach restores the captured
+// values (delete-when-undefined) so nothing leaks to sibling files in a
+// single-process full-suite run.  Tests that exercise real-provider routing set
+// these vars explicitly inside their own body on top of the cleared baseline.
+const _ROUTER_ENV0 = {
+  TEMPO_AI_SUMMARY_MODEL: process.env.TEMPO_AI_SUMMARY_MODEL,
+  TEMPO_AI_MOCK_ONLY: process.env.TEMPO_AI_MOCK_ONLY,
+};
+
 // ── Existing capability/summary tests ────────────────────────────────────────
+
+describe("model-router", () => {
+  beforeEach(() => {
+    delete process.env.TEMPO_AI_SUMMARY_MODEL;
+    delete process.env.TEMPO_AI_MOCK_ONLY;
+  });
+  afterEach(() => {
+    for (const [k, v] of Object.entries(_ROUTER_ENV0)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
 
 test("capability map exposes model assignments", () => {
   const map = getAiCapabilityMap();
@@ -521,4 +546,6 @@ test("assertReadyForRealRun: validation mode + all real + keys present → retur
   } finally {
     restoreEnv(saved);
   }
+});
+
 });

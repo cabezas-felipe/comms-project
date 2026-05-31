@@ -2,12 +2,14 @@
 // assert the legacy 0.40 precision-first contract — an off-topic item with
 // only a geo match (score ~0.30) must NOT leak. The MVP default lowered to
 // 0.20, which by design admits such borderline items. Pin the legacy
-// threshold here so the framework tests keep validating their contract;
-// node --test isolates env mutations to this file's child process.
-process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
-
-import { test } from "node:test";
+// threshold for this file's tests via a describe-scoped beforeEach/afterEach.
+// (Setting it at module top leaked across files in a single-process full-suite
+// run — TEMPO_BEAT_FIT_THRESHOLD is read at call time, so the relevance-
+// precision eval would inherit 0.40 and mis-score its geo-mismatch fixture.)
+import { test, beforeEach, afterEach, describe } from "node:test";
 import assert from "node:assert/strict";
+
+const _PREV_BEAT_FIT_THRESHOLD = process.env.TEMPO_BEAT_FIT_THRESHOLD;
 
 import {
   CRITICAL_SCENARIO_IDS,
@@ -15,6 +17,15 @@ import {
   aggregateVerdict,
 } from "./critical-suite-core.mjs";
 import { buildDeterministicChecks } from "./critical-suite-judge.mjs";
+
+describe("critical-suite-core", () => {
+  beforeEach(() => {
+    process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
+  });
+  afterEach(() => {
+    if (_PREV_BEAT_FIT_THRESHOLD === undefined) delete process.env.TEMPO_BEAT_FIT_THRESHOLD;
+    else process.env.TEMPO_BEAT_FIT_THRESHOLD = _PREV_BEAT_FIT_THRESHOLD;
+  });
 
 // ── CRITICAL_SCENARIO_IDS / registry shape ──────────────────────────────────
 
@@ -284,4 +295,6 @@ test("buildDeterministicChecks: flags source without stable id (no-fabrication c
   assert.equal(findings.length, 1);
   assert.equal(findings[0].level, "warn");
   assert.match(findings[0].id, /:source-id-missing$/);
+});
+
 });

@@ -1,34 +1,26 @@
-import { test } from "node:test";
+import { test, beforeEach, afterEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
-// Tests in this file predate the embedding-recall stage and don't inject
-// embedFn.  Under the strict fail-closed contract for `hybrid_strict`, every
-// such call would return an empty candidate set — making every assertion
-// about story counts/cluster output a false negative.  Set the file-scoped
-// default to `keyword` mode so legacy tests exercise the legacy recall path;
-// tests that target the embedding stage opt back into `hybrid_strict` by
-// passing `recallConfig: HYBRID_RECALL_CONFIG` explicitly.
+// This file pins three env-tunable pipeline knobs to legacy values so its
+// fixtures keep testing the contract they were written for:
+//   - TEMPO_RECALL_MODE="keyword": tests predate the embedding-recall stage and
+//     don't inject embedFn; hybrid_strict would fail-closed to empty candidates.
+//     Tests targeting the embedding stage opt back in via `recallConfig`.
+//   - TEMPO_SEMANTIC_BEAT_FIT_ENABLED="false": legacy tests don't inject a
+//     `semanticBeatFitEmbedFn`; the dedicated semantic tests opt in explicitly.
+//   - TEMPO_BEAT_FIT_THRESHOLD="0.40": the MVP default dropped to 0.20
+//     (recall-first); these fixtures were tuned against the 0.40 precision gate.
 //
-// Safe to set at module top: `node --test` runs each test file in a child
-// process, so this env mutation does not leak across files.
-process.env.TEMPO_RECALL_MODE = "keyword";
-// Semantic BeatFit defaults to enabled in production. Legacy tests in this
-// file predate the stage and don't inject a `semanticBeatFitEmbedFn`; if the
-// stage ran they would observe a degraded "embed_fn_unavailable" log line
-// (harmless) and any test counting embedFn invocations would see the fallback
-// fire. Disable at the file top so legacy assertions keep their original
-// contract; the dedicated semantic tests below opt in via
-// `semanticBeatFitConfig: SEMANTIC_ON`.
-process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED = "false";
-// D-063: the MVP default beat-fit threshold dropped from 0.40 to 0.20
-// (recall-first). The strict-empty / decisionTrace / semantic-geo / critical-
-// eval fixtures here were tuned against the legacy 0.40 precision gate (e.g.
-// commodity-penalized items scoring ~0.25 still exclude). Pin the legacy
-// threshold for this file so each scenario keeps testing the precision
-// contract it was written for. Same isolation guarantee as
-// TEMPO_SEMANTIC_BEAT_FIT_ENABLED above: node --test runs each file in a
-// child process, so this does not leak across files.
-process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
+// These knobs are read from process.env at *call time* by the pipeline.  Under
+// per-file process isolation (`node --test` default) setting them at module top
+// was safe, but in a single-process full-suite run every module body executes
+// before any test, so a module-top mutation leaks into sibling files (e.g. the
+// relevance-precision eval, which reads the same knobs).  Capture the originals
+// here and apply/restore the file-scoped values via describe-scoped
+// beforeEach/afterEach so they never escape this file's own tests.
+const _PREV_RECALL_MODE = process.env.TEMPO_RECALL_MODE;
+const _PREV_SEMANTIC_BEAT_FIT_ENABLED = process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED;
+const _PREV_BEAT_FIT_THRESHOLD = process.env.TEMPO_BEAT_FIT_THRESHOLD;
 
 import {
   selectSourcePool,
@@ -45,6 +37,13 @@ import {
   compareStoriesR1,
 } from "./refresh-pipeline.mjs";
 import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
+// Hoisted from further down the file: ESM imports must sit at module top level,
+// not inside the describe() wrapper that scopes this file's env knobs.
+import {
+  resolveSemanticBeatFitConfig,
+  createProfileEmbeddingCache,
+} from "./semantic-beat-fit.mjs";
+import { WHAT_CHANGED_COPY, WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION } from "./what-changed-engine.mjs";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
@@ -95,6 +94,24 @@ const BASE_SETTINGS = {
   traditionalSources: ["Reuters", "El Tiempo"],
   socialSources: [],
 };
+
+describe("refresh-pipeline", () => {
+  // Apply the file-scoped pipeline knobs before each test and restore the
+  // captured originals after, so they never leak into sibling test files when
+  // the whole suite shares one process.
+  beforeEach(() => {
+    process.env.TEMPO_RECALL_MODE = "keyword";
+    process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED = "false";
+    process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
+  });
+  afterEach(() => {
+    if (_PREV_RECALL_MODE === undefined) delete process.env.TEMPO_RECALL_MODE;
+    else process.env.TEMPO_RECALL_MODE = _PREV_RECALL_MODE;
+    if (_PREV_SEMANTIC_BEAT_FIT_ENABLED === undefined) delete process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED;
+    else process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED = _PREV_SEMANTIC_BEAT_FIT_ENABLED;
+    if (_PREV_BEAT_FIT_THRESHOLD === undefined) delete process.env.TEMPO_BEAT_FIT_THRESHOLD;
+    else process.env.TEMPO_BEAT_FIT_THRESHOLD = _PREV_BEAT_FIT_THRESHOLD;
+  });
 
 // ─── selectSourcePool ─────────────────────────────────────────────────────────
 
@@ -5896,11 +5913,6 @@ test("Phase 7 wiring: log.tags surfaces scorerCallCount + scorerLatencyMaxMs", a
 //   4. Kill switch (env or override) instantly restores deterministic-only
 //      behavior with no other pipeline changes.
 
-import {
-  resolveSemanticBeatFitConfig,
-  createProfileEmbeddingCache,
-} from "./semantic-beat-fit.mjs";
-
 const TERRORISM_SETTINGS = {
   contractVersion: "2026-05-19-meta-story-fields",
   topics: ["Terrorism"],
@@ -6184,8 +6196,6 @@ test("Semantic BeatFit: log surfaces version, model, latency, and score buckets"
 // that the deprecated `Latest update N min ago.` template is gone from
 // every shipped story.  LLM stages stay stubbed — production reads env at
 // call time and stays disabled by default until an operator opts in.
-
-import { WHAT_CHANGED_COPY, WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION } from "./what-changed-engine.mjs";
 
 const PHASE4_ENABLED_CONFIG = {
   enabled: true,
@@ -6866,4 +6876,6 @@ test("Slice 7: log.timings exposes non-negative integer per-stage wall-clock; wh
   assert.ok("latencyMs" in log.whyItMatters, "whyItMatters.latencyMs preserved");
   assert.ok("latencyMs" in log.whatChanged, "whatChanged.latencyMs preserved");
   assert.ok("clusteringLatencyMs" in log, "clusteringLatencyMs preserved");
+});
+
 });
