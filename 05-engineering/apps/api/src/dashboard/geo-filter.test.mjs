@@ -11,6 +11,11 @@ import {
   assessGeoConfidence,
   parseGeoAssessResponse,
   resolveGeoAssessConcurrency,
+  resolveGeoAssessRpmCap,
+  createGeoDiagnostics,
+  hasStrongLexicalGeoSignal,
+  _resetGeoRateLimiter,
+  _geoTiming,
   _geoAssessClient,
 } from "./geo-filter.mjs";
 
@@ -167,6 +172,113 @@ test("applyGeoFilter: held items preserve original item fields", async () => {
   assert.equal(held[0].headline, "Original headline");
 });
 
+// ─── A2: lexical geo pre-pass ────────────────────────────────────────────────
+//
+// Before queuing an implicit/conflict candidate for the (rate-limited, LLM)
+// assessor, `applyGeoFilter` checks for a strong lexical geo signal — a
+// configured-geography mention in the item text via the shared
+// `itemMentionsConfiguredGeography` matcher. A hit admits the item without an
+// assess call and bumps `diag.lexicalBypassCount`. These tests pin the bypass,
+// the no-signal fall-through, that explicit_match is untouched, and that the
+// counter is request-scoped (no cross-run bleed).
+
+// An assessor that throws if ever called — proves the pre-pass admitted the
+// item WITHOUT touching the LLM path.
+const FAIL_IF_ASSESSED = async () => {
+  throw new Error("assessFn must not be called when the lexical pre-pass admits the item");
+};
+
+test("hasStrongLexicalGeoSignal: true when text names a configured geography, false otherwise", () => {
+  assert.equal(
+    hasStrongLexicalGeoSignal(makeItem({ headline: "Colombia readies new policy", body: [] }), CONFIGURED_GEOS),
+    true
+  );
+  assert.equal(
+    hasStrongLexicalGeoSignal(makeItem({ headline: "Local fisheries report", body: ["No geo here."] }), CONFIGURED_GEOS),
+    false
+  );
+  // No configured geographies → never a strong signal.
+  assert.equal(hasStrongLexicalGeoSignal(makeItem({ headline: "Colombia news" }), []), false);
+});
+
+test("applyGeoFilter: implicit_geo item with a lexical geo mention bypasses assess and is included", async () => {
+  const items = [makeItem({ sourceId: "a", geographies: [], headline: "US Treasury weighs new package", body: ["Details."] })];
+  const diag = createGeoDiagnostics();
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, FAIL_IF_ASSESSED, diag);
+  assert.equal(included.length, 1, "lexical geo mention must admit without an assess call");
+  assert.equal(held.length, 0);
+  assert.equal(included[0].geoLexicalBypass, true);
+  assert.equal(included[0].geoConfidence, 1.0);
+  assert.equal(included[0].geoCategory, GEO_CATEGORY.IMPLICIT_GEO);
+  assert.equal(diag.lexicalBypassCount, 1);
+});
+
+test("applyGeoFilter: explicit_conflict item with a lexical geo mention bypasses assess and is included", async () => {
+  // Tagged geographies conflict (France), but the text clearly names a
+  // configured geography (Colombia) → admit via the pre-pass.
+  const items = [makeItem({ sourceId: "a", geographies: ["France"], headline: "Colombia and France sign accord", body: [] })];
+  const diag = createGeoDiagnostics();
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, FAIL_IF_ASSESSED, diag);
+  assert.equal(included.length, 1);
+  assert.equal(held.length, 0);
+  assert.equal(included[0].geoLexicalBypass, true);
+  assert.equal(included[0].geoCategory, GEO_CATEGORY.EXPLICIT_CONFLICT);
+  assert.equal(diag.lexicalBypassCount, 1);
+});
+
+test("applyGeoFilter: item without a lexical geo signal still goes through assess", async () => {
+  let assessCalls = 0;
+  const items = [makeItem({ sourceId: "a", geographies: [], headline: "Local council budget talks", body: ["No geo."] })];
+  const diag = createGeoDiagnostics();
+  const assessFn = async () => { assessCalls += 1; return { confidence: 0.82 }; };
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, assessFn, diag);
+  assert.equal(assessCalls, 1, "no lexical signal → assessor must run");
+  assert.equal(included.length, 1, "0.82 >= implicit threshold → included");
+  assert.equal(held.length, 0);
+  assert.equal(included[0].geoLexicalBypass, undefined, "assessed item is not flagged as a lexical bypass");
+  assert.equal(diag.lexicalBypassCount, 0);
+});
+
+test("applyGeoFilter: explicit_match behavior unchanged — no assess, not flagged as lexical bypass", async () => {
+  const items = [makeItem({ sourceId: "a", geographies: ["US"], headline: "US Treasury weighs new package" })];
+  const diag = createGeoDiagnostics();
+  const { included, held } = await applyGeoFilter(items, CONFIGURED_GEOS, FAIL_IF_ASSESSED, diag);
+  assert.equal(included.length, 1);
+  assert.equal(held.length, 0);
+  assert.equal(included[0].geoCategory, GEO_CATEGORY.EXPLICIT_MATCH);
+  assert.equal(included[0].geoConfidence, 1.0);
+  assert.equal(included[0].geoLexicalBypass, undefined, "explicit_match must not be tagged as a lexical bypass");
+  assert.equal(diag.lexicalBypassCount, 0, "explicit_match does not count as a lexical bypass");
+});
+
+test("applyGeoFilter: lexicalBypassCount counts each bypass and does not bleed across runs", async () => {
+  const items = [
+    makeItem({ sourceId: "a", geographies: [], headline: "US sanctions debated" }),       // bypass
+    makeItem({ sourceId: "b", geographies: ["France"], headline: "Colombia accord signed" }), // bypass
+    makeItem({ sourceId: "c", geographies: [], headline: "Local weather report", body: ["No geo."] }), // assessed
+  ];
+  const diagA = createGeoDiagnostics();
+  await applyGeoFilter(items, CONFIGURED_GEOS, async () => ({ confidence: 0.85 }), diagA);
+  assert.equal(diagA.lexicalBypassCount, 2, "two items admitted via the pre-pass");
+
+  // A fresh run with a fresh diag starts at zero — no cross-run bleed.
+  const diagB = createGeoDiagnostics();
+  await applyGeoFilter(
+    [makeItem({ sourceId: "d", geographies: [], headline: "Local weather report", body: ["No geo."] })],
+    CONFIGURED_GEOS,
+    async () => ({ confidence: 0.85 }),
+    diagB
+  );
+  assert.equal(diagB.lexicalBypassCount, 0, "run B owns its own counter — Run A's bypasses must not bleed in");
+});
+
+test("applyGeoFilter: pre-pass works without a diag context (counter optional)", async () => {
+  const items = [makeItem({ sourceId: "a", geographies: [], headline: "US sanctions debated" })];
+  const { included } = await applyGeoFilter(items, CONFIGURED_GEOS, FAIL_IF_ASSESSED);
+  assert.equal(included.length, 1, "bypass must still admit the item when no diag is provided");
+  assert.equal(included[0].geoLexicalBypass, true);
+});
+
 // ─── Slice 1: bounded-concurrency geo-assess pool ────────────────────────────
 //
 // geo-assess runs one Haiku call per implicit/conflict item.  Slice 1 pushes
@@ -277,19 +389,33 @@ function withGeoAssessEnv(setup, run) {
   const saved = {
     model: process.env.TEMPO_AI_GEO_ASSESS_MODEL,
     timeout: process.env.TEMPO_AI_GEO_ASSESS_TIMEOUT_MS,
+    rpmCap: process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP,
     apiKey: process.env.TEMPO_ANTHROPIC_API_KEY,
     altKey: process.env.ANTHROPIC_API_KEY,
     mockOnly: process.env.TEMPO_AI_MOCK_ONLY,
   };
   const prevCreate = _geoAssessClient.create;
+  // A1: neutralize real waits and isolate the process-wide limiter state so
+  // backoff/limiter spacing don't slow the suite and one test's dispatch
+  // reservations can't bleed into the next. (Diagnostics are now request-local
+  // per A1.2 — each test owns its own `diag` object, so there's nothing global
+  // to reset.)
+  const prevSleep = _geoTiming.sleep;
+  _geoTiming.sleep = async () => {};
+  _resetGeoRateLimiter();
   delete process.env.TEMPO_AI_GEO_ASSESS_MODEL;
   delete process.env.TEMPO_AI_GEO_ASSESS_TIMEOUT_MS;
+  delete process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP;
   delete process.env.TEMPO_ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.TEMPO_AI_MOCK_ONLY;
   setup();
   return run().finally(() => {
     _geoAssessClient.create = prevCreate;
+    _geoTiming.sleep = prevSleep;
+    _resetGeoRateLimiter();
+    if (saved.rpmCap !== undefined) process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP = saved.rpmCap;
+    else delete process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP;
     // Restore each key to its captured value, or DELETE it when it was unset
     // before the test.  Without the `else delete`, a var the test newly set
     // (e.g. TEMPO_AI_GEO_ASSESS_MODEL / API keys) would leak into every later
@@ -488,6 +614,177 @@ test("assessGeoConfidence: integrates with applyGeoFilter — held when stubbed 
       assert.equal(included.length, 0);
       assert.equal(held.length, 1);
       assert.equal(held[0].geoConfidence, 0.5);
+    }
+  );
+});
+
+// ─── A1: rate-limit cap + 429 retry/backoff + diagnostics ────────────────────
+//
+// A high concurrency setting lets a first-run refresh fire dozens of geo-assess
+// calls in the same second and trip the Anthropic org RPM ceiling — a wall of
+// `429 rate_limit_error` that drops relevant items into the hold bucket and
+// starves clustering. A1 adds a process-wide dispatch cap
+// (`TEMPO_AI_GEO_ASSESS_RPM_CAP`, default 48 since A1.2) and a bounded 429-only
+// retry/backoff (max 2 retries) inside `assessGeoConfidence`. Retry/backoff
+// counts accumulate onto a per-call, request-local `diag` context (A1.2) — no
+// global counters. These tests pin the cap resolver and the retry envelopes —
+// never hitting the live API (`_geoTiming.sleep` is neutralized in
+// `withGeoAssessEnv`, so backoff/limiter waits resolve instantly).
+
+function makeRateLimitError() {
+  // Mirror the SDK shape (`status: 429`) and the message text logged in prod.
+  const err = new Error("429 rate_limit_error");
+  err.status = 429;
+  return err;
+}
+
+test("resolveGeoAssessRpmCap: unset env → default 48 (A1.2)", () => {
+  const saved = process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP;
+  delete process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP;
+  try {
+    assert.equal(resolveGeoAssessRpmCap(), 48);
+    assert.ok(resolveGeoAssessRpmCap() < 50, "default must stay under the 50 RPM org ceiling");
+  } finally {
+    if (saved !== undefined) process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP = saved;
+  }
+});
+
+test("resolveGeoAssessRpmCap: invalid env → default 48 (A1.2)", () => {
+  const saved = process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP;
+  try {
+    for (const bad of ["0", "-5", "abc", "", "NaN"]) {
+      process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP = bad;
+      assert.equal(resolveGeoAssessRpmCap(), 48, `"${bad}" must fall back to 48`);
+    }
+  } finally {
+    if (saved !== undefined) process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP = saved;
+    else delete process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP;
+  }
+});
+
+test("resolveGeoAssessRpmCap: valid env honored (floored)", () => {
+  const saved = process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP;
+  try {
+    process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP = "25.9";
+    assert.equal(resolveGeoAssessRpmCap(), 25);
+  } finally {
+    if (saved !== undefined) process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP = saved;
+    else delete process.env.TEMPO_AI_GEO_ASSESS_RPM_CAP;
+  }
+});
+
+test("assessGeoConfidence: 429 then success returns the parsed confidence and increments retry diagnostics", async () => {
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      let calls = 0;
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => {
+            calls += 1;
+            if (calls === 1) throw makeRateLimitError();
+            return { content: [{ type: "text", text: '{"confidence": 0.91}' }] };
+          },
+        },
+      });
+    },
+    async () => {
+      const diag = createGeoDiagnostics();
+      const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS, diag);
+      assert.equal(result.confidence, 0.91, "retried call must return the success-path confidence");
+      assert.equal(diag.rateLimitedCount, 1);
+      assert.equal(diag.retryCount, 1);
+      assert.ok(diag.backoffMsTotal > 0, "backoff should be recorded");
+    }
+  );
+});
+
+test("assessGeoConfidence: repeated 429 exhausts retries and fails safe to confidence 0", async () => {
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => {
+            throw makeRateLimitError();
+          },
+        },
+      });
+    },
+    async () => {
+      const diag = createGeoDiagnostics();
+      const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS, diag);
+      assert.deepEqual(result, { confidence: 0 });
+      // initial attempt + 2 retries = 3 calls, all 429.
+      assert.equal(diag.rateLimitedCount, 3);
+      assert.equal(diag.retryCount, 2);
+    }
+  );
+});
+
+test("assessGeoConfidence: non-429 error fails safe without retrying", async () => {
+  let calls = 0;
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => {
+            calls += 1;
+            throw new Error("provider 503");
+          },
+        },
+      });
+    },
+    async () => {
+      const diag = createGeoDiagnostics();
+      const result = await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS, diag);
+      assert.deepEqual(result, { confidence: 0 });
+      assert.equal(calls, 1, "a non-rate-limit error must not trigger the retry loop");
+      assert.equal(diag.retryCount, 0);
+      assert.equal(diag.rateLimitedCount, 0);
+    }
+  );
+});
+
+test("assessGeoConfidence: diagnostics are request-local — two runs don't bleed across each other", async () => {
+  // A1.2 concurrency-safety: each run owns its own `diag`. Even with the same
+  // process-global limiter, counts must not mix. Run A sees one 429-then-success
+  // (1 rate-limit, 1 retry); Run B sees a clean success (0/0). Their diag
+  // objects must reflect only their own pressure.
+  await withGeoAssessEnv(
+    () => {
+      process.env.TEMPO_ANTHROPIC_API_KEY = "test-key";
+    },
+    async () => {
+      const diagA = createGeoDiagnostics();
+      const diagB = createGeoDiagnostics();
+
+      // Run A: 429 then success.
+      let aCalls = 0;
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => {
+            aCalls += 1;
+            if (aCalls === 1) throw makeRateLimitError();
+            return { content: [{ type: "text", text: '{"confidence": 0.7}' }] };
+          },
+        },
+      });
+      await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS, diagA);
+
+      // Run B: clean success, no rate limiting.
+      _geoAssessClient.create = () => ({
+        messages: {
+          create: async () => ({ content: [{ type: "text", text: '{"confidence": 0.8}' }] }),
+        },
+      });
+      await assessGeoConfidence(makeItem({ geographies: ["France"] }), CONFIGURED_GEOS, diagB);
+
+      assert.deepEqual(diagA, { rateLimitedCount: 1, retryCount: 1, backoffMsTotal: diagA.backoffMsTotal, lexicalBypassCount: 0 });
+      assert.ok(diagA.backoffMsTotal > 0, "Run A recorded backoff");
+      assert.deepEqual(diagB, { rateLimitedCount: 0, retryCount: 0, backoffMsTotal: 0, lexicalBypassCount: 0 },
+        "Run B's diagnostics must be untouched by Run A");
     }
   );
 });

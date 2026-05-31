@@ -38,6 +38,11 @@ export const DEFAULT_CALIBRATION_FLOORS = Object.freeze([0, 0.35, 0.4, 0.45]);
 //   floor 0.45 → reject 3  (0.33, 0.38, 0.43)
 // Outlets are real Batch-1 publishers so they clear source selection; topic
 // "Other" + keyword-free text keep them out of lexical recall (semantic only).
+// A1.2: probes are IMPLICIT geo (geographies: []) on purpose. An explicit-geo
+// item from a selected source is a must-see Lane 1 item that bypasses the
+// embedding floor by design — which would defeat this floor sweep. Implicit geo
+// still clears the geo gate (mock assessor 0.85 >= implicit threshold) while
+// keeping each probe a pure semantic-only candidate gated solely by the floor.
 const PROBE_DEFS = Object.freeze([
   { band: 0.33, sourceId: "cal-probe-33", outlet: "Reuters", marker: "cosineband33" },
   { band: 0.38, sourceId: "cal-probe-38", outlet: "Reuters", marker: "cosineband38" },
@@ -56,7 +61,10 @@ function makeProbeItem(def, i) {
     minutesAgo: 12 + i,
     url: `https://example.com/calibration/${def.sourceId}`,
     topic: "Other", // not in persona topics → no topic recall hit
-    geographies: ["US"], // matches a persona geo → clears the geo gate
+    geographies: [], // A1.2: implicit geo — clears the geo gate via the assessor
+                     // but is NOT must-see, so the floor (not lane protection)
+                     // decides admission
+
     headline: `Regional logistics outlook segment ${i + 1}`,
     body: [`Calibration probe ${def.marker} semantic only candidate.`],
   };

@@ -89,12 +89,18 @@ function makeSpanishTranslateFn({ failSourceIds = [] } = {}) {
 //
 // Scenario 1+2 items: Spanish text that mentions NO configured geography
 // literally (so the geo lexical recall gate cannot admit them) and carries an
-// empty topic (so the topic gate cannot admit them). `geographies: ["Colombia"]`
-// makes them pass the geo *filter* (explicit_match) so they reach recall — the
-// ONLY way they then clear recall is via the translated English keyword. This
-// is what isolates the translation effect.
+// empty topic (so the topic gate cannot admit them). `geographies: []` (implicit)
+// makes them pass the geo *filter* via the assessor (mock 0.85 >= implicit
+// threshold) so they reach recall — the ONLY way they then clear recall is via
+// the translated English keyword. This isolates the translation effect.
+//
+// A1.2: deliberately IMPLICIT geo, not explicit `["Colombia"]`. An explicit-geo
+// item from a selected source is a must-see Lane 1 item that survives recall by
+// design — it would reach clustering even untranslated, masking the very gap
+// this scenario proves. Implicit geo keeps these items non-must-see so recall
+// (the translation gate) is the only thing deciding admission.
 function recallItems() {
-  const base = { kind: "traditional", weight: 70, minutesAgo: 30, lang: "es", topic: "", geographies: ["Colombia"] };
+  const base = { kind: "traditional", weight: 70, minutesAgo: 30, lang: "es", topic: "", geographies: [] };
   return [
     {
       ...base,

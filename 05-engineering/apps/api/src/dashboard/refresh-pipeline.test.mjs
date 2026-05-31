@@ -35,6 +35,7 @@ import {
   deriveStoryTags,
   compareSourcesT1,
   compareStoriesR1,
+  resolveGeoStageBudgetMs,
 } from "./refresh-pipeline.mjs";
 import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
 // Hoisted from further down the file: ESM imports must sit at module top level,
@@ -735,6 +736,245 @@ test("runRefreshPipeline: previously held item remains held when confidence stay
   assert.ok(!seenIds.includes("still-held"), "low-confidence item must not reach cluster");
   assert.ok(writtenHeld !== null && writtenHeld.some((i) => i.sourceId === "still-held"),
     "item must be written back to hold bucket");
+});
+
+// ─── A1.1: protected must-see lane + adaptive geo time budget ────────────────
+//
+// The geo stage splits candidates into Lane 1 (protected must-see: from a
+// selected source AND carrying a geo signal — explicit geographies overlap OR a
+// configured-geography lexical mention) and Lane 2 (everything else, incl.
+// hold-bucket re-evals). Lane 1 always finishes; Lane 2 is processed only while
+// the wall-clock budget holds, then deferred to the hold path. Tests pin the
+// budget via the `geoStageBudgetMs` opt (0 forces a post-Lane-1 budget hit).
+
+test("resolveGeoStageBudgetMs: unset/invalid env → default 25000, valid honored", () => {
+  const saved = process.env.TEMPO_AI_GEO_STAGE_BUDGET_MS;
+  try {
+    delete process.env.TEMPO_AI_GEO_STAGE_BUDGET_MS;
+    assert.equal(resolveGeoStageBudgetMs(), 25000);
+    for (const bad of ["0", "-1", "abc", ""]) {
+      process.env.TEMPO_AI_GEO_STAGE_BUDGET_MS = bad;
+      assert.equal(resolveGeoStageBudgetMs(), 25000, `"${bad}" → default`);
+    }
+    process.env.TEMPO_AI_GEO_STAGE_BUDGET_MS = "8000";
+    assert.equal(resolveGeoStageBudgetMs(), 8000);
+  } finally {
+    if (saved !== undefined) process.env.TEMPO_AI_GEO_STAGE_BUDGET_MS = saved;
+    else delete process.env.TEMPO_AI_GEO_STAGE_BUDGET_MS;
+  }
+});
+
+test("runRefreshPipeline: Lane 1 is processed before Lane 2 in the geo stage (A1.1 ordering)", async () => {
+  // A1.1 sequencing contract, asserted independently of the A2 bypass: the geo
+  // lane split must emit Lane 1 (must-see) ahead of Lane 2 regardless of input
+  // order. Lane 1 here is an explicit_match item — must-see by tagged geography,
+  // so the lexical pre-pass plays no part (it neither short-circuits nor masks
+  // ordering). Lane 2 is an implicit_geo item with no geo signal that hits the
+  // assessor. The input is deliberately ordered Lane 2 first, so a passing
+  // assertion can only come from the split reordering Lane 1 ahead.
+  const assessOrder = [];
+  let clusterOrder = [];
+  const rawItems = [
+    makeItem({ sourceId: "lane2", outlet: "Reuters", geographies: [], headline: "Local council budget talks" }),
+    makeItem({ sourceId: "lane1", outlet: "Reuters", geographies: ["US"] }),
+  ];
+  await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { clusterOrder = items.map((i) => i.sourceId); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async (item) => { assessOrder.push(item.sourceId); return { confidence: 0.85 }; },
+    beatFitEnabled: false, // isolate lane ordering from the relevance gate
+  });
+  assert.deepEqual(clusterOrder, ["lane1", "lane2"], "geo lane split must place Lane 1 ahead of Lane 2");
+  // The Lane 1 must-see item is admitted without an assess call (explicit_match
+  // short-circuits the assessor); only the no-signal Lane 2 item is assessed.
+  assert.deepEqual(assessOrder, ["lane2"], "only the Lane 2 candidate reaches the assessor");
+});
+
+test("runRefreshPipeline: A2 lexical pre-pass admits a Lane 1 geo-mention item without an assess call", async () => {
+  // Lane 1: implicit_geo item whose text names a configured geography ("US") →
+  // must-see. Under A2 its lexical signal admits it WITHOUT an assess call.
+  // Lane 2: implicit_geo item with no geo mention → still hits the assessor.
+  // Both from the selected source (Reuters).
+  const assessed = [];
+  const rawItems = [
+    // Order the Lane 2 (assessed) item first so the result can't be an accident
+    // of input position — the lane split reorders Lane 1 ahead of it anyway.
+    makeItem({ sourceId: "assessed", outlet: "Reuters", geographies: [], headline: "Local council budget talks" }),
+    makeItem({ sourceId: "bypass", outlet: "Reuters", geographies: [], headline: "US sanctions package debated" }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async (item) => { assessed.push(item.sourceId); return { confidence: 0.85 }; },
+  });
+  assert.deepEqual(assessed, ["assessed"], "only the no-mention item hits the assessor; the geo-mention item bypasses");
+  assert.equal(log.geo.geoLexicalBypassCount, 1, "the Lane 1 geo-mention item is admitted via the lexical pre-pass");
+  assert.equal(log.geo.geoAssessedCount, 1, "exactly one assess call — the no-signal Lane 2 item");
+});
+
+test("runRefreshPipeline: Lane 1 still completes when budget is already exhausted (budget=0)", async () => {
+  // budget=0 means the geo stage is "over budget" the instant Lane 1 finishes,
+  // yet Lane 1 must always run to completion. Lane 1 = explicit_match (US) →
+  // always included → reaches clustering even though the budget is blown.
+  const seenIds = [];
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "opportunistic", outlet: "Reuters", geographies: [], headline: "Unrelated filler" }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    geoStageBudgetMs: 0,
+    beatFitEnabled: false,
+  });
+  assert.ok(seenIds.includes("mustsee"), "Lane 1 must-see item must reach clustering despite budget=0");
+  assert.equal(log.geo.geoLane1Count, 1);
+  assert.equal(log.geo.geoBudgetHit, true);
+});
+
+test("runRefreshPipeline: Lane 2 is deferred (and not clustered) when budget is hit post-Lane-1", async () => {
+  const seenIds = [];
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "defer-a", outlet: "Reuters", geographies: [], headline: "Filler one" }),
+    makeItem({ sourceId: "defer-b", outlet: "Reuters", geographies: [], headline: "Filler two" }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    geoStageBudgetMs: 0,
+    beatFitEnabled: false,
+  });
+  assert.equal(log.geo.geoLane2Count, 2, "two opportunistic candidates form Lane 2");
+  assert.equal(log.geo.geoLane2DeferredCount, 2, "both Lane 2 items deferred under budget=0");
+  assert.equal(log.geo.geoBudgetHit, true);
+  assert.ok(!seenIds.includes("defer-a") && !seenIds.includes("defer-b"),
+    "deferred Lane 2 items must not reach clustering this refresh");
+});
+
+test("runRefreshPipeline: deferred Lane 2 items are written to the hold path for re-evaluation", async () => {
+  let writtenHeld = null;
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "deferred", outlet: "Reuters", geographies: [], headline: "Filler" }),
+  ];
+  await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    geoStageBudgetMs: 0,
+    writeHeldFn: async (items) => { writtenHeld = items; },
+  });
+  assert.ok(writtenHeld !== null, "writeHeldFn must be called");
+  assert.ok(writtenHeld.some((i) => i.sourceId === "deferred"),
+    "budget-deferred item must be persisted to hold for next-refresh re-evaluation");
+  // Deferred items are written bare (no geo metadata) so the hold reader admits
+  // them cleanly next refresh.
+  const deferred = writtenHeld.find((i) => i.sourceId === "deferred");
+  assert.equal(deferred.geoConfidence, undefined, "deferred item carries no stale geoConfidence");
+});
+
+test("runRefreshPipeline: ample budget processes all of Lane 2 (no defer, no budget hit)", async () => {
+  const seenIds = [];
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "lane2", outlet: "Reuters", geographies: [], headline: "Filler" }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    geoStageBudgetMs: 60000,
+    beatFitEnabled: false,
+  });
+  assert.equal(log.geo.geoBudgetHit, false);
+  assert.equal(log.geo.geoLane2DeferredCount, 0);
+  assert.ok(seenIds.includes("mustsee") && seenIds.includes("lane2"),
+    "with ample budget both lanes reach clustering");
+});
+
+// ─── A1.2: Lane 1 protected end-to-end through the recall gate ───────────────
+//
+// The recall gate (`applyTopicKeywordFilter`) is text-driven, so a Lane 1
+// must-see item with an EXPLICIT geo tag but no geography *named in its text*
+// (and no topic/keyword match) used to be dropped at recall even though it's
+// exactly what the user tracks. A1.2 unions such Lane 1 survivors back into the
+// recall set. Non-Lane-1 items keep obeying recall.
+
+test("runRefreshPipeline: Lane 1 must-see item survives recall even with no topic/keyword/geo-text match", async () => {
+  const seenIds = [];
+  const rawItems = [
+    // Lane 1: selected source + EXPLICIT geo (US) → must-see. Topic "Sports" is
+    // not configured, no keyword, and the text never names a geography → it
+    // fails the text-driven recall gate and is only admitted by lane protection.
+    makeItem({
+      sourceId: "lane1-explicit", outlet: "Reuters", geographies: ["US"],
+      topic: "Sports", headline: "Local derby ends in a draw", body: ["Fans cheered."],
+    }),
+    // Non-Lane-1: implicit geo, no geo signal, same un-matchable topic/text →
+    // passes geo (0.85) but must still be dropped by recall (no protection).
+    makeItem({
+      sourceId: "lane2-norecall", outlet: "Reuters", geographies: [],
+      topic: "Sports", headline: "Local derby ends in a draw", body: ["Fans cheered."],
+    }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    beatFitEnabled: false, // isolate the recall gate from the relevance gate
+  });
+  assert.ok(seenIds.includes("lane1-explicit"),
+    "Lane 1 must-see item must survive recall and reach clustering");
+  assert.ok(!seenIds.includes("lane2-norecall"),
+    "non-Lane-1 item with no recall signal must still be dropped by recall");
+  assert.equal(log.recall.lane1Protected, 1, "exactly one must-see item was re-admitted past recall");
+});
+
+test("runRefreshPipeline: Lane 1 protection is a no-op when the must-see item already passes recall", async () => {
+  // Lane 1 item that DOES match a configured topic — recall admits it normally,
+  // so protection must not double-count or duplicate it.
+  const seenIds = [];
+  const rawItems = [
+    makeItem({
+      sourceId: "lane1-clean", outlet: "Reuters", geographies: ["US"],
+      topic: "Diplomatic relations", headline: "Bilateral talks resume",
+    }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    beatFitEnabled: false,
+  });
+  assert.deepEqual(seenIds, ["lane1-clean"], "no duplication when recall already admits the item");
+  assert.equal(log.recall.lane1Protected, 0, "nothing to re-admit → zero protected");
 });
 
 // ─── Finding 1: lineage continuity via prior-snapshot keyed merge ────────────
