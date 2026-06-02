@@ -2265,12 +2265,12 @@ export async function runRefreshPipeline({
   if (clusterInputItems.length === 0) {
     rawMetaStories = [];
   } else {
-    // Slice 4: the active profile bounds the clustering latency envelope.
-    // Interactive and default both run 2 attempts (initial + one retry) after
-    // Slice 4.1; the interactive win comes from a tighter geo budget plus a
-    // tighter per-attempt clustering timeout passed to `clusterFn`.  Fail-closed
-    // trust is unchanged: if every attempt fails we still publish zero stories
-    // with a classified `clusteringFailureReason`.
+    // Slice 4/4.1: the active profile bounds the clustering latency envelope.
+    // Interactive and default both run 2 attempts (initial + one retry) — the
+    // locked Slice 4.1 decision; the interactive win comes from a tighter geo
+    // budget plus a tighter per-attempt clustering timeout passed to `clusterFn`.
+    // Fail-closed trust is unchanged: if every attempt fails we still publish
+    // zero stories with a classified `clusteringFailureReason`.
     const MAX_CLUSTER_ATTEMPTS = profile.clusterMaxAttempts;
     const clusterCallOpts =
       profile.clusterTimeoutMs != null ? { timeoutMs: profile.clusterTimeoutMs } : {};
