@@ -919,10 +919,25 @@ function emitRefreshObservability({ userId, log, ingestionSource }) {
     outcomes,
   };
   console.log(`[refresh.summary] ${JSON.stringify(summary)}`);
-  evaluateRefreshSlo({
+  // Slice 7: feed the SLO gate the terminal failure classification (NOT repair
+  // diagnostics), latency, empty-result health, geo budget pressure, the active
+  // profile, and enrichment state. Geo fields live on `outcomes` (spread from
+  // geoDiagnostics) or on `log.geo`; all inputs are read defensively so a
+  // partial log (older mocks / skip path) can't throw into the refresh path.
+  const geo = (log && typeof log === "object" && log.geo) || {};
+  const slo = evaluateRefreshSlo({
     pipelineMs: timings.pipelineMs,
     clusteringFailureReason: outcomes?.clusteringFailureReason ?? log?.clusteringFailureReason ?? null,
     clusteringAttempts: outcomes?.clusteringAttempts ?? log?.clusteringAttempts ?? 0,
+    usedFallbackClustering:
+      outcomes?.usedFallbackClustering ?? log?.usedFallbackClustering ?? false,
+    storiesPublished: outcomes?.storiesPublished ?? log?.metaStoryCount ?? null,
+    geoBudgetHit: outcomes?.geoBudgetHit ?? geo.geoBudgetHit ?? false,
+    geoLane2Deferred: outcomes?.geoLane2Deferred ?? geo.geoLane2Deferred ?? geo.geoLane2DeferredCount ?? 0,
+    geoBudgetMsConfigured: outcomes?.geoBudgetMsConfigured ?? geo.geoBudgetMsConfigured ?? null,
+    geoBudgetMsUsed: outcomes?.geoBudgetMsUsed ?? geo.geoBudgetMsUsed ?? null,
+    profile: log?.profile ?? null,
+    enrichment: log?.whyEnrichment ?? null,
   });
 
   // D1: ingestion-cache benefit advisory (measurement + guardrails only — no
@@ -947,7 +962,9 @@ function emitRefreshObservability({ userId, log, ingestionSource }) {
       reasonCodes: cacheBenefit.reasonCodes,
     })}`
   );
-  return { runMode, cacheBenefit };
+  // Slice 7: hand the SLO gate result back so callers can surface it additively
+  // on `_meta.slo` (breach ids + action hints + the gate snapshot).
+  return { runMode, cacheBenefit, slo };
 }
 
 /**
@@ -1295,9 +1312,14 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
       // response, so observability surfaces stay consistent across branches.
       if (log.outcomes) skipMeta.outcomes = log.outcomes;
       skipMeta.ingestionSource = ingestionSource;
-      // Structured summary + SLO eval on the skip settle too — a skip is a fast,
-      // non-timeout refresh, so it adds a healthy sample to the rolling window.
-      const { cacheBenefit: skipCacheBenefit } = emitRefreshObservability({
+      // Structured summary + SLO eval run on the skip settle too, so the gate
+      // sees every settle.  But the attempt-only rolling windows
+      // (cluster_timeout_rate / cluster_failure_rate) are sampled ONLY when
+      // clustering actually attempted: a watermark short-circuit reports
+      // clusteringAttempts=0, so it is intentionally NOT sampled and does not
+      // dilute those rates (no false calm).  pipeline_slow / geo_budget_pressure
+      // and the gate snapshot still evaluate normally.
+      const { cacheBenefit: skipCacheBenefit, slo: skipSlo } = emitRefreshObservability({
         userId: identity.userId,
         log,
         ingestionSource,
@@ -1306,6 +1328,8 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
       // too, so the diagnostic surface stays consistent across branches.
       // Additive only — consumers ignore unknown _meta keys.
       if (skipCacheBenefit) skipMeta.cacheBenefit = skipCacheBenefit;
+      // Slice 7: additive SLO gate snapshot (breach ids + hints + gate fields).
+      if (skipSlo) skipMeta.slo = { breaches: skipSlo.breaches, breachDetails: skipSlo.breachDetails, gate: skipSlo.gate };
       if (priorSnapshot) {
         // Persist the bumped lastCheckedAt onto the existing snapshot so a
         // full page reload reflects this check.  refreshedAt stays pinned to
@@ -1402,12 +1426,14 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
       // Structured summary + SLO eval still run: clustering DID attempt and
       // fail, so this run must sample the cluster-timeout-rate window exactly
       // like the normal "ran" branch would for a fail-closed run.
-      const { cacheBenefit: preservedCacheBenefit } = emitRefreshObservability({
+      const { cacheBenefit: preservedCacheBenefit, slo: preservedSlo } = emitRefreshObservability({
         userId: identity.userId,
         log,
         ingestionSource,
       });
       if (preservedCacheBenefit) preservedMeta.cacheBenefit = preservedCacheBenefit;
+      // Slice 7: additive SLO gate snapshot on the fail-closed-preserved branch.
+      if (preservedSlo) preservedMeta.slo = { breaches: preservedSlo.breaches, breachDetails: preservedSlo.breachDetails, gate: preservedSlo.gate };
 
       trackServerEvent("dashboard_refresh_skipped", {
         reason: "clustering_failed_snapshot_preserved",
@@ -1557,7 +1583,8 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
     );
     // Slice 3: structured refresh summary + balanced SLO breach evaluation.
     // D1: capture the windowed cache-benefit advisory to surface on _meta below.
-    const { cacheBenefit: ranCacheBenefit } = emitRefreshObservability({
+    // Slice 7: capture the SLO gate result to surface on _meta.slo below.
+    const { cacheBenefit: ranCacheBenefit, slo: ranSlo } = emitRefreshObservability({
       userId: identity.userId,
       log,
       ingestionSource,
@@ -1618,6 +1645,11 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
           // Additive; consumers ignore unknown _meta keys. Reflects the rolling
           // 5-run-per-mode window as of this run — never gates the response.
           cacheBenefit: ranCacheBenefit,
+          // Slice 7: SLO gate snapshot — breach ids + per-breach action hints +
+          // the machine-readable gate fields (latency, attempt-only timeout /
+          // failure rates, empty-result health, enrichment state, profile).
+          // Additive + advisory only; never alters the response payload.
+          slo: ranSlo ? { breaches: ranSlo.breaches, breachDetails: ranSlo.breachDetails, gate: ranSlo.gate } : undefined,
           unchanged: false,
           watermark: log.watermark,
           candidateCount: log.candidateCount,
