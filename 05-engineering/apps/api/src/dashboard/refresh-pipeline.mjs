@@ -141,6 +141,21 @@ export const INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT = 22000;
 export const INTERACTIVE_CLUSTER_MAX_ATTEMPTS_DEFAULT = 2;
 export const DEFAULT_CLUSTER_MAX_ATTEMPTS = 2; // initial try + one retry
 
+// ─── Cold-start (Slice 1): first-run profile defaults ────────────────────────
+//
+// Brand-new users have no prior dashboard snapshot — the onboarding handoff
+// fires a cold-start refresh.  These are the locked defaults from cold-start-v1
+// (see ../../../../docs/cold-start-v1.md): a bounded geo budget with all Lane 2
+// deferred to the hold path, a 45s-per-attempt Sonnet clustering timeout, always
+// 2 attempts, and a tighter 10-item cluster input cap.  Slice 1 wires the
+// profile contract ONLY — `deferGeoLane2`/`clusterInputCap` are additive, inert
+// fields here; later slices thread them into pipeline behavior.  No env
+// overrides in this slice — the defaults are locked constants.
+export const COLD_START_GEO_STAGE_BUDGET_MS_DEFAULT = 12000;
+export const COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT = 45000;
+export const COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT = 2;
+export const COLD_START_CLUSTER_INPUT_CAP_DEFAULT = 10;
+
 function envIntPositive(name, fallback) {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
@@ -149,15 +164,30 @@ function envIntPositive(name, fallback) {
 /**
  * Resolve the latency-shaping profile for a refresh run.  `name === "interactive"`
  * (onboarding-driven interactive entry) yields the bounded fast-path knobs;
- * anything else (scheduled/background/default) yields the inert default profile
- * — `geoStageBudgetMs`/`clusterTimeoutMs` null so the pipeline keeps reading the
- * existing env defaults, and `clusterMaxAttempts` stays at 2 (one retry).
+ * `name === "cold_start"` (first-run, no prior snapshot) yields the locked
+ * cold-start knobs; anything else (scheduled/background/default) yields the
+ * inert default profile — `geoStageBudgetMs`/`clusterTimeoutMs` null so the
+ * pipeline keeps reading the existing env defaults, and `clusterMaxAttempts`
+ * stays at 2 (one retry).
  *
  * Returns a plain, fully-populated object so it can be surfaced verbatim on
  * `_meta.profile` for profile-on vs baseline comparison.  Exported for unit
  * testing of the knob matrix without driving the full pipeline.
  */
 export function resolveRefreshProfile(name) {
+  if (name === "cold_start") {
+    // Slice 1: locked defaults only.  `deferGeoLane2`/`clusterInputCap` are
+    // additive, inert fields — not yet wired into pipeline behavior.
+    return {
+      name: "cold_start",
+      interactive: true,
+      geoStageBudgetMs: COLD_START_GEO_STAGE_BUDGET_MS_DEFAULT,
+      clusterTimeoutMs: COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
+      clusterMaxAttempts: COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT,
+      deferGeoLane2: true,
+      clusterInputCap: COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
+    };
+  }
   if (name === "interactive") {
     return {
       name: "interactive",
