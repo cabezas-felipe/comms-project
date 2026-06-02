@@ -41,6 +41,10 @@ import {
   INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT,
   INTERACTIVE_CLUSTER_MAX_ATTEMPTS_DEFAULT,
   DEFAULT_CLUSTER_MAX_ATTEMPTS,
+  COLD_START_GEO_STAGE_BUDGET_MS_DEFAULT,
+  COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
+  COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT,
+  COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
   compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
@@ -811,6 +815,23 @@ test("resolveRefreshProfile: default profile is inert (no geo/cluster timeout ov
   assert.equal(p.clusterMaxAttempts, DEFAULT_CLUSTER_MAX_ATTEMPTS);
   // Any unknown profile name also resolves to the default (forward-compat).
   assert.equal(resolveRefreshProfile("scheduled").name, "default");
+  assert.equal(resolveRefreshProfile("totally-unknown").name, "default");
+});
+
+test("resolveRefreshProfile: cold_start profile yields the locked first-run knobs (Slice 1)", () => {
+  const p = resolveRefreshProfile("cold_start");
+  assert.equal(p.name, "cold_start");
+  assert.equal(p.interactive, true);
+  // Locked cold-start-v1 defaults: 12000 / 45000 / 2 / cap 10, Lane 2 deferred.
+  assert.equal(p.geoStageBudgetMs, COLD_START_GEO_STAGE_BUDGET_MS_DEFAULT);
+  assert.equal(p.geoStageBudgetMs, 12000);
+  assert.equal(p.clusterTimeoutMs, COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT);
+  assert.equal(p.clusterTimeoutMs, 45000);
+  assert.equal(p.clusterMaxAttempts, COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT);
+  assert.equal(p.clusterMaxAttempts, 2);
+  assert.equal(p.deferGeoLane2, true);
+  assert.equal(p.clusterInputCap, COLD_START_CLUSTER_INPUT_CAP_DEFAULT);
+  assert.equal(p.clusterInputCap, 10);
 });
 
 test("resolveRefreshProfile: interactive profile yields bounded fast-path knobs (env-overridable)", () => {

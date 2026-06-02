@@ -21,6 +21,7 @@ The Lovable reference UI stays in [`../04-prototype`](../04-prototype) and depen
 | Spanish readiness status (Phase 3) — extraction, translation-first normalization, and English-output guardrails are **code-complete**; the 6 Spanish feeds (La Silla Vacía, Semana, Infobae) are now **activated in the manifest across Phase 4 Slices 16–18 (complete)** — all enumerated in `source-feeds.json` as `active=true`, `lang=es`; production translation is wired and **enabled in preview + production (Sprint B1)** via `TEMPO_TRANSLATION_ENABLED=true` under controlled monitoring (rollback: set it to `false`). | [`evidence-translator.mjs`](apps/api/src/ingestion/evidence-translator.mjs) | [D-067](DECISIONS.md), [D-068](DECISIONS.md), [runbook](docs/runbook-translation-activation.md) |
 
 Detailed rationale: [dashboard-story-pool-walkthrough.md](docs/dashboard-story-pool-walkthrough.md). Operator scenarios: [dashboard-story-pool-scenario-map.md](docs/dashboard-story-pool-scenario-map.md).
+Cold-start orchestration spec: [cold-start-v1.md](docs/cold-start-v1.md).
 
 ## Commands
 
