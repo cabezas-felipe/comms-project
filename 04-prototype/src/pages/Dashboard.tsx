@@ -14,11 +14,14 @@ import {
 import {
   bootstrapDashboard,
   fetchDashboardWithMeta,
+  recoverDashboardViaGet,
+  refreshDashboard,
   type DashboardBootstrapDecision,
   type DashboardBootstrapResult,
   type DashboardFetchResult,
   type DashboardFunnelMeta,
   type DashboardRecallMeta,
+  type DashboardWhyEnrichmentMeta,
 } from "@/lib/api";
 import { DashboardRunDiagnostics } from "@/components/DashboardRunDiagnostics";
 import { formatKeywordLabel } from "@/lib/format";
@@ -58,6 +61,19 @@ export function shouldAdvanceClockForBootstrap(args: {
   if (args.failed) return true;
   return args.decision !== "served_fresh_snapshot";
 }
+
+// Slice 4: onboarding-driven interactive refresh requests the backend's
+// balanced fast-path profile (bounded geo + clustering envelope → 20–30s first
+// paint) via the `?interactive=1` query param.  Only the onboarding entry
+// (forceRefresh) uses this endpoint; the heartbeat/scheduled refresh keeps the
+// default `/api/dashboard/refresh` and therefore the default profile.
+const INTERACTIVE_REFRESH_ENDPOINT = "/api/dashboard/refresh?interactive=1";
+
+// Slice 5: how often to poll GET /api/dashboard for upgraded whyItMatters while
+// an interactive run's enrichment is pending, and the upper bound on how long
+// to keep polling before giving up (the fallback copy already on screen stays).
+const WHY_POLL_INTERVAL_MS = 3000;
+const WHY_POLL_BUDGET_MS = 60000;
 
 function dtoToStory(dto: StoryDto): Story {
   return {
@@ -110,7 +126,13 @@ export default function Dashboard() {
   // Both navigate with `state: { bootstrap: true }`.  Settings, in-app links,
   // browser back/forward, and direct URL loads do NOT carry this flag and use
   // the cheaper GET path.
-  const useBootstrap = (location.state as { bootstrap?: boolean } | null)?.bootstrap === true;
+  const navState = location.state as { bootstrap?: boolean; forceRefresh?: boolean } | null;
+  const useBootstrap = navState?.bootstrap === true;
+  // Slice 2: Onboarding → Dashboard passes `forceRefresh: true` so the loader
+  // runs the POST refresh pipeline directly instead of letting bootstrap reuse
+  // a stale "fresh" snapshot written before onboarding's settings landed.
+  // `forceRefresh` takes precedence over `bootstrap` when both are present.
+  const forceRefresh = navState?.forceRefresh === true;
 
   // Phase 6: dynamic, multi-select header pill state (one Set per section).
   // Empty sets across all three sections = "All" (no filters applied).
@@ -141,6 +163,10 @@ export default function Dashboard() {
     funnel: DashboardFunnelMeta | null;
     recall: DashboardRecallMeta | null;
   } | null>(null);
+  // Slice 5: progressive whyItMatters enrichment state from the latest fetch.
+  // When `deferred && pending > 0`, the dashboard polls GET /api/dashboard and
+  // patches story cards in place as upgraded copy lands.
+  const [whyEnrichment, setWhyEnrichment] = useState<DashboardWhyEnrichmentMeta | null>(null);
   const [reloadCounter, setReloadCounter] = useState(0);
 
   // Diagnostics panel visibility: UX test mode OR an explicit `?debug=1`.
@@ -208,56 +234,87 @@ export default function Dashboard() {
     let canceled = false;
     setIsLoading(true);
     setLoadError(null);
-    // Only bootstrap counts as a refresh-style attempt: it can delegate to
-    // the server's refresh executor, so the global `isRefreshing` flag must
-    // reflect it.  GET serves the persisted snapshot — it is NOT a refresh
-    // attempt, so it must not toggle the in-flight flag and must not
-    // advance the anchor (GET only seeds when nothing is set yet).  Local
-    // `isLoading` covers the GET path's own loading copy.
-    const attemptToken = useBootstrap ? recordAttemptStart() : null;
-    // Captured inside the promise chain so `.finally` can read the resolved
-    // result without re-awaiting.  `null` on the GET path (where we don't
-    // settle an attempt slot at all) and on the failure path (where the
-    // server gave us nothing usable).
+    // POST-style attempts (bootstrap OR forceRefresh) count as refresh
+    // attempts: they delegate to the server's refresh executor, so the global
+    // `isRefreshing` flag must reflect them and the anchor advances on settle.
+    // GET serves the persisted snapshot — it is NOT a refresh attempt, so it
+    // must not toggle the in-flight flag and must not advance the anchor (GET
+    // only seeds when nothing is set yet).  Local `isLoading` covers the GET
+    // path's own loading copy.
+    const isPostAttempt = useBootstrap || forceRefresh;
+    const attemptToken = isPostAttempt ? recordAttemptStart() : null;
+    // `bootstrapResult` is only set when the bootstrap POST resolves — used to
+    // read its `decision` for the clock-advance rule.  `renderedResult` is
+    // whatever we actually painted (the POST result OR the recovered GET
+    // result).  `postFailed` records that the POST loader threw (even when a
+    // GET recovery later succeeds) so the attempt still counts as a real
+    // refresh that advances the clock.
     let bootstrapResult: DashboardBootstrapResult | null = null;
-    let loaderResult: DashboardFetchResult | null = null;
-    let loaderFailed = false;
+    let renderedResult: DashboardFetchResult | null = null;
+    let postFailed = false;
 
-    // Phase 5: bootstrap path runs the (potentially expensive) refresh check
-    // server-side and falls back to a fresh snapshot when ≤ 60 min old.  GET
-    // path stays cheap and is used for every other dashboard load.
-    const loader: Promise<DashboardFetchResult | DashboardBootstrapResult> = useBootstrap
-      ? bootstrapDashboard()
-      : fetchDashboardWithMeta();
+    const applyResult = (result: DashboardFetchResult) => {
+      renderedResult = result;
+      const { payload } = result;
+      setStories(payload.stories.map(dtoToStory));
+      setLoadError(null);
+      setHasLoadedOnce(true);
+      setClusteringFailed(result.clusteringFailed);
+      setClusteringFailureReason(result.clusteringFailureReason);
+      setRunDiagnostics({
+        clusteringAttempts: result.clusteringAttempts,
+        selection: result.selection,
+        funnel: result.funnel,
+        recall: result.recall,
+      });
+      // Slice 5: capture progressive-enrichment state so the poll effect can
+      // start (deferred + pending) or stay idle.
+      setWhyEnrichment(result.whyEnrichment);
+      // First-paint seed.  GET responses never advance an existing anchor
+      // (post-seed remounts are no-ops); bootstrap `served_fresh_snapshot`
+      // also lands here so a brand-new session still gets a timestamp from
+      // the first response.  Refresh-style attempts additionally advance the
+      // clock via `recordAttemptFinished` below.
+      seedAnchorIfMissing(result);
+    };
 
-    loader
-      .then((result) => {
+    const run = async () => {
+      try {
+        // Routing:
+        //   forceRefresh → POST /refresh directly (Onboarding handoff): never
+        //     reuse a stale fresh snapshot for the user's first view.
+        //   useBootstrap → POST /bootstrap (Landing/Onboarding freshness check).
+        //   otherwise    → GET (cheap persisted snapshot for in-app nav).
+        if (forceRefresh) {
+          // Slice 4: request the interactive fast-path profile for the first
+          // post-onboarding paint (server reads `?interactive=1`).
+          renderedResult = await refreshDashboard({ endpoint: INTERACTIVE_REFRESH_ENDPOINT });
+        } else if (useBootstrap) {
+          const r = await bootstrapDashboard();
+          bootstrapResult = r;
+          renderedResult = r;
+        } else {
+          renderedResult = await fetchDashboardWithMeta();
+        }
         if (canceled) return;
-        loaderResult = result;
-        if (useBootstrap) bootstrapResult = result as DashboardBootstrapResult;
-        const { payload } = result;
-        setStories(payload.stories.map(dtoToStory));
-        setLoadError(null);
-        setHasLoadedOnce(true);
-        setClusteringFailed(result.clusteringFailed);
-        setClusteringFailureReason(result.clusteringFailureReason);
-        setRunDiagnostics({
-          clusteringAttempts: result.clusteringAttempts,
-          selection: result.selection,
-          funnel: result.funnel,
-          recall: result.recall,
-        });
-        // First-paint seed.  GET responses never advance an existing
-        // anchor (post-seed remounts are no-ops); bootstrap
-        // `served_fresh_snapshot` also lands here so a brand-new session
-        // still gets a timestamp from the first response.  Bootstrap
-        // `ran_refresh` will additionally advance the clock via
-        // `recordAttemptFinished` below.
-        seedAnchorIfMissing(result);
-      })
-      .catch((error: unknown) => {
+        applyResult(renderedResult);
+      } catch (error: unknown) {
+        // Slice 2 silent recovery: a POST loader (bootstrap/refresh) that fails
+        // after its retries gets ONE best-effort GET before we surface any
+        // error UI.  If the GET serves a contract-valid snapshot, render it
+        // silently — no full-page error, no banner, no toast.  GET-path loads
+        // have no recovery leg (they ARE the snapshot read), so they fall
+        // straight through to the existing error behavior.
+        if (isPostAttempt) {
+          postFailed = true;
+          const recovered = canceled ? null : await recoverDashboardViaGet();
+          if (canceled) return;
+          if (recovered) {
+            applyResult(recovered);
+            return;
+          }
+        }
         if (canceled) return;
-        loaderFailed = true;
         const message = error instanceof Error ? error.message : "Failed to load dashboard data.";
         setLoadError(message);
         trackSourceOpenError({ message, code: "dashboard_payload_load_failed" });
@@ -266,25 +323,36 @@ export default function Dashboard() {
         if (stories.length > 0) {
           notifyError("We couldn't refresh stories. Showing previous run.");
         }
-      })
-      .finally(() => {
+      } finally {
         if (attemptToken !== null) {
-          // Bootstrap path — settle the in-flight slot.  The result-aware
-          // settle prefers the server-stamped `lastCheckedAt` when present,
-          // falling back to client `now()` for failures and legacy
-          // responses.  The advance/no-op decision is delegated to
-          // `shouldAdvanceClockForBootstrap` (see helper for the matrix).
+          // Settle the in-flight slot exactly once per loader run (no
+          // double-counting across the POST + recovery legs).  The
+          // result-aware settle prefers the server-stamped `lastCheckedAt`
+          // when present, falling back to client `now()`.
+          //
+          // Clock-advance rule:
+          //   forceRefresh → always advance (a /refresh attempt always ran).
+          //   bootstrap    → delegate to `shouldAdvanceClockForBootstrap`.  A
+          //     POST that failed (even when recovered via GET) reports
+          //     `failed: true`, which advances — the recovery doesn't undo the
+          //     fact that a refresh was attempted.  Only a successful
+          //     `served_fresh_snapshot` is a no-op.
+          const advanceClock = forceRefresh
+            ? true
+            : shouldAdvanceClockForBootstrap({
+                failed: postFailed,
+                decision: bootstrapResult?.decision ?? null,
+              });
           recordAttemptFinished(attemptToken, {
-            result: loaderResult,
-            advanceClock: shouldAdvanceClockForBootstrap({
-              failed: loaderFailed,
-              decision: bootstrapResult?.decision ?? null,
-            }),
+            result: renderedResult,
+            advanceClock,
           });
         }
-        if (canceled) return;
-        setIsLoading(false);
-      });
+        if (!canceled) setIsLoading(false);
+      }
+    };
+
+    void run();
     return () => {
       canceled = true;
     };
@@ -293,6 +361,7 @@ export default function Dashboard() {
   }, [
     emptyMode,
     useBootstrap,
+    forceRefresh,
     reloadCounter,
     seedAnchorIfMissing,
     recordAttemptStart,
@@ -316,7 +385,69 @@ export default function Dashboard() {
       funnel: heartbeatResult.funnel,
       recall: heartbeatResult.recall,
     });
+    setWhyEnrichment(heartbeatResult.whyEnrichment);
   }, [emptyMode, heartbeatResult]);
+
+  // ─── Slice 5: poll for progressive whyItMatters upgrades ───────────────────
+  // While the latest fetch reports a DEFERRED enrichment with stories still
+  // pending, poll GET /api/dashboard on a short interval and patch each visible
+  // story card's `whyItMatters` IN PLACE (matched by id) — no full-page reset,
+  // so a reader with a card expanded sees the copy upgrade live.  Stops as soon
+  // as `pending` hits 0 (all upgraded) or the timeout budget is exhausted.  The
+  // effect gate is a stable boolean, so it doesn't churn the interval while
+  // pending is unchanged; the interval callback flips the gate when done.
+  const whyPending =
+    !emptyMode && whyEnrichment?.deferred === true && (whyEnrichment?.pending ?? 0) > 0;
+  useEffect(() => {
+    if (!whyPending) return;
+    let canceled = false;
+    // In-flight guard: a single GET poll can outlast the interval, so each tick
+    // is skipped while a prior request is still resolving — preventing
+    // overlapping/stacked GETs. Released in `finally` so a thrown/aborted poll
+    // can't wedge the loop shut.
+    let inFlight = false;
+    const deadline = Date.now() + WHY_POLL_BUDGET_MS;
+    const id = setInterval(async () => {
+      if (canceled) return;
+      if (Date.now() > deadline) {
+        // Budget exhausted: stop ACTIVE polling, keep whatever copy is on
+        // screen (grounded/template fallback or partial). `pollExhausted` marks
+        // that this is NOT a permanent lock — a later background refresh
+        // (heartbeat / next interactive entry) still upgrades the copy in place
+        // (Slice 6 follow-through). Clearing `deferred` halts this effect.
+        clearInterval(id);
+        setWhyEnrichment((prev) => (prev ? { ...prev, deferred: false, pollExhausted: true } : prev));
+        return;
+      }
+      if (inFlight) return; // a previous poll is still running — skip this tick
+      inFlight = true;
+      try {
+        const res = await fetchDashboardWithMeta();
+        if (canceled) return;
+        // Patch whyItMatters in place by story id — preserves order, expand
+        // state, scroll position, and the open source rail.
+        const byId = new Map(res.payload.stories.map((s) => [s.id, s.whyItMatters]));
+        setStories((prev) =>
+          prev.map((s) => (byId.has(s.id) ? { ...s, whyItMatters: byId.get(s.id) as string } : s))
+        );
+        setWhyEnrichment(res.whyEnrichment);
+        if (!res.whyEnrichment || res.whyEnrichment.pending <= 0) {
+          clearInterval(id); // all upgraded → stop
+        }
+      } catch {
+        // Transient poll failure — keep the fallback copy and retry next tick
+        // until the budget is exhausted. Never surfaces an error to the user.
+      } finally {
+        // Always release the in-flight guard so the next tick can proceed.
+        inFlight = false;
+      }
+    }, WHY_POLL_INTERVAL_MS);
+    return () => {
+      canceled = true;
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [whyPending]);
 
   const handleRetry = useCallback(() => {
     setReloadCounter((n) => n + 1);

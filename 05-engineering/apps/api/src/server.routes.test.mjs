@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _whyEnricher, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
 
@@ -1061,6 +1061,506 @@ test("POST /api/dashboard/refresh: emits a structured [refresh.summary] line and
   } finally {
     console.log = prevLog;
     _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── Slice 4: interactive fast-path profile routing ──────────────────────────
+
+function profileCapturingPipelineStub(captured) {
+  return async (opts) => {
+    captured.refreshProfile = opts.refreshProfile;
+    // Echo a profile shaped like what the real pipeline returns for the
+    // resolved name, so the route can surface it on `_meta.profile`.
+    const interactive = opts.refreshProfile === "interactive";
+    return {
+      payload: { contractVersion: opts.contractVersion, stories: [] },
+      log: {
+        unchanged: false,
+        poolCount: 1,
+        relevantCount: 1,
+        metaStoryCount: 0,
+        usedFallbackClustering: false,
+        clusteringFailureReason: null,
+        // Slice 4.1 locked behavior: interactive clustering attempts are ALWAYS
+        // 2 (same as default) — the latency win comes from the geo budget +
+        // per-attempt timeout, not from dropping the retry.
+        clusteringAttempts: 2,
+        watermark: "wm-profile",
+        candidateCount: 1,
+        selectedFeedCount: 1,
+        selection: { sourceSelectionMode: "test" },
+        profile: {
+          name: interactive ? "interactive" : "default",
+          interactive,
+          // Slice 4.1 calibrated values: geo 12000, timeout 22000, attempts 2.
+          geoStageBudgetMs: interactive ? 12000 : 25000,
+          clusterMaxAttempts: 2, // both profiles run 2 attempts post-4.1
+          clusterTimeoutMs: interactive ? 22000 : null,
+        },
+      },
+    };
+  };
+}
+
+test("POST /api/dashboard/refresh?interactive=1 runs the pipeline with the interactive profile and surfaces it on _meta", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const captured = {};
+  _refreshPipeline.run = profileCapturingPipelineStub(captured);
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice4-interactive", async () => {
+      const res = await request(app).post("/api/dashboard/refresh?interactive=1");
+      assert.equal(res.status, 200);
+      assert.equal(captured.refreshProfile, "interactive", "route must request the interactive profile");
+      assert.equal(res.body._meta?.profile?.name, "interactive");
+      assert.equal(res.body._meta?.profile?.interactive, true);
+      assert.equal(res.body._meta?.profile?.clusterMaxAttempts, 2);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh (no interactive flag) keeps the default profile (scheduled/background unchanged)", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const captured = {};
+  _refreshPipeline.run = profileCapturingPipelineStub(captured);
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice4-default", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(captured.refreshProfile, null, "default refresh must NOT request the interactive profile");
+      assert.equal(res.body._meta?.profile?.name, "default");
+      assert.equal(res.body._meta?.profile?.interactive, false);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── Slice 5: progressive whyItMatters enrichment ────────────────────────────
+
+// A deferred interactive pipeline stub: stories ship with non-empty fallback
+// whyItMatters and a `whyEnrichment.deferred` log (mirrors deferWhyItMatters).
+function deferredInteractivePipelineStub() {
+  return async (opts) => ({
+    payload: {
+      contractVersion: opts.contractVersion,
+      stories: [
+        {
+          id: "m1", metaStoryId: "m1", title: "T", subtitle: "sub",
+          geographies: ["US"], topic: "Diplomatic relations", summary: "x",
+          whyItMatters: "This narrative is newly entering your monitoring set; treat initial signals as baseline context before stronger implications.",
+          whatChanged: "z", priority: "standard", outletCount: 1,
+          tags: { topics: [], keywords: [], geographies: ["US"] },
+          sources: [{ id: "s1", outlet: "Reuters", kind: "traditional", weight: 50, url: "https://x", minutesAgo: 10, headline: "h", body: ["b"] }],
+        },
+      ],
+    },
+    log: {
+      unchanged: false, poolCount: 1, relevantCount: 1, metaStoryCount: 1,
+      usedFallbackClustering: false, clusteringFailureReason: null, clusteringAttempts: 2,
+      watermark: "wm-defer", candidateCount: 1, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "test" },
+      whyItMatters: { deferred: true },
+      whyEnrichment: { deferred: true, pending: 1, completed: 0, total: 1, upgradeLatencyMs: null },
+    },
+  });
+}
+
+test("POST /api/dashboard/refresh?interactive=1 defers whyItMatters: non-empty fallback + pending meta + schedules enrichment", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevEnrich = _whyEnricher.enrich;
+  let enrichCall = null;
+  _refreshPipeline.run = deferredInteractivePipelineStub();
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  // Capture the scheduled enrichment without running it (avoid racing the test).
+  _whyEnricher.enrich = async (args) => { enrichCall = args; };
+  try {
+    await withIsolatedUser("slice5-defer", async () => {
+      const res = await request(app).post("/api/dashboard/refresh?interactive=1");
+      assert.equal(res.status, 200);
+      // First paint: stories present with non-empty fallback whyItMatters.
+      assert.equal(res.body.stories.length, 1);
+      assert.ok(res.body.stories[0].whyItMatters.length > 0);
+      // Progressive-state diagnostics surfaced for the client poll loop.
+      assert.equal(res.body._meta?.whyEnrichment?.deferred, true);
+      assert.equal(res.body._meta?.whyEnrichment?.pending, 1);
+      // Async enrichment was scheduled with the generation (watermark) guard.
+      assert.ok(enrichCall, "enrichment must be scheduled after the deferred write");
+      assert.equal(enrichCall.generation, "wm-defer");
+      assert.ok(enrichCall.basePayload, "enrichment receives the just-written payload");
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _whyEnricher.enrich = prevEnrich;
+  }
+});
+
+// Helper: persist a deferred snapshot directly + return its in-memory base payload.
+async function seedDeferredSnapshot(userId, generation) {
+  const basePayload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "m1", metaStoryId: "m1", title: "T", subtitle: "sub",
+        geographies: ["US"], topic: "Diplomatic relations", summary: "x",
+        whyItMatters: "This narrative is newly entering your monitoring set; treat initial signals as baseline context before stronger implications.",
+        whatChanged: "z", priority: "standard", outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: ["US"] },
+        sources: [{ id: "s1", outlet: "Reuters", kind: "traditional", weight: 50, url: "https://x", minutesAgo: 10, headline: "h", body: ["b"] }],
+      },
+    ],
+    _watermark: generation,
+    _everSeenMetaStoryIds: [],
+    _lastRunMeta: { whyEnrichment: { deferred: true, pending: 1, completed: 0, total: 1, upgradeLatencyMs: null } },
+  };
+  await _snapshotRepo.write(userId, basePayload);
+  return basePayload;
+}
+
+test("Slice 5 enrichment: success path upgrades whyItMatters in the snapshot and clears pending", async () => {
+  await withIsolatedUser("slice5-upgrade", async () => {
+    const userId = "slice5-upgrade";
+    const basePayload = await seedDeferredSnapshot(userId, "gen-up");
+    const richResolver = async (input) => ({ whyItMatters: `RICH:${input.metaStoryId}`, trace: {}, diagnostics: {} });
+    const result = await _whyEnricher.enrich(
+      { userId, generation: "gen-up", basePayload },
+      { resolveWhyItMattersFn: richResolver }
+    );
+    assert.equal(result.kind, "upgraded");
+    const snap = await _snapshotRepo.read(userId);
+    assert.equal(snap.stories[0].whyItMatters, "RICH:m1", "upgraded copy persisted");
+    assert.equal(snap._meta.whyEnrichment.deferred, false);
+    assert.equal(snap._meta.whyEnrichment.pending, 0);
+    assert.equal(snap._meta.whyEnrichment.completed, 1);
+  });
+});
+
+test("Slice 5 enrichment: preserves same-generation metadata changed after the initial write (no clobber)", async () => {
+  await withIsolatedUser("slice5-meta-merge", async () => {
+    const userId = "slice5-meta-merge";
+    // Initial deferred write → capture basePayload (the enricher's write source).
+    const basePayload = await seedDeferredSnapshot(userId, "gen-meta");
+    // Simulate a CONCURRENT same-generation metadata write landing between the
+    // initial write and enrichment completion: same _watermark, but new
+    // `_lastRunMeta.funnel` + a newer `_lastCheckedAt`, still pending so the
+    // idempotency guard does not trip.
+    await _snapshotRepo.write(userId, {
+      ...basePayload,
+      _lastCheckedAt: "2026-06-01T12:00:00.000Z",
+      _lastRunMeta: {
+        ...basePayload._lastRunMeta,
+        funnel: { primaryDropStage: "geo_filter" },
+        clusterModel: "anthropic:later-model",
+      },
+    });
+    const richResolver = async (input) => ({ whyItMatters: `RICH:${input.metaStoryId}`, trace: {}, diagnostics: {} });
+    // Enrich with the ORIGINAL basePayload (which lacks funnel/clusterModel).
+    const result = await _whyEnricher.enrich(
+      { userId, generation: "gen-meta", basePayload },
+      { resolveWhyItMattersFn: richResolver }
+    );
+    assert.equal(result.kind, "upgraded");
+    const snap = await _snapshotRepo.read(userId);
+    // Intended enrichment overrides applied…
+    assert.equal(snap.stories[0].whyItMatters, "RICH:m1");
+    assert.equal(snap._meta.whyEnrichment.deferred, false);
+    assert.equal(snap._meta.whyEnrichment.pending, 0);
+    // …while the concurrently-written same-generation metadata is RETAINED
+    // (not clobbered by the stale basePayload).
+    assert.deepEqual(snap._meta.funnel, { primaryDropStage: "geo_filter" });
+    assert.equal(snap._meta.clusterModel, "anthropic:later-model");
+    assert.equal(snap._meta.lastCheckedAt, "2026-06-01T12:00:00.000Z");
+  });
+});
+
+test("Slice 5 enrichment: stale guard — generation mismatch is a no-op (no overwrite)", async () => {
+  await withIsolatedUser("slice5-stale", async () => {
+    const userId = "slice5-stale";
+    const basePayload = await seedDeferredSnapshot(userId, "gen-current");
+    const writeSpy = [];
+    const prevWrite = _snapshotRepo.write;
+    _snapshotRepo.write = async (...args) => { writeSpy.push(args); return prevWrite(...args); };
+    try {
+      const richResolver = async (input) => ({ whyItMatters: `RICH:${input.metaStoryId}`, trace: {}, diagnostics: {} });
+      // generation does NOT match the persisted snapshot's _watermark.
+      const result = await _whyEnricher.enrich(
+        { userId, generation: "gen-OLD-STALE", basePayload },
+        { resolveWhyItMattersFn: richResolver }
+      );
+      assert.equal(result.kind, "stale");
+      assert.equal(writeSpy.length, 0, "stale enrichment must NOT write");
+      const snap = await _snapshotRepo.read(userId);
+      // Snapshot untouched — still the deferred fallback copy + pending.
+      assert.ok(snap.stories[0].whyItMatters.startsWith("This narrative is newly entering"));
+      assert.equal(snap._meta.whyEnrichment.deferred, true);
+    } finally {
+      _snapshotRepo.write = prevWrite;
+    }
+  });
+});
+
+test("Slice 5 enrichment: idempotent — re-running after upgrade is a no-op", async () => {
+  await withIsolatedUser("slice5-idem", async () => {
+    const userId = "slice5-idem";
+    const basePayload = await seedDeferredSnapshot(userId, "gen-idem");
+    const richResolver = async (input) => ({ whyItMatters: `RICH:${input.metaStoryId}`, trace: {}, diagnostics: {} });
+    const first = await _whyEnricher.enrich({ userId, generation: "gen-idem", basePayload }, { resolveWhyItMattersFn: richResolver });
+    assert.equal(first.kind, "upgraded");
+    const second = await _whyEnricher.enrich({ userId, generation: "gen-idem", basePayload }, { resolveWhyItMattersFn: richResolver });
+    assert.equal(second.kind, "already_done", "second run must be a no-op");
+  });
+});
+
+test("Slice 5 enrichment: failed upgrade degrades to valid non-empty fallback (snapshot stays valid)", async () => {
+  await withIsolatedUser("slice5-fail", async () => {
+    const userId = "slice5-fail";
+    const basePayload = await seedDeferredSnapshot(userId, "gen-fail");
+    const throwingResolver = async () => { throw new Error("writer down"); };
+    const result = await _whyEnricher.enrich(
+      { userId, generation: "gen-fail", basePayload },
+      { resolveWhyItMattersFn: throwingResolver }
+    );
+    assert.equal(result.kind, "upgraded"); // pass completes; copy degraded to fallback
+    const snap = await _snapshotRepo.read(userId);
+    assert.ok(snap.stories[0].whyItMatters.length > 0, "story whyItMatters stays non-empty");
+    assert.equal(snap._meta.whyEnrichment.deferred, false, "enrichment marks done even on degrade");
+    assert.equal(snap._meta.whyEnrichment.completed, 0, "no stories upgraded when the resolver fails");
+  });
+});
+
+// ─── Slice 1: fail-closed clustering snapshot continuity ─────────────────────
+
+// Shared fail-closed pipeline stub: clustering failed on both attempts, so the
+// pipeline publishes ZERO stories and classifies the failure.  This is exactly
+// the shape `runRefreshPipeline` returns on its locked fail-closed path.
+function failClosedClusteringPipelineStub(reason = "timeout") {
+  return async (opts) => ({
+    payload: { contractVersion: opts.contractVersion, stories: [] },
+    log: {
+      unchanged: false,
+      poolCount: 4,
+      relevantCount: 3,
+      metaStoryCount: 0,
+      usedFallbackClustering: true,
+      clusteringFailureReason: reason,
+      clusteringAttempts: 2,
+      clusteringLatencyMs: [120, 130],
+      groundingFailures: 0,
+      droppedUngroundedStoryCount: 0,
+      groundingDropReasons: {},
+      watermark: "wm-failed-run",
+      candidateCount: 3,
+      selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict" },
+      funnel: { primaryDropStage: "clustering_and_grounding" },
+      timings: { pipelineMs: 50 },
+      outcomes: {
+        storiesPublished: 0,
+        clusteringAttempts: 2,
+        clusteringFailureReason: reason,
+        usedFallbackClustering: true,
+      },
+    },
+  });
+}
+
+// A prior HEALTHY snapshot — carries visible stories plus the persisted
+// `_watermark` / `_selectionMeta` the route re-serves on continuity.  The
+// story is contract-valid (passes `dashboardPayloadSchema`): a non-empty
+// `sources` array with every required `sourceSchema` field, so the fixture
+// matches what `_snapshotRepo.read` actually returns in production rather than
+// a degenerate shape the schema would reject.  The re-served body is asserted
+// against `dashboardPayloadSchema` in the WITH-prior test below.
+const PRIOR_HEALTHY_SNAPSHOT = Object.freeze({
+  contractVersion: "2026-05-19-meta-story-fields",
+  stories: [
+    {
+      id: "healthy-1",
+      metaStoryId: "healthy-1",
+      title: "Healthy Prior Story",
+      subtitle: "Prior subtitle.",
+      geographies: ["US"],
+      topic: "Diplomatic relations",
+      summary: "Prior summary.",
+      whyItMatters: "Prior implication.",
+      whatChanged: "Prior delta.",
+      priority: "standard",
+      outletCount: 1,
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      sources: [
+        {
+          id: "healthy-src-1",
+          outlet: "Reuters",
+          byline: "Staff",
+          kind: "traditional",
+          weight: 80,
+          url: "https://example.com/healthy-1",
+          minutesAgo: 42,
+          headline: "Prior healthy headline",
+          body: ["Prior healthy body paragraph."],
+        },
+      ],
+    },
+  ],
+  _watermark: "wm-prior-healthy",
+  _selectionMeta: { sourceSelectionMode: "strict" },
+  _meta: { refreshedAt: "2026-05-31T00:00:00.000Z", hasSnapshot: true },
+});
+
+test("POST /api/dashboard/refresh: clustering fail-closed WITH prior healthy snapshot re-serves prior stories and does NOT publish an empty replacement", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  let writeCalled = false;
+  let writeMetaCalled = false;
+  _refreshPipeline.run = failClosedClusteringPipelineStub("timeout");
+  _snapshotRepo.read = async () => PRIOR_HEALTHY_SNAPSHOT;
+  _snapshotRepo.write = async () => { writeCalled = true; };
+  _snapshotRepo.writeMeta = async () => { writeMetaCalled = true; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice1-failclosed-with-prior", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      // The re-served body must conform to the dashboard contract — the
+      // continuity path serves the prior snapshot verbatim, so a contract-valid
+      // prior (non-empty sources, all required fields) stays contract-valid out.
+      const parsed = dashboardPayloadSchema.safeParse({ contractVersion: res.body.contractVersion, stories: res.body.stories });
+      assert.ok(parsed.success, `re-served body must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
+      // The prior healthy stories remain visible — NOT an empty replacement.
+      assert.equal(res.body.stories.length, 1, "prior healthy stories must remain visible");
+      assert.equal(res.body.stories[0].metaStoryId, "healthy-1");
+      assert.equal(res.body.stories[0].sources.length, 1, "prior story sources must be re-served intact");
+      // Crucially: the empty snapshot was NOT written (no overwrite of healthy).
+      assert.equal(writeCalled, false, "must NOT publish/persist an empty replacement snapshot");
+      // The check timestamp still advances (best-effort writeMeta bump).
+      assert.equal(writeMetaCalled, true, "lastCheckedAt must be bumped via writeMeta");
+      // Diagnostics make this observable as a clustering-failure continuity event.
+      assert.equal(res.body._meta?.snapshotPreserved, true, "_meta.snapshotPreserved flag must be set");
+      assert.equal(res.body._meta?.clusteringFailureReason, "timeout");
+      assert.equal(res.body._meta?.usedFallbackClustering, true);
+      assert.equal(res.body._meta?.clusteringAttempts, 2);
+      assert.equal(res.body._meta?.refreshSkippedReason, "clustering_failed_snapshot_preserved");
+      assert.equal(res.body._meta?.hasSnapshot, true);
+      assert.equal(res.body._meta?.unchanged, false);
+      // Prior snapshot's own selection/watermark are re-served (contract parity
+      // with GET /api/dashboard for that snapshot).
+      assert.equal(res.body._meta?.watermark, "wm-prior-healthy");
+      assert.ok(res.body._meta?.selection, "prior selection metadata must be re-served");
+      // Persisted internals must not leak at the top level.
+      assert.equal(res.body._watermark, undefined);
+      assert.equal(res.body._selectionMeta, undefined);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.writeMeta = prevWriteMeta;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: clustering fail-closed with NO prior snapshot keeps the empty (no-stories) behavior", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  let writtenPayload = null;
+  _refreshPipeline.run = failClosedClusteringPipelineStub("error");
+  _snapshotRepo.read = async () => null; // no prior snapshot
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice1-failclosed-no-prior", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      // No prior snapshot to preserve → existing clustering-failed empty
+      // behavior: zero stories, and the empty snapshot IS published.
+      assert.equal(res.body.stories.length, 0, "no stories on clustering failure with no prior");
+      assert.ok(writtenPayload !== null, "empty snapshot is still persisted when there is no prior");
+      assert.equal(writtenPayload.stories.length, 0);
+      // Not a continuity event — the preservation flag must be absent.
+      assert.notEqual(res.body._meta?.snapshotPreserved, true, "snapshotPreserved must NOT be set without a prior healthy snapshot");
+      // Failure remains observable via the normal fail-closed diagnostics.
+      assert.equal(res.body._meta?.clusteringFailureReason, "error");
+      assert.equal(res.body._meta?.usedFallbackClustering, true);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: clustering fail-closed with an EMPTY prior snapshot (no stories) does NOT preserve and publishes empty", async () => {
+  // "Healthy" means the prior carried visible stories.  An empty prior is not
+  // healthy — preserving it would trap the user at zero, so we fall through to
+  // the normal publish path (no false continuity).
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  let writeCalled = false;
+  _refreshPipeline.run = failClosedClusteringPipelineStub("timeout");
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _watermark: "wm-empty-prior",
+  });
+  _snapshotRepo.write = async () => { writeCalled = true; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice1-failclosed-empty-prior", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.stories.length, 0);
+      assert.notEqual(res.body._meta?.snapshotPreserved, true, "empty prior is not healthy → no preservation");
+      assert.equal(writeCalled, true, "empty prior falls through to the normal publish path");
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;

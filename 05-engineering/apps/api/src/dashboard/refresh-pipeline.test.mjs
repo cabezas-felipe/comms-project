@@ -36,9 +36,17 @@ import {
   compareSourcesT1,
   compareStoriesR1,
   resolveGeoStageBudgetMs,
+  resolveRefreshProfile,
+  INTERACTIVE_GEO_STAGE_BUDGET_MS_DEFAULT,
+  INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT,
+  INTERACTIVE_CLUSTER_MAX_ATTEMPTS_DEFAULT,
+  DEFAULT_CLUSTER_MAX_ATTEMPTS,
   compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
+  enrichWhyItMattersForStories,
+  prioritizeLane2Candidates,
+  buildSourceGroundedWhyFallback,
 } from "./refresh-pipeline.mjs";
 import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
 // Hoisted from further down the file: ESM imports must sit at module top level,
@@ -48,6 +56,9 @@ import {
   createProfileEmbeddingCache,
 } from "./semantic-beat-fit.mjs";
 import { WHAT_CHANGED_COPY, WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION } from "./what-changed-engine.mjs";
+// Slice 3 follow-up: assert the terminal-field SLO guard directly against the
+// ops evaluator (no server/route round-trip needed for the counting semantics).
+import { evaluateRefreshSlo, _resetSloState } from "../ops/refresh-slo.mjs";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
@@ -433,6 +444,28 @@ test("runRefreshPipeline: classifies a clustering timeout failure reason", async
   assert.equal(log.clusteringAttempts, 2);
 });
 
+test("runRefreshPipeline: fail-closed emits the exact diagnostic contract the route's snapshot-continuity guard gates on", async () => {
+  // Slice 1: the route handler decides whether to preserve a prior healthy
+  // snapshot by reading `clusteringFailureReason` (non-null) + an empty
+  // `payload.stories`.  Pin that contract here so a future pipeline change
+  // can't silently break fail-closed snapshot continuity at the route layer.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { throw new Error("model unavailable"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  // No fabricated fallback stories — the empty array is the gating signal.
+  assert.ok(Array.isArray(payload.stories), "payload.stories must be an array");
+  assert.equal(payload.stories.length, 0, "fail-closed must publish zero stories (no fabricated buckets)");
+  // The route requires a non-null failure reason to enter the preserve branch.
+  assert.notEqual(log.clusteringFailureReason, null, "clusteringFailureReason must be set on fail-closed");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(typeof log.clusteringAttempts, "number");
+});
+
 test("runRefreshPipeline: applies 24h filter before clustering", async () => {
   const rawItems = [
     makeItem({ sourceId: "recent", outlet: "Reuters", minutesAgo: 30 }),
@@ -767,6 +800,261 @@ test("resolveGeoStageBudgetMs: unset/invalid env → default 25000, valid honore
   }
 });
 
+// ─── Slice 4: interactive fast-path profile ──────────────────────────────────
+
+test("resolveRefreshProfile: default profile is inert (no geo/cluster timeout override, 2 attempts)", () => {
+  const p = resolveRefreshProfile(null);
+  assert.equal(p.name, "default");
+  assert.equal(p.interactive, false);
+  assert.equal(p.geoStageBudgetMs, null, "default must fall through to env/default geo budget");
+  assert.equal(p.clusterTimeoutMs, null, "default must fall through to env/default cluster timeout");
+  assert.equal(p.clusterMaxAttempts, DEFAULT_CLUSTER_MAX_ATTEMPTS);
+  // Any unknown profile name also resolves to the default (forward-compat).
+  assert.equal(resolveRefreshProfile("scheduled").name, "default");
+});
+
+test("resolveRefreshProfile: interactive profile yields bounded fast-path knobs (env-overridable)", () => {
+  const savedGeo = process.env.TEMPO_INTERACTIVE_GEO_STAGE_BUDGET_MS;
+  const savedTimeout = process.env.TEMPO_INTERACTIVE_CLUSTER_TIMEOUT_MS;
+  const savedAttempts = process.env.TEMPO_INTERACTIVE_CLUSTER_MAX_ATTEMPTS;
+  try {
+    delete process.env.TEMPO_INTERACTIVE_GEO_STAGE_BUDGET_MS;
+    delete process.env.TEMPO_INTERACTIVE_CLUSTER_TIMEOUT_MS;
+    delete process.env.TEMPO_INTERACTIVE_CLUSTER_MAX_ATTEMPTS;
+    const p = resolveRefreshProfile("interactive");
+    assert.equal(p.name, "interactive");
+    assert.equal(p.interactive, true);
+    // Slice 4.1 calibrated defaults: 12000 / 22000 / 2.
+    assert.equal(p.geoStageBudgetMs, INTERACTIVE_GEO_STAGE_BUDGET_MS_DEFAULT);
+    assert.equal(p.geoStageBudgetMs, 12000);
+    assert.equal(p.clusterTimeoutMs, INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT);
+    assert.equal(p.clusterTimeoutMs, 22000);
+    assert.equal(p.clusterMaxAttempts, INTERACTIVE_CLUSTER_MAX_ATTEMPTS_DEFAULT);
+    assert.equal(p.clusterMaxAttempts, 2, "interactive clustering attempts are ALWAYS 2 (locked)");
+    // Interactive geo budget must still be materially tighter than the default
+    // to cut wall clock (the latency win now comes from geo + per-attempt
+    // timeout, not from dropping the retry).
+    assert.ok(
+      INTERACTIVE_GEO_STAGE_BUDGET_MS_DEFAULT < resolveGeoStageBudgetMs(),
+      "interactive geo budget must be below the default geo budget"
+    );
+    // Env overrides win so ops can retune the band without a deploy.  Use a
+    // distinct attempts value (3) so the override is provably honored rather
+    // than coinciding with the new default of 2.
+    process.env.TEMPO_INTERACTIVE_GEO_STAGE_BUDGET_MS = "5000";
+    process.env.TEMPO_INTERACTIVE_CLUSTER_TIMEOUT_MS = "15000";
+    process.env.TEMPO_INTERACTIVE_CLUSTER_MAX_ATTEMPTS = "3";
+    const o = resolveRefreshProfile("interactive");
+    assert.equal(o.geoStageBudgetMs, 5000);
+    assert.equal(o.clusterTimeoutMs, 15000);
+    assert.equal(o.clusterMaxAttempts, 3);
+  } finally {
+    if (savedGeo !== undefined) process.env.TEMPO_INTERACTIVE_GEO_STAGE_BUDGET_MS = savedGeo;
+    else delete process.env.TEMPO_INTERACTIVE_GEO_STAGE_BUDGET_MS;
+    if (savedTimeout !== undefined) process.env.TEMPO_INTERACTIVE_CLUSTER_TIMEOUT_MS = savedTimeout;
+    else delete process.env.TEMPO_INTERACTIVE_CLUSTER_TIMEOUT_MS;
+    if (savedAttempts !== undefined) process.env.TEMPO_INTERACTIVE_CLUSTER_MAX_ATTEMPTS = savedAttempts;
+    else delete process.env.TEMPO_INTERACTIVE_CLUSTER_MAX_ATTEMPTS;
+  }
+});
+
+test("runRefreshPipeline: interactive profile surfaces tuned diagnostics and passes the tighter cluster timeout (Slice 4.1)", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const seenClusterOpts = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      seenClusterOpts.push(opts);
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "interactive",
+  });
+  assert.equal(payload.stories.length, 1, "interactive profile still yields stories (quality preserved)");
+  // Diagnostics — additive, deterministic, comparable to baseline.  Slice 4.1
+  // calibration: geo budget 12000, cluster timeout 22000, attempts ALWAYS 2.
+  assert.equal(log.profile.name, "interactive");
+  assert.equal(log.profile.interactive, true);
+  assert.equal(log.profile.geoStageBudgetMs, INTERACTIVE_GEO_STAGE_BUDGET_MS_DEFAULT);
+  assert.equal(log.profile.clusterMaxAttempts, INTERACTIVE_CLUSTER_MAX_ATTEMPTS_DEFAULT);
+  assert.equal(log.profile.clusterMaxAttempts, 2, "interactive clustering attempts are ALWAYS 2 (locked)");
+  assert.equal(log.profile.clusterTimeoutMs, INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT);
+  // First attempt succeeds → loop breaks after one call, but the tighter
+  // interactive timeout is threaded on every clusterFn call.
+  assert.equal(seenClusterOpts.length, 1, "clustering succeeds on the first attempt → single call");
+  assert.equal(seenClusterOpts[0]?.timeoutMs, INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT);
+});
+
+test("runRefreshPipeline: interactive profile retries clustering once (attempts ALWAYS 2) and recovers on the retry", async () => {
+  // Slice 4.1 locked decision: interactive runs keep the default profile's
+  // resilience (initial try + one retry).  A transient first-attempt failure
+  // must NOT fail closed when the retry succeeds — this is the empty-risk
+  // reduction the recalibration exists for.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let attempts = 0;
+  const seenClusterOpts = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      attempts++;
+      seenClusterOpts.push(opts);
+      if (attempts === 1) throw new Error("transient blip");
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "interactive",
+  });
+  assert.equal(attempts, 2, "interactive retries once (initial + one retry)");
+  assert.equal(payload.stories.length, 1, "recovers on the retry rather than shipping empty");
+  assert.equal(log.usedFallbackClustering, false);
+  assert.equal(log.clusteringFailureReason, null);
+  assert.equal(log.clusteringAttempts, 2);
+  assert.equal(log.profile.clusterMaxAttempts, 2);
+  // The tighter interactive timeout is threaded on BOTH attempts.
+  assert.deepEqual(seenClusterOpts, [
+    { timeoutMs: INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT },
+    { timeoutMs: INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT },
+  ]);
+});
+
+test("runRefreshPipeline: default profile is unchanged — 2 attempts, no cluster timeout override, profile diagnostics report default", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let attempts = 0;
+  const seenClusterOpts = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      attempts++;
+      seenClusterOpts.push(opts);
+      if (attempts === 1) throw new Error("transient blip");
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // No refreshProfile → default profile.
+  });
+  // Default keeps the retry (2 attempts); interactive is also locked at 2 after
+  // Slice 4.1, with latency wins coming from tighter geo/timeout knobs.
+  assert.equal(attempts, 2, "default profile retries once (initial + retry)");
+  assert.equal(payload.stories.length, 1);
+  assert.equal(log.profile.name, "default");
+  assert.equal(log.profile.interactive, false);
+  assert.equal(log.profile.clusterMaxAttempts, DEFAULT_CLUSTER_MAX_ATTEMPTS);
+  assert.equal(log.profile.clusterTimeoutMs, null, "default passes no per-call cluster timeout");
+  // No timeout override threaded on the default path.
+  assert.deepEqual(seenClusterOpts, [{}, {}]);
+});
+
+test("runRefreshPipeline: interactive profile preserves fail-closed trust (both attempts fail → zero stories, classified error)", async () => {
+  // Slice 1 continuity contract still holds: when BOTH interactive attempts
+  // fail, the pipeline publishes ZERO stories (no fabricated fallback) with a
+  // non-null clusteringFailureReason the route's continuity gate keys on.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let attempts = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { attempts++; throw new Error("model unavailable"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "interactive",
+  });
+  assert.equal(attempts, 2, "interactive attempts clustering twice before failing closed (always 2)");
+  assert.equal(payload.stories.length, 0, "fail-closed: no fabricated fallback stories");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "error", "non-null reason preserves Slice 1 continuity gate");
+  assert.equal(log.clusteringAttempts, 2);
+  assert.equal(log.profile.name, "interactive");
+});
+
+// ─── Slice 5: progressive whyItMatters enrichment ────────────────────────────
+
+test("runRefreshPipeline: deferWhyItMatters skips the writer, emits non-empty fallback copy + deferred diagnostics", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let whyResolverCalls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    deferWhyItMatters: true,
+    // If the writer ran, this would increment — it must NOT on the deferred path.
+    resolveWhyItMattersFn: async () => { whyResolverCalls += 1; return { whyItMatters: "SHOULD-NOT-RUN", trace: {}, diagnostics: {} }; },
+  });
+  assert.equal(payload.stories.length, 1);
+  // whyItMatters is non-empty fallback copy — never empty, never a subtitle echo.
+  assert.ok(payload.stories[0].whyItMatters.length > 0, "fallback whyItMatters must be non-empty");
+  assert.notEqual(payload.stories[0].whyItMatters, payload.stories[0].subtitle, "never a subtitle echo");
+  assert.equal(whyResolverCalls, 0, "deferred path must NOT invoke the why writer");
+  // Diagnostics make the deferred/pending state observable.
+  assert.equal(log.whyItMatters.deferred, true);
+  assert.equal(log.whyEnrichment.deferred, true);
+  assert.equal(log.whyEnrichment.pending, 1);
+  assert.equal(log.whyEnrichment.completed, 0);
+  assert.equal(log.whyEnrichment.total, 1);
+});
+
+test("runRefreshPipeline: default (non-deferred) run reports whyEnrichment completed (no pending)", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // deferWhyItMatters defaults false.
+  });
+  assert.equal(log.whyItMatters.deferred, false);
+  assert.equal(log.whyEnrichment.deferred, false);
+  assert.equal(log.whyEnrichment.pending, 0);
+  assert.equal(log.whyEnrichment.completed, 1);
+});
+
+test("enrichWhyItMattersForStories: upgrades whyItMatters in place via the injected resolver (lineage preserved)", async () => {
+  const stories = [
+    { id: "m1", metaStoryId: "m1", title: "T1", subtitle: "s1", summary: "sum1", whatChanged: "c1", whyItMatters: "FALLBACK copy", sources: [] },
+    { id: "m2", metaStoryId: "m2", title: "T2", subtitle: "s2", summary: "sum2", whatChanged: "c2", whyItMatters: "FALLBACK copy", sources: [] },
+  ];
+  const richResolver = async (input) => ({
+    whyItMatters: `RICH:${input.metaStoryId}`,
+    trace: { metaStoryId: input.metaStoryId },
+    diagnostics: {},
+  });
+  const { stories: upgraded, diagnostics } = await enrichWhyItMattersForStories({
+    stories,
+    resolveWhyItMattersFn: richResolver,
+  });
+  assert.equal(upgraded.length, 2);
+  assert.equal(upgraded[0].whyItMatters, "RICH:m1");
+  assert.equal(upgraded[1].whyItMatters, "RICH:m2");
+  // metaStoryId lineage preserved exactly (no re-clustering).
+  assert.equal(upgraded[0].metaStoryId, "m1");
+  assert.equal(upgraded[1].metaStoryId, "m2");
+  assert.equal(diagnostics.upgraded, 2);
+  assert.equal(diagnostics.total, 2);
+});
+
+test("enrichWhyItMattersForStories: a throwing resolver degrades to non-empty safe fallback (no corruption)", async () => {
+  const stories = [
+    { id: "m1", metaStoryId: "m1", title: "T1", subtitle: "s1", summary: "sum1", whatChanged: "c1", whyItMatters: "FALLBACK copy", sources: [] },
+  ];
+  const throwingResolver = async () => { throw new Error("writer unavailable"); };
+  const { stories: upgraded, diagnostics } = await enrichWhyItMattersForStories({
+    stories,
+    resolveWhyItMattersFn: throwingResolver,
+  });
+  assert.equal(upgraded.length, 1);
+  assert.ok(upgraded[0].whyItMatters.length > 0, "must remain non-empty on resolver failure");
+  assert.notEqual(upgraded[0].whyItMatters, upgraded[0].subtitle, "never a subtitle echo");
+  assert.equal(diagnostics.upgraded, 0, "no stories counted as upgraded when the resolver fails");
+});
+
 test("runRefreshPipeline: Lane 1 is processed before Lane 2 in the geo stage (A1.1 ordering)", async () => {
   // A1.1 sequencing contract, asserted independently of the A2 bypass: the geo
   // lane split must emit Lane 1 (must-see) ahead of Lane 2 regardless of input
@@ -914,6 +1202,131 @@ test("runRefreshPipeline: ample budget processes all of Lane 2 (no defer, no bud
   assert.equal(log.geo.geoLane2DeferredCount, 0);
   assert.ok(seenIds.includes("mustsee") && seenIds.includes("lane2"),
     "with ample budget both lanes reach clustering");
+});
+
+// ─── Slice 6: Lane 2 throughput prioritization + diagnostics ─────────────────
+
+test("prioritizeLane2Candidates: geo-signal candidates first, then fresh, then fresher, deterministic", () => {
+  const items = [
+    { sourceId: "stale-backlog", minutesAgo: 500 },          // no signal, not selected
+    { sourceId: "signal-backlog", minutesAgo: 400 },          // signal, not selected
+    { sourceId: "fresh-nosignal", minutesAgo: 10 },           // no signal, selected
+    { sourceId: "signal-fresh-old", minutesAgo: 300 },        // signal, selected
+    { sourceId: "signal-fresh-new", minutesAgo: 50 },         // signal, selected
+  ];
+  const selectedSourceIds = new Set(["fresh-nosignal", "signal-fresh-old", "signal-fresh-new"]);
+  const relevantSignalIds = new Set(["signal-backlog", "signal-fresh-old", "signal-fresh-new"]);
+  const ordered = prioritizeLane2Candidates(items, { selectedSourceIds, relevantSignalIds }).map((i) => i.sourceId);
+  // Signal+fresh first (by minutesAgo), then signal+backlog, then fresh-no-signal,
+  // then stale backlog last.
+  assert.deepEqual(ordered, [
+    "signal-fresh-new",   // signal + selected + freshest
+    "signal-fresh-old",   // signal + selected
+    "signal-backlog",     // signal, not selected
+    "fresh-nosignal",     // no signal, selected
+    "stale-backlog",      // no signal, not selected
+  ]);
+  // Deterministic run-to-run: same input → identical order.
+  const again = prioritizeLane2Candidates(items, { selectedSourceIds, relevantSignalIds }).map((i) => i.sourceId);
+  assert.deepEqual(again, ordered);
+  // Pure: input array is not mutated.
+  assert.equal(items[0].sourceId, "stale-backlog");
+});
+
+test("runRefreshPipeline: Slice 6 geo diagnostics expose lane processed/deferred + budget used + memo hits", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "defer-a", outlet: "Reuters", geographies: [], headline: "Filler one" }),
+    makeItem({ sourceId: "defer-b", outlet: "Reuters", geographies: [], headline: "Filler two" }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    geoStageBudgetMs: 0, // force Lane 2 deferral
+    beatFitEnabled: false,
+  });
+  const g = log.geo;
+  // Lane 1 always fully processed under tight budget.
+  assert.equal(g.geoLane1Processed, 1, "Lane 1 processed to completion even at budget=0");
+  assert.equal(g.geoLane1Count, 1);
+  // Lane 2 deferred (not dropped) under budget pressure.
+  assert.equal(g.geoLane2Processed, 0, "no Lane 2 processed under budget=0");
+  assert.equal(g.geoLane2Deferred, 2);
+  assert.equal(g.geoLane2DeferredCount, 2, "legacy key retained for back-compat");
+  // Budget pair + latency present and consistent.
+  assert.equal(g.geoBudgetMsConfigured, 0);
+  assert.equal(typeof g.geoBudgetMsUsed, "number");
+  assert.equal(typeof g.geoStageLatencyMs, "number");
+  assert.equal(g.geoBudgetMsUsed, g.geoStageLatencyMs);
+  // Memo dedup ran (lane-split signal reused by the Lane 2 prioritizer).
+  assert.equal(typeof g.geoSignalMemoHits, "number");
+  assert.ok(g.geoSignalMemoHits >= 1, "Lane 2 prioritization reuses the lane-split geo-signal memo");
+});
+
+test("runRefreshPipeline: deterministic cluster-input ordering across identical interactive runs (Slice 6 ordering stability)", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "a", outlet: "Reuters", geographies: ["US"], minutesAgo: 30 }),
+    makeItem({ sourceId: "b", outlet: "Reuters", geographies: [], headline: "US sanctions update", minutesAgo: 20 }),
+    makeItem({ sourceId: "c", outlet: "Reuters", geographies: [], headline: "Filler", minutesAgo: 40 }),
+  ];
+  const run = async () => {
+    let clusterOrder = [];
+    const { log } = await runRefreshPipeline({
+      settings: BASE_SETTINGS,
+      rawItems: rawItems.map((i) => ({ ...i })),
+      clusterFn: async (items) => { clusterOrder = items.map((it) => it.sourceId); return []; },
+      clusterModel: "mock-anthropic-haiku",
+      contractVersion: "2026-05-19-meta-story-fields",
+      geoAssessFn: async () => ({ confidence: 0.95 }),
+      geoStageBudgetMs: 60000,
+      beatFitEnabled: false,
+      refreshProfile: "interactive",
+    });
+    return { clusterOrder, geo: log.geo };
+  };
+  const [r1, r2] = await Promise.all([run(), run()]);
+  // Same inputs → identical cluster-input ordering and identical geo
+  // diagnostics, proving the Lane 2 prioritization is deterministic run-to-run.
+  assert.deepEqual(r1.clusterOrder, r2.clusterOrder);
+  assert.equal(r1.geo.geoLane1Count, r2.geo.geoLane1Count);
+  assert.equal(r1.geo.geoLane2Deferred, r2.geo.geoLane2Deferred);
+  assert.equal(r1.geo.geoAssessedCount, r2.geo.geoAssessedCount);
+});
+
+test("buildSourceGroundedWhyFallback: derives a non-empty grounded line from summary + outletCount", () => {
+  const grounded = buildSourceGroundedWhyFallback({
+    summary: "US and Colombia resumed trade talks. A second sentence follows here.",
+    outletCount: 3,
+    sources: [],
+  });
+  assert.ok(grounded && grounded.length > 0);
+  assert.match(grounded, /Across 3 sources, /);
+  assert.match(grounded, /US and Colombia resumed trade talks\./);
+  // Only the first sentence is used (no second-sentence leak).
+  assert.doesNotMatch(grounded, /second sentence/);
+  // No groundable summary → null (caller falls back to the state template).
+  assert.equal(buildSourceGroundedWhyFallback({ summary: "" }), null);
+  assert.equal(buildSourceGroundedWhyFallback({}), null);
+});
+
+test("enrichWhyItMattersForStories: failed upgrade prefers source-grounded fallback over generic template", async () => {
+  const stories = [
+    { id: "m1", metaStoryId: "m1", title: "T", subtitle: "s", summary: "Sanctions tightened on key exporters.", whatChanged: "c", outletCount: 2, sources: [], whyItMatters: "old" },
+  ];
+  const throwingResolver = async () => { throw new Error("writer down"); };
+  const { stories: out, diagnostics } = await enrichWhyItMattersForStories({
+    stories,
+    resolveWhyItMattersFn: throwingResolver,
+  });
+  assert.equal(diagnostics.upgraded, 0, "resolver failure → not counted as upgraded");
+  // Grounded fallback, NOT the generic 'newly entering your monitoring set' template.
+  assert.match(out[0].whyItMatters, /Across 2 sources, Sanctions tightened on key exporters\./);
+  assert.doesNotMatch(out[0].whyItMatters, /newly entering your monitoring set/);
+  assert.notEqual(out[0].whyItMatters, out[0].subtitle, "never a subtitle echo");
 });
 
 // ─── A1.2: Lane 1 protected end-to-end through the recall gate ───────────────
@@ -7382,6 +7795,11 @@ test("C2 plumbing: repair diagnostics from a successful clusterFn surface on _me
   assert.equal(log.clusteringRepairAttempted, true);
   assert.equal(log.clusteringRepairSucceeded, true);
   assert.equal(log.clusteringRepairFailureReason, null);
+  // Slice 3 back-compat: a producer that attaches only the legacy 3-field
+  // shape normalizes to null on the new fields (no undefined leakage).
+  assert.equal(log.clusteringRepairRawFailureClass, null);
+  assert.equal(log.clusteringRepairSchemaErrorBucket, null);
+  assert.equal(log.clusteringRepairCoercion, null);
   // Fail-closed policy untouched: a successful (repaired) run is not a fallback.
   assert.equal(log.usedFallbackClustering, false);
 });
@@ -7414,6 +7832,108 @@ test("C2 plumbing: failed-repair diagnostics ride the thrown error and surface f
   assert.equal(log.clusteringRepairAttempted, true);
   assert.equal(log.clusteringRepairSucceeded, false);
   assert.equal(log.clusteringRepairFailureReason, "json_parse_error");
+});
+
+// ─── Slice 3: structured-output hardening diagnostics plumbing ───────────────
+
+test("Slice 3 plumbing: repairable run surfaces rawFailureClass + coercion and still publishes", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  // Mirrors the parser recovering a bare-array response via array_wrap: the raw
+  // output was schema-invalid, the single repair pass wrapped it, and stories
+  // publish.  The pipeline must surface the full Slice 3 diagnostic set.
+  const clusterFn = async () => {
+    const stories = MOCK_META_STORIES.slice();
+    stories._clusteringRepair = {
+      attempted: true,
+      succeeded: true,
+      failureReason: null,
+      rawFailureClass: "schema_validation_error",
+      schemaErrorBucket: "invalid_type",
+      coercion: "array_wrap",
+    };
+    return stories;
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1, "recovered stories publish");
+  assert.equal(log.usedFallbackClustering, false, "a recovered run is not a fallback");
+  assert.equal(log.clusteringFailureReason, null, "recovered run is not a clustering failure");
+  assert.equal(log.clusteringRepairSucceeded, true);
+  assert.equal(log.clusteringRepairRawFailureClass, "schema_validation_error");
+  assert.equal(log.clusteringRepairSchemaErrorBucket, "invalid_type");
+  assert.equal(log.clusteringRepairCoercion, "array_wrap");
+  // Follow-up semantics lock: the explicit recovered flag is true, and the
+  // raw-class/schema-bucket fields being non-null must NOT make this look like
+  // a failure — the TERMINAL failure fields stay clean on a recovered run.
+  assert.equal(log.clusteringRepairRecovered, true, "recovered flag is true on a repaired+published run");
+  assert.ok(
+    log.clusteringRepairRawFailureClass !== null && log.clusteringFailureReason === null,
+    "raw failure observed (non-null rawFailureClass) yet NOT a terminal failure (clusteringFailureReason null)"
+  );
+  // A failure rollup keyed on terminal fields counts this run as a success.
+  assert.equal(log.outcomes.clusteringFailureReason, null);
+  assert.equal(log.outcomes.usedFallbackClustering, false);
+});
+
+test("Slice 3 plumbing: schema-bucketed fail-closed surfaces bucket and keeps clusteringFailureReason non-null (Slice 1 continuity)", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const clusterFn = async () => {
+    const err = new Error("Clustering response parse failed after safe-trim repair: too many meta-stories");
+    err._clusteringRepair = {
+      attempted: true,
+      succeeded: false,
+      failureReason: "schema_validation_error",
+      rawFailureClass: "schema_validation_error",
+      schemaErrorBucket: "too_many_meta_stories",
+      coercion: null,
+    };
+    throw err;
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  // Fail-closed honesty: zero stories, no fabricated fallback buckets.
+  assert.equal(payload.stories.length, 0, "fail-closed: zero stories");
+  assert.equal(log.usedFallbackClustering, true);
+  // Slice 1 continuity gate: clusteringFailureReason MUST be non-null on a
+  // parse/schema fail-closed (a schema bucket is still an `error`, not a timeout).
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringAttempts, 2);
+  // Slice 3 buckets surface for triage.
+  assert.equal(log.clusteringRepairSucceeded, false);
+  assert.equal(log.clusteringRepairFailureReason, "schema_validation_error");
+  assert.equal(log.clusteringRepairRawFailureClass, "schema_validation_error");
+  assert.equal(log.clusteringRepairSchemaErrorBucket, "too_many_meta_stories");
+  // Follow-up semantics lock: a terminal fail-closed run is NOT recovered, and
+  // the failure rollup (keyed on terminal fields) counts it as a failure.
+  assert.equal(log.clusteringRepairRecovered, false, "terminal fail-closed is not recovered");
+  assert.equal(log.outcomes.clusteringFailureReason, "error");
+  assert.equal(log.outcomes.usedFallbackClustering, true);
+});
+
+test("Slice 3 follow-up: SLO does not overcount a recovered run as a failure (terminal-field guard)", () => {
+  // A recovered run reaches the SLO evaluator with clusteringAttempts>0 and a
+  // null (terminal) clusteringFailureReason — even though its raw diagnostics
+  // are non-null.  It must sample the timeout window as a NON-timeout and never
+  // contribute to the cluster_timeout_rate breach.
+  _resetSloState();
+  const recovered = evaluateRefreshSlo({
+    pipelineMs: 10,
+    clusteringFailureReason: null, // terminal field — recovered runs are null here
+    clusteringAttempts: 1,
+  });
+  assert.equal(recovered.windowSize, 1, "recovered run is sampled (it attempted clustering)");
+  assert.equal(recovered.clusterTimeoutRate, 0, "recovered run counts as a non-timeout, not a failure");
+  assert.deepEqual(recovered.breaches, [], "no breach from a recovered run");
 });
 
 });

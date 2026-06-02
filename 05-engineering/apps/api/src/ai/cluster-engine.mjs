@@ -99,10 +99,39 @@ function mockCluster(items, settings) {
 // repair was needed (or the mock path ran).  Frozen so callers can't mutate the
 // shared default; the pipeline reads a normalized copy via
 // `readClusteringRepairDiagnostics`.
+//
+// Slice 3 (clustering structured-output hardening) extends the C2 shape with
+// three additive, machine-parseable fields (all default null/false so existing
+// consumers that read only `attempted`/`succeeded`/`failureReason` are
+// unaffected):
+//   - `rawFailureClass`    — classification of the INITIAL strict-parse failure
+//                            (`json_parse_error` | `schema_validation_error` |
+//                            `empty_response` | `parse_error`).  Previously the
+//                            stage-1 error was swallowed; now it is observable
+//                            even when the single repair pass later succeeds.
+//   - `schemaErrorBucket`  — coarse, stable bucket for a schema-validation
+//                            failure (see `classifySchemaIssues`); null unless
+//                            the terminal/observed failure was schema-level.
+//   - `coercion`           — structural normalization applied during the repair
+//                            pass to make malformed-but-recoverable output
+//                            valid within strict bounds (`array_wrap` | null).
+//
+// IMPORTANT — "raw failure observed" is NOT "terminal failure":
+//   `rawFailureClass` and `schemaErrorBucket` describe what was wrong with the
+//   model's RAW output.  On a RECOVERED run (`attempted=true, succeeded=true`)
+//   they remain non-null to record what the repair pass fixed — yet stories
+//   ARE published and this is NOT a clustering failure.  The single source of
+//   truth for a TERMINAL failure is `succeeded=false` here (and, at the
+//   pipeline level, a non-null `clusteringFailureReason` + `usedFallback
+//   clustering=true`).  Downstream observability must never treat a non-null
+//   `rawFailureClass`/`schemaErrorBucket` as a failure signal on its own.
 export const EMPTY_CLUSTERING_REPAIR = Object.freeze({
   attempted: false,
   succeeded: false,
   failureReason: null,
+  rawFailureClass: null,
+  schemaErrorBucket: null,
+  coercion: null,
 });
 
 // Stage-1 (strict) normalization: whitespace trim only.  Markdown-fence
@@ -114,23 +143,96 @@ function normalizeNormalPath(raw) {
   return String(raw ?? "").trim();
 }
 
-// Parse + schema-validate a candidate string into meta-stories.  Throws on
-// either a JSON syntax error or a schema mismatch.
-function validateClusteringText(text) {
-  const parsed = JSON.parse(text);
-  const result = clusteringOutputSchema.parse(parsed);
+// Map a validated clustering envelope to meta-stories with stable IDs.
+function mapValidatedStories(result) {
   return result.meta_stories.map((ms) => ({
     ...ms,
     meta_story_id: generateMetaStoryId(ms),
   }));
 }
 
-// Concise classification of a failed parse for `clusteringRepairFailureReason`.
+// Stage 1 (strict): parse + schema-validate a candidate string into
+// meta-stories with NO structural coercion.  Throws on either a JSON syntax
+// error or a schema mismatch.  The strict envelope is an object with a
+// `meta_stories` array — a bare top-level array is rejected here and only
+// recovered (observably) on the repair path via `validateRepairedText`.
+function validateClusteringText(text) {
+  const parsed = JSON.parse(text);
+  const result = clusteringOutputSchema.parse(parsed);
+  return mapValidatedStories(result);
+}
+
+// Stage 2 (repair): parse + ONE structural coercion within strict bounds, then
+// schema-validate.  The only coercion is wrapping a bare top-level array of
+// meta-stories into the `{ meta_stories: [...] }` envelope — a common model
+// malformation.  This is NOT content rewriting: every element still must pass
+// the full `metaStoryOutputSchema`, and the max-5 cap still applies, so no
+// fabricated or relaxed stories can slip through.  Returns the mapped stories
+// plus the `coercion` tag applied (`array_wrap` | null).  Throws on syntax or
+// schema failure exactly like the strict path.
+function validateRepairedText(text) {
+  const parsed = JSON.parse(text);
+  let candidate = parsed;
+  let coercion = null;
+  if (Array.isArray(parsed)) {
+    candidate = { meta_stories: parsed };
+    coercion = "array_wrap";
+  }
+  const result = clusteringOutputSchema.parse(candidate);
+  return { stories: mapValidatedStories(result), coercion };
+}
+
+// Concise classification of a failed parse for `rawFailureClass` /
+// `failureReason`.  An empty/whitespace-only payload is its own class so an
+// operator can distinguish "model returned nothing usable" from "model
+// returned malformed JSON".
 function classifyParseFailure(err) {
   if (err instanceof SyntaxError) return "json_parse_error";
   // Zod validation errors expose an `issues` array.
   if (err && Array.isArray(err.issues)) return "schema_validation_error";
   return "parse_error";
+}
+
+// Slice 3: derive a coarse, STABLE bucket from a zod validation error so schema
+// failures are observable by class rather than collapsing into one opaque
+// `schema_validation_error` reason.  Deterministic: zod emits `issues` in a
+// stable encounter order, and we key off the first issue's path + code.  The
+// buckets are intentionally coarse (operator-actionable groupings, not a 1:1
+// mirror of every zod code) and fall back to `schema_other` for anything
+// unmapped so the function never throws on an unexpected shape.
+//
+// Buckets:
+//   missing_meta_stories     — top-level `meta_stories` absent / not an array
+//   too_many_meta_stories    — more than 5 meta-stories (max cap exceeded)
+//   empty_source_item_ids    — a story referenced zero sourceIds (min 1)
+//   too_many_source_item_ids — a story referenced more than 5 sourceIds (max)
+//   missing_required_field   — a required field was undefined
+//   empty_string_field       — a required string was empty (min 1)
+//   invalid_type             — a field had the wrong JSON type
+//   schema_other             — any other / unmapped validation issue
+function classifySchemaIssues(err) {
+  const issues = err && Array.isArray(err.issues) ? err.issues : [];
+  if (issues.length === 0) return "schema_other";
+  const issue = issues[0];
+  const path = Array.isArray(issue.path) ? issue.path : [];
+  const code = issue.code ?? "";
+
+  // Top-level container problems (path is exactly ["meta_stories"]).
+  if (path.length === 1 && path[0] === "meta_stories") {
+    if (code === "too_big") return "too_many_meta_stories";
+    if (code === "invalid_type") return "missing_meta_stories";
+  }
+  // `source_item_ids` array-bound violations anywhere in the tree.
+  if (path.includes("source_item_ids")) {
+    if (code === "too_small") return "empty_source_item_ids";
+    if (code === "too_big") return "too_many_source_item_ids";
+  }
+  // Generic codes (leaf-level).
+  if (code === "invalid_type") {
+    return issue.received === "undefined" ? "missing_required_field" : "invalid_type";
+  }
+  if (code === "too_small") return "empty_string_field";
+  return "schema_other";
 }
 
 /**
@@ -179,29 +281,65 @@ export function safeTrimRepair(raw) {
 /**
  * Parse a raw clustering response into validated meta-stories.
  *
- * C2 (clustering JSON resilience): two-stage parse, single repair attempt.
+ * C2 (clustering JSON resilience) + Slice 3 (structured-output hardening):
+ * two-stage parse, single repair attempt, with explicit failure classification
+ * at every stage.
  *   1. Normal parse — the strict current path (`normalizeNormalPath` + parse).
- *   2. On ANY failure, ONE safe-trim repair attempt (`safeTrimRepair`), then
- *      parse once more.  No second repair, no content rewriting.
- * If the repaired text still fails we throw exactly as before so the refresh
- * pipeline fails closed.  The thrown error carries `_clusteringRepair` so the
- * pipeline can surface the attempt/failure diagnostics on `_meta`.
+ *      On failure the error class is recorded as `rawFailureClass` (and, when
+ *      schema-level, bucketed into `schemaErrorBucket`) instead of being
+ *      swallowed.
+ *   2. On ANY stage-1 failure, ONE safe-trim repair attempt (`safeTrimRepair`)
+ *      followed by ONE structural coercion within strict bounds (bare array →
+ *      `{ meta_stories }`, tagged on `repair.coercion`), then validate once
+ *      more.  No second repair, no content rewriting.
+ * If the repaired text still fails we throw (the message never matches the
+ * pipeline's timeout regex, so the refresh pipeline classifies it as a
+ * clustering `error` and fails closed — Slice 1 continuity contract).  The
+ * thrown error carries `_clusteringRepair` so the pipeline can surface the
+ * full diagnostics on `_meta`.
  *
- * Returns `{ stories, repair }`; `repair` is `{ attempted, succeeded,
- * failureReason }`.  Exported for unit testing.
+ * Returns `{ stories, repair }`; `repair` is the extended shape documented on
+ * `EMPTY_CLUSTERING_REPAIR`.  Exported for unit testing.
  */
 export function parseClusteringResponse(raw) {
-  const repair = { attempted: false, succeeded: false, failureReason: null };
+  const repair = {
+    attempted: false,
+    succeeded: false,
+    failureReason: null,
+    rawFailureClass: null,
+    schemaErrorBucket: null,
+    coercion: null,
+  };
+
+  const normalized = normalizeNormalPath(raw);
+  // An empty/whitespace-only payload is a distinct, observable class — the
+  // strict parse below would throw a generic SyntaxError otherwise.
+  if (!normalized) {
+    repair.attempted = true;
+    repair.rawFailureClass = "empty_response";
+    repair.failureReason = "no_json_region";
+    console.warn("[cluster-engine] clustering response empty (reason=empty_response)");
+    const err = new Error("Clustering response parse failed: empty response");
+    err._clusteringRepair = repair;
+    throw err;
+  }
 
   // Stage 1: strict normal parse — unchanged happy path.
   try {
-    return { stories: validateClusteringText(normalizeNormalPath(raw)), repair };
-  } catch {
+    return { stories: validateClusteringText(normalized), repair };
+  } catch (firstErr) {
     repair.attempted = true;
+    repair.rawFailureClass = classifyParseFailure(firstErr);
+    if (repair.rawFailureClass === "schema_validation_error") {
+      repair.schemaErrorBucket = classifySchemaIssues(firstErr);
+    }
   }
 
-  // Stage 2: exactly one safe-trim repair attempt.
-  console.warn("[cluster-engine] initial clustering parse failed — attempting safe-trim repair");
+  // Stage 2: exactly one safe-trim repair attempt (+ one structural coercion).
+  console.warn(
+    `[cluster-engine] initial clustering parse failed (rawClass=${repair.rawFailureClass}` +
+      `${repair.schemaErrorBucket ? ` bucket=${repair.schemaErrorBucket}` : ""}) — attempting safe-trim repair`
+  );
   const repaired = safeTrimRepair(raw);
   if (repaired === null) {
     repair.failureReason = "no_json_region";
@@ -211,13 +349,28 @@ export function parseClusteringResponse(raw) {
     throw err;
   }
   try {
-    const stories = validateClusteringText(repaired);
+    const { stories, coercion } = validateRepairedText(repaired);
+    // RECOVERED run: the repair pass parsed cleanly, so stories are returned
+    // and published.  `repair.rawFailureClass` (and `schemaErrorBucket`, when
+    // the raw failure was schema-level) stay populated from stage 1 on purpose
+    // — they record what was wrong with the RAW output, not a terminal failure.
+    // `succeeded=true` is the unambiguous "recovered, not failed" marker.
     repair.succeeded = true;
-    console.log("[cluster-engine] safe-trim repair succeeded — clustering response parsed after repair");
+    repair.coercion = coercion;
+    console.log(
+      `[cluster-engine] safe-trim repair succeeded — clustering response parsed after repair` +
+        `${coercion ? ` (coercion=${coercion})` : ""}`
+    );
     return { stories, repair };
   } catch (secondErr) {
     repair.failureReason = classifyParseFailure(secondErr);
-    console.warn(`[cluster-engine] safe-trim repair failed (reason=${repair.failureReason})`);
+    if (repair.failureReason === "schema_validation_error") {
+      repair.schemaErrorBucket = classifySchemaIssues(secondErr);
+    }
+    console.warn(
+      `[cluster-engine] safe-trim repair failed (reason=${repair.failureReason}` +
+        `${repair.schemaErrorBucket ? ` bucket=${repair.schemaErrorBucket}` : ""})`
+    );
     const msg = secondErr instanceof Error ? secondErr.message : String(secondErr);
     const err = new Error(`Clustering response parse failed after safe-trim repair: ${msg}`);
     err._clusteringRepair = repair;
@@ -255,6 +408,11 @@ export function readClusteringRepairDiagnostics(source) {
       attempted: !!r.attempted,
       succeeded: !!r.succeeded,
       failureReason: r.failureReason ?? null,
+      // Slice 3 additive fields — normalized to null when absent so older
+      // producers (or hand-built diagnostics) read as "not classified".
+      rawFailureClass: r.rawFailureClass ?? null,
+      schemaErrorBucket: r.schemaErrorBucket ?? null,
+      coercion: r.coercion ?? null,
     };
   }
   return { ...EMPTY_CLUSTERING_REPAIR };
@@ -468,6 +626,26 @@ export function verifyGrounding(metaStories, sourceItemsById) {
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
+// Default clustering wall-clock budget (ms).  Larger than the global
+// TEMPO_AI_TIMEOUT_MS because the cluster prompt is the single largest AI
+// round-trip; the candidate set is C1-capped so the round-trip is bounded.
+export const CLUSTER_TIMEOUT_MS_DEFAULT = 60000;
+
+/**
+ * Resolve the clustering wall-clock budget (ms).  An explicit `override`
+ * (finite, > 0) wins — Slice 4's interactive fast-path passes a tighter budget
+ * here to bound onboarding latency.  Otherwise read `TEMPO_AI_CLUSTER_TIMEOUT_MS`,
+ * falling back to `CLUSTER_TIMEOUT_MS_DEFAULT`.  Exported so the pipeline/tests
+ * can assert the precedence without driving a real provider call.
+ */
+export function resolveClusterTimeoutMs(override) {
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.floor(override);
+  }
+  const env = Number(process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS);
+  return Number.isFinite(env) && env > 0 ? Math.floor(env) : CLUSTER_TIMEOUT_MS_DEFAULT;
+}
+
 /**
  * Cluster source items into meta-stories using the specified model.
  * Uses mock clustering when model is a mock provider.
@@ -477,9 +655,14 @@ export function verifyGrounding(metaStories, sourceItemsById) {
  * @param {Array} items — normalized source items (filtered pool)
  * @param {object} settings — user settings (for keyword/tag extraction in mock)
  * @param {string} model — capability model string (e.g. "anthropic:claude-haiku-4-5-20251001")
+ * @param {{ timeoutMs?: number }} [opts] — Slice 4: optional per-call clustering
+ *   timeout override (ms).  The interactive fast-path passes a tighter budget to
+ *   cap onboarding latency; omitted/invalid → `TEMPO_AI_CLUSTER_TIMEOUT_MS` /
+ *   `CLUSTER_TIMEOUT_MS_DEFAULT`.  Additive and backward-compatible: existing
+ *   3-arg callers and test `clusterFn` stubs are unaffected.
  * @returns {Promise<Array>} — array of meta-story objects with meta_story_id
  */
-export async function clusterItems(items, settings, model) {
+export async function clusterItems(items, settings, model, opts = {}) {
   if (!items.length) return [];
 
   const provider = providerFor(model);
@@ -488,12 +671,9 @@ export async function clusterItems(items, settings, model) {
   // global TEMPO_AI_TIMEOUT_MS because the cluster prompt is the single
   // largest AI round-trip (whole candidate pool) and the publish path retries
   // it once before failing closed (see refresh-pipeline.mjs). The candidate set
-  // is capped (C1) so the round-trip is bounded, but the timeout default is
-  // raised to 60s to cut spurious timeout/fail-closed runs. Only this stage
-  // reads TEMPO_AI_CLUSTER_TIMEOUT_MS; other AI stages keep TEMPO_AI_TIMEOUT_MS.
-  const timeoutMs = Number(
-    process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS || 60000
-  );
+  // is capped (C1) so the round-trip is bounded.  An explicit `opts.timeoutMs`
+  // (Slice 4 interactive fast-path) overrides the env/default budget.
+  const timeoutMs = resolveClusterTimeoutMs(opts?.timeoutMs);
 
   if (provider === "mock-anthropic" || provider === "mock-openai") {
     return mockCluster(items, settings);
