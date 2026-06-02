@@ -1709,6 +1709,27 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
  * (`resolveWhyItMattersFn` / `whyWriteFn` / `whyConfig`) — production uses the
  * env-configured why engine.
  */
+// Finding 2 helper: project a snapshot-read's lifted `_meta` back onto the
+// `_lastRunMeta`-shaped subset, so the enrichment write can merge the LATEST
+// same-generation metadata without clobbering it.  Allowlist mirrors the keys
+// `liftSnapshotMeta` promotes from `_lastRunMeta` (excludes read-only view
+// fields like `refreshedAt`/`hasSnapshot`/`lastCheckedAt`).  Only defined keys
+// are copied so absent fields don't write `undefined` placeholders.
+const _LAST_RUN_META_LIFTED_KEYS = Object.freeze([
+  "funnel", "recall", "translation", "beatFit", "clusterModel", "embeddingModel",
+  "usedFallbackClustering", "clusteringFailureReason", "clusteringAttempts",
+  "clusteringLatencyMs", "tags", "whatChanged", "whyItMatters", "timings",
+  "outcomes", "ingestionSource", "whyEnrichment", "profile",
+]);
+function liftedMetaToLastRunMeta(meta) {
+  const out = {};
+  if (!meta || typeof meta !== "object") return out;
+  for (const key of _LAST_RUN_META_LIFTED_KEYS) {
+    if (meta[key] !== undefined) out[key] = meta[key];
+  }
+  return out;
+}
+
 async function enrichSnapshotWhyItMatters({ userId, generation, basePayload }, opts = {}) {
   const current = await _snapshotRepo.read(userId).catch(() => null);
   if (!current) return { kind: "missing" };
@@ -1739,12 +1760,30 @@ async function enrichSnapshotWhyItMatters({ userId, generation, basePayload }, o
   }
 
   const total = baseStories.length;
+  // Finding 2: a concurrent SAME-GENERATION write (e.g. `writeSnapshotMeta`
+  // bumping `_lastCheckedAt`, or another metadata refresh) can land between the
+  // initial deferred write and enrichment completion.  `basePayload` is the
+  // payload captured at initial-write time, so writing it verbatim would
+  // clobber any such newer metadata.  Merge the LATEST snapshot's metadata over
+  // the base (generation already re-guarded above), then apply our intended
+  // overrides last so the enrichment never regresses sibling fields.
+  const latestRunMeta = liftedMetaToLastRunMeta(latest._meta);
   const nextPayload = {
     ...basePayload,
+    // Preserve a newer `_lastCheckedAt` written by a concurrent same-generation
+    // attempt; fall back to the base value when the latest read lacks one.
+    ...(typeof latest._meta?.lastCheckedAt === "string"
+      ? { _lastCheckedAt: latest._meta.lastCheckedAt }
+      : {}),
     stories: upgradedStories,
     _lastRunMeta: {
       ...(basePayload._lastRunMeta ?? {}),
-      whyItMatters: { ...(basePayload._lastRunMeta?.whyItMatters ?? {}), deferred: false },
+      ...latestRunMeta, // retain same-generation metadata changes since init
+      // Intended enrichment overrides applied LAST (never clobbered by merge):
+      whyItMatters: {
+        ...(latestRunMeta.whyItMatters ?? basePayload._lastRunMeta?.whyItMatters ?? {}),
+        deferred: false,
+      },
       whyEnrichment: {
         deferred: false,
         pending: 0,

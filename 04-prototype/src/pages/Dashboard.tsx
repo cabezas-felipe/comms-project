@@ -401,6 +401,11 @@ export default function Dashboard() {
   useEffect(() => {
     if (!whyPending) return;
     let canceled = false;
+    // In-flight guard: a single GET poll can outlast the interval, so each tick
+    // is skipped while a prior request is still resolving — preventing
+    // overlapping/stacked GETs. Released in `finally` so a thrown/aborted poll
+    // can't wedge the loop shut.
+    let inFlight = false;
     const deadline = Date.now() + WHY_POLL_BUDGET_MS;
     const id = setInterval(async () => {
       if (canceled) return;
@@ -414,6 +419,8 @@ export default function Dashboard() {
         setWhyEnrichment((prev) => (prev ? { ...prev, deferred: false, pollExhausted: true } : prev));
         return;
       }
+      if (inFlight) return; // a previous poll is still running — skip this tick
+      inFlight = true;
       try {
         const res = await fetchDashboardWithMeta();
         if (canceled) return;
@@ -430,6 +437,9 @@ export default function Dashboard() {
       } catch {
         // Transient poll failure — keep the fallback copy and retry next tick
         // until the budget is exhausted. Never surfaces an error to the user.
+      } finally {
+        // Always release the in-flight guard so the next tick can proceed.
+        inFlight = false;
       }
     }, WHY_POLL_INTERVAL_MS);
     return () => {

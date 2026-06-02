@@ -1292,6 +1292,47 @@ describe("Slice 5: progressive whyItMatters enrichment", () => {
     }
   });
 
+  it("does not overlap poll requests: a slow poll blocks the next tick until it resolves", async () => {
+    vi.useFakeTimers();
+    const resolvers: Array<(v: unknown) => void> = [];
+    try {
+      refreshSpy.mockResolvedValue(deferredResult(FALLBACK_WHY)); // interactive first paint
+      // Each poll GET returns a promise we resolve manually, so we can hold the
+      // first request "in flight" across interval ticks.
+      fetchSpy.mockImplementation(() => new Promise((resolve) => { resolvers.push(resolve); }));
+      renderAt({ bootstrap: true, forceRefresh: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+      // First interval tick → exactly one GET, left pending (unresolved).
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(fetchSpy.mock.calls.length).toBe(1);
+
+      // Next tick while the first poll is STILL in flight → no second GET.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(fetchSpy.mock.calls.length).toBe(1);
+
+      // Resolve the first poll with a still-pending result → polling continues.
+      // Flush microtasks inside act() so the resolved-poll continuation
+      // (setStories / setWhyEnrichment) is wrapped — no act(...) warning.
+      await act(async () => {
+        resolvers[0](deferredResult(FALLBACK_WHY));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // Now the next tick may proceed normally → a second GET fires.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(fetchSpy.mock.calls.length).toBe(2);
+    } finally {
+      // Drain any outstanding poll promises INSIDE act() and flush their
+      // continuations so no post-test state update leaks (no act warning).
+      await act(async () => {
+        resolvers.forEach((r) => r(deferredResult(FALLBACK_WHY)));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the non-empty fallback copy and stops polling at the timeout budget when enrichment never completes", async () => {
     vi.useFakeTimers();
     try {

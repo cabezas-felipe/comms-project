@@ -1265,6 +1265,44 @@ test("Slice 5 enrichment: success path upgrades whyItMatters in the snapshot and
   });
 });
 
+test("Slice 5 enrichment: preserves same-generation metadata changed after the initial write (no clobber)", async () => {
+  await withIsolatedUser("slice5-meta-merge", async () => {
+    const userId = "slice5-meta-merge";
+    // Initial deferred write → capture basePayload (the enricher's write source).
+    const basePayload = await seedDeferredSnapshot(userId, "gen-meta");
+    // Simulate a CONCURRENT same-generation metadata write landing between the
+    // initial write and enrichment completion: same _watermark, but new
+    // `_lastRunMeta.funnel` + a newer `_lastCheckedAt`, still pending so the
+    // idempotency guard does not trip.
+    await _snapshotRepo.write(userId, {
+      ...basePayload,
+      _lastCheckedAt: "2026-06-01T12:00:00.000Z",
+      _lastRunMeta: {
+        ...basePayload._lastRunMeta,
+        funnel: { primaryDropStage: "geo_filter" },
+        clusterModel: "anthropic:later-model",
+      },
+    });
+    const richResolver = async (input) => ({ whyItMatters: `RICH:${input.metaStoryId}`, trace: {}, diagnostics: {} });
+    // Enrich with the ORIGINAL basePayload (which lacks funnel/clusterModel).
+    const result = await _whyEnricher.enrich(
+      { userId, generation: "gen-meta", basePayload },
+      { resolveWhyItMattersFn: richResolver }
+    );
+    assert.equal(result.kind, "upgraded");
+    const snap = await _snapshotRepo.read(userId);
+    // Intended enrichment overrides applied…
+    assert.equal(snap.stories[0].whyItMatters, "RICH:m1");
+    assert.equal(snap._meta.whyEnrichment.deferred, false);
+    assert.equal(snap._meta.whyEnrichment.pending, 0);
+    // …while the concurrently-written same-generation metadata is RETAINED
+    // (not clobbered by the stale basePayload).
+    assert.deepEqual(snap._meta.funnel, { primaryDropStage: "geo_filter" });
+    assert.equal(snap._meta.clusterModel, "anthropic:later-model");
+    assert.equal(snap._meta.lastCheckedAt, "2026-06-01T12:00:00.000Z");
+  });
+});
+
 test("Slice 5 enrichment: stale guard — generation mismatch is a no-op (no overwrite)", async () => {
   await withIsolatedUser("slice5-stale", async () => {
     const userId = "slice5-stale";
