@@ -1683,20 +1683,31 @@ export async function runRefreshPipeline({
   // wave so the stage stops cleanly at a pool boundary instead of mid-flight.
   const geoLane2DeferredItems = [];
   let geoBudgetHit = false;
-  const lane2WaveSize = Math.max(1, resolveGeoAssessConcurrency());
-  // Iterate the PRIORITY-ORDERED Lane 2 set so the most-likely-relevant items
-  // are assessed before the budget runs out; the deferred slice is the
-  // lowest-priority tail.
-  for (let i = 0; i < lane2Ordered.length; i += lane2WaveSize) {
-    if (Date.now() - geoStartedAt >= effectiveGeoBudgetMs) {
-      geoBudgetHit = true;
-      geoLane2DeferredItems.push(...lane2Ordered.slice(i));
-      break;
+  // Slice 2 (cold_start): when the active profile sets `deferGeoLane2`, ALL of
+  // Lane 2 (including held-bucket re-evals) is deferred to the hold path without
+  // assessment — an intentional, profile-driven defer, NOT budget pressure. We
+  // skip the wave loop entirely (no `applyGeoFilter` / assessor calls for Lane 2)
+  // and leave `geoBudgetHit = false` (locked decision) so SLO/log consumers don't
+  // misread this as the geo budget being exhausted.
+  const geoLane2DeferredReason = profile.deferGeoLane2 ? "profile_defer" : null;
+  if (profile.deferGeoLane2) {
+    geoLane2DeferredItems.push(...lane2Ordered);
+  } else {
+    const lane2WaveSize = Math.max(1, resolveGeoAssessConcurrency());
+    // Iterate the PRIORITY-ORDERED Lane 2 set so the most-likely-relevant items
+    // are assessed before the budget runs out; the deferred slice is the
+    // lowest-priority tail.
+    for (let i = 0; i < lane2Ordered.length; i += lane2WaveSize) {
+      if (Date.now() - geoStartedAt >= effectiveGeoBudgetMs) {
+        geoBudgetHit = true;
+        geoLane2DeferredItems.push(...lane2Ordered.slice(i));
+        break;
+      }
+      const wave = lane2Ordered.slice(i, i + lane2WaveSize);
+      const waveResult = await applyGeoFilter(wave, configuredGeos, geoAssessFn, geoDiag);
+      geoPassedItems.push(...waveResult.included);
+      geoHeldItems.push(...waveResult.held);
     }
-    const wave = lane2Ordered.slice(i, i + lane2WaveSize);
-    const waveResult = await applyGeoFilter(wave, configuredGeos, geoAssessFn, geoDiag);
-    geoPassedItems.push(...waveResult.included);
-    geoHeldItems.push(...waveResult.held);
   }
 
   const geoEndedAt = Date.now();
@@ -1729,6 +1740,10 @@ export async function runRefreshPipeline({
     geoLane1Count,
     geoLane2Count,
     geoLane2DeferredCount,
+    // Slice 2: why Lane 2 was deferred — "profile_defer" for an intentional
+    // profile-driven defer (cold_start), else null. Budget-pressure defers leave
+    // this null and are signalled by `geoBudgetHit` instead.
+    geoLane2DeferredReason,
     geoBudgetMs: effectiveGeoBudgetMs,
     geoBudgetHit,
     geoAssessedCount,
@@ -1767,9 +1782,14 @@ export async function runRefreshPipeline({
   }
 
   if (geoHoldToWrite.length > 0) {
+    const lane2DeferredLabel =
+      geoLane2DeferredCount > 0
+        ? geoLane2DeferredReason ?? "budget"
+        : "none";
     console.log(
       `[pipeline] ${geoHoldToWrite.length} item(s) in geo hold bucket after this refresh` +
-        ` (${geoHeldItems.length} low-confidence, ${geoLane2DeferredCount} budget-deferred)`
+        ` (${geoHeldItems.length} low-confidence,` +
+        ` ${geoLane2DeferredCount} lane2-deferred[${lane2DeferredLabel}])`
     );
   }
 
@@ -1778,7 +1798,9 @@ export async function runRefreshPipeline({
   console.log(
     `[pipeline.geo] lane1=${geoLane1Count} lane2=${geoLane2Count}` +
       ` lane1_processed=${geoLane1Count} lane2_processed=${geoLane2Count - geoLane2DeferredCount}` +
-      ` lane2_deferred=${geoLane2DeferredCount} budget_ms=${effectiveGeoBudgetMs}` +
+      ` lane2_deferred=${geoLane2DeferredCount}` +
+      ` lane2_deferred_reason=${geoLane2DeferredReason ?? "none"}` +
+      ` budget_ms=${effectiveGeoBudgetMs}` +
       ` budget_ms_used=${geoMs} budget_hit=${geoBudgetHit} assessed=${geoAssessedCount}` +
       ` lexical_bypass=${geoLexicalBypassCount} memo_hits=${geoSignalMemoHits}` +
       ` held=${geoHeldItems.length}` +

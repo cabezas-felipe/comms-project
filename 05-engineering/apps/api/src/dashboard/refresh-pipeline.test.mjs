@@ -1221,8 +1221,103 @@ test("runRefreshPipeline: ample budget processes all of Lane 2 (no defer, no bud
   });
   assert.equal(log.geo.geoBudgetHit, false);
   assert.equal(log.geo.geoLane2DeferredCount, 0);
+  // Slice 2: budget-pressure / no-defer paths carry no profile reason.
+  assert.equal(log.geo.geoLane2DeferredReason, null,
+    "non-cold_start defer reason stays null (budget path is signalled by geoBudgetHit)");
   assert.ok(seenIds.includes("mustsee") && seenIds.includes("lane2"),
     "with ample budget both lanes reach clustering");
+});
+
+// ─── Slice 2: cold_start profile-driven Lane 2 deferral ──────────────────────
+
+test("runRefreshPipeline: cold_start defers ALL of Lane 2 without assessing it (profile_defer)", async () => {
+  const seenIds = [];
+  const assessedIds = [];
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "defer-a", outlet: "Reuters", geographies: [], headline: "Filler one" }),
+    makeItem({ sourceId: "defer-b", outlet: "Reuters", geographies: [], headline: "Filler two" }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { seenIds.push(...items.map((i) => i.sourceId)); return []; },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async (item) => { assessedIds.push(item.sourceId); return { confidence: 0.85 }; },
+    refreshProfile: "cold_start",
+    beatFitEnabled: false,
+  });
+  const g = log.geo;
+  // Lane 1 still fully processed; the must-see item reaches clustering.
+  assert.equal(g.geoLane1Count, 1);
+  assert.equal(g.geoLane1Processed, 1, "Lane 1 processed to completion under cold_start");
+  assert.ok(seenIds.includes("mustsee"), "Lane 1 must-see still reaches clustering");
+  // Lane 2 entirely deferred — not processed, not in clustering.
+  assert.equal(g.geoLane2Count, 2, "two opportunistic candidates form Lane 2");
+  assert.equal(g.geoLane2DeferredCount, 2, "cold_start defers all Lane 2 items");
+  assert.equal(g.geoLane2Processed, 0, "no Lane 2 processed under cold_start");
+  assert.ok(!seenIds.includes("defer-a") && !seenIds.includes("defer-b"),
+    "deferred Lane 2 items must not reach clustering this refresh");
+  // Explicit, profile-driven reason — distinguishable from budget pressure.
+  assert.equal(g.geoLane2DeferredReason, "profile_defer");
+  // Lane 2 contributes zero assessor calls (the must-see item is an
+  // explicit_match that bypasses the assessor, so total calls are zero too).
+  assert.ok(!assessedIds.includes("defer-a") && !assessedIds.includes("defer-b"),
+    "Lane 2 items are never assessed under cold_start defer");
+  assert.equal(assessedIds.length, 0, "no geoAssessFn calls at all this refresh");
+});
+
+test("runRefreshPipeline: cold_start defer is NOT budget pressure (geoBudgetHit stays false)", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "defer-a", outlet: "Reuters", geographies: [], headline: "Filler one" }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    refreshProfile: "cold_start",
+    beatFitEnabled: false,
+  });
+  assert.equal(log.geo.geoBudgetHit, false,
+    "intentional profile defer must not read as geo budget exhaustion");
+  assert.equal(log.geo.geoLane2DeferredReason, "profile_defer");
+  // Cold_start surfaces the profile's bounded geo budget unchanged (12000); the
+  // defer happens before the budget loop, so the budget itself is untouched.
+  assert.equal(log.profile.name, "cold_start");
+});
+
+test("runRefreshPipeline: cold_start defer scope includes previously-held re-evals", async () => {
+  let writtenHeld = null;
+  const heldItem = makeItem({
+    sourceId: "held-reeval", outlet: "Reuters", geographies: [], headline: "Backlog item",
+  });
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    refreshProfile: "cold_start",
+    readHeldFn: async () => [{ ...heldItem, geoCategory: "implicit_geo", geoConfidence: 0.5 }],
+    writeHeldFn: async (items) => { writtenHeld = items; },
+    beatFitEnabled: false,
+  });
+  // The held re-eval is a Lane 2 candidate; under cold_start it defers right back
+  // to the hold path rather than being assessed this refresh.
+  assert.equal(log.geo.geoLane2DeferredCount, 1, "the held re-eval counts as a deferred Lane 2 item");
+  assert.equal(log.geo.geoLane2DeferredReason, "profile_defer");
+  assert.ok(writtenHeld !== null, "writeHeldFn must be called");
+  assert.ok(writtenHeld.some((i) => i.sourceId === "held-reeval"),
+    "previously-held re-eval is deferred back to the hold path under cold_start");
 });
 
 // ─── Slice 6: Lane 2 throughput prioritization + diagnostics ─────────────────
