@@ -1158,6 +1158,72 @@ test("POST /api/dashboard/refresh (no interactive flag) keeps the default profil
   }
 });
 
+// ─── Slice 7: SLO gate surfaced additively on _meta.slo ──────────────────────
+
+test("POST /api/dashboard/refresh surfaces an additive _meta.slo gate (breaches + hints + fields)", async () => {
+  _refreshSlo.reset();
+  const prevRun = _refreshPipeline.run;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  // Healthy ran refresh that nonetheless hit geo budget pressure (single-run
+  // breach) — exercises both the gate snapshot and a breach + action hint.
+  _refreshPipeline.run = async (opts) => ({
+    payload: {
+      contractVersion: opts.contractVersion,
+      stories: [{
+        id: "s1", metaStoryId: "s1", title: "T", subtitle: "sub", geographies: ["US"],
+        topic: "Diplomatic relations", summary: "x", whyItMatters: "y", whatChanged: "z",
+        priority: "standard", outletCount: 1, tags: { topics: [], keywords: [], geographies: ["US"] }, sources: [],
+      }],
+    },
+    log: {
+      unchanged: false, poolCount: 3, relevantCount: 2, metaStoryCount: 1,
+      usedFallbackClustering: false, clusteringFailureReason: null, clusteringAttempts: 2,
+      watermark: "wm-slo", candidateCount: 2, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "test" },
+      timings: { pipelineMs: 30 },
+      outcomes: {
+        storiesPublished: 1, clusteringAttempts: 2, clusteringFailureReason: null,
+        usedFallbackClustering: false,
+        geoBudgetHit: true, geoLane2Deferred: 3, geoBudgetMsConfigured: 12000, geoBudgetMsUsed: 12005,
+      },
+      profile: { name: "interactive", interactive: true, geoStageBudgetMs: 12000, clusterMaxAttempts: 2, clusterTimeoutMs: 22000 },
+      whyEnrichment: { deferred: true, pending: 1, completed: 0, total: 1, upgradeLatencyMs: null },
+    },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice7-slo-meta", async () => {
+      const res = await request(app).post("/api/dashboard/refresh?interactive=1");
+      assert.equal(res.status, 200);
+      const slo = res.body._meta?.slo;
+      assert.ok(slo, "_meta.slo present (additive)");
+      // Geo budget pressure breach with a stable id + concrete action hint.
+      assert.ok(slo.breaches.includes("geo_budget_pressure"));
+      const detail = slo.breachDetails.find((d) => d.id === "geo_budget_pressure");
+      assert.match(detail.actionHint, /geo_budget_pressure/);
+      assert.equal(detail.observed.lane2Deferred, 3);
+      // Gate snapshot carries the machine-readable fields.
+      assert.equal(slo.gate.emptyKind, "has_stories");
+      assert.equal(slo.gate.profile, "interactive");
+      assert.equal(slo.gate.storiesPublished, 1);
+      assert.deepEqual(slo.gate.enrichment, { deferred: true, pending: 1, completed: 0, total: 1 });
+      // Terminal-field semantics: a healthy run never reports a clustering breach.
+      assert.ok(!slo.breaches.includes("cluster_timeout_rate"));
+      assert.ok(!slo.breaches.includes("cluster_failure_rate"));
+    });
+  } finally {
+    _refreshSlo.reset();
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
 // ─── Slice 5: progressive whyItMatters enrichment ────────────────────────────
 
 // A deferred interactive pipeline stub: stories ship with non-empty fallback
