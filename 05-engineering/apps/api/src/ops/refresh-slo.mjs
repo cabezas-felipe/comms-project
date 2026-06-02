@@ -65,6 +65,15 @@ export function evaluateRefreshSlo(
   // Condition B — sustained clustering-timeout rate over an ATTEMPT-ONLY
   // window.  Only refreshes that actually attempted clustering contribute a
   // sample; no-attempt refreshes are skipped so they can't dilute the rate.
+  //
+  // TERMINAL-FAILURE GUARD (Slice 3): the failure signal here is the terminal
+  // `clusteringFailureReason` ("timeout") ONLY.  We deliberately do NOT read
+  // any Slice 3 repair diagnostic (`clusteringRepairRawFailureClass` /
+  // `clusteringRepairSchemaErrorBucket`) — those are non-null on RECOVERED
+  // (published) runs too, so counting them would overcount failures and raise
+  // false breach alarms.  Recovered runs still sample the window as a
+  // non-timeout (`false`), which correctly reflects "clustering attempted and
+  // did not time out".
   if (clusteringAttempts > 0) {
     _clusterTimeoutWindow.push(clusteringFailureReason === "timeout");
     while (_clusterTimeoutWindow.length > CLUSTER_TIMEOUT_WINDOW) {

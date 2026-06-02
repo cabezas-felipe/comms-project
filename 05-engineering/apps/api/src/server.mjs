@@ -29,7 +29,7 @@ import { appendRejections as appendStoryRejections } from "./db/story-rejection-
 import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
 import { resolveProductionTranslateFn } from "./ai/openai-translator.mjs";
-import { runRefreshPipeline } from "./dashboard/refresh-pipeline.mjs";
+import { runRefreshPipeline, enrichWhyItMattersForStories } from "./dashboard/refresh-pipeline.mjs";
 import {
   createEmbeddingSemanticScorer,
   resolveSemanticTagConfig,
@@ -962,6 +962,10 @@ function emitRefreshObservability({ userId, log, ingestionSource }) {
  *     "in_flight"      — concurrent refresh in progress; this caller did not run anything
  *     "unchanged"      — pipeline watermark short-circuited; no new work performed
  *     "ran"            — full pipeline ran, snapshot persisted
+ *     "clustering_failed_preserved" — clustering failed closed (timeout/error →
+ *                        zero stories) AND a prior HEALTHY snapshot existed; we
+ *                        re-served the prior snapshot rather than publishing an
+ *                        empty replacement (Slice 1 fail-closed continuity)
  *     "error_fallback" — pipeline threw; served prior snapshot as soft fallback
  *     "error_500"      — pipeline threw and no prior snapshot to fall back on
  *
@@ -969,8 +973,13 @@ function emitRefreshObservability({ userId, log, ingestionSource }) {
  * (`dashboard_refreshed`, `dashboard_refresh_skipped`, `api_error`).  Bootstrap
  * adds its own `dashboard_bootstrap` event on top.
  */
-async function executeRefreshFlow(identity) {
+async function executeRefreshFlow(identity, { interactive = false } = {}) {
   const startedAt = Date.now();
+  // Slice 4: onboarding-driven interactive entries request the bounded
+  // fast-path profile (tighter geo Lane-2 budget + clustering envelope) for a
+  // 20–30s first paint.  The heartbeat/scheduled and bootstrap paths leave
+  // `interactive` false, so background cadence behavior is unchanged.
+  const refreshProfile = interactive ? "interactive" : null;
   // `lastCheckedAt` represents "when did the server initiate / complete a feed
   // check for this user".  Unlike `refreshedAt`, it advances on every refresh
   // attempt — including no-op outcomes (watermark unchanged, in_flight skip,
@@ -1217,6 +1226,13 @@ async function executeRefreshFlow(identity) {
       priorStoryCount,
       everSeenMetaStoryIds: priorEverSeenMetaStoryIds,
       priorStoriesById,
+      // Slice 4: latency-shaping profile for this run ("interactive" for the
+      // onboarding fast-path, null for scheduled/background/bootstrap).
+      refreshProfile,
+      // Slice 5: interactive runs defer the expensive whyItMatters writer so
+      // first paint isn't blocked on it; an async enrichment pass (scheduled
+      // after the snapshot write below) upgrades the copy in place.
+      deferWhyItMatters: interactive,
     });
 
     // Slice 7: fold the server-measured ingestionMs into the pipeline's
@@ -1315,6 +1331,112 @@ async function executeRefreshFlow(identity) {
       };
     }
 
+    // ─── Slice 1: fail-closed clustering snapshot continuity ────────────────
+    // Locked behavior: when clustering fails closed (timeout/error → ZERO
+    // meta-stories) AND a prior HEALTHY snapshot exists (it carried visible
+    // stories), do NOT overwrite that snapshot with an empty replacement.
+    // Re-serve the prior healthy snapshot as the user-visible result and
+    // surface explicit diagnostics on `_meta` so the failed-clustering event
+    // stays observable.  With no prior healthy snapshot we fall through to the
+    // normal publish path, which keeps the existing clustering-failed empty
+    // behavior (requirement 2).
+    //
+    // Gate strictly on `clusteringFailureReason` (the pipeline sets it only on
+    // the fail-closed path — 'timeout' | 'error').  A legitimately-empty run
+    // (empty pool, all stories dropped at grounding) leaves it `null`/undefined
+    // and must still publish its honest empty snapshot — we never trap a real
+    // zero-result behind a stale snapshot.  No fabricated stories are
+    // introduced here: we only re-serve a snapshot the pipeline previously
+    // produced and validated.
+    const clusteringFailedClosed = log?.clusteringFailureReason != null;
+    const producedNoStories =
+      Array.isArray(payload?.stories) && payload.stories.length === 0;
+    const priorHasHealthyStories =
+      !!priorSnapshot && typeof priorStoryCount === "number" && priorStoryCount > 0;
+    if (clusteringFailedClosed && producedNoStories && priorHasHealthyStories) {
+      const elapsedMs = Date.now() - startedAt;
+      console.warn(
+        `[dashboard.refresh] user=${identity.userId} clustering FAILED (reason=${log.clusteringFailureReason} attempts=${log.clusteringAttempts}) — preserving prior healthy snapshot (${priorStoryCount} stories), NOT publishing empty replacement elapsed=${elapsedMs}ms`
+      );
+      // Bump persisted lastCheckedAt so the header clock advances even though
+      // the story list is unchanged.  refreshedAt stays pinned to the prior
+      // snapshot's last successful publish.  Best-effort, non-fatal.  This is
+      // the same metadata posture as the watermark-skip / error-fallback
+      // branches — `writeSnapshotMeta` only touches lastCheckedAt, never the
+      // stories or selection/watermark, so the persisted snapshot shape is
+      // untouched (requirement 3).
+      await _snapshotRepo.writeMeta(identity.userId, { lastCheckedAt }).catch(() => {});
+
+      // Diagnostics describing THIS run's failed clustering attempt, surfaced
+      // on the response so the first read after the failure can explain why the
+      // snapshot is unchanged without a reload.  These live on the immediate
+      // response only — they are not persisted into the snapshot.
+      const preservedMeta = {
+        hasSnapshot: true,
+        unchanged: false,
+        refreshSkippedReason: "clustering_failed_snapshot_preserved",
+        // Explicit continuity flag so clients/operators can distinguish "we
+        // kept the prior healthy stories because clustering failed" from a
+        // normal unchanged-watermark skip.
+        snapshotPreserved: true,
+        usedFallbackClustering: log.usedFallbackClustering,
+        clusteringFailureReason: log.clusteringFailureReason,
+        clusteringAttempts: log.clusteringAttempts,
+        clusteringLatencyMs: log.clusteringLatencyMs,
+        priorStoryCount,
+        lastCheckedAt,
+        clusterModel,
+        embeddingModel,
+      };
+      // Carry the optional run-level diagnostics the failed run still computed
+      // (it ran every stage up to clustering) so operators can see what the
+      // pipeline produced before clustering collapsed.  Each is optional.
+      if (log.recall) preservedMeta.recall = log.recall;
+      if (log.funnel) preservedMeta.funnel = log.funnel;
+      if (log.beatFit) preservedMeta.beatFit = log.beatFit;
+      if (log.timings) preservedMeta.timings = log.timings;
+      if (log.decisionTrace) preservedMeta.decisionTrace = log.decisionTrace;
+      if (log.outcomes) preservedMeta.outcomes = log.outcomes;
+      preservedMeta.ingestionSource = ingestionSource;
+
+      // Structured summary + SLO eval still run: clustering DID attempt and
+      // fail, so this run must sample the cluster-timeout-rate window exactly
+      // like the normal "ran" branch would for a fail-closed run.
+      const { cacheBenefit: preservedCacheBenefit } = emitRefreshObservability({
+        userId: identity.userId,
+        log,
+        ingestionSource,
+      });
+      if (preservedCacheBenefit) preservedMeta.cacheBenefit = preservedCacheBenefit;
+
+      trackServerEvent("dashboard_refresh_skipped", {
+        reason: "clustering_failed_snapshot_preserved",
+        clusteringFailureReason: log.clusteringFailureReason,
+        clusteringAttempts: log.clusteringAttempts,
+        priorStoryCount,
+        elapsedMs,
+        identitySource: identity.source,
+      });
+
+      // Re-serve the prior snapshot's body + its own selection/watermark, so
+      // the response matches what GET /api/dashboard would return for that
+      // snapshot (requirement 3) — only `_meta` carries the additive
+      // clustering-failure diagnostics on top.
+      const { body, baseMeta, selectionMeta, watermark } =
+        stripPersistedFields(priorSnapshot);
+      return {
+        kind: "clustering_failed_preserved",
+        httpStatus: 200,
+        body: {
+          ...body,
+          _meta: attachInternalsToMeta(
+            { ...baseMeta, ...preservedMeta },
+            { selectionMeta, watermark }
+          ),
+        },
+      };
+    }
+
     // Apply title-only locks (meta-story fields PR — Prompt 1).
     // Product rule: on first publish, freeze the meta-story's `title` per
     // `metaStoryId` so it never silently renames across refreshes.  The
@@ -1397,10 +1519,36 @@ async function executeRefreshFlow(identity) {
     // "did this refresh do its job, and where did the items come from?" without
     // a replay. Optional for back-compat with pre-Slice-3 pipeline returns.
     if (log.outcomes !== undefined) lastRunMeta.outcomes = log.outcomes;
+    // Slice 4: persist the latency-shaping profile so GET /api/dashboard can
+    // report which profile produced this snapshot without replaying the run.
+    if (log.profile !== undefined) lastRunMeta.profile = log.profile;
+    // Slice 5: persist the progressive-enrichment state so GET /api/dashboard
+    // (the client's poll surface) reports pending/completed counts without a
+    // replay.  Additive + tolerant for older clients.
+    if (log.whyEnrichment !== undefined) lastRunMeta.whyEnrichment = log.whyEnrichment;
     lastRunMeta.ingestionSource = ingestionSource;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
+
+    // Slice 5: schedule the async whyItMatters enrichment AFTER the snapshot is
+    // written and WITHOUT awaiting it — the interactive response must not block
+    // on the writer.  Only fires for deferred (interactive) runs that actually
+    // published stories.  The enricher re-reads the snapshot and guards on the
+    // refresh generation (watermark), so a newer refresh landing first turns
+    // this into a safe no-op.  Fire-and-forget: enrichment failures never
+    // affect the user's response (the deferred fallback copy stays valid).
+    if (interactive && log.whyEnrichment?.deferred === true && finalPayload.stories.length > 0) {
+      const generation = finalPayload._watermark;
+      const basePayload = finalPayload;
+      void Promise.resolve()
+        .then(() => _whyEnricher.enrich({ userId: identity.userId, generation, basePayload }))
+        .catch((err) => {
+          console.warn(
+            `[why.enrich] async enrichment threw (non-fatal): ${err instanceof Error ? err.message : err}`
+          );
+        });
+    }
 
     const elapsedMs = Date.now() - startedAt;
     const sel = log.selection ?? {};
@@ -1452,6 +1600,15 @@ async function executeRefreshFlow(identity) {
           hasSnapshot: true,
           selection: log.selection,
           timings: log.timings,
+          // Slice 4: latency-shaping profile applied to this run, so the
+          // immediate refresh response can confirm the interactive fast-path
+          // was active and carry the timing-relevant knobs alongside `timings`.
+          profile: log.profile,
+          // Slice 5: progressive whyItMatters enrichment state.  On an
+          // interactive first paint this is `{ deferred:true, pending:N }`,
+          // signaling the client to poll GET /api/dashboard until pending hits
+          // 0.  Additive; older clients ignore it.
+          whyEnrichment: log.whyEnrichment,
           // Slice 3: run-level outcome rollup + server-resolved ingestion
           // source on the immediate refresh response. Backward-compatible;
           // clients ignore unknown _meta keys.
@@ -1537,6 +1694,82 @@ async function executeRefreshFlow(identity) {
 }
 
 /**
+ * Slice 5: async whyItMatters enrichment for a deferred interactive snapshot.
+ *
+ * Re-reads the persisted snapshot, GUARDS on the refresh generation
+ * (`_watermark`), and — only when the snapshot is still the same generation and
+ * still pending — recomputes richer `whyItMatters` and writes the upgraded
+ * stories back.  Deterministic, idempotent, and safe to retry:
+ *   - generation mismatch (a newer refresh landed)  → no-op  (kind: "stale")
+ *   - snapshot already enriched (pending === 0)      → no-op  (kind: "already_done")
+ *   - missing snapshot                               → no-op  (kind: "missing")
+ * No clustering re-run, so metaStoryId lineage is preserved exactly.  The
+ * `basePayload` (the just-written full payload) is the write source so we don't
+ * round-trip through the lossy snapshot-read lift.  `opts` carries test seams
+ * (`resolveWhyItMattersFn` / `whyWriteFn` / `whyConfig`) — production uses the
+ * env-configured why engine.
+ */
+async function enrichSnapshotWhyItMatters({ userId, generation, basePayload }, opts = {}) {
+  const current = await _snapshotRepo.read(userId).catch(() => null);
+  if (!current) return { kind: "missing" };
+  // Generation guard — never overwrite a newer snapshot (deterministic, not
+  // timing-based).  The watermark is the refresh generation key.
+  if (current._watermark !== generation) return { kind: "stale" };
+  // Idempotency guard — a prior enrichment already upgraded this generation.
+  if (current._meta?.whyEnrichment && current._meta.whyEnrichment.deferred === false) {
+    return { kind: "already_done" };
+  }
+  const baseStories = Array.isArray(basePayload?.stories) ? basePayload.stories : [];
+  if (baseStories.length === 0) return { kind: "empty" };
+
+  const { stories: upgradedStories, diagnostics } = await enrichWhyItMattersForStories({
+    stories: baseStories,
+    everSeenMetaStoryIds: basePayload?._everSeenMetaStoryIds ?? null,
+    resolveWhyItMattersFn: opts.resolveWhyItMattersFn ?? null,
+    whyWriteFn: opts.whyWriteFn ?? null,
+    whyConfig: opts.whyConfig ?? null,
+  });
+
+  // Re-guard immediately before the write in case a newer refresh raced in
+  // while the (potentially slow) enrichment was computing.
+  const latest = await _snapshotRepo.read(userId).catch(() => null);
+  if (!latest || latest._watermark !== generation) return { kind: "stale" };
+  if (latest._meta?.whyEnrichment && latest._meta.whyEnrichment.deferred === false) {
+    return { kind: "already_done" };
+  }
+
+  const total = baseStories.length;
+  const nextPayload = {
+    ...basePayload,
+    stories: upgradedStories,
+    _lastRunMeta: {
+      ...(basePayload._lastRunMeta ?? {}),
+      whyItMatters: { ...(basePayload._lastRunMeta?.whyItMatters ?? {}), deferred: false },
+      whyEnrichment: {
+        deferred: false,
+        pending: 0,
+        completed: diagnostics.upgraded,
+        total,
+        upgradeLatencyMs: diagnostics.upgradeLatencyMs,
+      },
+    },
+  };
+  await _snapshotRepo.write(userId, nextPayload);
+  console.log(
+    `[why.enrich] upgraded user=${userId} generation=${generation}` +
+      ` completed=${diagnostics.upgraded}/${total} upgradeLatencyMs=${diagnostics.upgradeLatencyMs}`
+  );
+  return { kind: "upgraded", completed: diagnostics.upgraded, total };
+}
+
+/**
+ * Mutable Slice 5 enrichment hook.  Production runs `enrichSnapshotWhyItMatters`
+ * fire-and-forget after a deferred interactive write; tests override `enrich`
+ * to observe scheduling or to drive the upgrade deterministically.
+ */
+export const _whyEnricher = { enrich: enrichSnapshotWhyItMatters };
+
+/**
  * Mutable execution hook for the shared refresh flow.  Both
  * `POST /api/dashboard/refresh` and the bootstrap route's "stale or missing
  * snapshot" path go through this hook so tests can stub flow outcomes
@@ -1582,7 +1815,12 @@ export const _dueUserOrchestrator = {
 app.post("/api/dashboard/refresh", async (req, res) => {
   const identity = await requireIdentity(req, res);
   if (!identity) return;
-  const { httpStatus, body } = await _refreshExecutor.execute(identity);
+  // Slice 4: the onboarding-driven interactive entry POSTs `?interactive=1` to
+  // request the bounded fast-path profile (20–30s first paint).  The heartbeat
+  // and any other refresh caller omit it, keeping the default profile — so
+  // scheduled/background cadence behavior is unchanged.
+  const interactive = req.query?.interactive === "1";
+  const { httpStatus, body } = await _refreshExecutor.execute(identity, { interactive });
   res.status(httpStatus).json(body);
 });
 
@@ -1663,6 +1901,9 @@ app.post("/api/dashboard/bootstrap", async (req, res) => {
   //                       (which performs its own re-read) successfully pulls
   //                       a snapshot — in that case we should still report
   //                       ran_refresh since data is being served.
+  //   "clustering_failed_preserved" — clustering failed closed but a prior
+  //                       healthy snapshot was re-served; data is being shown,
+  //                       so classify as ran_refresh from the user's POV
   //   "error_fallback"  — pipeline threw but a prior snapshot was served;
   //                       still classify as ran_refresh from the user's POV
   //   "error_500"       — pipeline threw with no fallback snapshot available

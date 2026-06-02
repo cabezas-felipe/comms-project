@@ -55,6 +55,32 @@ export interface DashboardFetchResult {
    * absent. Parsed defensively — never schema-validated.
    */
   recall: DashboardRecallMeta | null;
+  /**
+   * Slice 5: progressive `whyItMatters` enrichment state lifted from
+   * `_meta.whyEnrichment`. On an interactive first paint this is
+   * `{ deferred: true, pending: N, ... }` — the dashboard polls until
+   * `pending === 0` and patches story cards in place. `null` when the backend
+   * omits it (older API / non-deferred run) — callers treat null as
+   * "nothing pending". Parsed defensively; never schema-validated.
+   */
+  whyEnrichment: DashboardWhyEnrichmentMeta | null;
+}
+
+/** Subset of the server progressive-enrichment state surfaced for the client poll loop. */
+export interface DashboardWhyEnrichmentMeta {
+  deferred: boolean;
+  pending: number;
+  completed: number;
+  total: number;
+  upgradeLatencyMs: number | null;
+  /**
+   * Client-only marker (Slice 6 follow-through): set when bounded polling stops
+   * at the budget with items still pending. The card keeps its current
+   * (source-grounded or template) fallback copy — NOT a permanent lock: a later
+   * background refresh (heartbeat / next interactive entry) re-attempts the
+   * upgrade and overlays the richer copy in place. Never sent by the server.
+   */
+  pollExhausted?: boolean;
 }
 
 interface DashboardClusteringMeta {
@@ -227,6 +253,30 @@ function parseFunnelMetaSafe(raw: unknown): DashboardFunnelMeta | null {
 }
 
 /**
+ * Lift the progressive-enrichment state off `_meta.whyEnrichment` (Slice 5).
+ * Tolerant of any shape: a missing/garbled object returns `null` (→ "nothing
+ * pending"); individual missing/mistyped numeric fields degrade to 0 and
+ * `deferred` to false. Never throws — a malformed `_meta` must never read as
+ * "pending forever".
+ */
+function parseWhyEnrichmentMetaSafe(raw: unknown): DashboardWhyEnrichmentMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const w = raw as Record<string, unknown>;
+  const num = (v: unknown): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : 0;
+  return {
+    deferred: w.deferred === true,
+    pending: num(w.pending),
+    completed: num(w.completed),
+    total: num(w.total),
+    upgradeLatencyMs:
+      typeof w.upgradeLatencyMs === "number" && Number.isFinite(w.upgradeLatencyMs)
+        ? w.upgradeLatencyMs
+        : null,
+  };
+}
+
+/**
  * Lift the recall summary off `_meta.recall`. Same defensive posture as
  * `parseFunnelMetaSafe`. Dev-only — never gates behavior, never throws.
  */
@@ -320,8 +370,9 @@ async function requestDashboard<TExtras extends object>({
       const clustering = parseClusteringMetaSafe(meta);
       const funnel = parseFunnelMetaSafe(meta?.funnel);
       const recall = parseRecallMetaSafe(meta?.recall);
+      const whyEnrichment = parseWhyEnrichmentMetaSafe(meta?.whyEnrichment);
       const extras = parseExtras ? parseExtras(raw) : ({} as TExtras);
-      return { payload, selection, refreshedAt, lastCheckedAt, ...clustering, funnel, recall, ...extras };
+      return { payload, selection, refreshedAt, lastCheckedAt, ...clustering, funnel, recall, whyEnrichment, ...extras };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;
@@ -417,4 +468,27 @@ export async function refreshDashboard(
     label: "Refresh",
     defaultEndpoint: DEFAULT_REFRESH_ENDPOINT,
   });
+}
+
+/**
+ * Slice 2: best-effort GET recovery for a failed POST loader.
+ *
+ * When a POST loader (`bootstrapDashboard` / `refreshDashboard`) fails after
+ * its own retries are exhausted, the dashboard can still recover by serving
+ * the persisted snapshot via a plain GET.  This wraps `fetchDashboardWithMeta`
+ * and — unlike it — NEVER throws: it resolves to the GET result on success, or
+ * to `null` when the GET also fails (or aborts).  Callers treat `null` as
+ * "stay on the original POST error" and a non-null result as a silent recovery
+ * (render the recovered snapshot, no error UI).  The recovery GET is a single
+ * best-effort pass by default (`retries: 0`) so a failing backend doesn't
+ * stack a second multi-retry storm on top of the POST loader's.
+ */
+export async function recoverDashboardViaGet(
+  options: FetchDashboardOptions = {}
+): Promise<DashboardFetchResult | null> {
+  try {
+    return await fetchDashboardWithMeta({ retries: 0, ...options });
+  } catch {
+    return null;
+  }
 }

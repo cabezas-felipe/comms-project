@@ -6,6 +6,8 @@ import {
   gracefulFallbackClustering,
   extractiveSummary,
   clusterItems,
+  resolveClusterTimeoutMs,
+  CLUSTER_TIMEOUT_MS_DEFAULT,
   metaStoryOutputSchema,
   parseClusteringResponse,
   safeTrimRepair,
@@ -349,6 +351,37 @@ test("clusterItems: mock provider returns stories grouped by topic", async () =>
 test("clusterItems: returns empty array for empty input", async () => {
   const stories = await clusterItems([], BASE_SETTINGS, "mock-anthropic-haiku");
   assert.equal(stories.length, 0);
+});
+
+// ─── Slice 4: clustering timeout override (interactive fast-path) ────────────
+
+test("resolveClusterTimeoutMs: explicit override wins; else env; else default", () => {
+  const saved = process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS;
+  try {
+    delete process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS;
+    // No override, no env → default.
+    assert.equal(resolveClusterTimeoutMs(undefined), CLUSTER_TIMEOUT_MS_DEFAULT);
+    // A valid override always wins (Slice 4 interactive fast-path passes this).
+    assert.equal(resolveClusterTimeoutMs(20000), 20000);
+    // Invalid overrides fall through to env/default.
+    process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS = "45000";
+    assert.equal(resolveClusterTimeoutMs(0), 45000, "0 → ignore override, use env");
+    assert.equal(resolveClusterTimeoutMs(-1), 45000, "negative → ignore override, use env");
+    assert.equal(resolveClusterTimeoutMs(NaN), 45000, "NaN → ignore override, use env");
+    // Override still wins over env when valid.
+    assert.equal(resolveClusterTimeoutMs(10000), 10000);
+  } finally {
+    if (saved !== undefined) process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS = saved;
+    else delete process.env.TEMPO_AI_CLUSTER_TIMEOUT_MS;
+  }
+});
+
+test("clusterItems: accepts a 4th opts arg without breaking the mock path (backward compatible)", async () => {
+  const items = [makeItem({ sourceId: "to-1", topic: "Diplomatic relations" })];
+  // Passing an explicit timeout override must not disturb the mock provider
+  // path (it never makes a timed call) — proves the new arg is additive.
+  const stories = await clusterItems(items, BASE_SETTINGS, "mock-anthropic-haiku", { timeoutMs: 20000 });
+  assert.ok(stories.length >= 1);
 });
 
 test("clusterItems: throws when anthropic model requested but API key absent", async () => {
@@ -794,13 +827,18 @@ test("C2 safeTrimRepair: structural-trim only — strips fences, isolates outer 
 });
 
 test("C2 readClusteringRepairDiagnostics: defaults to no-repair for plain arrays/objects", () => {
-  const plain = readClusteringRepairDiagnostics([]);
-  assert.deepEqual(plain, { attempted: false, succeeded: false, failureReason: null });
-  assert.deepEqual(readClusteringRepairDiagnostics(null), {
+  // Slice 3 extends the normalized shape with rawFailureClass / schemaErrorBucket
+  // / coercion — all null on the no-repair default.
+  const expected = {
     attempted: false,
     succeeded: false,
     failureReason: null,
-  });
+    rawFailureClass: null,
+    schemaErrorBucket: null,
+    coercion: null,
+  };
+  assert.deepEqual(readClusteringRepairDiagnostics([]), expected);
+  assert.deepEqual(readClusteringRepairDiagnostics(null), expected);
 });
 
 test("C2 clusterItems (mock provider): attaches no-repair diagnostics", async () => {
@@ -811,4 +849,136 @@ test("C2 clusterItems (mock provider): attaches no-repair diagnostics", async ()
   assert.equal(repair.attempted, false);
   assert.equal(repair.succeeded, false);
   assert.equal(repair.failureReason, null);
+});
+
+// ─── Slice 3: clustering structured-output hardening ─────────────────────────
+//
+// Builds a contract-valid meta-story array so each case isolates exactly the
+// malformation under test.
+
+function validMetaStory(overrides = {}) {
+  return {
+    title: "Diplomatic Relations Developments",
+    subtitle: "Recent diplomatic updates.",
+    source_item_ids: ["src-1"],
+    summary: "Diplomatic relations updates tracked.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    factual_claims: ["Reuters reports a diplomatic meeting."],
+    claim_evidence_map: { "0": ["src-1"] },
+    ...overrides,
+  };
+}
+
+test("Slice 3: valid structured output passes with no repair and no diagnostics noise", () => {
+  const { stories, repair } = parseClusteringResponse(VALID_CLUSTER_JSON);
+  assert.equal(stories.length, 1);
+  // Every Slice 3 field is inert on the clean happy path.
+  assert.equal(repair.attempted, false);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.failureReason, null);
+  assert.equal(repair.rawFailureClass, null);
+  assert.equal(repair.schemaErrorBucket, null);
+  assert.equal(repair.coercion, null);
+});
+
+test("Slice 3 repairable: bare top-level array is wrapped within strict bounds (coercion=array_wrap)", () => {
+  // The model emitted the meta-stories array directly, without the
+  // `{ meta_stories: [...] }` envelope.  Strict parse fails (schema), the
+  // single repair pass wraps the array, and validation then passes — no
+  // fabricated content, every element still validated.
+  const bareArray = JSON.stringify([validMetaStory()]);
+  const { stories, repair } = parseClusteringResponse(bareArray);
+  assert.equal(stories.length, 1);
+  assert.equal(stories[0].title, "Diplomatic Relations Developments");
+  assert.ok(/^[0-9a-f]{16}$/.test(stories[0].meta_story_id), "meta_story_id assigned");
+  assert.equal(repair.attempted, true);
+  assert.equal(repair.succeeded, true);
+  assert.equal(repair.coercion, "array_wrap", "bare array recovered via array_wrap coercion");
+  // The raw output was schema-invalid (a bare array, not the envelope object).
+  assert.equal(repair.rawFailureClass, "schema_validation_error");
+  assert.equal(repair.failureReason, null, "no terminal failure — repair succeeded");
+});
+
+test("Slice 3 repairable: fenced bare array recovers via trim + array_wrap, raw class captured", () => {
+  const fencedBareArray = "```json\n" + JSON.stringify([validMetaStory()]) + "\n```";
+  const { stories, repair } = parseClusteringResponse(fencedBareArray);
+  assert.equal(stories.length, 1);
+  assert.equal(repair.succeeded, true);
+  assert.equal(repair.coercion, "array_wrap");
+  // Fences make the raw text a JSON syntax error before the array is reached.
+  assert.equal(repair.rawFailureClass, "json_parse_error");
+});
+
+test("Slice 3 raw-class capture: fenced valid object records rawFailureClass even though repair succeeds", () => {
+  const fenced = "```json\n" + VALID_CLUSTER_JSON + "\n```";
+  const { stories, repair } = parseClusteringResponse(fenced);
+  assert.equal(stories.length, 1);
+  assert.equal(repair.succeeded, true);
+  assert.equal(repair.coercion, null, "object envelope needs no structural coercion");
+  assert.equal(repair.rawFailureClass, "json_parse_error", "raw fences are a JSON syntax failure");
+});
+
+test("Slice 3 empty: whitespace-only response classifies as empty_response and fails closed", () => {
+  let thrown = null;
+  assert.throws(
+    () => parseClusteringResponse("   \n  "),
+    (err) => { thrown = err; return /empty response/i.test(err.message); }
+  );
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.attempted, true);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.rawFailureClass, "empty_response");
+  assert.equal(repair.failureReason, "no_json_region");
+});
+
+test("Slice 3 schema bucket: missing meta_stories → missing_meta_stories", () => {
+  const wrongShape = JSON.stringify({ stories: [] });
+  let thrown = null;
+  assert.throws(() => parseClusteringResponse(wrongShape), (err) => { thrown = err; return true; });
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.failureReason, "schema_validation_error");
+  assert.equal(repair.rawFailureClass, "schema_validation_error");
+  assert.equal(repair.schemaErrorBucket, "missing_meta_stories");
+});
+
+test("Slice 3 schema bucket: more than 5 meta-stories → too_many_meta_stories", () => {
+  const tooMany = JSON.stringify({ meta_stories: Array.from({ length: 6 }, () => validMetaStory()) });
+  let thrown = null;
+  assert.throws(() => parseClusteringResponse(tooMany), (err) => { thrown = err; return true; });
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.schemaErrorBucket, "too_many_meta_stories");
+  assert.equal(repair.succeeded, false);
+});
+
+test("Slice 3 schema bucket: empty source_item_ids → empty_source_item_ids", () => {
+  const emptyIds = JSON.stringify({ meta_stories: [validMetaStory({ source_item_ids: [] })] });
+  let thrown = null;
+  assert.throws(() => parseClusteringResponse(emptyIds), (err) => { thrown = err; return true; });
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.schemaErrorBucket, "empty_source_item_ids");
+});
+
+test("Slice 3 schema bucket: too many source_item_ids → too_many_source_item_ids", () => {
+  const tooManyIds = JSON.stringify({
+    meta_stories: [validMetaStory({ source_item_ids: ["a", "b", "c", "d", "e", "f"] })],
+  });
+  let thrown = null;
+  assert.throws(() => parseClusteringResponse(tooManyIds), (err) => { thrown = err; return true; });
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.schemaErrorBucket, "too_many_source_item_ids");
+});
+
+test("Slice 3 continuity contract: malformed output throws a non-timeout error carrying diagnostics", () => {
+  // The pipeline classifies any clustering throw whose message does NOT match
+  // its timeout regex as `error` (Slice 1 continuity gate needs a non-null
+  // clusteringFailureReason).  Assert the parser's terminal error message
+  // never trips the timeout heuristic and always rides repair diagnostics.
+  const broken = "```json\n{ \"meta_stories\": [ {bad json} ] }\n```";
+  let thrown = null;
+  assert.throws(() => parseClusteringResponse(broken), (err) => { thrown = err; return true; });
+  assert.doesNotMatch(thrown.message, /timed out|timeout|abort/i, "must not look like a timeout");
+  const repair = readClusteringRepairDiagnostics(thrown);
+  assert.equal(repair.attempted, true);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.failureReason, "json_parse_error");
 });

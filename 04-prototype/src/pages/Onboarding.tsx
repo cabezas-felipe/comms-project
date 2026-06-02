@@ -171,9 +171,21 @@ export default function Onboarding() {
     setSubmitting(false);
     // Phase 5: Onboarding → Dashboard post-submit is the second of the two
     // surfaces that should trigger backend-owned bootstrap freshness.
+    //
+    // Slice 2: also pass `forceRefresh: true` so the dashboard runs the POST
+    // refresh pipeline directly instead of letting bootstrap reuse a stale
+    // "fresh" snapshot (≤60 min old) written before this onboarding's settings
+    // landed.  The new user's first view must reflect the beat they just
+    // configured, not a pre-existing snapshot.
+    //
+    // Slice 4: this `forceRefresh` entry is the onboarding-driven INTERACTIVE
+    // path — the Dashboard loader routes it through the backend's balanced
+    // fast-path profile (bounded geo + clustering envelope) so first stories
+    // land in the 20–30s band while a human waits.  Scheduled/background
+    // refreshes are unaffected (they never set `forceRefresh`).
     navigate(
       import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard",
-      { state: { bootstrap: true } }
+      { state: { bootstrap: true, forceRefresh: true } }
     );
 
     // Surface backend extraction failure — save already committed, user can fix in Settings.

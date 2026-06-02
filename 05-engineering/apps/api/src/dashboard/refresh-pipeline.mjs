@@ -109,6 +109,82 @@ export function resolveGeoStageBudgetMs() {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : GEO_STAGE_BUDGET_MS_DEFAULT;
 }
 
+// ─── Slice 4: interactive fast-path refresh profile ──────────────────────────
+//
+// Onboarding → Dashboard fires an INTERACTIVE refresh: a human is staring at a
+// spinner waiting for their first stories.  The default profile is tuned for
+// background/scheduled refreshes where total yield matters more than wall
+// clock; for the interactive entry we trade a slice of opportunistic geo
+// assessment + clustering retry budget for a materially faster first paint
+// (Balanced target: 20–30s).  The profile ONLY changes latency-shaping knobs —
+// it never relaxes a trust guardrail:
+//   - Geo Lane 1 (protected must-see) still always finishes; only Lane 2
+//     opportunistic assessment is bounded sooner, deferring the remainder to
+//     the hold path for the next refresh (geography relevance is preserved,
+//     not removed).
+//   - Clustering still fails closed (zero stories, no fabricated fallback) and
+//     Slice 1 snapshot continuity still applies at the route layer.
+//
+// All knobs are env-overridable so ops can retune the band without a deploy.
+//
+// Slice 4.1 (balanced-safe calibration): the original Slice 4 values traded too
+// much resilience for latency — an 8s geo budget + single clustering attempt
+// raised first-run empty risk.  Recalibrated to keep a meaningful latency win
+// while reducing that risk: a slightly larger geo budget, a marginally longer
+// per-attempt clustering timeout, and — locked decision — ALWAYS 2 clustering
+// attempts for interactive runs (initial + one retry), matching the default
+// profile's resilience.  The latency win now comes from the bounded geo Lane-2
+// budget and the tighter per-attempt clustering timeout, not from dropping the
+// retry.
+export const INTERACTIVE_GEO_STAGE_BUDGET_MS_DEFAULT = 12000;
+export const INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT = 22000;
+export const INTERACTIVE_CLUSTER_MAX_ATTEMPTS_DEFAULT = 2;
+export const DEFAULT_CLUSTER_MAX_ATTEMPTS = 2; // initial try + one retry
+
+function envIntPositive(name, fallback) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+/**
+ * Resolve the latency-shaping profile for a refresh run.  `name === "interactive"`
+ * (onboarding-driven interactive entry) yields the bounded fast-path knobs;
+ * anything else (scheduled/background/default) yields the inert default profile
+ * — `geoStageBudgetMs`/`clusterTimeoutMs` null so the pipeline keeps reading the
+ * existing env defaults, and `clusterMaxAttempts` stays at 2 (one retry).
+ *
+ * Returns a plain, fully-populated object so it can be surfaced verbatim on
+ * `_meta.profile` for profile-on vs baseline comparison.  Exported for unit
+ * testing of the knob matrix without driving the full pipeline.
+ */
+export function resolveRefreshProfile(name) {
+  if (name === "interactive") {
+    return {
+      name: "interactive",
+      interactive: true,
+      geoStageBudgetMs: envIntPositive(
+        "TEMPO_INTERACTIVE_GEO_STAGE_BUDGET_MS",
+        INTERACTIVE_GEO_STAGE_BUDGET_MS_DEFAULT
+      ),
+      clusterTimeoutMs: envIntPositive(
+        "TEMPO_INTERACTIVE_CLUSTER_TIMEOUT_MS",
+        INTERACTIVE_CLUSTER_TIMEOUT_MS_DEFAULT
+      ),
+      clusterMaxAttempts: envIntPositive(
+        "TEMPO_INTERACTIVE_CLUSTER_MAX_ATTEMPTS",
+        INTERACTIVE_CLUSTER_MAX_ATTEMPTS_DEFAULT
+      ),
+    };
+  }
+  return {
+    name: "default",
+    interactive: false,
+    geoStageBudgetMs: null, // fall through to resolveGeoStageBudgetMs()
+    clusterTimeoutMs: null, // fall through to env / cluster-engine default
+    clusterMaxAttempts: DEFAULT_CLUSTER_MAX_ATTEMPTS,
+  };
+}
+
 // ─── C1: deterministic cluster input cap ─────────────────────────────────────
 //
 // Clustering is the single largest AI round-trip (whole candidate pool in one
@@ -934,6 +1010,60 @@ export function compareStoriesR1(a, b) {
   return 0;
 }
 
+// ─── Slice 6: Lane 2 throughput prioritization ───────────────────────────────
+//
+// Lane 2 (opportunistic geo candidates) is processed in concurrency-sized waves
+// only while the geo-stage budget holds; the remainder defers to the hold path
+// (never dropped, re-evaluated next refresh).  To get the most relevance out of
+// a tight budget (interactive profile), assess the MOST-LIKELY-RELEVANT and
+// CHEAPEST candidates first so they're the ones that survive when the budget
+// runs out — the deferred tail is then the least-promising items, which lose
+// the least by waiting a refresh.
+//
+// This reorders ASSESSMENT ORDER ONLY — it never changes which items pass/fail
+// (same thresholds) and never drops anything, so geography relevance is
+// preserved.  The sort is a total order with a stable final tiebreak (original
+// index) so output is deterministic run-to-run.
+//
+// Priority (lower sorts first):
+//   1. carries a geo signal (lexical/explicit) — likely relevant AND admitted
+//      via the cheap assessor-bypass, so it costs ~nothing and should never be
+//      the item we defer.  `relevantSignalIds` holds these sourceIds.
+//   2. from the current selected pool (fresh) ahead of hold-bucket backlog.
+//   3. fresher (`minutesAgo` ascending).
+//   4. `sourceId` ascending, then original index — fully deterministic.
+export function prioritizeLane2Candidates(
+  items,
+  { selectedSourceIds = new Set(), relevantSignalIds = new Set() } = {}
+) {
+  const list = Array.isArray(items) ? items : [];
+  return list
+    .map((item, idx) => ({ item, idx }))
+    .sort((a, b) => {
+      const asig = relevantSignalIds.has(a.item?.sourceId) ? 0 : 1;
+      const bsig = relevantSignalIds.has(b.item?.sourceId) ? 0 : 1;
+      if (asig !== bsig) return asig - bsig;
+      const afresh = selectedSourceIds.has(a.item?.sourceId) ? 0 : 1;
+      const bfresh = selectedSourceIds.has(b.item?.sourceId) ? 0 : 1;
+      if (afresh !== bfresh) return afresh - bfresh;
+      const am =
+        typeof a.item?.minutesAgo === "number" && Number.isFinite(a.item.minutesAgo)
+          ? a.item.minutesAgo
+          : Number.POSITIVE_INFINITY;
+      const bm =
+        typeof b.item?.minutesAgo === "number" && Number.isFinite(b.item.minutesAgo)
+          ? b.item.minutesAgo
+          : Number.POSITIVE_INFINITY;
+      if (am !== bm) return am - bm;
+      const aid = a.item?.sourceId ?? "";
+      const bid = b.item?.sourceId ?? "";
+      if (aid < bid) return -1;
+      if (aid > bid) return 1;
+      return a.idx - b.idx;
+    })
+    .map((x) => x.item);
+}
+
 /**
  * Converts a meta-story + its resolved source items into the response story shape
  * expected by dashboardPayloadSchema.  Derives schema-constrained fields (topic,
@@ -1258,7 +1388,22 @@ export async function runRefreshPipeline({
   // healer without env mutation, mirroring the other stage-config injection
   // points above.
   clusterSplitConfig = null,
+  // Slice 4 — latency-shaping profile for this run.  `"interactive"` activates
+  // the onboarding fast-path (bounded geo Lane-2 budget + tighter clustering
+  // envelope); null / anything else keeps the default scheduled/background
+  // behavior.  The route passes `"interactive"` only for onboarding-driven
+  // interactive entries; the heartbeat and bootstrap paths leave it null.
+  refreshProfile = null,
+  // Slice 5 — progressive whyItMatters enrichment.  When true, the per-story
+  // implications WRITER is skipped at first paint: every published story gets
+  // the deterministic, state-aware safe fallback copy (non-empty, never a
+  // subtitle echo) so the interactive response paints immediately, and the
+  // server runs an async enrichment pass that upgrades the copy in place.
+  // Trust is unchanged — no fabricated stories, only `whyItMatters` is
+  // progressively enriched; clustering fail-closed continuity is untouched.
+  deferWhyItMatters = false,
 }) {
+  const profile = resolveRefreshProfile(refreshProfile);
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
   const effectiveSemanticBeatFitConfig =
@@ -1440,15 +1585,34 @@ export async function runRefreshPipeline({
   //         is exhausted the remainder is deferred to the hold path so it is
   //         re-evaluated next refresh (never dropped).
   const configuredGeos = settings.geographies ?? [];
-  const effectiveGeoBudgetMs = geoStageBudgetMs ?? resolveGeoStageBudgetMs();
+  // Precedence: explicit test override (`geoStageBudgetMs`) > active profile's
+  // budget (Slice 4 interactive fast-path tightens this) > env/default.
+  const effectiveGeoBudgetMs =
+    geoStageBudgetMs ?? profile.geoStageBudgetMs ?? resolveGeoStageBudgetMs();
   // "Selected source" = present in the current source-selected pool. Held-bucket
   // re-evaluations (previouslyHeld) are deliberately Lane 2: fresh must-see
   // content takes priority over re-litigating the backlog under load.
   const selectedSourceIds = new Set(recentItems.map((i) => i.sourceId));
+  // Slice 6: per-run memo for the (regex-heavy) lexical/explicit geo-signal
+  // check, keyed by sourceId.  The lane-split below and the Lane 2 prioritizer
+  // both need the SAME signal over the SAME text surface (`joinGeoText`), so a
+  // run-scoped memo collapses the duplicate work to one computation per
+  // candidate.  Safe because, within a run, both `configuredGeos` and an item's
+  // text are constant for a given sourceId.
+  const geoSignalMemo = new Map();
+  let geoSignalMemoHits = 0;
   const hasGeoSignal = (item) => {
     if (configuredGeos.length === 0) return false;
-    if (categorizeItem(item, configuredGeos) === GEO_CATEGORY.EXPLICIT_MATCH) return true;
-    return itemMentionsConfiguredGeography(joinGeoText(item), configuredGeos) !== null;
+    const key = item?.sourceId;
+    if (key != null && geoSignalMemo.has(key)) {
+      geoSignalMemoHits += 1;
+      return geoSignalMemo.get(key);
+    }
+    const signal =
+      categorizeItem(item, configuredGeos) === GEO_CATEGORY.EXPLICIT_MATCH ||
+      itemMentionsConfiguredGeography(joinGeoText(item), configuredGeos) !== null;
+    if (key != null) geoSignalMemo.set(key, signal);
+    return signal;
   };
   const lane1Items = [];
   const lane2Items = [];
@@ -1456,6 +1620,19 @@ export async function runRefreshPipeline({
     if (selectedSourceIds.has(item.sourceId) && hasGeoSignal(item)) lane1Items.push(item);
     else lane2Items.push(item);
   }
+  // Slice 6: reorder Lane 2 so the most-likely-relevant + cheapest-to-admit
+  // candidates are assessed first under budget pressure; the deferred tail
+  // (written to the hold path, re-evaluated next refresh) is then the least
+  // promising items.  Pass/fail logic and the hold-path continuity are
+  // unchanged — only assessment order shifts.  `relevantSignalIds` reuses the
+  // memo populated during lane-split (memo hits, no recomputation).
+  const lane2RelevantSignalIds = new Set(
+    lane2Items.filter((item) => hasGeoSignal(item)).map((item) => item.sourceId)
+  );
+  const lane2Ordered = prioritizeLane2Candidates(lane2Items, {
+    selectedSourceIds,
+    relevantSignalIds: lane2RelevantSignalIds,
+  });
   // A1.1 (recall protection): the set of must-see sourceIds, used after the
   // recall gate to union Lane 1 survivors that topic/keyword recall would
   // otherwise drop (an explicit-geo item whose *text* never names the geo).
@@ -1477,13 +1654,16 @@ export async function runRefreshPipeline({
   const geoLane2DeferredItems = [];
   let geoBudgetHit = false;
   const lane2WaveSize = Math.max(1, resolveGeoAssessConcurrency());
-  for (let i = 0; i < lane2Items.length; i += lane2WaveSize) {
+  // Iterate the PRIORITY-ORDERED Lane 2 set so the most-likely-relevant items
+  // are assessed before the budget runs out; the deferred slice is the
+  // lowest-priority tail.
+  for (let i = 0; i < lane2Ordered.length; i += lane2WaveSize) {
     if (Date.now() - geoStartedAt >= effectiveGeoBudgetMs) {
       geoBudgetHit = true;
-      geoLane2DeferredItems.push(...lane2Items.slice(i));
+      geoLane2DeferredItems.push(...lane2Ordered.slice(i));
       break;
     }
-    const wave = lane2Items.slice(i, i + lane2WaveSize);
+    const wave = lane2Ordered.slice(i, i + lane2WaveSize);
     const waveResult = await applyGeoFilter(wave, configuredGeos, geoAssessFn, geoDiag);
     geoPassedItems.push(...waveResult.included);
     geoHeldItems.push(...waveResult.held);
@@ -1527,6 +1707,20 @@ export async function runRefreshPipeline({
     geoRateLimitedCount,
     geoRetryCount,
     geoBackoffMsTotal,
+    // ── Slice 6: explicit throughput counters (additive; existing keys above
+    //    retained for back-compat).  `*Processed` make "what actually ran this
+    //    refresh" unambiguous vs the `*Count` candidate totals; the budget pair
+    //    lets ops compare profile-on (interactive 12000) vs baseline (25000)
+    //    against the wall clock actually consumed.
+    geoLane1Processed: geoLane1Count, // Lane 1 is always processed to completion
+    geoLane2Processed: geoLane2Count - geoLane2DeferredCount,
+    geoLane2Deferred: geoLane2DeferredCount,
+    geoBudgetMsConfigured: effectiveGeoBudgetMs,
+    geoBudgetMsUsed: geoMs,
+    geoStageLatencyMs: geoMs,
+    // Redundant-work avoided this run: lexical/explicit geo-signal checks served
+    // from the per-run memo instead of recomputed (lane-split ↔ Lane 2 sort).
+    geoSignalMemoHits,
   };
 
   // Persist BOTH the low-confidence holds and the budget-deferred Lane 2 items
@@ -1553,9 +1747,11 @@ export async function runRefreshPipeline({
   // rate-limit pressure obvious in prod logs.
   console.log(
     `[pipeline.geo] lane1=${geoLane1Count} lane2=${geoLane2Count}` +
+      ` lane1_processed=${geoLane1Count} lane2_processed=${geoLane2Count - geoLane2DeferredCount}` +
       ` lane2_deferred=${geoLane2DeferredCount} budget_ms=${effectiveGeoBudgetMs}` +
-      ` budget_hit=${geoBudgetHit} assessed=${geoAssessedCount}` +
-      ` lexical_bypass=${geoLexicalBypassCount} held=${geoHeldItems.length}` +
+      ` budget_ms_used=${geoMs} budget_hit=${geoBudgetHit} assessed=${geoAssessedCount}` +
+      ` lexical_bypass=${geoLexicalBypassCount} memo_hits=${geoSignalMemoHits}` +
+      ` held=${geoHeldItems.length}` +
       ` rate_limited=${geoRateLimitedCount} retries=${geoRetryCount}` +
       ` backoff_ms=${geoBackoffMsTotal} latency_ms=${geoMs}`
   );
@@ -1924,6 +2120,24 @@ export async function runRefreshPipeline({
         clusteringRepairAttempted: false,
         clusteringRepairSucceeded: false,
         clusteringRepairFailureReason: null,
+        // Slice 3: keep the extended repair-diagnostic shape consistent on the
+        // watermark short-circuit too (clustering never ran → all null/false).
+        clusteringRepairRawFailureClass: null,
+        clusteringRepairSchemaErrorBucket: null,
+        clusteringRepairCoercion: null,
+        // Clustering never ran on the short-circuit, so nothing was recovered.
+        clusteringRepairRecovered: false,
+        // Slice 4: surface the resolved profile on the short-circuit branch too
+        // so `_meta.profile` shape is consistent across full-run and skip paths.
+        // Geo ran before the watermark decision, so `geoStageBudgetMs` is the
+        // value it actually used; clustering never ran on a skip.
+        profile: {
+          name: profile.name,
+          interactive: profile.interactive,
+          geoStageBudgetMs: effectiveGeoBudgetMs,
+          clusterMaxAttempts: profile.clusterMaxAttempts,
+          clusterTimeoutMs: profile.clusterTimeoutMs,
+        },
         // Slice 3: outcome rollup on the short-circuit branch too, so the
         // summary/SLO surfaces have a consistent shape across both paths.
         // Geo + beat-fit ran before the watermark decision; clustering did not.
@@ -2036,19 +2250,36 @@ export async function runRefreshPipeline({
   let clusteringFailureReason = null; // 'timeout' | 'error' | null
   let clusteringAttempts = 0;
   const clusteringAttemptLatencyMs = [];
-  // C2: clustering JSON safe-trim repair diagnostics for the last attempt
-  // (success or failure both carry them via `_clusteringRepair`).
-  let clusteringRepair = { attempted: false, succeeded: false, failureReason: null };
+  // C2 + Slice 3: clustering JSON repair diagnostics for the last attempt
+  // (success or failure both carry them via `_clusteringRepair`).  Shape
+  // mirrors `EMPTY_CLUSTERING_REPAIR` — `rawFailureClass` / `schemaErrorBucket`
+  // / `coercion` are the Slice 3 additions surfaced on `_meta` below.
+  let clusteringRepair = {
+    attempted: false,
+    succeeded: false,
+    failureReason: null,
+    rawFailureClass: null,
+    schemaErrorBucket: null,
+    coercion: null,
+  };
   if (clusterInputItems.length === 0) {
     rawMetaStories = [];
   } else {
-    const MAX_CLUSTER_ATTEMPTS = 2; // initial try + one retry
+    // Slice 4: the active profile bounds the clustering latency envelope.
+    // Interactive and default both run 2 attempts (initial + one retry) after
+    // Slice 4.1; the interactive win comes from a tighter geo budget plus a
+    // tighter per-attempt clustering timeout passed to `clusterFn`.  Fail-closed
+    // trust is unchanged: if every attempt fails we still publish zero stories
+    // with a classified `clusteringFailureReason`.
+    const MAX_CLUSTER_ATTEMPTS = profile.clusterMaxAttempts;
+    const clusterCallOpts =
+      profile.clusterTimeoutMs != null ? { timeoutMs: profile.clusterTimeoutMs } : {};
     let lastErr = null;
     for (let attempt = 1; attempt <= MAX_CLUSTER_ATTEMPTS; attempt++) {
       clusteringAttempts = attempt;
       const attemptStartedAt = Date.now();
       try {
-        rawMetaStories = await clusterFn(clusterInputItems, settings, clusterModel);
+        rawMetaStories = await clusterFn(clusterInputItems, settings, clusterModel, clusterCallOpts);
         clusteringAttemptLatencyMs.push(Date.now() - attemptStartedAt);
         clusteringRepair = readClusteringRepairDiagnostics(rawMetaStories);
         lastErr = null;
@@ -2484,6 +2715,32 @@ export async function runRefreshPipeline({
     droppedIds: [],
   };
 
+  // Slice 5: interactive first paint defers the expensive writer.  Each
+  // non-dropped story takes the deterministic, state-aware safe fallback (the
+  // same copy the resolver would emit on a disabled/failed write — non-empty,
+  // never subtitle echo).  No why-stage drops; the async enrichment pass
+  // upgrades the copy in place after the snapshot is written.
+  let whyItMattersDiagnostics;
+  // Hoisted so `pipelineTimings` can read it after either branch (deferred runs
+  // skip the writer, so the why stage wall-clock is ~0).
+  let whyMs = 0;
+  if (deferWhyItMatters) {
+    for (const prep of preparedWhy) {
+      if (prep.dropped) continue;
+      prep.story.whyItMatters = safeWhyFallbackForState(prep.whyState);
+    }
+    whyItMattersDiagnostics = {
+      ...emptyWhyItMattersRunDiagnostics(),
+      enabled: effectiveWhyConfig.enabled,
+      deferred: true,
+      whyConcurrency: 0,
+      whyMs: 0,
+    };
+    console.log(
+      `[pipeline.whyItMatters] deferred=true (interactive fast-path)` +
+        ` stories=${preparedWhy.filter((p) => !p.dropped).length} enrichment=pending`
+    );
+  } else {
   // Parallel fan-out — bounded worker pool caps in-flight resolver calls at
   // `whyConcurrency`.  `whyMs` is the wall-clock for the whole stage.
   const { concurrency: whyConcurrency } = resolveWhyConcurrencyConfig();
@@ -2534,7 +2791,7 @@ export async function runRefreshPipeline({
       whyResults[i] = synthWhyResolverThrew(prep);
     }
   }
-  const whyMs = Date.now() - whyStartedAt;
+  whyMs = Date.now() - whyStartedAt;
 
   // Apply pass — walk results in input index order so story order is unchanged
   // (R1). A story whose why stage still fails after the retry is dropped from
@@ -2559,7 +2816,7 @@ export async function runRefreshPipeline({
     }
     perStoryWhyItMatters.push(why);
   }
-  const whyItMattersDiagnostics = aggregateWhyItMattersDiagnostics(perStoryWhyItMatters, {
+  whyItMattersDiagnostics = aggregateWhyItMattersDiagnostics(perStoryWhyItMatters, {
     enabled: effectiveWhyConfig.enabled,
   });
   // Stage wall-clock + concurrency surfaced on the diagnostics object so they
@@ -2567,6 +2824,9 @@ export async function runRefreshPipeline({
   // analogous what-changed/recall stages already expose per-stage latency).
   whyItMattersDiagnostics.whyConcurrency = whyConcurrency;
   whyItMattersDiagnostics.whyMs = whyMs;
+  // Slice 5: full (non-deferred) run already produced final copy — flag it so
+  // `_meta.whyItMatters.deferred` is always present for profile comparison.
+  whyItMattersDiagnostics.deferred = false;
   console.log(
     `[pipeline.whyItMatters]` +
       ` schema=${whyItMattersDiagnostics.schemaVersion}` +
@@ -2583,6 +2843,7 @@ export async function runRefreshPipeline({
       ` why_concurrency=${whyConcurrency}` +
       ` why_ms=${whyMs}`
   );
+  }
 
   // ── D2: fail-closed-per-story drop + stability diagnostics ───────────────
   // Remove the stories a narrative stage could not produce content for (after
@@ -2695,6 +2956,16 @@ export async function runRefreshPipeline({
     `[pipeline.timings] preClusterMs=${preClusterMs} geoMs=${geoMs} recallMs=${recallMs}` +
       ` clusterMs=${clusterMs} whatChangedMs=${whatChangedMs} whyMs=${whyMs} pipelineMs=${pipelineMs}`
   );
+  // Slice 4: one grep-friendly line so operators can confirm the profile that
+  // shaped this run's latency and read the key timing contributors (geo +
+  // cluster) alongside the resulting story count for profile-on vs baseline
+  // comparison.
+  console.log(
+    `[pipeline.profile] profile=${profile.name} geoBudgetMs=${effectiveGeoBudgetMs}` +
+      ` clusterMaxAttempts=${profile.clusterMaxAttempts}` +
+      ` clusterTimeoutMs=${profile.clusterTimeoutMs ?? "default"}` +
+      ` geoMs=${geoMs} clusterMs=${clusterMs} stories=${stories.length}`
+  );
   const log = {
     totalItems: normalizedItems.length,
     poolCount: recentItems.length,
@@ -2722,11 +2993,57 @@ export async function runRefreshPipeline({
     clusteringRepairAttempted: clusteringRepair.attempted,
     clusteringRepairSucceeded: clusteringRepair.succeeded,
     clusteringRepairFailureReason: clusteringRepair.failureReason,
+    // Slice 3 (structured-output hardening): finer-grained, machine-parseable
+    // clustering diagnostics surfaced on `_meta` for incident triage.
+    //
+    // SEMANTICS — "raw failure observed" is NOT "terminal failure".  The two
+    // fields below describe what was wrong with the model's RAW output and can
+    // be NON-NULL on a RECOVERED run (one where the single repair pass parsed
+    // cleanly and stories were published).  They must NOT be read as a failure
+    // signal on their own — see `clusteringRepairRecovered` below and the
+    // terminal-failure guard on the `outcomes` rollup.
+    //   `clusteringRepairRawFailureClass`   — class of the INITIAL strict-parse
+    //       failure even when the repair pass later succeeded (so "the raw model
+    //       output was malformed but we recovered it" is observable).
+    //   `clusteringRepairSchemaErrorBucket` — coarse schema-failure bucket when
+    //       the (raw or terminal) failure was schema-level; null otherwise.
+    //   `clusteringRepairCoercion`          — structural normalization applied
+    //       to recover the output (`array_wrap`) or null.
+    clusteringRepairRawFailureClass: clusteringRepair.rawFailureClass ?? null,
+    clusteringRepairSchemaErrorBucket: clusteringRepair.schemaErrorBucket ?? null,
+    clusteringRepairCoercion: clusteringRepair.coercion ?? null,
+    // Slice 3 follow-up: explicit, additive "recovered" boolean so downstream
+    // observability never has to infer recovery from the raw-class/bucket
+    // fields.  True iff the strict parse failed (`attempted`) AND the single
+    // repair pass then parsed cleanly (`succeeded`).  A recovered run publishes
+    // stories and is NOT a clustering failure: `clusteringFailureReason` is
+    // null and `usedFallbackClustering` is false on this path.
+    clusteringRepairRecovered:
+      clusteringRepair.attempted === true && clusteringRepair.succeeded === true,
     timings: pipelineTimings,
+    // Slice 4: latency-shaping profile applied to this run.  Additive,
+    // deterministic snapshot of the resolved knobs (name + the geo budget /
+    // clustering envelope actually used) so an operator can compare profile-on
+    // vs baseline from `_meta.profile` alone.  `effectiveGeoBudgetMs` reflects
+    // the value the geo stage actually ran with (test override > profile > env).
+    profile: {
+      name: profile.name,
+      interactive: profile.interactive,
+      geoStageBudgetMs: effectiveGeoBudgetMs,
+      clusterMaxAttempts: profile.clusterMaxAttempts,
+      clusterTimeoutMs: profile.clusterTimeoutMs,
+    },
     // Slice 3: run-level outcome rollup — the handful of fields an operator (or
     // the SLO log line / summary) needs to judge "did this refresh do its job?"
     // without walking the full diagnostics tree.  Additive; mirrors values
     // already present elsewhere in this log.
+    //
+    // TERMINAL-FAILURE GUARD: clustering-failure rollups MUST be derived from
+    // the terminal fields `clusteringFailureReason` (non-null) and
+    // `usedFallbackClustering` (true) — NEVER from the presence of
+    // `clusteringRepairRawFailureClass` / `clusteringRepairSchemaErrorBucket`,
+    // which are also populated on recovered (published) runs and would
+    // overcount failures if treated as failure signals.
     outcomes: {
       storiesPublished: stories.length,
       clusteringAttempts,
@@ -2848,6 +3165,16 @@ export async function runRefreshPipeline({
     // lowConfidence + write/rewrite latency.  Persisted via
     // `_lastRunMeta.whyItMatters` and surfaced under `_meta.whyItMatters`.
     whyItMatters: whyItMattersDiagnostics,
+    // Slice 5: progressive-enrichment state for the interactive fast-path.
+    // `deferred:true` means this run shipped fallback `whyItMatters` and an
+    // async upgrade is pending; `pending`/`completed`/`total` count published
+    // stories so the client can poll until `pending === 0`.  A non-deferred run
+    // reports everything completed up front.  `upgradeLatencyMs` is filled in
+    // by the enrichment write (null on the first paint).  Always present so the
+    // contract is stable for older clients (additive, tolerant).
+    whyEnrichment: deferWhyItMatters
+      ? { deferred: true, pending: stories.length, completed: 0, total: stories.length, upgradeLatencyMs: null }
+      : { deferred: false, pending: 0, completed: stories.length, total: stories.length, upgradeLatencyMs: null },
     // D2: per-story narrative-stability rollup (fail-closed policy, per-stage
     // retry/drop tallies, retention rate). Additive; surfaced for operators and
     // the standalone advisory eval. No user-facing messaging is derived from it.
@@ -2855,4 +3182,147 @@ export async function runRefreshPipeline({
   };
 
   return { payload, log };
+}
+
+// ─── Slice 5: standalone whyItMatters enrichment (async upgrade pass) ─────────
+//
+// Recomputes richer `whyItMatters` for an already-published, response-shaped
+// story set WITHOUT re-running clustering / grounding (so metaStoryId lineage
+// is preserved exactly).  Reuses the same why engine the pipeline uses, so the
+// upgraded copy is identical to what a non-deferred run would have produced.
+// Pure over its inputs (no snapshot I/O — the caller owns persistence + the
+// stale guard); returns fresh story clones so the caller can patch by
+// metaStoryId.  On any per-story resolver failure it falls back to the same
+// state-aware safe copy the deferred first paint used (never empty, never a
+// subtitle echo) — so a failed upgrade degrades to the already-valid fallback
+// rather than corrupting the snapshot.
+// Slice 5 follow-through (Slice 6): when an enrichment upgrade fails, prefer a
+// SOURCE-GROUNDED fallback over the generic state template.  Built entirely
+// from the story's own already-grounded fields (its C0 summary + real outlet
+// count) — no fabrication — so it's safe and more useful than boilerplate.
+// Returns null when there's no groundable summary, so the caller falls back to
+// the state-aware template (still non-empty, never a subtitle echo).
+const GROUNDED_WHY_MAX_CHARS = 300;
+export function buildSourceGroundedWhyFallback(story) {
+  const summary = typeof story?.summary === "string" ? story.summary.trim() : "";
+  if (!summary) return null;
+  // First sentence of the grounded summary (the summary is itself a join of
+  // verified claims under the C0 policy), so this stays evidence-anchored.
+  const firstSentence = (summary.split(/(?<=[.!?])\s+/)[0] ?? summary).trim();
+  if (!firstSentence) return null;
+  const outletCount =
+    typeof story?.outletCount === "number" && story.outletCount > 0
+      ? story.outletCount
+      : Array.isArray(story?.sources)
+        ? story.sources.length
+        : 0;
+  const lead = outletCount > 1 ? `Across ${outletCount} sources, ` : "Per current sourcing, ";
+  let text = `${lead}${firstSentence}`;
+  if (text.length > GROUNDED_WHY_MAX_CHARS) {
+    text = text.slice(0, GROUNDED_WHY_MAX_CHARS - 1).trimEnd() + "…";
+  }
+  return text;
+}
+
+export async function enrichWhyItMattersForStories({
+  stories,
+  everSeenMetaStoryIds = null,
+  whyConfig = null,
+  whyWriteFn = null,
+  resolveWhyItMattersFn = null,
+  doctrineRetrievalFn = null,
+}) {
+  const list = Array.isArray(stories) ? stories : [];
+  const effectiveWhyConfig = whyConfig ?? resolveWhyConfig();
+  const everSeenSet = new Set(Array.isArray(everSeenMetaStoryIds) ? everSeenMetaStoryIds : []);
+  const whyResolver = resolveWhyItMattersFn ?? resolveWhyItMatters;
+  const { concurrency } = resolveWhyConcurrencyConfig();
+  const startedAt = Date.now();
+
+  // The persisted story carries `whatChanged` text but not the delta-state
+  // enum, so enrichment derives the why state from everSeen alone (null
+  // whatChangedState → engine's fail-closed derivation).  Emphasis fidelity is
+  // slightly looser than first-cluster, but the copy is still grounded in the
+  // story's own summary/subtitle/whatChanged — and far richer than the
+  // fallback it replaces.
+  const prepared = list.map((story) => {
+    const everSeenForStory =
+      typeof story?.metaStoryId === "string" && everSeenSet.has(story.metaStoryId);
+    const whyState = deriveWhyStateFromWhatChangedState({
+      whatChangedState: null,
+      everSeen: everSeenForStory,
+    });
+    let doctrineSnippets = [];
+    try {
+      doctrineSnippets = doctrineRetrievalFn
+        ? doctrineRetrievalFn({ story, state: whyState })
+        : retrieveDoctrineSnippetsForStory({ story, state: whyState });
+      if (!Array.isArray(doctrineSnippets)) doctrineSnippets = [];
+    } catch {
+      doctrineSnippets = [];
+    }
+    return {
+      story,
+      whyState,
+      resolveArgs: {
+        metaStoryId: story?.metaStoryId,
+        title: story?.title,
+        subtitle: story?.subtitle,
+        summary: story?.summary,
+        whatChanged: story?.whatChanged,
+        whatChangedState: null,
+        everSeen: everSeenForStory,
+        state: whyState,
+        evidenceRefs: computeEvidenceRefsForStory(story, null),
+        doctrineSnippets,
+      },
+    };
+  });
+
+  const settled = await pMap(
+    prepared,
+    async (prep) => {
+      try {
+        const why = await whyResolver(prep.resolveArgs, {
+          writeFn: whyWriteFn ?? undefined,
+          config: effectiveWhyConfig,
+        });
+        if (why && typeof why.whyItMatters === "string" && why.whyItMatters.length > 0) {
+          return { copy: why.whyItMatters, ok: true };
+        }
+        // Resolver returned no copy → prefer a source-grounded fallback over
+        // the generic template (Slice 5 follow-through), else the state template.
+        return {
+          copy: buildSourceGroundedWhyFallback(prep.story) ?? safeWhyFallbackForState(prep.whyState),
+          ok: false,
+        };
+      } catch {
+        // Resolver threw → same grounded-first degrade (never empty / echo).
+        return {
+          copy: buildSourceGroundedWhyFallback(prep.story) ?? safeWhyFallbackForState(prep.whyState),
+          ok: false,
+        };
+      }
+    },
+    concurrency
+  );
+
+  let upgraded = 0;
+  const enrichedStories = prepared.map((prep, i) => {
+    const r = settled[i];
+    const value = r && r.status === "fulfilled" ? r.value : null;
+    const copy = value?.copy ?? safeWhyFallbackForState(prep.whyState);
+    if (value?.ok) upgraded += 1;
+    return { ...prep.story, whyItMatters: copy };
+  });
+
+  return {
+    stories: enrichedStories,
+    diagnostics: {
+      total: list.length,
+      upgraded,
+      enabled: effectiveWhyConfig.enabled,
+      upgradeLatencyMs: Date.now() - startedAt,
+    },
+  };
 }

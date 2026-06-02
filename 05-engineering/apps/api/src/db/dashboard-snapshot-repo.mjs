@@ -142,6 +142,11 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // backward compat with snapshots written before the implications
     // writer shipped.
     if (_lastRunMeta.whyItMatters !== undefined) meta.whyItMatters = _lastRunMeta.whyItMatters;
+    // Slice 5: progressive whyItMatters enrichment state (deferred / pending /
+    // completed / total / upgradeLatencyMs).  Surfaced on GET so the client's
+    // poll loop can read `_meta.whyEnrichment.pending` and stop at 0.  Optional
+    // for backward compat with snapshots written before Slice 5.
+    if (_lastRunMeta.whyEnrichment !== undefined) meta.whyEnrichment = _lastRunMeta.whyEnrichment;
     // Slice 7: per-stage wall-clock timings (ingestion + pipeline). Optional —
     // absent on pre-Slice-7 snapshots, so older reads simply omit the key.
     if (_lastRunMeta.timings !== undefined) meta.timings = _lastRunMeta.timings;

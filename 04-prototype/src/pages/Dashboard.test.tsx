@@ -8,6 +8,8 @@ import { REFRESH_INTERVAL_MS } from "@/lib/refresh-heartbeat";
 
 const fetchSpy = vi.fn();
 const bootstrapSpy = vi.fn();
+const refreshSpy = vi.fn();
+const recoverSpy = vi.fn();
 const notifyErrorSpy = vi.fn();
 const seedAnchorIfMissingSpy = vi.fn();
 const recordAttemptStartSpy = vi.fn();
@@ -40,6 +42,8 @@ const { MockDashboardFetchError } = vi.hoisted(() => {
 vi.mock("@/lib/api", () => ({
   fetchDashboardWithMeta: (...args: unknown[]) => fetchSpy(...args),
   bootstrapDashboard: (...args: unknown[]) => bootstrapSpy(...args),
+  refreshDashboard: (...args: unknown[]) => refreshSpy(...args),
+  recoverDashboardViaGet: (...args: unknown[]) => recoverSpy(...args),
   DashboardFetchError: MockDashboardFetchError,
 }));
 
@@ -80,11 +84,14 @@ const OK_RESULT = {
   clusteringLatencyMs: null,
   funnel: null,
   recall: null,
+  whyEnrichment: null,
 };
 
 afterEach(() => {
   fetchSpy.mockReset();
   bootstrapSpy.mockReset();
+  refreshSpy.mockReset();
+  recoverSpy.mockReset();
   notifyErrorSpy.mockReset();
   seedAnchorIfMissingSpy.mockReset();
   recordAttemptStartSpy.mockReset();
@@ -139,6 +146,112 @@ describe("Phase 5: Dashboard load path selection", () => {
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
     await screen.findByTestId("dashboard-empty");
     expect(bootstrapSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Slice 2: forceRefresh routing + POST→GET silent recovery ────────────────
+// 1) Onboarding handoff (`forceRefresh: true`) routes straight to POST /refresh
+//    so the first view reflects freshly-saved settings (no stale-snapshot
+//    bootstrap reuse).
+// 2) When a POST loader fails after retries, a best-effort GET recovers the
+//    persisted snapshot and renders it SILENTLY — no error block / banner /
+//    toast — while still counting as a refresh attempt that advances the clock.
+// 3) When the GET recovery also fails, the existing error UI is preserved.
+
+describe("Slice 2: forceRefresh routing + POST→GET silent recovery", () => {
+  it("forceRefresh state routes to the POST /refresh endpoint (not bootstrap, not GET)", async () => {
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    // Onboarding navigates with BOTH flags; forceRefresh must win.
+    renderAt({ bootstrap: true, forceRefresh: true });
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
+    expect(bootstrapSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(recoverSpy).not.toHaveBeenCalled();
+  });
+
+  it("Slice 4: forceRefresh requests the interactive fast-path profile (?interactive=1)", async () => {
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt({ bootstrap: true, forceRefresh: true });
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
+    // The onboarding interactive entry must hit the interactive refresh endpoint
+    // so the backend applies the balanced fast-path profile.
+    const arg = refreshSpy.mock.calls[0][0] as { endpoint?: string } | undefined;
+    expect(arg?.endpoint).toMatch(/\/api\/dashboard\/refresh\?interactive=1$/);
+  });
+
+  it("POST fail + GET success → silent recovery render (no error UI, no toast)", async () => {
+    refreshSpy.mockRejectedValue(new MockDashboardFetchError("http", "503", 503));
+    recoverSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [makeStoryDto({ id: "rec", title: "Recovered Story" })],
+      },
+    });
+    renderAt({ bootstrap: true, forceRefresh: true });
+
+    // The recovered snapshot's stories render…
+    expect(await screen.findByText("Recovered Story")).toBeInTheDocument();
+    expect(recoverSpy).toHaveBeenCalledTimes(1);
+    // …with zero error surfaces: no full-page error, no clustering-failed block,
+    // no inline retry banner, no toast.
+    expect(screen.queryByTestId("dashboard-error")).toBeNull();
+    expect(screen.queryByTestId("dashboard-clustering-failed")).toBeNull();
+    expect(notifyErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("POST fail + GET success advances the clock (recovered run still counts as an attempt)", async () => {
+    refreshSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    recoverSpy.mockResolvedValue({ ...OK_RESULT, lastCheckedAt: "2026-05-11T14:00:00Z" });
+    renderAt({ bootstrap: true, forceRefresh: true });
+    await screen.findByTestId("dashboard-empty");
+
+    // Exactly one attempt opened and one settled — no double-counting across
+    // the POST + recovery legs.
+    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1));
+    const [, options] = recordAttemptFinishedSpy.mock.calls[0];
+    expect(options?.advanceClock).toBe(true);
+    // The recovered GET result is threaded through so the anchor can prefer
+    // its server-stamped lastCheckedAt.
+    expect(options?.result).toMatchObject({ lastCheckedAt: "2026-05-11T14:00:00Z" });
+  });
+
+  it("POST fail + GET fail → existing error UI remains (recovery exhausted)", async () => {
+    refreshSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    recoverSpy.mockResolvedValue(null); // GET recovery also failed
+    renderAt({ bootstrap: true, forceRefresh: true });
+
+    expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
+    expect(recoverSpy).toHaveBeenCalledTimes(1);
+    // Still settled as an attempt; failures advance the clock.
+    await waitFor(() => expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1));
+    const [, options] = recordAttemptFinishedSpy.mock.calls[0];
+    expect(options?.advanceClock).toBe(true);
+  });
+
+  it("bootstrap POST fail + GET success also recovers silently (recovery covers both POST loaders)", async () => {
+    bootstrapSpy.mockRejectedValue(new MockDashboardFetchError("http", "500", 500));
+    recoverSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [makeStoryDto({ id: "rec-b", title: "Recovered Via Bootstrap" })],
+      },
+    });
+    renderAt({ bootstrap: true });
+    expect(await screen.findByText("Recovered Via Bootstrap")).toBeInTheDocument();
+    expect(screen.queryByTestId("dashboard-error")).toBeNull();
+    expect(notifyErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("GET-path failure does NOT attempt recovery (GET is already the snapshot read)", async () => {
+    fetchSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
+    expect(recoverSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -1122,3 +1235,124 @@ describe("Footer reads single attempt anchor (header + footer share state)", () 
   });
 });
 
+
+// ─── Slice 5: progressive whyItMatters enrichment (defer → poll → patch) ─────
+// The interactive onboarding path first-paints stories with non-empty fallback
+// whyItMatters, then the dashboard polls GET /api/dashboard while enrichment is
+// pending and patches the open story card's "Why this matters" copy in place —
+// no full-page reset — stopping once pending hits 0 or the budget is exhausted.
+
+describe("Slice 5: progressive whyItMatters enrichment", () => {
+  const FALLBACK_WHY = "Fallback why copy (baseline).";
+  const RICH_WHY = "Upgraded, richer why-this-matters copy.";
+
+  function deferredResult(why: string) {
+    return {
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [makeStoryDto({ id: "m1", title: "Story M1", whyItMatters: why })],
+      },
+      whyEnrichment: { deferred: true, pending: 1, completed: 0, total: 1, upgradeLatencyMs: null },
+    };
+  }
+  function upgradedResult(why: string) {
+    return {
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [makeStoryDto({ id: "m1", title: "Story M1", whyItMatters: why })],
+      },
+      whyEnrichment: { deferred: false, pending: 0, completed: 1, total: 1, upgradeLatencyMs: 42 },
+    };
+  }
+
+  it("polls and upgrades whyItMatters IN PLACE while the card is open, then stops polling", async () => {
+    vi.useFakeTimers();
+    try {
+      refreshSpy.mockResolvedValue(deferredResult(FALLBACK_WHY)); // interactive first paint
+      fetchSpy.mockResolvedValue(upgradedResult(RICH_WHY)); // poll GET returns upgraded
+      renderAt({ bootstrap: true, forceRefresh: true });
+      // Flush the interactive first-paint load.
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // Expand the card to reveal "Why this matters"; fallback shows first.
+      fireEvent.click(screen.getByText("Story M1"));
+      expect(screen.getByText(FALLBACK_WHY)).toBeInTheDocument();
+      // Poll fires at the 3s interval → patches whyItMatters in place. The card
+      // stays expanded (no reset), so the upgraded copy appears immediately.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(screen.getByText(RICH_WHY)).toBeInTheDocument();
+      expect(screen.queryByText(FALLBACK_WHY)).toBeNull();
+      // Pending hit 0 → polling stops: no further GET calls.
+      const callsAfterUpgrade = fetchSpy.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+      expect(fetchSpy.mock.calls.length).toBe(callsAfterUpgrade);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the non-empty fallback copy and stops polling at the timeout budget when enrichment never completes", async () => {
+    vi.useFakeTimers();
+    try {
+      refreshSpy.mockResolvedValue(deferredResult(FALLBACK_WHY));
+      // Every poll still reports pending (slow / failing enrichment).
+      fetchSpy.mockResolvedValue(deferredResult(FALLBACK_WHY));
+      renderAt({ bootstrap: true, forceRefresh: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      fireEvent.click(screen.getByText("Story M1"));
+      expect(screen.getByText(FALLBACK_WHY)).toBeInTheDocument();
+      // Advance past the 60s budget → polling stops; fallback persists; no error UI.
+      await act(async () => { await vi.advanceTimersByTimeAsync(70000); });
+      expect(screen.getByText(FALLBACK_WHY)).toBeInTheDocument();
+      expect(screen.queryByTestId("dashboard-error")).toBeNull();
+      const callsAtStop = fetchSpy.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+      expect(fetchSpy.mock.calls.length).toBe(callsAtStop); // stopped after budget
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Slice 6 follow-through: after bounded polling stops at budget, a later heartbeat refresh still upgrades the why copy in place", async () => {
+    vi.useFakeTimers();
+    try {
+      refreshSpy.mockResolvedValue(deferredResult(FALLBACK_WHY)); // interactive first paint
+      fetchSpy.mockResolvedValue(deferredResult(FALLBACK_WHY)); // poll never completes
+      renderAt({ bootstrap: true, forceRefresh: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      fireEvent.click(screen.getByText("Story M1"));
+      expect(screen.getByText(FALLBACK_WHY)).toBeInTheDocument();
+      // Exhaust the 60s poll budget → active polling stops; fallback persists.
+      await act(async () => { await vi.advanceTimersByTimeAsync(70000); });
+      const callsAtStop = fetchSpy.mock.calls.length;
+      expect(screen.getByText(FALLBACK_WHY)).toBeInTheDocument();
+      // A later BACKGROUND heartbeat refresh produces the upgraded copy — proves
+      // no permanent template lock-in. The overlay patches the open card in place.
+      mockHeartbeatResult = upgradedResult(RICH_WHY);
+      await act(async () => { fireEvent.click(screen.getByTestId("pill-all")); });
+      expect(screen.getByText(RICH_WHY)).toBeInTheDocument();
+      // Active polling did NOT resume (still stopped after the budget).
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+      expect(fetchSpy.mock.calls.length).toBe(callsAtStop);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does NOT poll when the run is not deferred (default/non-interactive load)", async () => {
+    vi.useFakeTimers();
+    try {
+      // Non-deferred GET load — whyEnrichment null → no polling.
+      fetchSpy.mockResolvedValue({ ...OK_RESULT, payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "m1", title: "Story M1" })] } });
+      renderAt(null);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const callsAfterLoad = fetchSpy.mock.calls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+      // No poll cadence engaged — call count unchanged.
+      expect(fetchSpy.mock.calls.length).toBe(callsAfterLoad);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
