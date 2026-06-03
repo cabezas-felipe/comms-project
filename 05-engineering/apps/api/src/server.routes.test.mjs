@@ -1257,6 +1257,79 @@ test("POST /api/dashboard/refresh (no interactive flag) keeps the default profil
   }
 });
 
+// ─── Slice 11: retry-default profile contract ────────────────────────────────
+
+test("Slice 11: POST /api/dashboard/refresh?profile=default → effective default profile (no prior snapshot)", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const captured = {};
+  _refreshPipeline.run = profileCapturingPipelineStub(captured);
+  _snapshotRepo.read = async () => null; // brand-new user, no prior snapshot
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice11-default-nosnap", async () => {
+      const res = await request(app).post("/api/dashboard/refresh?profile=default");
+      assert.equal(res.status, 200);
+      // `profile=default` is not the cold_start trigger → pipeline runs default.
+      assert.equal(captured.refreshProfile, null, "explicit default must not request cold_start");
+      assert.equal(res.body._meta?.profile?.name, "default");
+      assert.equal(res.body._meta?.profile?.interactive, false);
+      // requested === effective → no additive profileRequested surfaced.
+      assert.equal(res.body._meta?.profileRequested, undefined);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("Slice 11: POST /api/dashboard/refresh?profile=default → effective default even WITH a prior snapshot (no cold-start gating interference)", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const captured = {};
+  _refreshPipeline.run = profileCapturingPipelineStub(captured);
+  // A prior snapshot exists; for an explicit default request this is irrelevant
+  // (cold-start gating only ever downgrades cold_start → default, never reshapes
+  // a default request).
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _watermark: "wm-slice11-default-prior",
+    _meta: { hasSnapshot: true },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice11-default-withsnap", async () => {
+      const res = await request(app).post("/api/dashboard/refresh?profile=default");
+      assert.equal(res.status, 200);
+      assert.equal(captured.refreshProfile, null);
+      assert.equal(res.body._meta?.profile?.name, "default");
+      assert.equal(res.body._meta?.profile?.interactive, false);
+      // Still no gate fired → no profileRequested (requested === effective).
+      assert.equal(res.body._meta?.profileRequested, undefined);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
 // ─── Slice 7: SLO gate surfaced additively on _meta.slo ──────────────────────
 
 test("POST /api/dashboard/refresh surfaces an additive _meta.slo gate (breaches + hints + fields)", async () => {
