@@ -60,7 +60,7 @@ const FIXTURE_SOURCE_FEEDS = {
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
 const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
-const { createJob: _createRefreshJob, getJob: _getRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
+const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
 // refresh executor, and a real fire-and-forget refresh would contaminate the
@@ -6184,6 +6184,119 @@ test("Slice 6 settle (D): an unknown executor kind fails the job with reason `un
       });
     }
   );
+});
+
+// ─── Slice 7: GET /api/dashboard/refresh-status/:jobId ───────────────────────
+
+const SLICE7_MINIMAL_KEYS = ["jobId", "status", "phase", "storyCount", "failureReason"];
+
+test("Slice 7 (A): refresh-status without a valid token returns 401", async () => {
+  const prev = _auth.resolver;
+  _auth.resolver = async () => null;
+  try {
+    const res = await request(app).get("/api/dashboard/refresh-status/anyone");
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _auth.resolver = prev;
+  }
+});
+
+test("Slice 7 (B): a jobId that is not the caller's userId returns 403", async () => {
+  _resetRefreshJobs();
+  try {
+    await withIsolatedUser("slice7-owner", async () => {
+      // A job exists for someone else; the caller must not be able to read it.
+      _createRefreshJob("slice7-other");
+      const res = await request(app).get("/api/dashboard/refresh-status/slice7-other");
+      assert.equal(res.status, 403);
+      assert.equal(res.body.code, "FORBIDDEN_REFRESH_JOB");
+    });
+  } finally {
+    _resetRefreshJobs();
+  }
+});
+
+test("Slice 7 (C): an authorized request for a missing job returns 404 JOB_NOT_FOUND", async () => {
+  _resetRefreshJobs();
+  try {
+    await withIsolatedUser("slice7-missing", async () => {
+      const res = await request(app).get("/api/dashboard/refresh-status/slice7-missing");
+      assert.equal(res.status, 404);
+      assert.equal(res.body.code, "JOB_NOT_FOUND");
+    });
+  } finally {
+    _resetRefreshJobs();
+  }
+});
+
+test("Slice 7 (D): a running job returns 200 with the minimal snapshot and status running", async () => {
+  _resetRefreshJobs();
+  try {
+    await withIsolatedUser("slice7-running", async () => {
+      _createRefreshJob("slice7-running");
+      _setRefreshPhase("slice7-running", "matching");
+      const res = await request(app).get("/api/dashboard/refresh-status/slice7-running");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.jobId, "slice7-running");
+      assert.equal(res.body.status, "running");
+      assert.equal(res.body.phase, "matching");
+      assert.equal(res.body.storyCount, null);
+      assert.equal(res.body.failureReason, null);
+    });
+  } finally {
+    _resetRefreshJobs();
+  }
+});
+
+test("Slice 7 (E): a done job returns 200 with status done and the story count", async () => {
+  _resetRefreshJobs();
+  try {
+    await withIsolatedUser("slice7-done", async () => {
+      _createRefreshJob("slice7-done");
+      _completeRefreshJob("slice7-done", { ok: true, storyCount: 4 });
+      const res = await request(app).get("/api/dashboard/refresh-status/slice7-done");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.status, "done");
+      assert.equal(res.body.phase, "done");
+      assert.equal(res.body.storyCount, 4);
+      assert.equal(res.body.failureReason, null);
+    });
+  } finally {
+    _resetRefreshJobs();
+  }
+});
+
+test("Slice 7 (F): a failed job returns 200 with status failed and the failure reason", async () => {
+  _resetRefreshJobs();
+  try {
+    await withIsolatedUser("slice7-failed", async () => {
+      _createRefreshJob("slice7-failed");
+      _completeRefreshJob("slice7-failed", { ok: false, failureReason: "clustering_timeout" });
+      const res = await request(app).get("/api/dashboard/refresh-status/slice7-failed");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.status, "failed");
+      assert.equal(res.body.failureReason, "clustering_timeout");
+      assert.equal(res.body.storyCount, null);
+    });
+  } finally {
+    _resetRefreshJobs();
+  }
+});
+
+test("Slice 7 (G): the 200 response carries ONLY the minimal contract fields", async () => {
+  _resetRefreshJobs();
+  try {
+    await withIsolatedUser("slice7-shape", async () => {
+      _createRefreshJob("slice7-shape");
+      const res = await request(app).get("/api/dashboard/refresh-status/slice7-shape");
+      assert.equal(res.status, 200);
+      // No timestamps, userId, or other internal fields leak.
+      assert.deepEqual(Object.keys(res.body).sort(), [...SLICE7_MINIMAL_KEYS].sort());
+    });
+  } finally {
+    _resetRefreshJobs();
+  }
 });
 
 });
