@@ -59,7 +59,14 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _whyEnricher, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
+const { createJob: _createRefreshJob, getJob: _getRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
+// Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
+// can neutralize prefetch by default (below) — most route tests don't stub the
+// refresh executor, and a real fire-and-forget refresh would contaminate the
+// shared snapshot store across tests. The Slice 6 tests opt back into the real
+// implementation explicitly.
+const _realPrefetchStart = _refreshPrefetch.start;
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
 
@@ -204,12 +211,18 @@ describe("server.routes", () => {
     for (const k of _ROUTES_ENV_KEYS) _routesEnvSnapshot[k] = process.env[k];
     process.env.TEMPO_DATA_DIR = tmpDir;
     process.env.TEMPO_AI_MOCK_ONLY = "true";
+    // Slice 6: neutralize the prefetch kickoff by default so extraction-success
+    // tests don't fire a real background refresh that writes a snapshot and
+    // bleeds into later tests. The dedicated Slice 6 tests restore the genuine
+    // implementation. No-op returns undefined → handler omits _meta.refreshJobId.
+    _refreshPrefetch.start = () => undefined;
   });
   afterEach(() => {
     for (const k of _ROUTES_ENV_KEYS) {
       if (_routesEnvSnapshot[k] === undefined) delete process.env[k];
       else process.env[k] = _routesEnvSnapshot[k];
     }
+    _refreshPrefetch.start = _realPrefetchStart;
   });
 
 // ─── Public routes ────────────────────────────────────────────────────────────
@@ -5952,6 +5965,225 @@ test("translateFn wiring: resolver returns null under mock-only even with a key 
     await _refreshPipeline.run({ ...TRANSLATE_BASE_OPTS });
     assert.equal(getCaptured().translateFn, null, "mock-only forces the no-op pass-through path");
   });
+});
+
+// ─── Slice 6: cold-start prefetch kickoff from PUT /api/settings ──────────────
+
+const SLICE6_EXTRACTED = {
+  topics: ["Migration policy"],
+  keywords: ["bilateral"],
+  geographies: ["US", "Colombia"],
+  traditionalSources: [],
+  socialSources: [],
+};
+
+// Run `fn` with extraction stubbed to succeed and the executor stubbed to count
+// kickoffs, restoring all hooks (and the job registry) afterward. `execResult`
+// overrides the resolved executor result so settlement-mapping can be exercised.
+async function withSlice6PrefetchHarness(
+  { extractionSucceeds = true, execResult = { kind: "ran", httpStatus: 200, body: { stories: [{ id: "s1" }] } } } = {},
+  fn
+) {
+  const prevRead = _narrativeRepo.read;
+  const prevExtract = _extraction.extract;
+  const prevWrite = _writeSettings.write;
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshPrefetch.start;
+  const calls = [];
+  _resetRefreshJobs();
+  // Opt back into the genuine prefetch kickoff (the suite neutralizes it by
+  // default); test E overrides this with a throwing stub after harness setup.
+  _refreshPrefetch.start = _realPrefetchStart;
+  _narrativeRepo.read = async () => "A US–Colombia bilateral comms narrative.";
+  _extraction.extract = async () => (extractionSucceeds ? SLICE6_EXTRACTED : null);
+  _writeSettings.write = async () => {};
+  _refreshExecutor.execute = async (identity, opts) => {
+    calls.push({ userId: identity.userId, opts });
+    return execResult;
+  };
+  try {
+    return await fn(calls);
+  } finally {
+    _narrativeRepo.read = prevRead;
+    _extraction.extract = prevExtract;
+    _writeSettings.write = prevWrite;
+    _refreshExecutor.execute = prevExec;
+    _refreshPrefetch.start = prevStart;
+    _resetRefreshJobs();
+  }
+}
+
+test("Slice 6 (A): successful onboarding save + extraction kicks off a cold_start prefetch and surfaces _meta.refreshJobId", async () => {
+  await withSlice6PrefetchHarness({}, async (calls) => {
+    await withIsolatedUser("slice6-happy", async () => {
+      const res = await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.extractionStatus, "succeeded");
+      assert.equal(res.body._meta?.refreshJobId, "slice6-happy", "refreshJobId === userId");
+      assert.equal(res.body.refreshJobId, undefined, "no top-level refreshJobId");
+      // Executor invoked exactly once with the cold_start profile.
+      assert.equal(calls.length, 1, "prefetch starts exactly one refresh");
+      assert.equal(calls[0].userId, "slice6-happy");
+      assert.equal(calls[0].opts?.refreshProfile, "cold_start");
+      // A running job was registered for the user.
+      assert.ok(_getRefreshJob("slice6-happy"), "a refresh job exists for the user");
+    });
+  });
+});
+
+test("Slice 6 (B): extraction failure does NOT kick off prefetch and omits _meta.refreshJobId", async () => {
+  await withSlice6PrefetchHarness({ extractionSucceeds: false }, async (calls) => {
+    await withIsolatedUser("slice6-extract-fail", async () => {
+      const res = await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.extractionStatus, "failed");
+      assert.equal(res.body._meta?.refreshJobId, undefined, "no refreshJobId when extraction failed");
+      assert.equal(calls.length, 0, "no prefetch kickoff on extraction failure");
+      assert.equal(_getRefreshJob("slice6-extract-fail"), null, "no job registered");
+    });
+  });
+});
+
+test("Slice 6 (C): a normal save without onboardingRawText does not kick off prefetch", async () => {
+  await withSlice6PrefetchHarness({}, async (calls) => {
+    await withIsolatedUser("slice6-no-narrative", async () => {
+      const res = await request(app)
+        .put("/api/settings")
+        .send(VALID_BODY) // no onboardingRawText
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.extractionStatus, "not_attempted");
+      assert.equal(res.body._meta?.refreshJobId, undefined, "no refreshJobId without onboardingRawText");
+      assert.equal(calls.length, 0, "no prefetch kickoff without onboardingRawText");
+    });
+  });
+});
+
+test("Slice 6 (D): an in-flight refresh is JOINED — refreshJobId returned, no second run started", async () => {
+  await withSlice6PrefetchHarness({}, async (calls) => {
+    await withIsolatedUser("slice6-inflight", async () => {
+      // Simulate a prior, still-running cold-start refresh for this user.
+      _createRefreshJob("slice6-inflight");
+      const res = await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.refreshJobId, "slice6-inflight", "joins the in-flight job id");
+      assert.equal(calls.length, 0, "no second executor run while one is in flight");
+    });
+  });
+});
+
+test("Slice 6 (E): a prefetch kickoff failure is non-fatal — settings still 200, no refreshJobId", async () => {
+  await withSlice6PrefetchHarness({}, async (calls) => {
+    // Force the kickoff path to throw.
+    _refreshPrefetch.start = () => { throw new Error("prefetch boom"); };
+    await withIsolatedUser("slice6-kickoff-throw", async () => {
+      const res = await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200, "settings write/response is unaffected by a prefetch failure");
+      assert.equal(res.body._meta?.extractionStatus, "succeeded");
+      assert.equal(res.body._meta?.refreshJobId, undefined, "no refreshJobId when kickoff throws");
+      // Settings payload still conforms.
+      const parsed = settingsPayloadSchema.safeParse(res.body);
+      assert.ok(parsed.success, "response remains a valid settings payload");
+    });
+  });
+});
+
+// Poll the registry until the fire-and-forget prefetch settles the job to a
+// terminal state (or `maxTicks` flushes elapse). Deterministic enough for the
+// stubbed executor, which resolves immediately.
+async function waitForJobSettled(userId, { maxTicks = 50 } = {}) {
+  for (let i = 0; i < maxTicks; i++) {
+    const job = _getRefreshJob(userId);
+    if (job && job.status !== "running") return job;
+    await new Promise((r) => setImmediate(r));
+  }
+  return _getRefreshJob(userId);
+}
+
+test("Slice 6 settle (A): a `ran` result marks the job done with story count", async () => {
+  await withSlice6PrefetchHarness(
+    { execResult: { kind: "ran", httpStatus: 200, body: { stories: [{ id: "a" }, { id: "b" }] } } },
+    async () => {
+      await withIsolatedUser("slice6-settle-ran", async () => {
+        await request(app)
+          .put("/api/settings")
+          .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+          .set("Content-Type", "application/json");
+        const job = await waitForJobSettled("slice6-settle-ran");
+        assert.equal(job.status, "done");
+        assert.equal(job.phase, "done");
+        assert.equal(job.storyCount, 2);
+      });
+    }
+  );
+});
+
+for (const kind of ["error_500", "validation_not_ready"]) {
+  test(`Slice 6 settle (B): a terminal failure kind "${kind}" marks the job failed with that reason`, async () => {
+    await withSlice6PrefetchHarness(
+      { execResult: { kind, httpStatus: 500, body: {} } },
+      async () => {
+        await withIsolatedUser(`slice6-settle-${kind}`, async () => {
+          await request(app)
+            .put("/api/settings")
+            .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+            .set("Content-Type", "application/json");
+          const job = await waitForJobSettled(`slice6-settle-${kind}`);
+          assert.equal(job.status, "failed");
+          assert.equal(job.failureReason, kind);
+        });
+      }
+    );
+  });
+}
+
+test("Slice 6 settle (C): an `in_flight` result settles terminally (failed, in_flight_joined) — never wedged running", async () => {
+  await withSlice6PrefetchHarness(
+    { execResult: { kind: "in_flight", httpStatus: 200, body: {} } },
+    async () => {
+      await withIsolatedUser("slice6-settle-inflight", async () => {
+        const res = await request(app)
+          .put("/api/settings")
+          .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+          .set("Content-Type", "application/json");
+        assert.equal(res.body._meta?.refreshJobId, "slice6-settle-inflight");
+        // The job must settle terminally (not stay running forever, which would
+        // wedge future prefetch attempts into joining a stale running job).
+        const job = await waitForJobSettled("slice6-settle-inflight");
+        assert.equal(job.status, "failed");
+        assert.equal(job.failureReason, "in_flight_joined");
+      });
+    }
+  );
+});
+
+test("Slice 6 settle (D): an unknown executor kind fails the job with reason `unknown_kind`", async () => {
+  await withSlice6PrefetchHarness(
+    { execResult: { kind: "unexpected_kind", httpStatus: 200, body: {} } },
+    async () => {
+      await withIsolatedUser("slice6-settle-unknown", async () => {
+        await request(app)
+          .put("/api/settings")
+          .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+          .set("Content-Type", "application/json");
+        const job = await waitForJobSettled("slice6-settle-unknown");
+        assert.equal(job.status, "failed");
+        assert.equal(job.failureReason, "unknown_kind");
+      });
+    }
+  );
 });
 
 });
