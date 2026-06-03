@@ -1,12 +1,13 @@
 // Process-local refresh job registry (Slice 5).
 //
 // A tiny, deterministic, in-memory progress tracker for the cold-start refresh
-// flow.  The onboarding handoff (later slices) starts a job, advances its phase
-// as the pipeline moves through ingestion → matching → clustering, and marks it
-// terminal so a polling client can render progress.  This slice ships the
-// registry + tests ONLY — no route wiring yet.
+// flow.  The onboarding handoff (Slice 6) starts a job and marks it terminal
+// (done/failed) when the prefetch settles; the status endpoint (Slice 7) reads
+// it so a polling client can render progress.  `setPhase` supports advancing
+// `ingesting → matching → clustering` for finer progress, though the current
+// prefetch only sets `ingesting` then a terminal state.
 //
-// Locked contract for this slice:
+// Locked contract:
 //   - jobId strategy: `jobId === userId` (one in-flight-or-latest job per user).
 //   - retention: keep the latest state until the SAME user's next `createJob`
 //     overwrites it — no TTL, no timers, no eviction.

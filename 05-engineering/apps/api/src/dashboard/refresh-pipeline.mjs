@@ -147,10 +147,9 @@ export const DEFAULT_CLUSTER_MAX_ATTEMPTS = 2; // initial try + one retry
 // fires a cold-start refresh.  These are the locked defaults from cold-start-v1
 // (see ../../../../docs/cold-start-v1.md): a bounded geo budget with all Lane 2
 // deferred to the hold path, a 45s-per-attempt Sonnet clustering timeout, always
-// 2 attempts, and a tighter 10-item cluster input cap.  Slice 1 wires the
-// profile contract ONLY — `deferGeoLane2`/`clusterInputCap` are additive, inert
-// fields here; later slices thread them into pipeline behavior.  No env
-// overrides in this slice — the defaults are locked constants.
+// 2 attempts, and a tighter 10-item cluster input cap.  All are wired into
+// pipeline behavior (`deferGeoLane2` → geo stage, `clusterInputCap` → cluster
+// cap).  No env overrides — these are locked constants.
 export const COLD_START_GEO_STAGE_BUDGET_MS_DEFAULT = 12000;
 export const COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT = 45000;
 export const COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT = 2;
@@ -176,8 +175,9 @@ function envIntPositive(name, fallback) {
  */
 export function resolveRefreshProfile(name) {
   if (name === "cold_start") {
-    // Slice 1: locked defaults only.  `deferGeoLane2`/`clusterInputCap` are
-    // additive, inert fields — not yet wired into pipeline behavior.
+    // Locked cold-start defaults.  `deferGeoLane2` is honored by the geo stage
+    // (Slice 2: all Lane 2 deferred to hold) and `clusterInputCap` by the
+    // cluster-cap stage (Slice 3: tighter 10-item cap).
     return {
       name: "cold_start",
       interactive: true,
