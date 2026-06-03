@@ -2018,6 +2018,39 @@ app.post("/api/dashboard/refresh", async (req, res) => {
   res.status(httpStatus).json(body);
 });
 
+// ─── Slice 7: refresh-status polling endpoint ────────────────────────────────
+//
+// Read-only snapshot of a cold-start prefetch job (Slice 6) so the dashboard can
+// poll progress.  `jobId === userId`, so a caller may only read their OWN job
+// (cross-user reads are 403, never leaked as 404).  Running jobs return their
+// current state immediately — there is no server-side long-poll in this slice.
+app.get("/api/dashboard/refresh-status/:jobId", async (req, res) => {
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  const { jobId } = req.params;
+  if (jobId !== identity.userId) {
+    return res.status(403).json({
+      code: "FORBIDDEN_REFRESH_JOB",
+      message: "You may only read your own refresh job.",
+    });
+  }
+  const job = getJob(jobId);
+  if (!job) {
+    return res.status(404).json({
+      code: "JOB_NOT_FOUND",
+      message: "No refresh job found for this id.",
+    });
+  }
+  // Minimal contract only — no timestamps or internal fields.
+  return res.status(200).json({
+    jobId: job.jobId,
+    status: job.status,
+    phase: job.phase,
+    storyCount: job.storyCount ?? null,
+    failureReason: job.failureReason ?? null,
+  });
+});
+
 // ─── Phase 5: bootstrap route ────────────────────────────────────────────────
 //
 // Backend-owned freshness policy: dashboard's first paint after Landing or
