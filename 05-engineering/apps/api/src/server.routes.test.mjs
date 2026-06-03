@@ -1069,12 +1069,31 @@ test("POST /api/dashboard/refresh: emits a structured [refresh.summary] line and
 
 // ─── Slice 4: interactive fast-path profile routing ──────────────────────────
 
+// Echo a profile object shaped like what `resolveRefreshProfile` returns for the
+// resolved name, so the route can surface it verbatim on `_meta.profile`.
+function echoProfileForName(name) {
+  if (name === "cold_start") {
+    return {
+      name: "cold_start", interactive: true,
+      geoStageBudgetMs: 12000, clusterTimeoutMs: 45000, clusterMaxAttempts: 2,
+      deferGeoLane2: true, clusterInputCap: 10,
+    };
+  }
+  if (name === "interactive") {
+    return {
+      name: "interactive", interactive: true,
+      geoStageBudgetMs: 12000, clusterTimeoutMs: 22000, clusterMaxAttempts: 2,
+    };
+  }
+  return {
+    name: "default", interactive: false,
+    geoStageBudgetMs: 25000, clusterTimeoutMs: null, clusterMaxAttempts: 2,
+  };
+}
+
 function profileCapturingPipelineStub(captured) {
   return async (opts) => {
     captured.refreshProfile = opts.refreshProfile;
-    // Echo a profile shaped like what the real pipeline returns for the
-    // resolved name, so the route can surface it on `_meta.profile`.
-    const interactive = opts.refreshProfile === "interactive";
     return {
       payload: { contractVersion: opts.contractVersion, stories: [] },
       log: {
@@ -1092,40 +1111,107 @@ function profileCapturingPipelineStub(captured) {
         candidateCount: 1,
         selectedFeedCount: 1,
         selection: { sourceSelectionMode: "test" },
-        profile: {
-          name: interactive ? "interactive" : "default",
-          interactive,
-          // Slice 4.1 calibrated values: geo 12000, timeout 22000, attempts 2.
-          geoStageBudgetMs: interactive ? 12000 : 25000,
-          clusterMaxAttempts: 2, // both profiles run 2 attempts post-4.1
-          clusterTimeoutMs: interactive ? 22000 : null,
-        },
+        // Reflect the EFFECTIVE profile the route resolved (after cold-start
+        // gating), keyed off the name the executor passed to the pipeline.
+        profile: echoProfileForName(opts.refreshProfile),
       },
     };
   };
 }
 
-test("POST /api/dashboard/refresh?interactive=1 runs the pipeline with the interactive profile and surfaces it on _meta", async () => {
+test("POST /api/dashboard/refresh?profile=cold_start (no prior snapshot) runs the cold_start profile and surfaces it on _meta", async () => {
   const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
   const prevWrite = _snapshotRepo.write;
   const prevGetLocks = _snapshotRepo.getLocks;
   const prevInsertLocks = _snapshotRepo.insertLocks;
   const captured = {};
   _refreshPipeline.run = profileCapturingPipelineStub(captured);
+  _snapshotRepo.read = async () => null; // brand-new user: no prior snapshot
   _snapshotRepo.write = async () => {};
   _snapshotRepo.getLocks = async () => new Map();
   _snapshotRepo.insertLocks = async () => {};
   try {
-    await withIsolatedUser("slice4-interactive", async () => {
-      const res = await request(app).post("/api/dashboard/refresh?interactive=1");
+    await withIsolatedUser("slice4-coldstart-profile", async () => {
+      const res = await request(app).post("/api/dashboard/refresh?profile=cold_start");
       assert.equal(res.status, 200);
-      assert.equal(captured.refreshProfile, "interactive", "route must request the interactive profile");
-      assert.equal(res.body._meta?.profile?.name, "interactive");
+      assert.equal(captured.refreshProfile, "cold_start", "route must request the cold_start profile");
+      assert.equal(res.body._meta?.profile?.name, "cold_start");
       assert.equal(res.body._meta?.profile?.interactive, true);
-      assert.equal(res.body._meta?.profile?.clusterMaxAttempts, 2);
+      assert.equal(res.body._meta?.profile?.clusterInputCap, 10);
+      // Effective === requested, so no additive profileRequested is surfaced.
+      assert.equal(res.body._meta?.profileRequested, undefined);
     });
   } finally {
     _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh?interactive=1 (legacy alias) maps to cold_start when no prior snapshot", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const captured = {};
+  _refreshPipeline.run = profileCapturingPipelineStub(captured);
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice4-interactive-alias", async () => {
+      const res = await request(app).post("/api/dashboard/refresh?interactive=1");
+      assert.equal(res.status, 200);
+      assert.equal(captured.refreshProfile, "cold_start", "legacy ?interactive=1 must request cold_start");
+      assert.equal(res.body._meta?.profile?.name, "cold_start");
+      assert.equal(res.body._meta?.profile?.interactive, true);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh?profile=cold_start WITH a prior snapshot gates down to default (requested surfaced additively)", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const captured = {};
+  _refreshPipeline.run = profileCapturingPipelineStub(captured);
+  // A prior snapshot exists → cold_start is not a valid first-run state here.
+  _snapshotRepo.read = async () => ({
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _watermark: "wm-prior-coldstart-gate",
+    _meta: { hasSnapshot: true },
+  });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("slice4-coldstart-gated", async () => {
+      const res = await request(app).post("/api/dashboard/refresh?profile=cold_start");
+      assert.equal(res.status, 200);
+      // Gating: the pipeline runs the DEFAULT profile, not cold_start.
+      assert.equal(captured.refreshProfile, null, "cold_start must be gated to default when a prior snapshot exists");
+      assert.equal(res.body._meta?.profile?.name, "default");
+      assert.equal(res.body._meta?.profile?.interactive, false);
+      // Additive: the originally-requested profile is surfaced so the gate is visible.
+      assert.equal(res.body._meta?.profileRequested, "cold_start");
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
     _snapshotRepo.write = prevWrite;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
