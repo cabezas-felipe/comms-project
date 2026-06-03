@@ -71,6 +71,12 @@ export function shouldAdvanceClockForBootstrap(args: {
 // default `/api/dashboard/refresh` and therefore the default profile.
 const INTERACTIVE_REFRESH_ENDPOINT = "/api/dashboard/refresh?interactive=1";
 
+// Slice 10: every user-triggered retry runs the DEFAULT profile explicitly,
+// regardless of how the dashboard was first entered (onboarding interactive,
+// cold-start join, bootstrap, timeout, fail-closed, etc.). The server reads
+// `?profile=default`.
+const RETRY_DEFAULT_REFRESH_ENDPOINT = "/api/dashboard/refresh?profile=default";
+
 // Slice 5: how often to poll GET /api/dashboard for upgraded whyItMatters while
 // an interactive run's enrichment is pending, and the upper bound on how long
 // to keep polling before giving up (the fallback copy already on screen stays).
@@ -277,14 +283,19 @@ export default function Dashboard() {
     // already ran the refresh) — never a duplicate POST.  `timeout`/`inactive`
     // keep the existing routing below.
     const joinResolvedToGet = joinState === "done" || joinState === "failed";
-    // POST-style attempts (bootstrap OR forceRefresh) count as refresh
+    // Slice 10: any load triggered by a retry (reloadCounter bumped — only
+    // `handleRetry` does this) runs the DEFAULT-profile refresh, overriding every
+    // other routing path (join/forceRefresh/bootstrap).  A retry is always a
+    // refresh attempt.
+    const isRetry = reloadCounter > 0;
+    // POST-style attempts (retry, bootstrap, OR forceRefresh) count as refresh
     // attempts: they delegate to the server's refresh executor, so the global
     // `isRefreshing` flag must reflect them and the anchor advances on settle.
     // GET serves the persisted snapshot — it is NOT a refresh attempt, so it
     // must not toggle the in-flight flag and must not advance the anchor (GET
     // only seeds when nothing is set yet).  Local `isLoading` covers the GET
     // path's own loading copy.
-    const isPostAttempt = !joinResolvedToGet && (useBootstrap || forceRefresh);
+    const isPostAttempt = isRetry || (!joinResolvedToGet && (useBootstrap || forceRefresh));
     const attemptToken = isPostAttempt ? recordAttemptStart() : null;
     // `bootstrapResult` is only set when the bootstrap POST resolves — used to
     // read its `decision` for the clock-advance rule.  `renderedResult` is
@@ -324,13 +335,18 @@ export default function Dashboard() {
     const run = async () => {
       try {
         // Routing:
+        //   retry        → POST /refresh?profile=default (Slice 10): every
+        //     user-triggered retry runs the default profile, overriding any
+        //     prior path (join/forceRefresh/bootstrap/timeout/failed).
         //   join done/failed → GET (the prefetch already ran the refresh; never
         //     POST a duplicate — failed loads the fail-closed/empty snapshot).
         //   forceRefresh → POST /refresh directly (Onboarding handoff): never
         //     reuse a stale fresh snapshot for the user's first view.
         //   useBootstrap → POST /bootstrap (Landing/Onboarding freshness check).
         //   otherwise    → GET (cheap persisted snapshot for in-app nav).
-        if (joinResolvedToGet) {
+        if (isRetry) {
+          renderedResult = await refreshDashboard({ endpoint: RETRY_DEFAULT_REFRESH_ENDPOINT });
+        } else if (joinResolvedToGet) {
           renderedResult = await fetchDashboardWithMeta();
         } else if (forceRefresh) {
           // Slice 4: request the interactive fast-path profile for the first
@@ -384,12 +400,13 @@ export default function Dashboard() {
           //     `failed: true`, which advances — the recovery doesn't undo the
           //     fact that a refresh was attempted.  Only a successful
           //     `served_fresh_snapshot` is a no-op.
-          const advanceClock = forceRefresh
-            ? true
-            : shouldAdvanceClockForBootstrap({
-                failed: postFailed,
-                decision: bootstrapResult?.decision ?? null,
-              });
+          const advanceClock =
+            isRetry || forceRefresh
+              ? true
+              : shouldAdvanceClockForBootstrap({
+                  failed: postFailed,
+                  decision: bootstrapResult?.decision ?? null,
+                });
           recordAttemptFinished(attemptToken, {
             result: renderedResult,
             advanceClock,
@@ -557,6 +574,12 @@ export default function Dashboard() {
   }, [whyPending]);
 
   const handleRetry = useCallback(() => {
+    // Slice 10: a retry always abandons any in-flight JOIN and starts a fresh
+    // default-profile refresh path (the loader routes reloadCounter>0 loads to
+    // RETRY_DEFAULT_REFRESH_ENDPOINT).  Clearing the join state deterministically
+    // prevents a stale poll/progress from gating the retry-triggered load.
+    setJoinState("inactive");
+    setJoinPhase(null);
     setReloadCounter((n) => n + 1);
   }, []);
 
