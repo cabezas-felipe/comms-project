@@ -13,7 +13,9 @@ import {
 } from "@/lib/analytics";
 import {
   bootstrapDashboard,
+  DashboardFetchError,
   fetchDashboardWithMeta,
+  fetchRefreshStatus,
   recoverDashboardViaGet,
   refreshDashboard,
   type DashboardBootstrapDecision,
@@ -33,7 +35,7 @@ import {
   type TagSelection,
 } from "@/lib/dashboard-filters";
 import { type StoryDto, type DashboardSelectionMeta } from "@tempo/contracts";
-import { notifyError } from "@/lib/notify";
+import { notifyError, notifyWarning } from "@/lib/notify";
 import { isUxTestMode } from "@/lib/ux-test-mode";
 import { useRefreshContext } from "@/lib/refresh-context";
 import { REFRESH_INTERVAL_MS } from "@/lib/refresh-heartbeat";
@@ -74,6 +76,21 @@ const INTERACTIVE_REFRESH_ENDPOINT = "/api/dashboard/refresh?interactive=1";
 // to keep polling before giving up (the fallback copy already on screen stays).
 const WHY_POLL_INTERVAL_MS = 3000;
 const WHY_POLL_BUDGET_MS = 60000;
+
+// Slice 9: cold-start JOIN polling — how often to poll the prefetch job status
+// (Slice 7 endpoint) and the upper bound before falling back to the normal
+// dashboard load path.
+const JOIN_POLL_INTERVAL_MS = 2000;
+const JOIN_MAX_MS = 60000;
+
+// Minimal, operational phase copy shown while JOINed to an in-flight cold-start
+// refresh. Unknown/absent phases fall back to a generic line.
+const JOIN_PHASE_COPY: Record<string, string> = {
+  ingesting: "Gathering sources…",
+  matching: "Matching your beat…",
+  clustering: "Assembling stories…",
+};
+const JOIN_PROGRESS_FALLBACK = "Preparing your first stories…";
 
 function dtoToStory(dto: StoryDto): Story {
   return {
@@ -126,13 +143,22 @@ export default function Dashboard() {
   // Both navigate with `state: { bootstrap: true }`.  Settings, in-app links,
   // browser back/forward, and direct URL loads do NOT carry this flag and use
   // the cheaper GET path.
-  const navState = location.state as { bootstrap?: boolean; forceRefresh?: boolean } | null;
+  const navState = location.state as
+    | { bootstrap?: boolean; forceRefresh?: boolean; coldStartJobId?: string }
+    | null;
   const useBootstrap = navState?.bootstrap === true;
   // Slice 2: Onboarding → Dashboard passes `forceRefresh: true` so the loader
   // runs the POST refresh pipeline directly instead of letting bootstrap reuse
   // a stale "fresh" snapshot written before onboarding's settings landed.
   // `forceRefresh` takes precedence over `bootstrap` when both are present.
   const forceRefresh = navState?.forceRefresh === true;
+  // Slice 9: Onboarding handoff may pass the cold-start prefetch job handle.
+  // When present (non-empty string), the dashboard JOINs that in-flight refresh
+  // by polling its status instead of immediately firing its own POST /refresh.
+  const coldStartJobId =
+    typeof navState?.coldStartJobId === "string" && navState.coldStartJobId.trim().length > 0
+      ? navState.coldStartJobId.trim()
+      : null;
 
   // Phase 6: dynamic, multi-select header pill state (one Set per section).
   // Empty sets across all three sections = "All" (no filters applied).
@@ -168,6 +194,15 @@ export default function Dashboard() {
   // patches story cards in place as upgraded copy lands.
   const [whyEnrichment, setWhyEnrichment] = useState<DashboardWhyEnrichmentMeta | null>(null);
   const [reloadCounter, setReloadCounter] = useState(0);
+
+  // Slice 9: cold-start JOIN lifecycle.  `active` while polling the prefetch
+  // job; `done`/`failed` are terminal job outcomes; `timeout` means the 60s
+  // budget elapsed and we fall back to the normal loader.  `inactive` when no
+  // job handle was handed off (existing behavior, unchanged).
+  const [joinState, setJoinState] = useState<
+    "inactive" | "active" | "done" | "failed" | "timeout"
+  >(() => (!emptyMode && coldStartJobId ? "active" : "inactive"));
+  const [joinPhase, setJoinPhase] = useState<string | null>(null);
 
   // Diagnostics panel visibility: UX test mode OR an explicit `?debug=1`.
   // Never visible in normal prototype use; carries no end-user copy.
@@ -231,9 +266,17 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (emptyMode) return;
+    // Slice 9: while JOINed to an in-flight cold-start refresh, the poll effect
+    // owns the screen — do NOT load or fire a duplicate POST /refresh yet.  The
+    // loader re-runs (joinState in deps) once the join settles done/failed/timeout.
+    if (joinState === "active") return;
     let canceled = false;
     setIsLoading(true);
     setLoadError(null);
+    // Slice 9: a JOIN that settled `done`/`failed` loads via GET (the prefetch
+    // already ran the refresh) — never a duplicate POST.  `timeout`/`inactive`
+    // keep the existing routing below.
+    const joinResolvedToGet = joinState === "done" || joinState === "failed";
     // POST-style attempts (bootstrap OR forceRefresh) count as refresh
     // attempts: they delegate to the server's refresh executor, so the global
     // `isRefreshing` flag must reflect them and the anchor advances on settle.
@@ -241,7 +284,7 @@ export default function Dashboard() {
     // must not toggle the in-flight flag and must not advance the anchor (GET
     // only seeds when nothing is set yet).  Local `isLoading` covers the GET
     // path's own loading copy.
-    const isPostAttempt = useBootstrap || forceRefresh;
+    const isPostAttempt = !joinResolvedToGet && (useBootstrap || forceRefresh);
     const attemptToken = isPostAttempt ? recordAttemptStart() : null;
     // `bootstrapResult` is only set when the bootstrap POST resolves — used to
     // read its `decision` for the clock-advance rule.  `renderedResult` is
@@ -281,11 +324,15 @@ export default function Dashboard() {
     const run = async () => {
       try {
         // Routing:
+        //   join done/failed → GET (the prefetch already ran the refresh; never
+        //     POST a duplicate — failed loads the fail-closed/empty snapshot).
         //   forceRefresh → POST /refresh directly (Onboarding handoff): never
         //     reuse a stale fresh snapshot for the user's first view.
         //   useBootstrap → POST /bootstrap (Landing/Onboarding freshness check).
         //   otherwise    → GET (cheap persisted snapshot for in-app nav).
-        if (forceRefresh) {
+        if (joinResolvedToGet) {
+          renderedResult = await fetchDashboardWithMeta();
+        } else if (forceRefresh) {
           // Slice 4: request the interactive fast-path profile for the first
           // post-onboarding paint (server reads `?interactive=1`).
           renderedResult = await refreshDashboard({ endpoint: INTERACTIVE_REFRESH_ENDPOINT });
@@ -360,6 +407,7 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     emptyMode,
+    joinState,
     useBootstrap,
     forceRefresh,
     reloadCounter,
@@ -367,6 +415,65 @@ export default function Dashboard() {
     recordAttemptStart,
     recordAttemptFinished,
   ]);
+
+  // ─── Slice 9: poll the cold-start prefetch job while JOINed ─────────────────
+  // Polls the Slice 7 status endpoint every 2s up to a 60s budget.  Terminal
+  // `done`/`failed` settle the join (the loader then renders via GET — no
+  // duplicate POST).  At the budget we fall back to the normal loader path with
+  // a non-blocking warning.  Transient poll errors are swallowed and retried
+  // until the deadline so a flaky tick never wedges the join.
+  useEffect(() => {
+    if (joinState !== "active" || !coldStartJobId) return;
+    let canceled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const deadline = Date.now() + JOIN_MAX_MS;
+    const tick = async () => {
+      if (canceled) return;
+      try {
+        const status = await fetchRefreshStatus(coldStartJobId);
+        if (canceled) return;
+        setJoinPhase(status.phase);
+        if (status.status === "done") {
+          setJoinState("done");
+          return;
+        }
+        if (status.status === "failed") {
+          setJoinState("failed");
+          return;
+        }
+      } catch (error) {
+        // Terminal job-unavailable (forbidden / not found) can never recover by
+        // retrying — short-circuit to the fallback path immediately rather than
+        // stalling the progress UI for the full budget.  All other errors
+        // (network, contract parse, other HTTP statuses like 500) are treated as
+        // transient and retried until the deadline below.
+        if (
+          error instanceof DashboardFetchError &&
+          error.kind === "http" &&
+          (error.status === 403 || error.status === 404)
+        ) {
+          if (canceled) return;
+          setJoinState("timeout");
+          notifyWarning("Still preparing your first stories — loading what we have.");
+          return;
+        }
+        // Transient poll failure — keep trying until the deadline.
+      }
+      if (canceled) return;
+      if (Date.now() >= deadline) {
+        setJoinState("timeout");
+        notifyWarning("Still preparing your first stories — loading what we have.");
+        return;
+      }
+      timer = setTimeout(tick, JOIN_POLL_INTERVAL_MS);
+    };
+    void tick();
+    return () => {
+      canceled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joinState, coldStartJobId]);
 
   // App-scope heartbeat (lib/refresh-heartbeat) drives the 60-minute refresh
   // attempt guarantee; here we just overlay its successful result onto the
@@ -515,11 +622,19 @@ export default function Dashboard() {
             <h1 className="font-display text-[32px] font-semibold leading-tight tracking-tight">
               {headline}
             </h1>
-            {isLoading && (
+            {joinState === "active" ? (
+              <p
+                className="mt-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground"
+                data-testid="cold-start-progress"
+                role="status"
+              >
+                {(joinPhase && JOIN_PHASE_COPY[joinPhase]) || JOIN_PROGRESS_FALLBACK}
+              </p>
+            ) : isLoading ? (
               <p className="mt-2 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
                 Loading stories…
               </p>
-            )}
+            ) : null}
 
             {/* Pill row — Phase 6: dynamic sections derived from current
                 payload's stories.  Order: All → Topics → Keywords → Geographies.

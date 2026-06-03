@@ -5,6 +5,7 @@ import {
   DashboardFetchError,
   fetchDashboardPayload,
   fetchDashboardWithMeta,
+  fetchRefreshStatus,
   refreshDashboard,
 } from "@/lib/api";
 import { STORIES } from "@/data/stories";
@@ -918,5 +919,123 @@ describe("refreshDashboard", () => {
     ).rejects.toThrow("aborted");
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
+  });
+});
+
+describe("fetchRefreshStatus", () => {
+  it("parses a valid running response into the minimal contract", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        jobId: "user-1",
+        status: "running",
+        phase: "clustering",
+        storyCount: null,
+        failureReason: null,
+      }),
+    });
+    const result = await fetchRefreshStatus("user-1", { fetcher });
+    expect(result).toEqual({
+      jobId: "user-1",
+      status: "running",
+      phase: "clustering",
+      storyCount: null,
+      failureReason: null,
+    });
+    // The job id is path-encoded onto the status endpoint.
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/dashboard/refresh-status/user-1",
+      expect.objectContaining({ method: "GET" })
+    );
+  });
+
+  it("parses a done response carrying a storyCount", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        jobId: "user-1",
+        status: "done",
+        phase: "done",
+        storyCount: 4,
+        failureReason: null,
+      }),
+    });
+    const result = await fetchRefreshStatus("user-1", { fetcher });
+    expect(result.status).toBe("done");
+    expect(result.storyCount).toBe(4);
+  });
+
+  it("parses a failed response carrying a failureReason", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        jobId: "user-1",
+        status: "failed",
+        phase: "done",
+        storyCount: null,
+        failureReason: "clustering_timeout",
+      }),
+    });
+    const result = await fetchRefreshStatus("user-1", { fetcher });
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toBe("clustering_timeout");
+  });
+
+  it("degrades absent/mistyped phase & storyCount to null without throwing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ jobId: "user-1", status: "running" }),
+    });
+    const result = await fetchRefreshStatus("user-1", { fetcher });
+    expect(result.phase).toBeNull();
+    expect(result.storyCount).toBeNull();
+    expect(result.failureReason).toBeNull();
+  });
+
+  it("throws DashboardFetchError(contract) when status is outside the known enum", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ jobId: "user-1", status: "bogus_state" }),
+    });
+    await expect(fetchRefreshStatus("user-1", { fetcher })).rejects.toMatchObject({
+      name: "DashboardFetchError",
+      kind: "contract",
+    });
+  });
+
+  it("throws DashboardFetchError(contract) when jobId is missing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "running" }),
+    });
+    await expect(fetchRefreshStatus("user-1", { fetcher })).rejects.toMatchObject({
+      kind: "contract",
+    });
+  });
+
+  it("throws DashboardFetchError(http) with status on a non-2xx response", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ code: "FORBIDDEN_REFRESH_JOB" }),
+    });
+    await expect(fetchRefreshStatus("user-1", { fetcher })).rejects.toMatchObject({
+      name: "DashboardFetchError",
+      kind: "http",
+      status: 403,
+    });
+  });
+
+  it("throws DashboardFetchError(network) when the fetch itself rejects", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error("offline"));
+    await expect(fetchRefreshStatus("user-1", { fetcher })).rejects.toMatchObject({
+      kind: "network",
+    });
   });
 });

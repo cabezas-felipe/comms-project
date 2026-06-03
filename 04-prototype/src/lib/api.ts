@@ -492,3 +492,103 @@ export async function recoverDashboardViaGet(
     return null;
   }
 }
+
+// ─── Slice 9: cold-start refresh-status polling ──────────────────────────────
+
+const DEFAULT_REFRESH_STATUS_ENDPOINT = "/api/dashboard/refresh-status";
+
+/** Minimal refresh-status contract (Slice 7 server endpoint). */
+export interface RefreshStatusResult {
+  jobId: string;
+  status: "running" | "done" | "failed";
+  phase: string | null;
+  storyCount: number | null;
+  failureReason: string | null;
+}
+
+const VALID_REFRESH_STATUSES: ReadonlySet<RefreshStatusResult["status"]> = new Set([
+  "running",
+  "done",
+  "failed",
+]);
+
+/**
+ * Defensive parse of a refresh-status response.  Returns `null` when the shape
+ * is unusable — a missing/blank `jobId` or a `status` outside the known enum —
+ * so a malformed body can never read as a valid (e.g. terminal) state.  `phase`,
+ * `storyCount`, and `failureReason` degrade individually to `null` when absent
+ * or mistyped.
+ */
+function parseRefreshStatusSafe(raw: unknown): RefreshStatusResult | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.jobId !== "string" || r.jobId.length === 0) return null;
+  if (
+    typeof r.status !== "string" ||
+    !VALID_REFRESH_STATUSES.has(r.status as RefreshStatusResult["status"])
+  ) {
+    return null;
+  }
+  return {
+    jobId: r.jobId,
+    status: r.status as RefreshStatusResult["status"],
+    phase: typeof r.phase === "string" && r.phase.length > 0 ? r.phase : null,
+    storyCount:
+      typeof r.storyCount === "number" && Number.isFinite(r.storyCount)
+        ? r.storyCount
+        : null,
+    failureReason:
+      typeof r.failureReason === "string" && r.failureReason.length > 0
+        ? r.failureReason
+        : null,
+  };
+}
+
+/**
+ * Poll the cold-start prefetch job status (Slice 7 endpoint).  Single-shot (no
+ * retry loop — the caller drives the poll cadence/deadline).  Throws a
+ * `DashboardFetchError` on transport failure, non-2xx, non-JSON, or a payload
+ * that fails defensive validation, mirroring the other dashboard helpers' error
+ * style so callers never silently consume a bad state.
+ */
+export async function fetchRefreshStatus(
+  jobId: string,
+  options: { endpoint?: string; fetcher?: typeof fetch } = {}
+): Promise<RefreshStatusResult> {
+  const base = options.endpoint ?? DEFAULT_REFRESH_STATUS_ENDPOINT;
+  const fetcher = options.fetcher ?? fetch;
+  const identityHeaders = await buildIdentityHeaders();
+  const endpoint = `${base}/${encodeURIComponent(jobId)}`;
+
+  let response: Response;
+  try {
+    response = await fetcher(endpoint, {
+      method: "GET",
+      headers: { Accept: "application/json", ...identityHeaders },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown refresh-status error";
+    throw new DashboardFetchError("network", message);
+  }
+
+  if (!response.ok) {
+    throw new DashboardFetchError(
+      "http",
+      `Refresh status API returned HTTP ${response.status}`,
+      response.status
+    );
+  }
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    throw new DashboardFetchError("contract", "Refresh status response was not valid JSON.");
+  }
+
+  const parsed = parseRefreshStatusSafe(raw);
+  if (!parsed) {
+    throw new DashboardFetchError("contract", "Refresh status response failed validation.");
+  }
+  return parsed;
+}
