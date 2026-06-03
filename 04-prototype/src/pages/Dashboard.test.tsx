@@ -10,7 +10,9 @@ const fetchSpy = vi.fn();
 const bootstrapSpy = vi.fn();
 const refreshSpy = vi.fn();
 const recoverSpy = vi.fn();
+const statusSpy = vi.fn();
 const notifyErrorSpy = vi.fn();
+const notifyWarningSpy = vi.fn();
 const seedAnchorIfMissingSpy = vi.fn();
 const recordAttemptStartSpy = vi.fn();
 const recordAttemptFinishedSpy = vi.fn();
@@ -44,6 +46,7 @@ vi.mock("@/lib/api", () => ({
   bootstrapDashboard: (...args: unknown[]) => bootstrapSpy(...args),
   refreshDashboard: (...args: unknown[]) => refreshSpy(...args),
   recoverDashboardViaGet: (...args: unknown[]) => recoverSpy(...args),
+  fetchRefreshStatus: (...args: unknown[]) => statusSpy(...args),
   DashboardFetchError: MockDashboardFetchError,
 }));
 
@@ -54,7 +57,10 @@ vi.mock("@/lib/analytics", () => ({
   trackStoryExpanded: vi.fn(),
 }));
 
-vi.mock("@/lib/notify", () => ({ notifyError: (...args: unknown[]) => notifyErrorSpy(...args) }));
+vi.mock("@/lib/notify", () => ({
+  notifyError: (...args: unknown[]) => notifyErrorSpy(...args),
+  notifyWarning: (...args: unknown[]) => notifyWarningSpy(...args),
+}));
 
 vi.mock("@/lib/refresh-context", () => ({
   useRefreshContext: () => ({
@@ -92,7 +98,9 @@ afterEach(() => {
   bootstrapSpy.mockReset();
   refreshSpy.mockReset();
   recoverSpy.mockReset();
+  statusSpy.mockReset();
   notifyErrorSpy.mockReset();
+  notifyWarningSpy.mockReset();
   seedAnchorIfMissingSpy.mockReset();
   recordAttemptStartSpy.mockReset();
   recordAttemptFinishedSpy.mockReset();
@@ -1395,5 +1403,215 @@ describe("Slice 5: progressive whyItMatters enrichment", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ─── Slice 9: cold-start JOIN (poll prefetch status, minimal progress UI) ─────
+
+describe("Slice 9: cold-start JOIN mode", () => {
+  const runningStatus = (phase: string) => ({
+    jobId: "u1",
+    status: "running" as const,
+    phase,
+    storyCount: null,
+    failureReason: null,
+  });
+  const doneStatus = {
+    jobId: "u1",
+    status: "done" as const,
+    phase: "done",
+    storyCount: 1,
+    failureReason: null,
+  };
+  const failedStatus = {
+    jobId: "u1",
+    status: "failed" as const,
+    phase: "done",
+    storyCount: null,
+    failureReason: "clustering_timeout",
+  };
+
+  it("polls refresh-status and does NOT immediately fire a refresh POST while JOIN is active", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy.mockResolvedValue(runningStatus("ingesting"));
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // Status polled with the handed-off job id…
+      expect(statusSpy).toHaveBeenCalledWith("u1");
+      // …and NO refresh/bootstrap/GET kicked off while the join is active.
+      expect(refreshSpy).not.toHaveBeenCalled();
+      expect(bootstrapSpy).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // Minimal progress UI is present.
+      expect(screen.getByTestId("cold-start-progress")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("updates phase progress copy as the running phase advances", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy
+        .mockResolvedValueOnce(runningStatus("ingesting"))
+        .mockResolvedValue(runningStatus("matching"));
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByTestId("cold-start-progress").textContent).toBe("Gathering sources…");
+      // Next 2s poll reports the matching phase → copy updates in place.
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.getByTestId("cold-start-progress").textContent).toBe("Matching your beat…");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("running → done exits JOIN and renders loaded data via GET (no duplicate refresh POST)", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy
+        .mockResolvedValueOnce(runningStatus("clustering"))
+        .mockResolvedValue(doneStatus);
+      fetchSpy.mockResolvedValue({
+        ...OK_RESULT,
+        payload: {
+          contractVersion: CONTRACT_VERSION,
+          stories: [makeStoryDto({ id: "j1", title: "Joined Story" })],
+        },
+      });
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // running
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // done → load
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush GET render
+      expect(screen.getByText("Joined Story")).toBeInTheDocument();
+      // Loaded via GET; the prefetch already ran the refresh — no duplicate POST.
+      expect(fetchSpy).toHaveBeenCalled();
+      expect(refreshSpy).not.toHaveBeenCalled();
+      expect(bootstrapSpy).not.toHaveBeenCalled();
+      // Progress UI is gone once the data renders.
+      expect(screen.queryByTestId("cold-start-progress")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("running → failed exits JOIN and routes into the clustering-failed empty path (no auto-retry)", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy
+        .mockResolvedValueOnce(runningStatus("clustering"))
+        .mockResolvedValue(failedStatus);
+      // The fail-closed snapshot the GET returns: 0 stories, clusteringFailed.
+      fetchSpy.mockResolvedValue({
+        ...OK_RESULT,
+        clusteringFailed: true,
+        clusteringFailureReason: "timeout",
+      });
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // running
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // failed → load
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush GET render
+      expect(screen.getByTestId("dashboard-clustering-failed")).toBeInTheDocument();
+      // GET loaded the fail-closed snapshot; no duplicate refresh POST, no auto-retry.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out at 60s → warning toast + falls back to the existing loader path (refresh POST)", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy.mockResolvedValue(runningStatus("ingesting")); // never settles
+      refreshSpy.mockResolvedValue(OK_RESULT);
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // No fallback load yet while still polling.
+      expect(refreshSpy).not.toHaveBeenCalled();
+      // Cross the 60s budget → timeout.
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush fallback loader
+      expect(notifyWarningSpy).toHaveBeenCalledTimes(1);
+      // Falls back to the existing onboarding loader path: POST /refresh.
+      expect(refreshSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("short-circuits on a terminal HTTP error (404) → immediate fallback, no 60s wait", async () => {
+    vi.useFakeTimers();
+    try {
+      // The status endpoint forbids/misses the job — retrying can never recover.
+      statusSpy.mockRejectedValue(new MockDashboardFetchError("http", "not found", 404));
+      refreshSpy.mockResolvedValue(OK_RESULT);
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      // First poll (t=0) rejects with 404 → immediate terminal fallback. No need
+      // to advance anywhere near the 60s budget.
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush fallback loader
+      expect(notifyWarningSpy).toHaveBeenCalledTimes(1);
+      // Fell back to the existing loader path immediately…
+      expect(refreshSpy).toHaveBeenCalled();
+      // …and only polled once (did NOT keep retrying to the deadline).
+      expect(statusSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("also short-circuits on a 403 terminal HTTP error", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy.mockRejectedValue(new MockDashboardFetchError("http", "forbidden", 403));
+      refreshSpy.mockResolvedValue(OK_RESULT);
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(notifyWarningSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy).toHaveBeenCalled();
+      expect(statusSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps retrying transient errors (network / 500) until the 60s deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      // Network errors and non-terminal HTTP statuses must NOT short-circuit.
+      statusSpy
+        .mockRejectedValueOnce(new MockDashboardFetchError("network", "offline"))
+        .mockRejectedValue(new MockDashboardFetchError("http", "server error", 500));
+      refreshSpy.mockResolvedValue(OK_RESULT);
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // Still polling after the first failure — no early fallback.
+      expect(notifyWarningSpy).not.toHaveBeenCalled();
+      expect(refreshSpy).not.toHaveBeenCalled();
+      // Multiple retries occur as the budget elapses…
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(statusSpy.mock.calls.length).toBeGreaterThan(1);
+      // …and only at the 60s deadline do we fall back.
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(notifyWarningSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores JOIN mode and uses the normal loader when no coldStartJobId is present", async () => {
+    fetchSpy.mockResolvedValue(OK_RESULT);
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt({ bootstrap: true, forceRefresh: true }); // no coldStartJobId
+    await screen.findByTestId("dashboard-empty");
+    // Existing behavior: forceRefresh path POSTs /refresh; status never polled.
+    expect(refreshSpy).toHaveBeenCalled();
+    expect(statusSpy).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("cold-start-progress")).toBeNull();
   });
 });
