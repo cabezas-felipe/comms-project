@@ -2065,15 +2065,28 @@ export async function runRefreshPipeline({
   // surfaced on `_meta.clusterCap` for both the full-run and watermark-skip
   // paths.  Watermarking still keys off `dedupedItems` (clusterInputItems is a
   // deterministic function of it, so the skip decision is unchanged).
-  const clusterCapResult = applyClusterInputCap(dedupedItems);
+  // Slice 3 (cold_start): prefer the active profile's `clusterInputCap` when it
+  // is a finite integer > 0, else fall back to the global CLUSTER_INPUT_CAP.
+  // cold_start tightens this to 10; all other profiles leave it unset and keep
+  // the default 15.
+  const clusterInputCapEffective =
+    Number.isInteger(profile.clusterInputCap) && profile.clusterInputCap > 0
+      ? profile.clusterInputCap
+      : CLUSTER_INPUT_CAP;
+  const clusterCapResult = applyClusterInputCap(dedupedItems, clusterInputCapEffective);
   const clusterInputItems = clusterCapResult.clusterInputItems;
-  const clusterCapDiagnostics = clusterCapResult.diagnostics;
+  // Additive: surface the cap actually used this run so profile-on (cold_start
+  // 10) vs baseline (15) is auditable from `_meta.clusterCap` without re-deriving.
+  const clusterCapDiagnostics = {
+    ...clusterCapResult.diagnostics,
+    clusterInputCapEffective,
+  };
   if (clusterCapDiagnostics.clusterDroppedCount > 0) {
     console.log(
       `[pipeline.cluster-cap] deduped=${clusterCapDiagnostics.dedupedCount} ` +
         `clusterInput=${clusterCapDiagnostics.clusterInputCount} ` +
         `dropped=${clusterCapDiagnostics.clusterDroppedCount} ` +
-        `cap=${CLUSTER_INPUT_CAP}`
+        `cap=${clusterInputCapEffective}`
     );
   }
   // Slice 7 (non-overlap): the pre-cluster stage is the two spans that bracket
