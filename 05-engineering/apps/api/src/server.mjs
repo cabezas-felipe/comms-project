@@ -769,16 +769,29 @@ app.put("/api/settings", async (req, res) => {
     // any kickoff failure leaves the settings write/response untouched and just
     // omits `_meta.refreshJobId`.
     const _meta = { extractionStatus };
+    // Slice 11: one targeted boundary line recording the prefetch decision —
+    // started (new job) | joined (existing in-flight) | skipped (no narrative /
+    // extraction not succeeded) | error (kickoff threw). No payload/secret data.
+    let prefetchOutcome = "skipped";
     if (onboardingRawText && extractionStatus === "succeeded") {
+      const existing = getJob(identity.userId);
+      const wasRunning = !!existing && existing.status === JOB_STATUS.RUNNING;
       try {
         const refreshJobId = _refreshPrefetch.start(identity);
-        if (refreshJobId) _meta.refreshJobId = refreshJobId;
+        if (refreshJobId) {
+          _meta.refreshJobId = refreshJobId;
+          prefetchOutcome = wasRunning ? "joined" : "started";
+        }
       } catch (prefetchErr) {
+        prefetchOutcome = "error";
         console.error(
           `[onboarding.prefetch] cold-start kickoff failed for user ${identity.userId}: ${prefetchErr instanceof Error ? prefetchErr.message : prefetchErr}`
         );
       }
     }
+    console.log(
+      `[onboarding.prefetch] user=${identity.userId} extraction=${extractionStatus} prefetch=${prefetchOutcome} refreshJobId=${_meta.refreshJobId ?? "none"}`
+    );
     res.json({ ...settingsToReturn, _meta });
   } catch (error) {
     trackServerEvent("api_error", {
@@ -2015,6 +2028,15 @@ app.post("/api/dashboard/refresh", async (req, res) => {
   const refreshProfile = profileParam === "cold_start" ? "cold_start" : null;
   const interactive = req.query?.interactive === "1";
   const { httpStatus, body } = await _refreshExecutor.execute(identity, { refreshProfile, interactive });
+  // Slice 11: one targeted line when a retry explicitly requests the default
+  // profile (Slice 10 retry contract), recording requested vs effective so QA
+  // can confirm cold-start gating never reshapes a default retry.
+  if (profileParam === "default") {
+    const effective = body?._meta?.profile?.name ?? "default";
+    console.log(
+      `[dashboard.refresh] user=${identity.userId} profileRequested=default profileEffective=${effective}`
+    );
+  }
   res.status(httpStatus).json(body);
 });
 
@@ -2029,6 +2051,8 @@ app.get("/api/dashboard/refresh-status/:jobId", async (req, res) => {
   if (!identity) return;
   const { jobId } = req.params;
   if (jobId !== identity.userId) {
+    // Slice 11: targeted boundary log (safe identifiers only).
+    console.log(`[dashboard.refresh-status] user=${identity.userId} jobId=${jobId} result=forbidden`);
     return res.status(403).json({
       code: "FORBIDDEN_REFRESH_JOB",
       message: "You may only read your own refresh job.",
@@ -2036,10 +2060,21 @@ app.get("/api/dashboard/refresh-status/:jobId", async (req, res) => {
   }
   const job = getJob(jobId);
   if (!job) {
+    console.log(`[dashboard.refresh-status] user=${identity.userId} jobId=${jobId} result=not_found`);
     return res.status(404).json({
       code: "JOB_NOT_FOUND",
       message: "No refresh job found for this id.",
     });
+  }
+  // Slice 11 hardening: a dashboard JOIN polls this endpoint every 2s, so the
+  // running-state OK line repeats per tick.  Log terminal outcomes (done/failed)
+  // always, but suppress the repetitive running OK by default — opt back in via
+  // TEMPO_LOG_REFRESH_STATUS_RUNNING=true when debugging the poll loop.
+  const shouldLogRunning = process.env.TEMPO_LOG_REFRESH_STATUS_RUNNING === "true";
+  if (job.status !== JOB_STATUS.RUNNING || shouldLogRunning) {
+    console.log(
+      `[dashboard.refresh-status] user=${identity.userId} jobId=${jobId} result=ok status=${job.status} phase=${job.phase}`
+    );
   }
   // Minimal contract only — no timestamps or internal fields.
   return res.status(200).json({

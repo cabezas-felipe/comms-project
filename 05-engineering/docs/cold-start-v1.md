@@ -51,3 +51,7 @@ Deliver a fast, accurate first dashboard experience for new users while preservi
 - Scheduled ingestion warming.
 - Haiku (or any lower-quality) clustering fallback.
 - Deterministic extraction fallback path.
+
+## QA
+
+Manual smoke checklist for this flow: [Cold-start QA — manual smoke runbook](./runbook-refresh-slo.md#cold-start-qa--manual-smoke-runbook).
