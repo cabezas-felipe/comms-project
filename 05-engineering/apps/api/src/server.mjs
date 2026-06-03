@@ -30,6 +30,7 @@ import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
 import { resolveProductionTranslateFn } from "./ai/openai-translator.mjs";
 import { runRefreshPipeline, enrichWhyItMattersForStories } from "./dashboard/refresh-pipeline.mjs";
+import { createJob, getJob, completeJob, JOB_STATUS } from "./dashboard/refresh-job.mjs";
 import {
   createEmbeddingSemanticScorer,
   resolveSemanticTagConfig,
@@ -762,7 +763,23 @@ app.put("/api/settings", async (req, res) => {
       sourceCount: (settingsToReturn.traditionalSources?.length ?? 0) + (settingsToReturn.socialSources?.length ?? 0),
       identitySource: identity.source,
     });
-    res.json({ ...settingsToReturn, _meta: { extractionStatus } });
+    // Slice 6: cold-start prefetch kickoff. After a successful onboarding save +
+    // extraction, start (or join) a cold-start refresh so the dashboard's first
+    // paint can join the in-flight work. Fire-and-forget and fully non-fatal —
+    // any kickoff failure leaves the settings write/response untouched and just
+    // omits `_meta.refreshJobId`.
+    const _meta = { extractionStatus };
+    if (onboardingRawText && extractionStatus === "succeeded") {
+      try {
+        const refreshJobId = _refreshPrefetch.start(identity);
+        if (refreshJobId) _meta.refreshJobId = refreshJobId;
+      } catch (prefetchErr) {
+        console.error(
+          `[onboarding.prefetch] cold-start kickoff failed for user ${identity.userId}: ${prefetchErr instanceof Error ? prefetchErr.message : prefetchErr}`
+        );
+      }
+    }
+    res.json({ ...settingsToReturn, _meta });
   } catch (error) {
     trackServerEvent("api_error", {
       route: "/api/settings",
@@ -1876,6 +1893,82 @@ export const _whyEnricher = { enrich: enrichSnapshotWhyItMatters };
  * tests replace it inside a `try/finally` and restore the prior reference.
  */
 export const _refreshExecutor = { execute: executeRefreshFlow };
+
+/**
+ * Slice 6: start (or join) a user's cold-start prefetch refresh.
+ *
+ * `jobId === userId`.  If a refresh job is already running for this user, we
+ * JOIN it (return the existing jobId, start nothing new).  Otherwise we register
+ * a running job at the `ingesting` phase and kick off the cold-start refresh
+ * fire-and-forget — the settings response never blocks on refresh completion.
+ * When the executor settles, the job is marked done (with story count) or
+ * failed.  Returns the jobId so the caller can surface it on `_meta.refreshJobId`.
+ */
+function startColdStartPrefetch(identity) {
+  const userId = identity.userId;
+  const existing = getJob(userId);
+  if (existing && existing.status === JOB_STATUS.RUNNING) {
+    // Already in flight — join it, don't double-run.
+    return userId;
+  }
+  createJob(userId); // running, phase: ingesting
+  // Mark the job terminal defensively — a same-user createJob/reset between
+  // kickoff and settle could remove the entry; never let that throw into the
+  // fire-and-forget chain.
+  const settle = (args) => {
+    try {
+      completeJob(userId, args);
+    } catch {
+      /* job already replaced/cleared — nothing to settle */
+    }
+  };
+  // Kick off now (so the run is observably started) but DO NOT await completion.
+  // Map the executor's terminal `kind` to a job outcome — only kinds that
+  // actually served the user data settle as `done`; error kinds settle `failed`.
+  Promise.resolve(_refreshExecutor.execute(identity, { refreshProfile: "cold_start" }))
+    .then((result) => {
+      const kind = result?.kind;
+      switch (kind) {
+        // Data was produced or a valid snapshot was (re-)served to the user.
+        case "ran":
+        case "unchanged":
+        case "clustering_failed_preserved":
+        case "error_fallback": {
+          const stories = result?.body?.stories;
+          settle({ ok: true, storyCount: Array.isArray(stories) ? stories.length : null });
+          return;
+        }
+        // Terminal failures — surface the kind as the reason.
+        case "error_500":
+        case "validation_not_ready":
+          settle({ ok: false, failureReason: kind });
+          return;
+        // A concurrent refresh already holds the lock. Settle terminally rather
+        // than leave our just-created job `running` forever — a stuck running
+        // job would make every later save keep joining it and wedge future
+        // prefetch attempts. The concurrent run owns the actual refresh.
+        case "in_flight":
+          console.log(`[onboarding.prefetch] cold-start joined in-flight refresh for user ${userId}; settling terminally to avoid stale-running state`);
+          settle({ ok: false, failureReason: "in_flight_joined" });
+          return;
+        default:
+          // Unknown/missing kind → fail conservatively rather than claim success.
+          console.warn(`[onboarding.prefetch] cold-start refresh returned unknown kind="${kind}" for user ${userId}`);
+          settle({ ok: false, failureReason: "unknown_kind" });
+          return;
+      }
+    })
+    .catch((err) => {
+      console.error(
+        `[onboarding.prefetch] cold-start refresh failed for user ${userId}: ${err instanceof Error ? err.message : err}`
+      );
+      settle({ ok: false, failureReason: "refresh_error" });
+    });
+  return userId;
+}
+
+/** Mutable hook so tests can stub/observe the prefetch kickoff. */
+export const _refreshPrefetch = { start: startColdStartPrefetch };
 
 /**
  * Slice 3 test hook: direct access to the refresh SLO evaluator and its
