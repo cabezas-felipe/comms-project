@@ -7888,6 +7888,58 @@ test("C1 integration: no cap effect when dedupedItems <= 15", async () => {
   assert.deepEqual(log.clusterCap.clusterDroppedSourceIds, []);
 });
 
+// ─── Slice 3: profile-aware cluster input cap ────────────────────────────────
+
+test("Slice 3: cold_start tightens the cluster cap to 10 (effective cap surfaced)", async () => {
+  // 14 Lane-1 items (default fixtures carry a geo signal from a selected source,
+  // so cold_start's Lane 2 defer doesn't strip them) — more than the cold_start
+  // cap of 10 so the tighter cap actually bites.
+  const rawItems = Array.from({ length: 14 }, (_, i) =>
+    makeItem({ sourceId: `src-${String(i).padStart(2, "0")}`, minutesAgo: i * 10 })
+  );
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+    beatFitEnabled: false,
+  });
+  assert.ok(clusterInput, "clusterFn must be invoked");
+  assert.ok(clusterInput.length <= 10, "cold_start passes at most 10 candidates to clustering");
+  assert.equal(log.clusterCap.clusterInputCount, clusterInput.length,
+    "diagnostics clusterInputCount matches the actual clusterFn input");
+  assert.ok(log.clusterCap.clusterInputCount <= 10);
+  assert.equal(log.clusterCap.clusterInputCapEffective, 10,
+    "cold_start surfaces the profile cap (10) as the effective cap");
+});
+
+test("Slice 3: default profile keeps CLUSTER_INPUT_CAP (15) as the effective cap", async () => {
+  // 20 items under the default profile — the global cap (15) still governs, and
+  // the effective-cap diagnostic reports 15 (not the cold_start 10).
+  const rawItems = Array.from({ length: 20 }, (_, i) =>
+    makeItem({ sourceId: `src-${String(i).padStart(2, "0")}`, minutesAgo: i * 10 })
+  );
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+  assert.ok(clusterInput, "clusterFn must be invoked");
+  assert.equal(clusterInput.length, CLUSTER_INPUT_CAP, "default cap (15) still governs");
+  assert.equal(clusterInput.length, 15);
+  assert.equal(log.clusterCap.clusterInputCount, 15);
+  assert.equal(log.clusterCap.clusterInputCapEffective, CLUSTER_INPUT_CAP,
+    "default profile surfaces the global cap (15) as the effective cap");
+  assert.equal(log.clusterCap.clusterInputCapEffective, 15);
+});
+
 // ─── C2: clustering repair diagnostics plumbing ──────────────────────────────
 
 test("C2 plumbing: repair diagnostics from a successful clusterFn surface on _meta", async () => {
