@@ -990,13 +990,15 @@ function emitRefreshObservability({ userId, log, ingestionSource }) {
  * (`dashboard_refreshed`, `dashboard_refresh_skipped`, `api_error`).  Bootstrap
  * adds its own `dashboard_bootstrap` event on top.
  */
-async function executeRefreshFlow(identity, { interactive = false } = {}) {
+async function executeRefreshFlow(identity, { refreshProfile = null, interactive = false } = {}) {
   const startedAt = Date.now();
-  // Slice 4: onboarding-driven interactive entries request the bounded
-  // fast-path profile (tighter geo Lane-2 budget + clustering envelope) for a
-  // 20–30s first paint.  The heartbeat/scheduled and bootstrap paths leave
-  // `interactive` false, so background cadence behavior is unchanged.
-  const refreshProfile = interactive ? "interactive" : null;
+  // Slice 4: a refresh requests a latency-shaping profile via `refreshProfile`
+  // (preferred).  The legacy `interactive: true` flag is kept for back-compat
+  // and maps to a requested `cold_start`.  The heartbeat/scheduled and bootstrap
+  // paths request neither, keeping the default profile so background cadence is
+  // unchanged.  NOTE: this is the *requested* profile — cold-start gating below
+  // (once `priorSnapshot` is known) may downgrade the *effective* profile.
+  const requestedProfile = refreshProfile ?? (interactive ? "cold_start" : null);
   // `lastCheckedAt` represents "when did the server initiate / complete a feed
   // check for this user".  Unlike `refreshedAt`, it advances on every refresh
   // attempt — including no-op outcomes (watermark unchanged, in_flight skip,
@@ -1086,6 +1088,20 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
       // signal and the recall stage falls through to settings-only profile.
       _narrativeRepo.read(identity.userId).catch(() => null),
     ]);
+
+    // Slice 4: cold-start gating — the `cold_start` profile is only valid for a
+    // brand-new user with no prior dashboard snapshot.  If a snapshot already
+    // exists, downgrade to the default profile for THIS run (the requested name
+    // is still surfaced additively on `_meta.profileRequested`).  Any other
+    // requested profile passes through unchanged.
+    const effectiveProfile =
+      requestedProfile === "cold_start" && priorSnapshot != null
+        ? null
+        : requestedProfile;
+    // Interactive-class runs (the cold_start / interactive fast-paths) defer the
+    // expensive whyItMatters writer so first paint isn't blocked on it.
+    const isInteractiveRun =
+      effectiveProfile === "cold_start" || effectiveProfile === "interactive";
 
     // D-064a: apply the idempotent keyword-dedupe backfill so pipeline
     // scoring uses clean keywords even if the user hasn't hit GET /api/settings
@@ -1243,13 +1259,13 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
       priorStoryCount,
       everSeenMetaStoryIds: priorEverSeenMetaStoryIds,
       priorStoriesById,
-      // Slice 4: latency-shaping profile for this run ("interactive" for the
-      // onboarding fast-path, null for scheduled/background/bootstrap).
-      refreshProfile,
-      // Slice 5: interactive runs defer the expensive whyItMatters writer so
-      // first paint isn't blocked on it; an async enrichment pass (scheduled
+      // Slice 4: effective latency-shaping profile for this run (after cold-start
+      // gating); null for scheduled/background/bootstrap.
+      refreshProfile: effectiveProfile,
+      // Slice 5: interactive-class runs defer the expensive whyItMatters writer
+      // so first paint isn't blocked on it; an async enrichment pass (scheduled
       // after the snapshot write below) upgrades the copy in place.
-      deferWhyItMatters: interactive,
+      deferWhyItMatters: isInteractiveRun,
     });
 
     // Slice 7: fold the server-measured ingestionMs into the pipeline's
@@ -1548,6 +1564,10 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
     // Slice 4: persist the latency-shaping profile so GET /api/dashboard can
     // report which profile produced this snapshot without replaying the run.
     if (log.profile !== undefined) lastRunMeta.profile = log.profile;
+    // Slice 4: when cold-start gating downgraded the requested profile, persist
+    // the originally-requested name additively so GET /api/dashboard can report
+    // that the gate fired. Omitted when requested === effective.
+    if (requestedProfile !== effectiveProfile) lastRunMeta.profileRequested = requestedProfile;
     // Slice 5: persist the progressive-enrichment state so GET /api/dashboard
     // (the client's poll surface) reports pending/completed counts without a
     // replay.  Additive + tolerant for older clients.
@@ -1564,7 +1584,7 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
     // refresh generation (watermark), so a newer refresh landing first turns
     // this into a safe no-op.  Fire-and-forget: enrichment failures never
     // affect the user's response (the deferred fallback copy stays valid).
-    if (interactive && log.whyEnrichment?.deferred === true && finalPayload.stories.length > 0) {
+    if (isInteractiveRun && log.whyEnrichment?.deferred === true && finalPayload.stories.length > 0) {
       const generation = finalPayload._watermark;
       const basePayload = finalPayload;
       void Promise.resolve()
@@ -1631,6 +1651,13 @@ async function executeRefreshFlow(identity, { interactive = false } = {}) {
           // immediate refresh response can confirm the interactive fast-path
           // was active and carry the timing-relevant knobs alongside `timings`.
           profile: log.profile,
+          // Slice 4 (cold-start gating): when the requested profile was
+          // downgraded (e.g. cold_start requested but a prior snapshot exists),
+          // surface the originally-requested name additively so callers can see
+          // the gate fired. Omitted when requested === effective.
+          ...(requestedProfile !== effectiveProfile
+            ? { profileRequested: requestedProfile }
+            : {}),
           // Slice 5: progressive whyItMatters enrichment state.  On an
           // interactive first paint this is `{ deferred:true, pending:N }`,
           // signaling the client to poll GET /api/dashboard until pending hits
@@ -1886,12 +1913,15 @@ export const _dueUserOrchestrator = {
 app.post("/api/dashboard/refresh", async (req, res) => {
   const identity = await requireIdentity(req, res);
   if (!identity) return;
-  // Slice 4: the onboarding-driven interactive entry POSTs `?interactive=1` to
-  // request the bounded fast-path profile (20–30s first paint).  The heartbeat
-  // and any other refresh caller omit it, keeping the default profile — so
-  // scheduled/background cadence behavior is unchanged.
+  // Slice 4: a refresh requests a latency-shaping profile via `?profile=<name>`
+  // (preferred) — currently only `cold_start` is recognized; any other/unknown
+  // value falls through to the default profile.  `?interactive=1` is kept as a
+  // legacy alias that maps to a requested `cold_start`.  The heartbeat and other
+  // internal callers omit both, so scheduled/background cadence is unchanged.
+  const profileParam = typeof req.query?.profile === "string" ? req.query.profile : null;
+  const refreshProfile = profileParam === "cold_start" ? "cold_start" : null;
   const interactive = req.query?.interactive === "1";
-  const { httpStatus, body } = await _refreshExecutor.execute(identity, { interactive });
+  const { httpStatus, body } = await _refreshExecutor.execute(identity, { refreshProfile, interactive });
   res.status(httpStatus).json(body);
 });
 
