@@ -97,6 +97,9 @@ const JOIN_PHASE_COPY: Record<string, string> = {
   clustering: "Assembling stories…",
 };
 const JOIN_PROGRESS_FALLBACK = "Preparing your first stories…";
+// Shown when the join ends without a terminal job result (budget elapsed or a
+// terminal 403/404 from the status endpoint) before falling back to the loader.
+const JOIN_FALLBACK_WARNING = "Still preparing your first stories — loading what we have.";
 
 function dtoToStory(dto: StoryDto): Story {
   return {
@@ -444,6 +447,14 @@ export default function Dashboard() {
     let canceled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const deadline = Date.now() + JOIN_MAX_MS;
+    // End the join without a terminal job result (budget elapsed or terminal
+    // 403/404) and hand off to the normal loader with one non-blocking warning.
+    // Reuses the `timeout` state so the loader's fallback routing is identical
+    // for both causes.
+    const fallbackToLoader = () => {
+      setJoinState("timeout");
+      notifyWarning(JOIN_FALLBACK_WARNING);
+    };
     const tick = async () => {
       if (canceled) return;
       try {
@@ -470,16 +481,14 @@ export default function Dashboard() {
           (error.status === 403 || error.status === 404)
         ) {
           if (canceled) return;
-          setJoinState("timeout");
-          notifyWarning("Still preparing your first stories — loading what we have.");
+          fallbackToLoader();
           return;
         }
         // Transient poll failure — keep trying until the deadline.
       }
       if (canceled) return;
       if (Date.now() >= deadline) {
-        setJoinState("timeout");
-        notifyWarning("Still preparing your first stories — loading what we have.");
+        fallbackToLoader();
         return;
       }
       timer = setTimeout(tick, JOIN_POLL_INTERVAL_MS);
