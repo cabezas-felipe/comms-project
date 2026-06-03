@@ -183,9 +183,28 @@ export default function Onboarding() {
     // fast-path profile (bounded geo + clustering envelope) so first stories
     // land in the 20–30s band while a human waits.  Scheduled/background
     // refreshes are unaffected (they never set `forceRefresh`).
+    //
+    // Slice 8: when the settings save kicked off a cold-start prefetch (Slice 6),
+    // forward its job handle as `coldStartJobId` so the Dashboard can later join
+    // the in-flight refresh.  Absent/blank → navigate exactly as before; the job
+    // id never blocks navigation.
+    // Defensive: a malformed backend `_meta` could carry a non-string
+    // refreshJobId; only trim when it's actually a string, otherwise treat as
+    // absent (never let `.trim()` throw into the navigation path).
+    const rawRefreshJobId = saveResult._meta?.refreshJobId;
+    const coldStartJobId =
+      typeof rawRefreshJobId === "string" ? rawRefreshJobId.trim() : undefined;
+    const handoffState: {
+      bootstrap: true;
+      forceRefresh: true;
+      coldStartJobId?: string;
+    } = { bootstrap: true, forceRefresh: true };
+    if (coldStartJobId) {
+      handoffState.coldStartJobId = coldStartJobId;
+    }
     navigate(
       import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard",
-      { state: { bootstrap: true, forceRefresh: true } }
+      { state: handoffState }
     );
 
     // Surface backend extraction failure — save already committed, user can fix in Settings.

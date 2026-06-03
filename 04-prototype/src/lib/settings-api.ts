@@ -65,6 +65,9 @@ export function defaultSettingsPayload(): SettingsPayload {
 export type SaveSettingsResult = SettingsPayload & {
   _meta?: {
     extractionStatus?: "not_attempted" | "succeeded" | "failed";
+    // Slice 6/8: cold-start prefetch job handle (=== userId) returned when the
+    // onboarding save kicked off a refresh; surfaced for the dashboard handoff.
+    refreshJobId?: string;
   };
 };
 

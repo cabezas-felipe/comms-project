@@ -280,3 +280,117 @@ describe("Onboarding — extraction status toast", () => {
     expect(notify.notifyWarning).not.toHaveBeenCalled();
   });
 });
+
+describe("Onboarding — cold-start handoff (Slice 8)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockNavigate.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("forwards coldStartJobId in navigate state when _meta.refreshJobId is present", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      _meta: { extractionStatus: "succeeded", refreshJobId: "user-abc" },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalled();
+    });
+    const [, opts] = mockNavigate.mock.calls[0];
+    expect(opts.state).toEqual({
+      bootstrap: true,
+      forceRefresh: true,
+      coldStartJobId: "user-abc",
+    });
+  });
+
+  it("trims surrounding whitespace from refreshJobId before forwarding", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      _meta: { extractionStatus: "succeeded", refreshJobId: "  user-xyz  " },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalled();
+    });
+    const [, opts] = mockNavigate.mock.calls[0];
+    expect(opts.state.coldStartJobId).toBe("user-xyz");
+  });
+
+  it("omits coldStartJobId from navigate state when _meta.refreshJobId is absent", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      _meta: { extractionStatus: "succeeded" },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalled();
+    });
+    const [, opts] = mockNavigate.mock.calls[0];
+    expect(opts.state).toEqual({ bootstrap: true, forceRefresh: true });
+    expect(opts.state).not.toHaveProperty("coldStartJobId");
+  });
+
+  it("omits coldStartJobId when refreshJobId is blank/whitespace, navigating exactly as before", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      _meta: { extractionStatus: "succeeded", refreshJobId: "   " },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalled();
+    });
+    const [, opts] = mockNavigate.mock.calls[0];
+    expect(opts.state).toEqual({ bootstrap: true, forceRefresh: true });
+  });
+
+  it("does not throw and omits coldStartJobId when refreshJobId is a non-string value", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      // Simulate malformed backend meta: a non-string truthy value that would
+      // throw if `.trim()` were called on it directly.
+      _meta: { extractionStatus: "succeeded", refreshJobId: 123 as unknown as string },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalled();
+    });
+    // Save still succeeded — no error toast — and navigation omits the bad id.
+    expect(notify.notifyError).not.toHaveBeenCalled();
+    const [, opts] = mockNavigate.mock.calls[0];
+    expect(opts.state).toEqual({ bootstrap: true, forceRefresh: true });
+    expect(opts.state).not.toHaveProperty("coldStartJobId");
+  });
+
+  it("navigates normally (no coldStartJobId) when _meta is entirely absent", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce(BASE_PAYLOAD);
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalled();
+    });
+    const [, opts] = mockNavigate.mock.calls[0];
+    expect(opts.state).toEqual({ bootstrap: true, forceRefresh: true });
+  });
+});

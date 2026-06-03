@@ -438,5 +438,30 @@ describe("saveSettingsPayload — _meta pass-through", () => {
     );
     expect(result._meta).toBeUndefined();
   });
+
+  it("preserves _meta.refreshJobId (cold-start prefetch handle) when present", async () => {
+    const apiResponse = {
+      contractVersion: CONTRACT_VERSION,
+      topics: ["Diplomatic relations"],
+      keywords: [],
+      geographies: ["US"],
+      traditionalSources: [],
+      socialSources: [],
+      _meta: { extractionStatus: "succeeded", refreshJobId: "user-123" },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => apiResponse,
+    } as Response);
+
+    const result = await saveSettingsPayload(
+      { contractVersion: CONTRACT_VERSION, topics: ["Diplomatic relations"], keywords: [], geographies: ["US"], traditionalSources: [], socialSources: [] },
+      { onboardingRawText: "Colombia diplomacy." }
+    );
+    expect(result._meta?.refreshJobId).toBe("user-123");
+    // Extraction status is preserved alongside the job handle.
+    expect(result._meta?.extractionStatus).toBe("succeeded");
+  });
 });
 
