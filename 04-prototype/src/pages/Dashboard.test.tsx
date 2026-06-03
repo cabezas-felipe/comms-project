@@ -303,20 +303,24 @@ describe("Dashboard load states (no fake-story fallback)", () => {
     expect(screen.queryByText("No stories yet.")).toBeNull();
   });
 
-  it("clustering-failed empty state offers a Refresh action that re-invokes the loader", async () => {
-    fetchSpy
-      .mockResolvedValueOnce({
-        ...OK_RESULT,
-        clusteringFailed: true,
-        clusteringFailureReason: "error",
-      })
-      .mockResolvedValueOnce(OK_RESULT);
+  it("Slice 10: clustering-failed Refresh action retries via the default-profile endpoint", async () => {
+    fetchSpy.mockResolvedValueOnce({
+      ...OK_RESULT,
+      clusteringFailed: true,
+      clusteringFailureReason: "error",
+    });
+    // Slice 10: retry routes through refreshDashboard (POST), not a GET.
+    refreshSpy.mockResolvedValue(OK_RESULT);
     renderAt(null);
     expect(await screen.findByTestId("dashboard-clustering-failed")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
     // Second load is a normal empty → generic quiet-beat copy returns.
     expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    // Initial load was the GET; the retry ran the default-profile refresh POST.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      endpoint: "/api/dashboard/refresh?profile=default",
+    });
   });
 
   it("quiet beat (empty stories, clusteringFailed=false) keeps the generic empty state", async () => {
@@ -342,15 +346,19 @@ describe("Dashboard load states (no fake-story fallback)", () => {
     expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
   });
 
-  it("retry button re-invokes the loader after an error", async () => {
-    fetchSpy
-      .mockRejectedValueOnce(new MockDashboardFetchError("network", "boom"))
-      .mockResolvedValueOnce(OK_RESULT);
+  it("Slice 10: error-state retry re-invokes the loader via the default-profile endpoint", async () => {
+    fetchSpy.mockRejectedValueOnce(new MockDashboardFetchError("network", "boom"));
+    // Slice 10: retry runs the default-profile refresh POST (not a GET).
+    refreshSpy.mockResolvedValue(OK_RESULT);
     renderAt(null);
     expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /try again/i }));
     expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    // Initial failed load was the GET; the retry ran the default-profile refresh.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).toHaveBeenCalledWith({
+      endpoint: "/api/dashboard/refresh?profile=default",
+    });
   });
 });
 
@@ -1126,20 +1134,21 @@ describe("Dashboard loader records refresh attempts (bootstrap path only)", () =
     expect(options?.advanceClock).not.toBe(false);
   });
 
-  it("retry of a failed GET does NOT engage the attempt lifecycle", async () => {
-    fetchSpy
-      .mockRejectedValueOnce(new MockDashboardFetchError("network", "boom"))
-      .mockResolvedValueOnce(OK_RESULT);
+  it("Slice 10: retry of a failed GET engages the attempt lifecycle (it's now a refresh)", async () => {
+    fetchSpy.mockRejectedValueOnce(new MockDashboardFetchError("network", "boom"));
+    refreshSpy.mockResolvedValue(OK_RESULT);
     renderAt(null);
     expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
+    // Initial GET failed → not an attempt.
+    expect(recordAttemptStartSpy).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /try again/i }));
     await screen.findByTestId("dashboard-empty");
 
-    // Two GET loads (initial + retry), neither participates in the attempt
-    // lifecycle.
-    expect(recordAttemptStartSpy).not.toHaveBeenCalled();
-    expect(recordAttemptFinishedSpy).not.toHaveBeenCalled();
+    // Slice 10: the retry runs the default-profile refresh POST, which IS a
+    // refresh attempt — the lifecycle now engages exactly once for it.
+    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
+    expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1);
   });
 
   it("calls recordAttemptFinished even when a bootstrap is canceled mid-flight (unmount)", async () => {
@@ -1613,5 +1622,58 @@ describe("Slice 9: cold-start JOIN mode", () => {
     expect(refreshSpy).toHaveBeenCalled();
     expect(statusSpy).not.toHaveBeenCalled();
     expect(screen.queryByTestId("cold-start-progress")).toBeNull();
+  });
+
+  // ─── Slice 10: retry clears JOIN and runs default profile ──────────────────
+
+  it("Slice 10: retry from a join-derived state clears join + does not resume polling, loads via default-profile refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      // Join is polling (never settles); a fail-closed snapshot is available so a
+      // Retry control is on screen once we exit the join.
+      statusSpy.mockResolvedValue({
+        jobId: "u1", status: "running", phase: "ingesting", storyCount: null, failureReason: null,
+      });
+      refreshSpy.mockResolvedValue({ ...OK_RESULT, clusteringFailed: true, clusteringFailureReason: "timeout" });
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      // JOIN owns the screen: progress shown, no refresh POST yet.
+      expect(screen.getByTestId("cold-start-progress")).toBeInTheDocument();
+      expect(refreshSpy).not.toHaveBeenCalled();
+
+      // Force a timeout so the fail-closed snapshot + Retry control render.
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const pollsBeforeRetry = statusSpy.mock.calls.length;
+
+      // User retries from the fail-closed state.
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // JOIN is cleared (no progress UI) and status polling does not resume.
+      expect(screen.queryByTestId("cold-start-progress")).toBeNull();
+      expect(statusSpy.mock.calls.length).toBe(pollsBeforeRetry);
+      // The retry ran the default-profile refresh (overriding the prior path).
+      expect(refreshSpy).toHaveBeenCalledWith({
+        endpoint: "/api/dashboard/refresh?profile=default",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Slice 10: the onboarding first paint still uses the interactive endpoint (retry-only override)", async () => {
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt({ bootstrap: true, forceRefresh: true }); // onboarding handoff, no retry yet
+    await screen.findByTestId("dashboard-empty");
+    // Untouched: the first onboarding paint requests the interactive fast-path.
+    expect(refreshSpy).toHaveBeenCalledWith({
+      endpoint: "/api/dashboard/refresh?interactive=1",
+    });
+    expect(refreshSpy).not.toHaveBeenCalledWith({
+      endpoint: "/api/dashboard/refresh?profile=default",
+    });
   });
 });
