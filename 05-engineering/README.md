@@ -243,6 +243,8 @@ Run after the think-tank onboarding blurb is saved (topics: economy / elections 
 
 `npm run cluster:probe` ([`scripts/cluster-reliability-probe.mjs`](apps/api/scripts/cluster-reliability-probe.mjs)) hammers `POST /api/dashboard/refresh` for one user N times and enforces the clustering reliability gate. Use it to baseline reliability before/after a clustering change.
 
+> **Before a pilot or a clustering-reliability merge,** run the full [Clustering MVP readiness gate](docs/clustering-mvp-gate.md) — the operator checklist that wraps the quality gate, this probe, and a manual golden sanity pass, with a signoff template and failure triage.
+
 > **Live probe** — requires the API server running (`npm run dev`) and, for `--email`, Supabase admin env (`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `apps/api/.env`). It only *observes* refresh responses; it does not change product behavior.
 
 ```sh
