@@ -31,7 +31,8 @@
     "eval:d3-quality-advisory": "node src/ai/evals/run-d3-quality-advisory.mjs",
     "eval:relevance-precision": "NODE_ENV=test node --test src/dashboard/relevance-precision-eval.test.mjs",
     "eval:why-this-matters": "node src/ai/evals/run-why-this-matters-eval.mjs",
-    "source-catalog:generate": "node src/ops/source-registry-catalog-generate.mjs"
+    "source-catalog:generate": "node src/ops/source-registry-catalog-generate.mjs",
+    "cluster:probe": "node scripts/cluster-reliability-probe.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",

@@ -237,6 +237,25 @@ Run after the think-tank onboarding blurb is saved (topics: economy / elections 
 - [ ] (Optional, before any floor change) `npm run eval:dashboard-calibration` — compare floors and confirm guardrails hold; pair the table with `?debug=1` quality review.
 - [ ] (CI / pre-PR) `npm run eval:dashboard-quality-gate` — golden + calibration in one command; must exit `0`.
 
+## Clustering reliability probe (live gate)
+
+`npm run cluster:probe` ([`scripts/cluster-reliability-probe.mjs`](apps/api/scripts/cluster-reliability-probe.mjs)) hammers `POST /api/dashboard/refresh` for one user N times and enforces the clustering reliability gate. Use it to baseline reliability before/after a clustering change.
+
+> **Live probe** — requires the API server running (`npm run dev`) and, for `--email`, Supabase admin env (`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `apps/api/.env`). It only *observes* refresh responses; it does not change product behavior.
+
+```sh
+cd 05-engineering/apps/api
+npm run cluster:probe -- --email <your-invited-email>          # 20 runs, 3s cooldown (defaults)
+npm run cluster:probe -- --user-id <uuid> --runs 20
+npm run cluster:probe -- --email <email> --runs 30 --cooldown-ms 5000 --base-url http://localhost:8787
+```
+
+`--email` is the preferred, portable mode (uses `x-recognized-email`); `--user-id` runs a single preflight first and exits clearly if the server's `x-user-id` path is not accepted.
+
+**Gate (pass requires both):** `successRate >= 0.95` (fraction of runs with `_meta.usedFallbackClustering === false`) **and** `medianStories >= 2` (median `stories.length`). Default `N = 20` runs.
+
+**Pass/fail:** exits `0` only when both thresholds hold; otherwise exits **non-zero** and prints which threshold failed. Each run logs a compact line; the final summary JSON reports `runs`, `successRate`, `medianStories`, `p95PipelineMs`, and counts by `clusteringFailureReason` / `refreshSkippedReason`. Pure helpers are unit-tested offline in [`scripts/cluster-reliability-probe.test.mjs`](apps/api/scripts/cluster-reliability-probe.test.mjs).
+
 ## Server-side cadence tick (Sub-slice 2.5)
 
 Background: Sub-slice 2.4 added the [due-user orchestrator](apps/api/src/dashboard/due-user-orchestrator.mjs) — pure due-selection (`selectDueUsers`), anchor extraction from `dashboard_snapshots` (`listSnapshotAnchors`), and `runDueRefreshes` which iterates due users through the shared `_refreshExecutor.execute` path. 2.4 left the orchestrator without a caller: the interactive `POST /api/dashboard/refresh` only fires when a browser is open.
