@@ -8104,4 +8104,142 @@ test("Slice 3 follow-up: SLO does not overcount a recovered run as a failure (te
   assert.deepEqual(recovered.breaches, [], "no breach from a recovered run");
 });
 
+// ─── PR B Step 1: Option B clustering auto-recovery tier ──────────────────────
+//
+// A non-timeout (parse/schema-style) primary clustering failure triggers ONE
+// bounded recovery attempt on a reduced (top-half, min 6) candidate set.
+// Recovery success publishes recovered stories and clears the fail-closed
+// flags; recovery failure preserves the fail-closed (0 stories) outcome. Timeout
+// failures never trigger recovery. No `gracefulFallbackClustering` buckets ever.
+
+// 10 relevant items (beat-fit bypassed) so exactly 10 reach clustering and the
+// reduced recovery cap (max(6, floor(10/2))=6) genuinely shrinks the input.
+function makeRecoveryRawItems(n = 10) {
+  return Array.from({ length: n }, (_, i) =>
+    makeItem({ sourceId: `src-${i}`, outlet: "Reuters", minutesAgo: i })
+  );
+}
+
+test("PR B recovery: non-timeout error → recovery on reduced input succeeds and publishes", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  // Recovered story references src-0 (freshest → ranked first → inside the
+  // reduced set) and carries no factual_claims, so it grounds and publishes.
+  const recoveredStory = {
+    meta_story_id: "recovered-1",
+    title: "Recovered Story",
+    subtitle: "Recovered after reduced-input retry.",
+    source_item_ids: ["src-0"],
+    summary: "Recovered.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+  };
+  let calls = 0;
+  let recoveryInputLen = null;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async (items) => {
+      calls += 1;
+      if (calls <= 2) {
+        // Primary attempts (initial + one retry) fail with a non-timeout error.
+        const err = new Error("Clustering response parse failed: schema validation");
+        err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+        throw err;
+      }
+      recoveryInputLen = items.length; // the reduced recovery set
+      return [recoveredStory];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary attempts + 1 recovery attempt");
+  assert.equal(recoveryInputLen, 6, "recovery used the reduced (50%, min 6) input");
+  assert.equal(payload.stories.length, 1, "recovered story is published");
+  assert.equal(log.usedFallbackClustering, false, "recovery clears fail-closed");
+  assert.equal(log.clusteringFailureReason, null, "no terminal failure after recovery");
+  assert.equal(log.clusteringRecoveryAttempted, true);
+  assert.equal(log.clusteringRecoverySucceeded, true);
+  assert.equal(log.clusteringRecoveryReason, null);
+  assert.equal(log.clusteringAttempts, 3, "attempt count includes the recovery attempt");
+  assert.equal(log.clusteringLatencyMs.length, 3, "one latency sample per attempt incl. recovery");
+});
+
+test("PR B recovery: recovery also fails → remains fail-closed with recovery flags set", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      const err = new Error("Clustering response parse failed: schema validation");
+      err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+      throw err;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary attempts + 1 recovery attempt");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved: zero stories (no fallback buckets)");
+  // No fabricated "* Updates"/"General Updates" buckets ever ship.
+  assert.deepEqual(payload.stories, [], "no gracefulFallbackClustering stories");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "error", "terminal reason preserved");
+  assert.equal(log.clusteringRecoveryAttempted, true);
+  assert.equal(log.clusteringRecoverySucceeded, false);
+  assert.equal(log.clusteringRecoveryReason, "error", "recovery's own failure class");
+  assert.equal(log.clusteringAttempts, 3);
+});
+
+test("PR B recovery: timeout-class failure does NOT trigger recovery", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)");
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 2, "timeout path keeps the locked 2-attempt behavior — no recovery call");
+  assert.equal(payload.stories.length, 0, "fail-closed on timeout");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "timeout");
+  assert.equal(log.clusteringRecoveryAttempted, false, "recovery not attempted for timeouts");
+  assert.equal(log.clusteringRecoverySucceeded, false);
+  assert.equal(log.clusteringRecoveryReason, null);
+  assert.equal(log.clusteringAttempts, 2);
+});
+
+test("PR B recovery: small candidate set (no genuine reduction) does NOT trigger recovery", async () => {
+  // 6 items → reduced cap max(6, floor(6/2))=6 → no actual shrink → recovery is
+  // skipped (it would be an identical retry). Locks the reducibility guard.
+  const rawItems = makeRecoveryRawItems(6);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      const err = new Error("Clustering response parse failed: schema validation");
+      err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+      throw err;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 2, "no recovery call when the set cannot be reduced");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringRecoveryAttempted, false);
+  assert.equal(log.clusteringAttempts, 2);
+});
+
 });

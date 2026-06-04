@@ -2315,6 +2315,13 @@ export async function runRefreshPipeline({
   let clusteringFailureReason = null; // 'timeout' | 'error' | null
   let clusteringAttempts = 0;
   const clusteringAttemptLatencyMs = [];
+  // PR B Step 1: Option B auto-recovery tier diagnostics.  A bounded, single
+  // extra clustering attempt on a reduced input set, triggered ONLY for a
+  // non-timeout (parse/schema-style) primary failure.  All default to the
+  // "not attempted" state so the fields are additive and stable.
+  let clusteringRecoveryAttempted = false;
+  let clusteringRecoverySucceeded = false;
+  let clusteringRecoveryReason = null; // recovery failure class ('error'|'timeout') or null
   // C2 + Slice 3: clustering JSON repair diagnostics for the last attempt
   // (success or failure both carry them via `_clusteringRepair`).  Shape
   // mirrors `EMPTY_CLUSTERING_REPAIR` — `rawFailureClass` / `schemaErrorBucket`
@@ -2372,6 +2379,62 @@ export async function runRefreshPipeline({
       console.warn(
         `[pipeline] clustering FAILED after ${clusteringAttempts} attempt(s) (reason=${clusteringFailureReason}) — publishing 0 meta-stories (fail-closed)`
       );
+    }
+
+    // PR B Step 1: Option B auto-recovery tier.  A non-timeout clustering
+    // failure (parse/schema-style, reason === "error") is frequently transient
+    // and input-size sensitive — ONE bounded retry on a reduced (top-half)
+    // candidate set can recover real stories without weakening fail-closed
+    // trust.  We deliberately do NOT retry timeout-class failures here: the
+    // primary loop already spent the latency budget, and a smaller set does not
+    // change a capacity/latency outcome.  On recovery success we publish the
+    // recovered meta-stories through the normal grounding/build path and clear
+    // the fail-closed flags; on recovery failure the existing fail-closed
+    // outcome (0 meta-stories) is preserved untouched.  No
+    // `gracefulFallbackClustering` buckets are ever produced — the trust posture
+    // is unchanged.
+    const RECOVERY_MIN_ITEMS = 6;
+    const recoveryCap = Math.max(
+      RECOVERY_MIN_ITEMS,
+      Math.floor(clusterInputItems.length / 2)
+    );
+    const recoveryInput = clusterInputItems.slice(0, recoveryCap);
+    // Recovery only runs when the reduced cap genuinely SHRINKS the input — its
+    // mechanism is "fewer items parse cleanly".  When the candidate set is
+    // already at/below the floor there is nothing to reduce, so we keep the
+    // existing fail-closed outcome rather than burn an identical extra call.
+    if (
+      usedFallbackClustering &&
+      clusteringFailureReason === "error" &&
+      recoveryInput.length < clusterInputItems.length
+    ) {
+      clusteringRecoveryAttempted = true;
+      clusteringAttempts += 1;
+      const recoveryStartedAt = Date.now();
+      try {
+        rawMetaStories = await clusterFn(recoveryInput, settings, clusterModel, clusterCallOpts);
+        clusteringAttemptLatencyMs.push(Date.now() - recoveryStartedAt);
+        clusteringRepair = readClusteringRepairDiagnostics(rawMetaStories);
+        // Recovered: publish recovered stories normally and clear the
+        // fail-closed flags the primary loop set.
+        clusteringRecoverySucceeded = true;
+        usedFallbackClustering = false;
+        clusteringFailureReason = null;
+        console.warn(
+          `[pipeline] clustering RECOVERED on reduced input (${recoveryInput.length} of ${clusterInputItems.length} items) — publishing recovered meta-stories`
+        );
+      } catch (recoveryErr) {
+        clusteringAttemptLatencyMs.push(Date.now() - recoveryStartedAt);
+        // Keep the last attempt's repair diagnostics for `_meta`.
+        clusteringRepair = readClusteringRepairDiagnostics(recoveryErr);
+        const rmsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr);
+        clusteringRecoveryReason = /timed out|timeout|abort/i.test(rmsg) ? "timeout" : "error";
+        // Preserve the fail-closed outcome set above (0 meta-stories).
+        rawMetaStories = [];
+        console.warn(
+          `[pipeline] clustering recovery FAILED (reason=${clusteringRecoveryReason}) — remaining fail-closed (0 meta-stories)`
+        );
+      }
     }
   }
 
@@ -3044,9 +3107,10 @@ export async function runRefreshPipeline({
     // Clustering fail-closed diagnostics (Slice 1).  `usedFallbackClustering`
     // now means "clustering failed → published 0 stories" (not "degraded
     // buckets shipped").  `clusteringFailureReason` is 'timeout' | 'error' |
-    // null; `clusteringAttempts` counts initial-try + retries; latency is the
-    // per-attempt array so an operator can see how long each attempt ran
-    // before the timeout/error.
+    // null; `clusteringAttempts` counts initial-try + retries (and the single
+    // PR B recovery attempt when the auto-recovery tier fires); latency is the
+    // per-attempt array (same length) so an operator can see how long each
+    // attempt ran before the timeout/error.
     clusteringFailureReason,
     clusteringAttempts,
     // C2 (clustering JSON resilience): single safe-trim repair diagnostics for
@@ -3085,6 +3149,17 @@ export async function runRefreshPipeline({
     // null and `usedFallbackClustering` is false on this path.
     clusteringRepairRecovered:
       clusteringRepair.attempted === true && clusteringRepair.succeeded === true,
+    // PR B Step 1 — Option B auto-recovery tier diagnostics (additive).
+    // `clusteringRecoveryAttempted` is true when a primary non-timeout failure
+    // triggered the single reduced-input recovery attempt; `…Succeeded` is true
+    // when that attempt published recovered stories (in which case
+    // `usedFallbackClustering` is false and `clusteringFailureReason` is null);
+    // `…Reason` is the recovery attempt's own failure class ('error'|'timeout')
+    // when it failed, else null.  Timeout-class primary failures never trigger
+    // recovery, so all three stay in the default state on that path.
+    clusteringRecoveryAttempted,
+    clusteringRecoverySucceeded,
+    clusteringRecoveryReason,
     timings: pipelineTimings,
     // Slice 4: latency-shaping profile applied to this run.  Additive,
     // deterministic snapshot of the resolved knobs (name + the geo budget /
