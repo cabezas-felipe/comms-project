@@ -185,6 +185,35 @@ export const COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT = 60000;
 // past the total budget to at most this value.
 export const CLUSTER_CALL_MIN_TIMEOUT_MS = 5000;
 
+// ─── Step 4.1: deadline-aware clustering envelope (cold-start p95 hardening) ──
+//
+// PR B Step 2 caps the clustering envelope at a FIXED 60s measured from
+// clustering start, ignoring how much wall-clock the pipeline already spent on
+// geo + recall + pre-cluster.  When upstream is slow that fixed 60s can still
+// land `pipelineMs` above the 90s budget (60s clustering + slow upstream +
+// downstream build/whatChanged/why).  Step 4.1 makes the envelope DEADLINE-aware:
+// the clustering budget is additionally clamped to the wall-clock remaining
+// until a pipeline-relative soft deadline, so clustering plans to FINISH by that
+// deadline and leaves headroom for the downstream stages.
+//
+// `COLD_START_CLUSTER_DEADLINE_MS` is measured from `pipelineStartedAt` (NOT
+// from clustering start): clustering should wrap up ~75s into the pipeline,
+// reserving ~15s of the 90s `PIPELINE_SLOW_MS` budget for grounding + response
+// build + what-changed + why.  In the common case (upstream finishes in well
+// under ~15s) the deadline does NOT bind — `min(60000, 75000 - elapsed)` stays
+// 60000 — so behavior is byte-identical to Step 2 and there is no common-path
+// regression.  Only slow-upstream OUTLIERS (the p95 tail) get their clustering
+// envelope trimmed.
+//
+// `COLD_START_CLUSTER_MIN_ENVELOPE_MS` floors the trimmed envelope so clustering
+// always keeps a real shot even when the pipeline is already near/over the
+// deadline — fail-closed + the PR B Step 1 recovery tier still function (a
+// shorter envelope just makes a slow run more likely to fail closed → cold-start
+// retry routes to the default profile, exactly the locked policy).  This is a
+// time-budget knob only; the item cap (quality-shaping) is untouched.
+export const COLD_START_CLUSTER_DEADLINE_MS = 75000;
+export const COLD_START_CLUSTER_MIN_ENVELOPE_MS = 20000;
+
 function envIntPositive(name, fallback) {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
@@ -288,6 +317,47 @@ export function resolveClusterCallTimeoutMs({
   const remaining = Math.max(CLUSTER_CALL_MIN_TIMEOUT_MS, budget - elapsed);
   const bounded = perAttempt != null ? Math.min(perAttempt, remaining) : remaining;
   return Math.floor(bounded);
+}
+
+/**
+ * Step 4.1: resolve the EFFECTIVE total clustering wall-clock budget for a run,
+ * clamping the configured envelope down to the wall-clock that remains until a
+ * pipeline-relative soft deadline.  Pure — `pipelineElapsedMs` is the wall-clock
+ * the pipeline already spent before clustering started (`clusterStartedAt -
+ * pipelineStartedAt`), injected by the caller so the math is unit-testable
+ * without real time.
+ *
+ *   - No configured budget (`totalBudgetMs` null → default/interactive): returns
+ *     null.  No envelope, behavior unchanged for those profiles.
+ *   - No deadline (`deadlineMs` null): returns the configured budget verbatim —
+ *     identical to the pre-Step-4.1 (Step 2) fixed-envelope behavior.
+ *   - With a deadline (cold_start): returns `min(budget, deadline - elapsed)`,
+ *     floored at `minEnvelopeMs`.  Fast upstream → `deadline - elapsed >= budget`
+ *     → the budget is returned UNCHANGED (no common-path regression).  Slow
+ *     upstream → the envelope is trimmed so clustering aims to finish by the
+ *     deadline; a very slow pipeline floors at `minEnvelopeMs` so clustering
+ *     still gets a real shot (fail-closed / recovery preserved).
+ *
+ * The result feeds `resolveClusterCallTimeoutMs` as its `totalBudgetMs`, so the
+ * existing per-call clamp + floor still apply on top.  Exported for focused unit
+ * testing of the envelope contract.
+ */
+export function resolveClusterEnvelopeBudgetMs({
+  totalBudgetMs = null,
+  pipelineElapsedMs = 0,
+  deadlineMs = null,
+  minEnvelopeMs = 0,
+}) {
+  const budget =
+    Number.isFinite(totalBudgetMs) && totalBudgetMs > 0 ? totalBudgetMs : null;
+  if (budget == null) return null;
+  if (!(Number.isFinite(deadlineMs) && deadlineMs > 0)) return Math.floor(budget);
+  const elapsed =
+    Number.isFinite(pipelineElapsedMs) && pipelineElapsedMs > 0 ? pipelineElapsedMs : 0;
+  const floor = Number.isFinite(minEnvelopeMs) && minEnvelopeMs > 0 ? minEnvelopeMs : 0;
+  const remainingToDeadline = deadlineMs - elapsed;
+  const effective = Math.max(floor, Math.min(budget, remainingToDeadline));
+  return Math.floor(effective);
 }
 
 // ─── C1: deterministic cluster input cap ─────────────────────────────────────
@@ -2389,6 +2459,11 @@ export async function runRefreshPipeline({
   //    clustering stage failed.  `gracefulFallbackClustering` stays exported for
   //    tests/ops only.
   const clusterStartedAt = Date.now();
+  // Step 4.1: effective (deadline-aware) clustering envelope for this run. Stays
+  // null on profiles without a configured envelope (default/interactive) and on
+  // the empty-input branch; set inside the clustering branch below so the
+  // `[pipeline.profile]` log can surface the value clustering actually ran with.
+  let effectiveClusterTotalBudgetMs = null;
   let rawMetaStories;
   let usedFallbackClustering = false;
   let clusteringFailureReason = null; // 'timeout' | 'error' | null
@@ -2423,16 +2498,29 @@ export async function runRefreshPipeline({
     // Fail-closed trust is unchanged: if every attempt fails we still publish
     // zero stories with a classified `clusteringFailureReason`.
     const MAX_CLUSTER_ATTEMPTS = profile.clusterMaxAttempts;
+    // Step 4.1: clamp the configured clustering envelope to the wall-clock that
+    // remains until the pipeline-relative soft deadline (cold_start only — other
+    // profiles have no configured budget, so this returns null and nothing
+    // changes).  Fast upstream → unchanged 60s envelope; slow upstream → trimmed
+    // so clustering aims to finish by the deadline, floored so it keeps a real
+    // shot (fail-closed / recovery untouched).
+    effectiveClusterTotalBudgetMs = resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: profile.clusterTotalBudgetMs ?? null,
+      pipelineElapsedMs: clusterStartedAt - pipelineStartedAt,
+      deadlineMs: profile.clusterTotalBudgetMs != null ? COLD_START_CLUSTER_DEADLINE_MS : null,
+      minEnvelopeMs: COLD_START_CLUSTER_MIN_ENVELOPE_MS,
+    });
     // PR B Step 2: build each clustering call's `opts` at call time so a
     // total-budget profile (cold_start) can clamp the retry's timeout to the
     // wall-clock the earlier attempt(s) left behind.  Profiles WITHOUT a total
     // budget (default/interactive) ignore `elapsedMs` entirely and reproduce
     // the previous flat per-attempt behavior exactly (`{}` or
-    // `{ timeoutMs: <perAttempt> }`).
+    // `{ timeoutMs: <perAttempt> }`).  Step 4.1: the budget passed here is the
+    // deadline-aware EFFECTIVE envelope, not the raw configured one.
     const clusterCallOpts = () => {
       const t = resolveClusterCallTimeoutMs({
         perAttemptTimeoutMs: profile.clusterTimeoutMs,
-        totalBudgetMs: profile.clusterTotalBudgetMs ?? null,
+        totalBudgetMs: effectiveClusterTotalBudgetMs,
         elapsedMs: Date.now() - clusterStartedAt,
       });
       return t != null ? { timeoutMs: t } : {};
@@ -3184,6 +3272,7 @@ export async function runRefreshPipeline({
       ` clusterMaxAttempts=${profile.clusterMaxAttempts}` +
       ` clusterTimeoutMs=${profile.clusterTimeoutMs ?? "default"}` +
       ` clusterTotalBudgetMs=${profile.clusterTotalBudgetMs ?? "none"}` +
+      ` clusterEnvelopeMs=${effectiveClusterTotalBudgetMs ?? "none"}` +
       ` geoMs=${geoMs} clusterMs=${clusterMs} stories=${stories.length}`
   );
   const log = {

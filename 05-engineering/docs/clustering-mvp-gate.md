@@ -39,14 +39,14 @@ cd 05-engineering/apps/api && npm run eval:dashboard-quality-gate
 
 - [ ] Exits `0` (golden eval + calibration sweep both green). This is the offline regression guard — see [evals README → Dashboard Quality Gate](../apps/api/src/ai/evals/README.md#dashboard-quality-gate-slice-6).
 
-### 3. Run the live reliability probe (defaults, `N=20`)
+### 3. Run the live reliability probe (cold-start, recompute-enforced, `N=20`)
 
 ```sh
 cd 05-engineering/apps/api
-npm run cluster:probe -- --email <your-invited-email>
+npm run cluster:probe -- --email <your-invited-email> --mode cold-start --require-recompute --runs 20 --cooldown-ms 3000 --base-url http://localhost:8787
 ```
 
-`--email` is the preferred mode (uses `x-recognized-email`). Full usage: [Clustering reliability probe](../README.md#clustering-reliability-probe-live-gate).
+`--email` is the preferred mode (uses `x-recognized-email`). This Step 4.1 command enforces a recompute-quality sample for cold-start latency and fails non-zero if that sample is insufficient (`SAMPLE-QUALITY FAIL`). Full usage: [Clustering reliability probe](../README.md#clustering-reliability-probe-live-gate).
 
 ### 4. Confirm thresholds
 
@@ -54,8 +54,9 @@ Read the probe's final summary JSON and the exit code:
 
 - [ ] `successRate >= 0.95` (fraction of runs with `_meta.usedFallbackClustering === false`)
 - [ ] `medianStories >= 2` (median `stories.length`)
-- [ ] Probe process exited `0` (it fails non-zero if either threshold is missed)
-- [ ] **Advisory (PR A phase):** `p95PipelineMs <= 90000` (90s) — matches the `pipeline_slow` SLO breach threshold (`PIPELINE_SLOW_MS`, see [refresh SLO runbook](runbook-refresh-slo.md)). Cold-start has a tighter UX target (submit → first meta-story ≤ 45s, [cold-start spec](cold-start-v1.md)); for this phase `p95 <= 90s` is the gate-relevant reference and is **advisory, not blocking**.
+- [ ] Probe process exited `0` (it fails non-zero if reliability thresholds are missed **or** recompute sample quality is insufficient)
+- [ ] `recomputeTargetMet === true` in summary JSON (sample quality is decision-grade)
+- [ ] `p95PipelineMs <= 90000` (90s) in cold-start mode — Step 4.1 hard perf gate (aligns to the `pipeline_slow` SLO threshold; see [refresh SLO runbook](runbook-refresh-slo.md))
 
 ### 5. Manual golden-path sanity check
 
@@ -86,7 +87,8 @@ Results
 - [3/4] Live probe (N=20):             PASS / FAIL   (exit code: ___)
       - successRate:        ____   (need >= 0.95)
       - medianStories:      ____   (need >= 2)
-      - p95PipelineMs:      ____   (advisory <= 90000)
+      - p95PipelineMs:      ____   (need <= 90000 in cold-start mode)
+      - recomputeTargetMet: ____   (need true)
 - [5] Manual golden sanity:            PASS / FAIL
 
 Notes / risks:

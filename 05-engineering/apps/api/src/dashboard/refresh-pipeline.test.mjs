@@ -47,7 +47,10 @@ import {
   COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
   COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
   CLUSTER_CALL_MIN_TIMEOUT_MS,
+  COLD_START_CLUSTER_DEADLINE_MS,
+  COLD_START_CLUSTER_MIN_ENVELOPE_MS,
   resolveClusterCallTimeoutMs,
+  resolveClusterEnvelopeBudgetMs,
   compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
@@ -886,6 +889,90 @@ test("resolveClusterCallTimeoutMs: clamp contract (PR B Step 2)", () => {
     resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 90000 }),
     CLUSTER_CALL_MIN_TIMEOUT_MS,
     "over-spent budget never goes below the floor (no 0ms instant-timeout call)"
+  );
+});
+
+test("resolveClusterEnvelopeBudgetMs: deadline-aware envelope contract (Step 4.1)", () => {
+  // No configured budget (default/interactive) → no envelope, regardless of args.
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: null, deadlineMs: 75000, pipelineElapsedMs: 5000 }),
+    null,
+    "profiles without a configured budget get no envelope"
+  );
+  // No deadline → configured budget returned verbatim (pre-Step-4.1 behavior).
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: 60000, deadlineMs: null, pipelineElapsedMs: 30000 }),
+    60000,
+    "without a deadline the envelope equals the configured budget"
+  );
+  // Fast upstream (elapsed small): deadline does NOT bind → full 60s envelope.
+  // This is the common case — proves no regression vs Step 2.
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: 60000,
+      deadlineMs: 75000,
+      pipelineElapsedMs: 10000,
+      minEnvelopeMs: 20000,
+    }),
+    60000,
+    "fast upstream keeps the full configured envelope (no common-path regression)"
+  );
+  // Exactly at the bind point (deadline - elapsed == budget) → still full budget.
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: 60000,
+      deadlineMs: 75000,
+      pipelineElapsedMs: 15000,
+      minEnvelopeMs: 20000,
+    }),
+    60000,
+    "boundary: deadline minus elapsed equal to budget keeps the full envelope"
+  );
+  // Slow upstream: envelope trimmed to the wall-clock left until the deadline.
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: 60000,
+      deadlineMs: 75000,
+      pipelineElapsedMs: 30000,
+      minEnvelopeMs: 20000,
+    }),
+    45000,
+    "slow upstream trims the envelope to (deadline - elapsed)"
+  );
+  // Very slow upstream: trimmed value would fall below the floor → floored, so
+  // clustering still gets a real shot (fail-closed / recovery preserved).
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: 60000,
+      deadlineMs: 75000,
+      pipelineElapsedMs: 70000,
+      minEnvelopeMs: 20000,
+    }),
+    20000,
+    "near/over-deadline floors the envelope at the minimum"
+  );
+});
+
+test("resolveClusterEnvelopeBudgetMs: cold_start locked constants compose to the documented envelope", () => {
+  // Tie the math to the actual cold_start constants so a constant change is
+  // caught here. With the real 60s budget / 75s deadline / 20s floor:
+  //   - upstream 10s → full 60s (common path unchanged)
+  //   - upstream 40s → 35s envelope (trimmed)
+  //   - upstream 80s → 20s floor
+  const budget = COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT;
+  const deadline = COLD_START_CLUSTER_DEADLINE_MS;
+  const floor = COLD_START_CLUSTER_MIN_ENVELOPE_MS;
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: budget, deadlineMs: deadline, pipelineElapsedMs: 10000, minEnvelopeMs: floor }),
+    budget
+  );
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: budget, deadlineMs: deadline, pipelineElapsedMs: 40000, minEnvelopeMs: floor }),
+    deadline - 40000
+  );
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: budget, deadlineMs: deadline, pipelineElapsedMs: 80000, minEnvelopeMs: floor }),
+    floor
   );
 });
 
@@ -8037,6 +8124,35 @@ test("PR B Step 2: cold_start still retries once (attempts ALWAYS 2) under the e
       "every clustering call is bounded by the per-attempt timeout / remaining budget"
     );
   }
+});
+
+test("Step 4.1: cold_start common path (fast hermetic upstream) is unchanged — full 45s first attempt threaded", async () => {
+  // Hermetic upstream is effectively instant, so pipelineElapsed at cluster start
+  // is ~0 → the deadline does NOT bind → effective envelope stays the full 60s and
+  // the first attempt still threads the locked 45s. This is the no-regression
+  // guarantee: the Step 4.1 deadline-awareness only trims slow-upstream OUTLIERS,
+  // which are exercised by the pure-helper contract test above (real wall-clock
+  // can't be injected end-to-end deterministically).
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const seenClusterOpts = [];
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      seenClusterOpts.push(opts);
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(seenClusterOpts.length, 1);
+  assert.equal(
+    seenClusterOpts[0]?.timeoutMs,
+    COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
+    "fast upstream → full 45s first-attempt timeout (deadline did not bind)"
+  );
 });
 
 test("Slice 3: default profile keeps CLUSTER_INPUT_CAP (15) as the effective cap", async () => {

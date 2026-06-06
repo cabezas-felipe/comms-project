@@ -256,13 +256,16 @@ cd 05-engineering/apps/api
 npm run cluster:probe -- --email <your-invited-email>          # 20 runs, 3s cooldown (defaults)
 npm run cluster:probe -- --user-id <uuid> --runs 20
 npm run cluster:probe -- --email <email> --runs 30 --cooldown-ms 5000 --base-url http://localhost:8787
+npm run cluster:probe -- --email <email> --mode cold-start --require-recompute --runs 20 --base-url http://localhost:8787
 ```
 
-`--email` is the preferred, portable mode (uses `x-recognized-email`); `--user-id` runs a single preflight first and exits clearly if the server's `x-user-id` path is not accepted.
+`--email` is the preferred, portable mode (uses `x-recognized-email`); `--user-id` runs a single preflight first and exits clearly if the server's `x-user-id` path is not accepted. `--mode cold-start` targets `?profile=cold_start` and scopes latency to recompute runs. `--require-recompute` keeps sampling until it collects the requested recompute count (bounded by an attempt cap) and exits non-zero on insufficient recompute sample quality.
 
 **Gate (pass requires both):** `successRate >= 0.95` (fraction of runs with `_meta.usedFallbackClustering === false`) **and** `medianStories >= 2` (median `stories.length`). Default `N = 20` runs.
 
-**Pass/fail:** exits `0` only when both thresholds hold; otherwise exits **non-zero** and prints which threshold failed. Each run logs a compact line; the final summary JSON reports `runs`, `successRate`, `medianStories`, `p95PipelineMs`, and counts by `clusteringFailureReason` / `refreshSkippedReason`. Pure helpers are unit-tested offline in [`scripts/cluster-reliability-probe.test.mjs`](apps/api/scripts/cluster-reliability-probe.test.mjs).
+**Pass/fail:** exits `0` only when the reliability gate passes; otherwise exits **non-zero** and prints which threshold failed. In recompute-enforced runs (`--require-recompute`), the probe adds an independent sample-quality gate: if the recompute target is not met, it exits non-zero with `SAMPLE-QUALITY FAIL` even when success-rate and story-count thresholds pass.
+
+The final summary JSON includes baseline fields (`runs`, `successRate`, `medianStories`, `p95PipelineMs`, `clusteringFailureReasons`, `refreshSkippedReasons`) plus Step 4.1 transparency fields (`latencyScope`, `recomputeRuns`, `skippedRuns`, `latencyRunsCounted`, `requireRecompute`, `recomputeTarget`, `recomputeTargetMet`, `attempts`). Pure helpers are unit-tested offline in [`scripts/cluster-reliability-probe.test.mjs`](apps/api/scripts/cluster-reliability-probe.test.mjs).
 
 ### Nightly clustering reliability workflow (background monitoring)
 
