@@ -45,6 +45,9 @@ import {
   COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
   COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT,
   COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
+  COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
+  CLUSTER_CALL_MIN_TIMEOUT_MS,
+  resolveClusterCallTimeoutMs,
   compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
@@ -832,6 +835,58 @@ test("resolveRefreshProfile: cold_start profile yields the locked first-run knob
   assert.equal(p.deferGeoLane2, true);
   assert.equal(p.clusterInputCap, COLD_START_CLUSTER_INPUT_CAP_DEFAULT);
   assert.equal(p.clusterInputCap, 10);
+  // PR B Step 2: cold_start carries a clustering wall-clock envelope cap so the
+  // 2-attempt loop can never run two back-to-back 45s timeouts (~90s).
+  assert.equal(p.clusterTotalBudgetMs, COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT);
+  assert.equal(p.clusterTotalBudgetMs, 60000);
+});
+
+test("resolveRefreshProfile: default + interactive carry no clustering envelope cap (Step 2)", () => {
+  // Only cold_start opts into the total-budget clamp; every other profile keeps
+  // a flat per-attempt timeout (clusterTotalBudgetMs === null), so their
+  // clustering behavior is byte-identical to the pre-Step-2 path.
+  assert.equal(resolveRefreshProfile(null).clusterTotalBudgetMs, null);
+  assert.equal(resolveRefreshProfile("scheduled").clusterTotalBudgetMs, null);
+  assert.equal(resolveRefreshProfile("interactive").clusterTotalBudgetMs, null);
+});
+
+test("resolveClusterCallTimeoutMs: clamp contract (PR B Step 2)", () => {
+  // No total budget → flat per-attempt timeout passthrough (default/interactive).
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: null, totalBudgetMs: null }),
+    null,
+    "default profile (no per-attempt, no budget) → no override"
+  );
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 22000, totalBudgetMs: null, elapsedMs: 9999 }),
+    22000,
+    "flat per-attempt timeout ignores elapsed when there is no total budget"
+  );
+  // cold_start, first attempt (elapsed≈0) → keeps the full locked 45s.
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 0 }),
+    45000,
+    "first attempt keeps the full per-attempt timeout"
+  );
+  // cold_start retry after the first attempt timed out at 45s → bounded to the
+  // 15s the 60s budget left behind (this is the p95 win: 45+15 not 45+45).
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 45000 }),
+    15000,
+    "retry timeout is clamped to the remaining budget"
+  );
+  // Budget nearly/over-spent → floored so the retry still gets a real shot and
+  // overshoot past the budget is bounded by the floor.
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 58000 }),
+    CLUSTER_CALL_MIN_TIMEOUT_MS,
+    "near-exhausted budget floors the retry timeout"
+  );
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 90000 }),
+    CLUSTER_CALL_MIN_TIMEOUT_MS,
+    "over-spent budget never goes below the floor (no 0ms instant-timeout call)"
+  );
 });
 
 test("resolveRefreshProfile: interactive profile yields bounded fast-path knobs (env-overridable)", () => {
@@ -7914,6 +7969,74 @@ test("Slice 3: cold_start tightens the cluster cap to 10 (effective cap surfaced
   assert.ok(log.clusterCap.clusterInputCount <= 10);
   assert.equal(log.clusterCap.clusterInputCapEffective, 10,
     "cold_start surfaces the profile cap (10) as the effective cap");
+});
+
+test("PR B Step 2: cold_start threads the per-attempt timeout and surfaces the clustering envelope cap", async () => {
+  // First attempt succeeds immediately, so the budget clamp is a no-op (elapsed
+  // ≈ 0 → min(45000, 60000) = 45000): the locked 45s per-attempt timeout is
+  // threaded unchanged, and `_meta.profile.clusterTotalBudgetMs` advertises the
+  // 60s envelope that WOULD have bounded a retry.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const seenClusterOpts = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      seenClusterOpts.push(opts);
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+  });
+  assert.equal(payload.stories.length, 1, "cold_start still yields stories (trust preserved)");
+  assert.equal(seenClusterOpts.length, 1, "first attempt succeeds → single clustering call");
+  assert.equal(
+    seenClusterOpts[0]?.timeoutMs,
+    COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
+    "first attempt keeps the full locked 45s per-attempt timeout"
+  );
+  assert.equal(seenClusterOpts[0]?.timeoutMs, 45000);
+  assert.equal(log.profile.name, "cold_start");
+  assert.equal(
+    log.profile.clusterTotalBudgetMs,
+    COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
+    "cold_start surfaces the 60s clustering envelope on _meta.profile"
+  );
+  assert.equal(log.profile.clusterTotalBudgetMs, 60000);
+});
+
+test("PR B Step 2: cold_start still retries once (attempts ALWAYS 2) under the envelope cap", async () => {
+  // The total-budget clamp must NOT weaken resilience: a transient first-attempt
+  // failure is still retried, and a successful retry publishes rather than
+  // failing closed. Each call carries a budget-bounded timeout (≤ 45s).
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let attempts = 0;
+  const seenClusterOpts = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      attempts++;
+      seenClusterOpts.push(opts);
+      if (attempts === 1) throw new Error("transient blip");
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+  });
+  assert.equal(attempts, 2, "cold_start retries once (initial + one retry)");
+  assert.equal(payload.stories.length, 1, "recovers on the retry rather than shipping empty");
+  assert.equal(log.usedFallbackClustering, false);
+  assert.equal(log.clusteringFailureReason, null);
+  assert.equal(log.clusteringAttempts, 2);
+  for (const opts of seenClusterOpts) {
+    assert.ok(
+      opts?.timeoutMs > 0 && opts.timeoutMs <= COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
+      "every clustering call is bounded by the per-attempt timeout / remaining budget"
+    );
+  }
 });
 
 test("Slice 3: default profile keeps CLUSTER_INPUT_CAP (15) as the effective cap", async () => {

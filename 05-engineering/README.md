@@ -23,6 +23,8 @@ The Lovable reference UI stays in [`../04-prototype`](../04-prototype) and depen
 Detailed rationale: [dashboard-story-pool-walkthrough.md](docs/dashboard-story-pool-walkthrough.md). Operator scenarios: [dashboard-story-pool-scenario-map.md](docs/dashboard-story-pool-scenario-map.md).
 Cold-start orchestration spec: [cold-start-v1.md](docs/cold-start-v1.md).
 
+Cold-start clustering envelope (PR B Step 2): the `cold_start` profile keeps the locked 45s per-attempt clustering timeout and 2 attempts, but bounds the **sum** of those attempts with a wall-clock budget (`COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT = 60000`) in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs). The first attempt gets the full 45s; a retry inherits only the budget the first attempt left behind (floored at `CLUSTER_CALL_MIN_TIMEOUT_MS`). This caps the worst-case clustering span at ~60s (instead of two back-to-back 45s timeouts ≈ 90s) so cold-start `pipelineMs` trends under the 90s `PIPELINE_SLOW_MS` budget; trust is unchanged (still 2 attempts, fail-closed, PR B Step 1 recovery untouched). The cap is surfaced on `_meta.profile.clusterTotalBudgetMs` and the `[pipeline.profile]` log line.
+
 ## Commands
 
 Run from **this directory** (`05-engineering/`):

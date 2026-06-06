@@ -155,6 +155,36 @@ export const COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT = 45000;
 export const COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT = 2;
 export const COLD_START_CLUSTER_INPUT_CAP_DEFAULT = 10;
 
+// ─── PR B / Step 2: cold-start clustering wall-clock envelope ────────────────
+//
+// Baseline (read from `_meta.timings` / `[pipeline.timings]` on cold-start runs):
+// clustering (`clusterMs`) is by far the dominant term — the single largest AI
+// round-trip — while `geoMs` (Lane 2 deferred → Lane 1 + lexical only),
+// `recallMs`, and `preClusterMs` are comparatively small.  The p95 tail is NOT
+// a single slow call; it is the RETRY case: attempt 1 runs to its 45s timeout
+// on a slow provider, then attempt 2 runs up to ANOTHER full 45s.  Two
+// sequential per-attempt timeouts = up to 90s of clustering alone — which, once
+// geo + recall + what-changed + why are added, pushes `pipelineMs` past the 90s
+// budget (`PIPELINE_SLOW_MS`).
+//
+// Targeted fix (latency-only, trust-preserving): bound the SUM of clustering
+// attempts with a wall-clock budget.  The first attempt still gets the full,
+// locked 45s per-attempt timeout; the retry's timeout is clamped to the budget
+// the first attempt left behind (see `resolveClusterCallTimeoutMs`).  This caps
+// the worst-case clustering envelope at ~60s (45s + a bounded retry) instead of
+// ~90s, leaving ~30s of headroom for the rest of the pipeline.  Nothing that
+// protects trust changes: still ALWAYS 2 attempts, still fail-closed on total
+// failure, and the PR B Step 1 recovery tier's trigger/input semantics are
+// untouched (it simply inherits the same budget-bounded call timeout the
+// primary loop already used).  Locked constant, consistent with the other
+// cold-start knobs — no env override.
+export const COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT = 60000;
+// Floor for any single budget-bounded clustering call: even when the first
+// attempt has eaten most/all of the total budget, the retry still gets a real
+// (if short) shot rather than an instant-timeout 0ms call.  Bounds overshoot
+// past the total budget to at most this value.
+export const CLUSTER_CALL_MIN_TIMEOUT_MS = 5000;
+
 function envIntPositive(name, fallback) {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
@@ -184,6 +214,9 @@ export function resolveRefreshProfile(name) {
       geoStageBudgetMs: COLD_START_GEO_STAGE_BUDGET_MS_DEFAULT,
       clusterTimeoutMs: COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
       clusterMaxAttempts: COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT,
+      // PR B Step 2: bound the whole 2-attempt clustering envelope (first
+      // attempt keeps the locked 45s; the retry inherits the remaining budget).
+      clusterTotalBudgetMs: COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
       deferGeoLane2: true,
       clusterInputCap: COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
     };
@@ -204,6 +237,8 @@ export function resolveRefreshProfile(name) {
         "TEMPO_INTERACTIVE_CLUSTER_MAX_ATTEMPTS",
         INTERACTIVE_CLUSTER_MAX_ATTEMPTS_DEFAULT
       ),
+      // Interactive keeps a flat per-attempt timeout; no total-envelope cap.
+      clusterTotalBudgetMs: null,
     };
   }
   return {
@@ -212,7 +247,47 @@ export function resolveRefreshProfile(name) {
     geoStageBudgetMs: null, // fall through to resolveGeoStageBudgetMs()
     clusterTimeoutMs: null, // fall through to env / cluster-engine default
     clusterMaxAttempts: DEFAULT_CLUSTER_MAX_ATTEMPTS,
+    clusterTotalBudgetMs: null, // no clustering-envelope cap on the default path
   };
+}
+
+/**
+ * PR B Step 2: resolve the `timeoutMs` for a SINGLE clustering call, bounded by
+ * both the profile's per-attempt timeout AND the run's remaining clustering
+ * wall-clock budget.  Pure (the caller injects `elapsedMs = Date.now() -
+ * clusterStartedAt`) so the clamp math is unit-testable without real time.
+ *
+ *   - No total budget (default/interactive): returns the flat per-attempt
+ *     timeout unchanged (null → caller passes no override).  Behavior is
+ *     byte-identical to the pre-Step-2 path for those profiles.
+ *   - With a total budget (cold_start): the call gets `min(perAttempt,
+ *     remaining)` where `remaining = budget - elapsed`, floored at
+ *     CLUSTER_CALL_MIN_TIMEOUT_MS so the retry always gets a real shot and the
+ *     worst-case overshoot past the budget is bounded.  The first attempt
+ *     (elapsed≈0) therefore keeps the full per-attempt timeout; only a retry
+ *     after a slow/timed-out first attempt is shortened.
+ *
+ * Returns the timeout in ms, or null when neither bound applies.  Exported for
+ * focused unit testing of the clamp contract.
+ */
+export function resolveClusterCallTimeoutMs({
+  perAttemptTimeoutMs = null,
+  totalBudgetMs = null,
+  elapsedMs = 0,
+}) {
+  const perAttempt =
+    Number.isFinite(perAttemptTimeoutMs) && perAttemptTimeoutMs > 0
+      ? perAttemptTimeoutMs
+      : null;
+  const budget =
+    Number.isFinite(totalBudgetMs) && totalBudgetMs > 0 ? totalBudgetMs : null;
+  if (budget == null) {
+    return perAttempt != null ? Math.floor(perAttempt) : null;
+  }
+  const elapsed = Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs : 0;
+  const remaining = Math.max(CLUSTER_CALL_MIN_TIMEOUT_MS, budget - elapsed);
+  const bounded = perAttempt != null ? Math.min(perAttempt, remaining) : remaining;
+  return Math.floor(bounded);
 }
 
 // ─── C1: deterministic cluster input cap ─────────────────────────────────────
@@ -2202,6 +2277,10 @@ export async function runRefreshPipeline({
           geoStageBudgetMs: effectiveGeoBudgetMs,
           clusterMaxAttempts: profile.clusterMaxAttempts,
           clusterTimeoutMs: profile.clusterTimeoutMs,
+          // PR B Step 2: clustering wall-clock envelope cap (cold_start only;
+          // null elsewhere). Clustering never ran on a skip, so this is the
+          // configured value, not a measured one.
+          clusterTotalBudgetMs: profile.clusterTotalBudgetMs ?? null,
         },
         // Slice 3: outcome rollup on the short-circuit branch too, so the
         // summary/SLO surfaces have a consistent shape across both paths.
@@ -2344,14 +2423,26 @@ export async function runRefreshPipeline({
     // Fail-closed trust is unchanged: if every attempt fails we still publish
     // zero stories with a classified `clusteringFailureReason`.
     const MAX_CLUSTER_ATTEMPTS = profile.clusterMaxAttempts;
-    const clusterCallOpts =
-      profile.clusterTimeoutMs != null ? { timeoutMs: profile.clusterTimeoutMs } : {};
+    // PR B Step 2: build each clustering call's `opts` at call time so a
+    // total-budget profile (cold_start) can clamp the retry's timeout to the
+    // wall-clock the earlier attempt(s) left behind.  Profiles WITHOUT a total
+    // budget (default/interactive) ignore `elapsedMs` entirely and reproduce
+    // the previous flat per-attempt behavior exactly (`{}` or
+    // `{ timeoutMs: <perAttempt> }`).
+    const clusterCallOpts = () => {
+      const t = resolveClusterCallTimeoutMs({
+        perAttemptTimeoutMs: profile.clusterTimeoutMs,
+        totalBudgetMs: profile.clusterTotalBudgetMs ?? null,
+        elapsedMs: Date.now() - clusterStartedAt,
+      });
+      return t != null ? { timeoutMs: t } : {};
+    };
     let lastErr = null;
     for (let attempt = 1; attempt <= MAX_CLUSTER_ATTEMPTS; attempt++) {
       clusteringAttempts = attempt;
       const attemptStartedAt = Date.now();
       try {
-        rawMetaStories = await clusterFn(clusterInputItems, settings, clusterModel, clusterCallOpts);
+        rawMetaStories = await clusterFn(clusterInputItems, settings, clusterModel, clusterCallOpts());
         clusteringAttemptLatencyMs.push(Date.now() - attemptStartedAt);
         clusteringRepair = readClusteringRepairDiagnostics(rawMetaStories);
         lastErr = null;
@@ -2412,7 +2503,7 @@ export async function runRefreshPipeline({
       clusteringAttempts += 1;
       const recoveryStartedAt = Date.now();
       try {
-        rawMetaStories = await clusterFn(recoveryInput, settings, clusterModel, clusterCallOpts);
+        rawMetaStories = await clusterFn(recoveryInput, settings, clusterModel, clusterCallOpts());
         clusteringAttemptLatencyMs.push(Date.now() - recoveryStartedAt);
         clusteringRepair = readClusteringRepairDiagnostics(rawMetaStories);
         // Recovered: publish recovered stories normally and clear the
@@ -3092,6 +3183,7 @@ export async function runRefreshPipeline({
     `[pipeline.profile] profile=${profile.name} geoBudgetMs=${effectiveGeoBudgetMs}` +
       ` clusterMaxAttempts=${profile.clusterMaxAttempts}` +
       ` clusterTimeoutMs=${profile.clusterTimeoutMs ?? "default"}` +
+      ` clusterTotalBudgetMs=${profile.clusterTotalBudgetMs ?? "none"}` +
       ` geoMs=${geoMs} clusterMs=${clusterMs} stories=${stories.length}`
   );
   const log = {
@@ -3172,6 +3264,11 @@ export async function runRefreshPipeline({
       geoStageBudgetMs: effectiveGeoBudgetMs,
       clusterMaxAttempts: profile.clusterMaxAttempts,
       clusterTimeoutMs: profile.clusterTimeoutMs,
+      // PR B Step 2: the clustering wall-clock envelope cap that bounded this
+      // run's 2-attempt loop (cold_start = 60000; null on every other profile,
+      // i.e. no envelope cap). Additive — read alongside `clusterTimeoutMs`
+      // (per-attempt) to reason about the worst-case clustering span.
+      clusterTotalBudgetMs: profile.clusterTotalBudgetMs ?? null,
     },
     // Slice 3: run-level outcome rollup — the handful of fields an operator (or
     // the SLO log line / summary) needs to judge "did this refresh do its job?"
