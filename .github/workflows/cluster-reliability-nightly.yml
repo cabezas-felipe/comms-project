@@ -1,0 +1,166 @@
+name: Cluster reliability nightly
+
+# PR B / Step 3 — automated nightly guard for clustering reliability.
+#
+# Runs the existing live clustering reliability probe
+# (`05-engineering/apps/api/scripts/cluster-reliability-probe.mjs`, exposed as
+# `npm run cluster:probe`) against a deployed API for one invited user, then
+# uploads the probe log + an extracted summary JSON as artifacts. The job FAILS
+# whenever the probe exits non-zero — the probe owns the thresholds
+# (successRate >= 0.95 AND medianStories >= 2); this workflow never duplicates
+# that gate logic.
+#
+# This is BACKGROUND MONITORING. It does NOT replace the manual pre-pilot gate:
+# see 05-engineering/docs/clustering-mvp-gate.md, which is still required before
+# pilots and before merging clustering-reliability changes.
+#
+# Cadence: 04:15 UTC daily. Minute 15 stays clear of the hourly cadence-tick
+# (:05) and ingestion-warm (:35) jobs, and 04:00-ish UTC is genuinely overnight
+# for the Colombia–US operating window (≈23:15 US Eastern), well away from the
+# 09:00 UTC source-digest run — so the scheduled jobs don't contend for runner
+# capacity.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   - CLUSTER_PROBE_EMAIL          invited test user's email (x-recognized-email)
+#   - SUPABASE_URL                 Supabase project URL (email → userId resolve)
+#   - SUPABASE_SERVICE_ROLE_KEY    Supabase service-role key (admin listUsers)
+#   - TEMPO_ANTHROPIC_API_KEY      Anthropic key (or ANTHROPIC_API_KEY fallback)
+# Missing any of these → the "Verify required secrets" step fails fast with a
+# clear message before any live HTTP is attempted.
+
+on:
+  schedule:
+    - cron: "15 4 * * *"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Number of probe runs (probe default 20)"
+        required: false
+        default: "20"
+      cooldown_ms:
+        description: "Cooldown between runs in ms (probe default 3000)"
+        required: false
+        default: "3000"
+      base_url:
+        description: "API base URL to probe"
+        required: false
+        default: "https://tempo-gray-psi.vercel.app"
+
+# Never overlap a manual dispatch with the nightly run (or two dispatches) —
+# the probe makes repeated live refreshes for a single user.
+concurrency:
+  group: cluster-reliability-nightly
+  cancel-in-progress: false
+
+jobs:
+  cluster-reliability:
+    name: Live clustering reliability probe
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # Resolve dispatch inputs to the probe's own defaults on the scheduled
+      # path (where github.event.inputs.* is empty).
+      RUNS: ${{ github.event.inputs.runs || '20' }}
+      COOLDOWN_MS: ${{ github.event.inputs.cooldown_ms || '3000' }}
+      BASE_URL: ${{ github.event.inputs.base_url || 'https://tempo-gray-psi.vercel.app' }}
+      ARTIFACT_DIR: ${{ github.workspace }}/probe-artifacts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: 05-engineering/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: 05-engineering
+
+      - name: Verify required secrets
+        env:
+          CLUSTER_PROBE_EMAIL: ${{ secrets.CLUSTER_PROBE_EMAIL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TEMPO_ANTHROPIC_API_KEY: ${{ secrets.TEMPO_ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${CLUSTER_PROBE_EMAIL:-}" ] || missing+=("CLUSTER_PROBE_EMAIL")
+          [ -n "${SUPABASE_URL:-}" ] || missing+=("SUPABASE_URL")
+          [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ] || missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          if [ -z "${TEMPO_ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            missing+=("TEMPO_ANTHROPIC_API_KEY or ANTHROPIC_API_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required secret(s): ${missing[*]}"
+            echo "Configure them under repo Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+          echo "All required secrets are present."
+
+      - name: Run clustering reliability probe
+        working-directory: 05-engineering/apps/api
+        env:
+          # The probe resolves --email → userId via Supabase admin and then
+          # drives live refreshes at $BASE_URL using x-recognized-email.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TEMPO_ANTHROPIC_API_KEY: ${{ secrets.TEMPO_ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROBE_EMAIL: ${{ secrets.CLUSTER_PROBE_EMAIL }}
+        run: |
+          set -o pipefail
+          mkdir -p "$ARTIFACT_DIR"
+          echo "[nightly] probing base_url=$BASE_URL runs=$RUNS cooldown_ms=$COOLDOWN_MS"
+          # `tee` mirrors stdout/stderr to the artifact log; `set -o pipefail`
+          # makes the probe's non-zero exit (threshold miss / setup error)
+          # propagate through the pipe so this step — and the job — fails.
+          npm run cluster:probe -- \
+            --email "$PROBE_EMAIL" \
+            --runs "$RUNS" \
+            --cooldown-ms "$COOLDOWN_MS" \
+            --base-url "$BASE_URL" \
+            2>&1 | tee "$ARTIFACT_DIR/cluster-probe.log"
+
+      - name: Extract summary JSON
+        if: always()
+        run: |
+          set -uo pipefail
+          LOG="$ARTIFACT_DIR/cluster-probe.log"
+          OUT="$ARTIFACT_DIR/cluster-probe-summary.json"
+          mkdir -p "$ARTIFACT_DIR"
+          if [ ! -f "$LOG" ]; then
+            echo '{"error":"probe log not found — probe step produced no output"}' > "$OUT"
+            cat "$OUT"
+            exit 0
+          fi
+          # The probe prints its summary as a pretty-printed JSON object between
+          # the "[probe] summary:" marker and the "[probe] GATE …" verdict line.
+          # We only EXTRACT that object — thresholds stay owned by the probe.
+          awk '/^\[probe\] summary:/{flag=1; next} /^\[probe\] GATE/{flag=0} flag' "$LOG" \
+            | sed '/^[[:space:]]*$/d' > "$OUT.tmp" || true
+          if [ -s "$OUT.tmp" ] && node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$OUT.tmp" 2>/dev/null; then
+            mv "$OUT.tmp" "$OUT"
+            echo "Extracted probe summary:"
+            cat "$OUT"
+          else
+            rm -f "$OUT.tmp"
+            echo '{"error":"could not extract summary JSON (probe likely failed before printing its summary — see cluster-probe.log)"}' > "$OUT"
+            cat "$OUT"
+          fi
+
+      - name: Upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-reliability-nightly-${{ github.run_id }}
+          path: |
+            probe-artifacts/cluster-probe.log
+            probe-artifacts/cluster-probe-summary.json
+          if-no-files-found: warn
+          retention-days: 30

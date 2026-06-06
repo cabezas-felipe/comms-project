@@ -264,6 +264,16 @@ npm run cluster:probe -- --email <email> --runs 30 --cooldown-ms 5000 --base-url
 
 **Pass/fail:** exits `0` only when both thresholds hold; otherwise exits **non-zero** and prints which threshold failed. Each run logs a compact line; the final summary JSON reports `runs`, `successRate`, `medianStories`, `p95PipelineMs`, and counts by `clusteringFailureReason` / `refreshSkippedReason`. Pure helpers are unit-tested offline in [`scripts/cluster-reliability-probe.test.mjs`](apps/api/scripts/cluster-reliability-probe.test.mjs).
 
+### Nightly clustering reliability workflow (background monitoring)
+
+**Workflow:** `Cluster reliability nightly` ([`.github/workflows/cluster-reliability-nightly.yml`](../.github/workflows/cluster-reliability-nightly.yml)) runs the probe above against a deployed API every night and uploads the results. It is **background monitoring only** — the manual [Clustering MVP readiness gate](docs/clustering-mvp-gate.md) is still required before pilots and before merging clustering-reliability changes.
+
+- **Cadence:** `15 4 * * *` (04:15 UTC nightly), plus manual `workflow_dispatch`. The minute (`:15`) is offset from the hourly cadence-tick (`:05`) and ingestion-warm (`:35`) jobs and away from the 09:00 UTC source-digest, so the scheduled jobs don't contend for runner capacity.
+- **Thresholds:** owned entirely by the probe (`successRate >= 0.95` **and** `medianStories >= 2`). The job **fails when the probe exits non-zero** — no threshold logic is duplicated in the workflow.
+- **Where to view runs/artifacts:** GitHub → **Actions** → **"Cluster reliability nightly"** → a run → **Artifacts**: `cluster-reliability-nightly-<run_id>` contains `cluster-probe.log` (full probe stdout/stderr) and `cluster-probe-summary.json` (extracted summary). Artifacts upload even on failure (retained 30 days).
+- **Required repo secrets** (Settings → Secrets and variables → Actions): `CLUSTER_PROBE_EMAIL` (invited test user), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `TEMPO_ANTHROPIC_API_KEY` (or `ANTHROPIC_API_KEY`). A missing secret fails the run fast with a clear message before any live HTTP.
+- **Manual dispatch + input overrides:** Actions → "Cluster reliability nightly" → **Run workflow**. Optional inputs (all default to the probe's own defaults): `runs` (default `20`), `cooldown_ms` (default `3000`), `base_url` (default `https://tempo-gray-psi.vercel.app`). Example: `runs=30`, `cooldown_ms=5000`, `base_url=https://tempo-gray-psi.vercel.app`.
+
 ## Server-side cadence tick (Sub-slice 2.5)
 
 Background: Sub-slice 2.4 added the [due-user orchestrator](apps/api/src/dashboard/due-user-orchestrator.mjs) — pure due-selection (`selectDueUsers`), anchor extraction from `dashboard_snapshots` (`listSnapshotAnchors`), and `runDueRefreshes` which iterates due users through the shared `_refreshExecutor.execute` path. 2.4 left the orchestrator without a caller: the interactive `POST /api/dashboard/refresh` only fires when a browser is open.

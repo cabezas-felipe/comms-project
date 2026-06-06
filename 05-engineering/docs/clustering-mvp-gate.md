@@ -11,6 +11,8 @@ Run this checklist when **either** is true:
 
 This is a **live** gate: it exercises the real API + Supabase + provider path, not just hermetic unit tests. Budget ~10 minutes.
 
+> **Background monitoring (not a substitute):** the `Cluster reliability nightly` GitHub Actions workflow runs the same reliability probe automatically every night and uploads the log + summary JSON ([README → Nightly clustering reliability workflow](../README.md#nightly-clustering-reliability-workflow-background-monitoring)). It catches drift between gate runs, but this manual gate is still **required** before pilots and before merging clustering-reliability changes.
+
 ## Prerequisites
 
 - `apps/api/.env` populated: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and an Anthropic key (`TEMPO_ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY`).
