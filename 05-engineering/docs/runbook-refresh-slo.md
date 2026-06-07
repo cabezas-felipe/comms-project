@@ -61,7 +61,11 @@ non-null on recovered runs and would overcount failures.
   **clusterMaxAttempts 2** (Slice 4.1). The attempt count is never lowered to
   shave latency.
 - Slice 3 terminal-failure classification (`clusteringFailureReason` /
-  `usedFallbackClustering`) is the only failure signal the gate reads.
+  `usedFallbackClustering`) is the only failure signal the gate reads. The finer
+  `clusteringFailureSubtype` (`parse` / `provider_request` / `timeout_budget` /
+  `unknown`) is **triage-only diagnostics** — surfaced on `_meta` for incident
+  attribution but never read by the SLO gate (see
+  [README → Failure subtype taxonomy](../README.md#dashboard-trust-controls-slice-1)).
 
 ## Thresholds (env-free constants, in `refresh-slo.mjs`)
 
