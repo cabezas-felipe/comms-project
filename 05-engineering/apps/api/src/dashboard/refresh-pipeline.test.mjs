@@ -64,6 +64,9 @@ import {
   prioritizeLane2Candidates,
   buildSourceGroundedWhyFallback,
 } from "./refresh-pipeline.mjs";
+// C2: cross-module B1→B2 handoff regression — feed the pipeline's emitted
+// reclusterQueue straight into the deferred re-cluster executor.
+import { executeDeferredRecluster } from "./deferred-recluster.mjs";
 import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
 // Hoisted from further down the file: ESM imports must sit at module top level,
 // not inside the describe() wrapper that scopes this file's env knobs.
@@ -8112,6 +8115,179 @@ test("runRefreshPipeline (B1): no candidates → empty queue, additive diagnosti
   assert.ok(log.clusterSplit, "clusterSplit diagnostics preserved");
   assert.ok(log.overflowCap, "overflowCap diagnostics preserved");
   assert.equal(log.overflowCap.overflowCapApplied, false);
+});
+
+// ─── C2: cross-cutting hermetic regression scenarios ─────────────────────────
+//
+// These protect the END-TO-END interactions of Section A + B that no single
+// incremental slice test exercises together. All deterministic — fixed clocks
+// are not needed; ranking ties are broken on controlled minutesAgo / ids.
+
+test("C2 overflow: freshness tier drops the OLDEST story end-to-end (tie on source-count + beat-fit)", async () => {
+  // Six single-source stories, each grounded on a DISTINCT source with a
+  // distinct minutesAgo. Beat-fit is disabled so every story ties at score 0 →
+  // the Q6-C freshness tier is the sole differentiator: the oldest (max
+  // minutesAgo) is the deterministic drop. ms-fresh-5's source is the oldest.
+  const ages = [30, 31, 32, 33, 34, 600];
+  const rawItems = ages.map((minutesAgo, i) =>
+    makeItem({ sourceId: `src-fresh-${i}`, outlet: "Reuters", minutesAgo })
+  );
+  const clusterStories = ages.map((_, i) => ({
+    meta_story_id: `ms-fresh-${i}`,
+    title: `Fresh story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i}.`,
+    source_item_ids: [`src-fresh-${i}`],
+    summary: `Summary ${i}.`,
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+    factual_claims: [`Reuters reports verified development ${i}.`],
+    claim_evidence_map: { "0": [`src-fresh-${i}`] },
+  }));
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => clusterStories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false, // tie on beat-fit → freshness decides the drop
+  });
+
+  assert.equal(payload.stories.length, 5);
+  assert.equal(log.overflowCap.overflowCapApplied, true);
+  assert.equal(log.overflowCap.overflowDroppedCount, 1);
+  // The oldest story (600 min) is the deterministic freshness-tier drop.
+  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, ["ms-fresh-5"]);
+  assert.ok(
+    !payload.stories.some((s) => s.metaStoryId === "ms-fresh-5"),
+    "the oldest story must be the one trimmed by the cap"
+  );
+});
+
+test("C2 full chain (A1+A2+A3+A4): translated ES over-merge splits into English stories then caps to 5", async () => {
+  // Six Spanish sources translated to English, over-merged into ONE cluster
+  // with a disjoint single-source claim map. The healer splits the all-English,
+  // mutually-unrelated cluster into 6 atoms (A3 low_token_overlap on normalized
+  // English), each titled from the normalized English headline (A1), and the A4
+  // cap trims the OLDEST atom back to 5. Exercises the whole Section-A chain in
+  // a single run.
+  const EN = {
+    "esc-0": "Colombia coffee prices reach a record high",
+    "esc-1": "Colombia volcano eruption triggers an evacuation alert",
+    "esc-2": "Colombia presidential election debate draws large crowds",
+    "esc-3": "Colombia gold mine attack leaves several workers dead",
+    "esc-4": "Colombia floods displace thousands along the river basin",
+    "esc-5": "Colombia tax reform protest grips the capital downtown",
+  };
+  const ES = {
+    "esc-0": "Colombia: la cosecha de café alcanza un récord",
+    "esc-1": "Alerta de evacuación por erupción volcánica en Colombia",
+    "esc-2": "El debate presidencial en Colombia atrae cifras récord",
+    "esc-3": "Ataque a mina de oro en Colombia deja varios obreros muertos",
+    "esc-4": "Inundaciones en Colombia desplazan a miles en la cuenca del río",
+    "esc-5": "Protesta por la reforma tributaria sacude el centro de Colombia",
+  };
+  const translateFn = async (segments, { sourceId }) => {
+    const out = [EN[sourceId] ?? segments[0], ...segments.slice(1)];
+    return out.slice(0, segments.length);
+  };
+  // esc-5 is the oldest → the deterministic cap drop.
+  const ages = [30, 31, 32, 33, 34, 600];
+  // Headline-only evidence (empty body) so the normalized-English overlap is
+  // driven purely by the distinct headlines — a shared body would inflate
+  // pairwise overlap and bundle the atoms instead of splitting them cleanly.
+  const rawItems = Object.keys(ES).map((sourceId, i) =>
+    makeItem({ sourceId, outlet: "Reuters", minutesAgo: ages[i], lang: "es", headline: ES[sourceId], body: [] })
+  );
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [{
+      meta_story_id: "over-merged-es-6",
+      title: "Colombia Roundup",
+      subtitle: "Varios desarrollos.",
+      source_item_ids: Object.keys(ES),
+      summary: "Resumen combinado.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] },
+      factual_claims: Object.keys(ES).map((_, i) => `claim ${i}`),
+      claim_evidence_map: Object.fromEntries(Object.keys(ES).map((id, i) => [String(i), [id]])),
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    translateFn,
+    translationConfig: { enabled: true, concurrency: 2, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 },
+    beatFitEnabled: false, // tie on beat-fit so the cap drop is freshness-deterministic
+  });
+
+  // A2: translation ran over all six ES sources before clustering.
+  assert.equal(log.translation.translatedCount, 6);
+  // A3: the over-merge split (low_token_overlap on normalized English).
+  assert.equal(log.clusterSplit.splitCount, 1);
+  assert.equal(log.clusterSplit.splitReasons.low_token_overlap, 1);
+  // A4: 6 atoms capped to 5, oldest (esc-5) dropped.
+  assert.equal(payload.stories.length, 5);
+  assert.equal(log.overflowCap.overflowCapApplied, true);
+  assert.equal(log.overflowCap.overflowDroppedCount, 1);
+  // A1: every shipped story is English (normalized), never the Spanish original.
+  const SPANISH = ["café", "récord", "erupción", "Alerta", "Ataque", "Inundaciones", "Protesta", "Resumen", "Varios", "español"];
+  for (const s of payload.stories) {
+    const blob = `${s.title} ${s.subtitle} ${s.summary}`;
+    assert.ok(blob.includes("Colombia"), `English evidence expected: ${blob}`);
+    for (const tok of SPANISH) {
+      assert.ok(!blob.includes(tok), `published story must not leak Spanish "${tok}": ${blob}`);
+    }
+  }
+  // The dropped atom is the oldest source's English headline.
+  assert.ok(
+    !payload.stories.some((s) => s.title === EN["esc-5"]),
+    "the oldest atom (esc-5) must be the cap drop"
+  );
+});
+
+test("C2 handoff (B1→B2): the pipeline's reclusterQueue feeds the executor and patches the published slot", async () => {
+  // 1) A deferred ambiguous ES over-merge → the pipeline emits a 1-item
+  //    reclusterQueue (B1) and ships the merge intact as one story.
+  const rawItems = [
+    esDeferItem("es-cafe", ...ES_CAFE),
+    esDeferItem("es-volcan", ...ES_VOLCAN),
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [esDeferCluster("ambiguous-es", "es-cafe", "es-volcan")],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(log.reclusterQueueCount, 1);
+  assert.equal(log.reclusterQueue[0].metaStoryId, "ambiguous-es");
+
+  // 2) Feed the EXACT emitted queue + the REAL published stories into the B2
+  //    executor with a deterministic split stub. The metaStoryId from the B1
+  //    queue must resolve the published slot, and the slot is patched in place.
+  const splitStub = async (items) =>
+    items.map((it, i) => ({
+      meta_story_id: `re-${i}`,
+      title: `Re-clustered ${i}`, subtitle: "s", summary: "sum",
+      source_item_ids: [it.sourceId],
+      tags: { topics: [], keywords: [], geographies: [] },
+      factual_claims: ["A grounded claim."],
+      claim_evidence_map: { "0": [it.sourceId] },
+    }));
+
+  const { stories: patched, mutated, diagnostics } = await executeDeferredRecluster({
+    queue: log.reclusterQueue,
+    stories: payload.stories,
+    settings: BASE_SETTINGS,
+    clusterModel: "mock-anthropic-haiku",
+    clusterFn: splitStub,
+  });
+
+  assert.equal(mutated, true, "the queued candidate's published slot is patched");
+  assert.deepEqual(patched.map((s) => s.metaStoryId), ["re-0", "re-1"]);
+  assert.equal(diagnostics.succeeded, 1);
+  assert.equal(diagnostics.candidates[0].outcome, "split");
+  assert.deepEqual(diagnostics.candidates[0].newMetaStoryIds, ["re-0", "re-1"]);
 });
 
 test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats serial wall-clock (order preserved)", async () => {
