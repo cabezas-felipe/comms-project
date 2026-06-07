@@ -153,6 +153,10 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // poll loop can read `_meta.whyEnrichment.pending` and stop at 0.  Optional
     // for backward compat with snapshots written before Slice 5.
     if (_lastRunMeta.whyEnrichment !== undefined) meta.whyEnrichment = _lastRunMeta.whyEnrichment;
+    // B2: deferred re-cluster execution outcome (queued/attempted/succeeded/
+    // failed/timedOut + per-candidate outcomes + status). Optional for backward
+    // compat with snapshots written before the deferred re-cluster executor.
+    if (_lastRunMeta.reclusterExecution !== undefined) meta.reclusterExecution = _lastRunMeta.reclusterExecution;
     // Slice 7: per-stage wall-clock timings (ingestion + pipeline). Optional —
     // absent on pre-Slice-7 snapshots, so older reads simply omit the key.
     if (_lastRunMeta.timings !== undefined) meta.timings = _lastRunMeta.timings;

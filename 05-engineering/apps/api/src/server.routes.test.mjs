@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
 const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
@@ -1651,6 +1651,116 @@ test("Slice 5 enrichment: failed upgrade degrades to valid non-empty fallback (s
     assert.ok(snap.stories[0].whyItMatters.length > 0, "story whyItMatters stays non-empty");
     assert.equal(snap._meta.whyEnrichment.deferred, false, "enrichment marks done even on degrade");
     assert.equal(snap._meta.whyEnrichment.completed, 0, "no stories upgraded when the resolver fails");
+  });
+});
+
+// ─── B2: deferred re-cluster executor (snapshot patching) ────────────────────
+
+const BASE_SETTINGS_FOR_B2 = { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] };
+// Seed a snapshot whose single story carries TWO sources and is the B1 queue
+// candidate; returns the in-memory base payload (the executor's write source).
+async function seedReclusterSnapshot(userId, generation) {
+  const basePayload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "merged", metaStoryId: "merged", title: "Merged", subtitle: "sub",
+        geographies: ["Colombia"], topic: "Diplomatic relations", summary: "merged summary",
+        whyItMatters: "why copy", whatChanged: "wc", priority: "standard", outletCount: 2,
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] },
+        sources: [
+          { id: "rc1", outlet: "Reuters", kind: "traditional", weight: 70, url: "https://x/rc1", minutesAgo: 30, headline: "Coffee", body: ["b1"] },
+          { id: "rc2", outlet: "El Tiempo", kind: "traditional", weight: 70, url: "https://x/rc2", minutesAgo: 31, headline: "Volcano", body: ["b2"] },
+        ],
+      },
+    ],
+    _watermark: generation,
+    _everSeenMetaStoryIds: [],
+    _lastRunMeta: {},
+  };
+  await _snapshotRepo.write(userId, basePayload);
+  return basePayload;
+}
+const RECLUSTER_QUEUE = [{ metaStoryId: "merged", suspicionScore: 124, reason: "ambiguous_unnormalized_overlap" }];
+// clusterFn that splits the candidate's two sources into two grounded stories.
+const reclusterSplitFn = async (items) =>
+  items.map((it, i) => ({
+    meta_story_id: `re-${i}`,
+    title: `Re-clustered ${i}`,
+    subtitle: "s", summary: "sum",
+    source_item_ids: [it.sourceId],
+    tags: { topics: [], keywords: [], geographies: [] },
+    factual_claims: ["A grounded claim."],
+    claim_evidence_map: { "0": [it.sourceId] },
+  }));
+
+test("B2 deferred re-cluster: success path patches affected slot + records diagnostics on _meta", async () => {
+  await withIsolatedUser("b2-success", async () => {
+    const userId = "b2-success";
+    const basePayload = await seedReclusterSnapshot(userId, "gen-b2");
+    const result = await _reclusterExecutor.execute(
+      { userId, generation: "gen-b2", basePayload, queue: RECLUSTER_QUEUE, settings: BASE_SETTINGS_FOR_B2, clusterModel: "mock-anthropic-haiku" },
+      { clusterFn: reclusterSplitFn }
+    );
+    assert.equal(result.kind, "patched");
+    const snap = await _snapshotRepo.read(userId);
+    // The single merged slot was split into two stories in place.
+    assert.deepEqual(snap.stories.map((s) => s.metaStoryId), ["re-0", "re-1"]);
+    // B2 diagnostics surfaced on read via _meta.reclusterExecution.
+    assert.equal(snap._meta.reclusterExecution.status, "completed");
+    assert.equal(snap._meta.reclusterExecution.attempted, 1);
+    assert.equal(snap._meta.reclusterExecution.succeeded, 1);
+    assert.equal(snap._meta.reclusterExecution.candidates[0].outcome, "split");
+  });
+});
+
+test("B2 deferred re-cluster: failure leaves snapshot stories unchanged but records the outcome", async () => {
+  await withIsolatedUser("b2-fail", async () => {
+    const userId = "b2-fail";
+    const basePayload = await seedReclusterSnapshot(userId, "gen-b2-fail");
+    const result = await _reclusterExecutor.execute(
+      { userId, generation: "gen-b2-fail", basePayload, queue: RECLUSTER_QUEUE, settings: BASE_SETTINGS_FOR_B2, clusterModel: "mock-anthropic-haiku" },
+      { clusterFn: async () => { throw new Error("provider down"); } }
+    );
+    assert.equal(result.kind, "recorded");
+    const snap = await _snapshotRepo.read(userId);
+    // Stories untouched (Phase-1 snapshot preserved).
+    assert.deepEqual(snap.stories.map((s) => s.metaStoryId), ["merged"]);
+    assert.equal(snap._meta.reclusterExecution.status, "failed");
+    assert.equal(snap._meta.reclusterExecution.failed, 1);
+    assert.equal(snap._meta.reclusterExecution.candidates[0].outcome, "error");
+  });
+});
+
+test("B2 deferred re-cluster: stale generation guard is a no-op (no write)", async () => {
+  await withIsolatedUser("b2-stale", async () => {
+    const userId = "b2-stale";
+    const basePayload = await seedReclusterSnapshot(userId, "gen-current");
+    const writeSpy = [];
+    const prevWrite = _snapshotRepo.write;
+    _snapshotRepo.write = async (...args) => { writeSpy.push(args); return prevWrite(...args); };
+    try {
+      const result = await _reclusterExecutor.execute(
+        { userId, generation: "gen-OLD", basePayload, queue: RECLUSTER_QUEUE, settings: BASE_SETTINGS_FOR_B2, clusterModel: "mock-anthropic-haiku" },
+        { clusterFn: reclusterSplitFn }
+      );
+      assert.equal(result.kind, "stale");
+      assert.equal(writeSpy.length, 0, "stale generation must NOT write");
+    } finally {
+      _snapshotRepo.write = prevWrite;
+    }
+  });
+});
+
+test("B2 deferred re-cluster: empty queue is a no-op", async () => {
+  await withIsolatedUser("b2-noop", async () => {
+    const userId = "b2-noop";
+    const basePayload = await seedReclusterSnapshot(userId, "gen-noop");
+    const result = await _reclusterExecutor.execute(
+      { userId, generation: "gen-noop", basePayload, queue: [], settings: BASE_SETTINGS_FOR_B2, clusterModel: "mock-anthropic-haiku" },
+      { clusterFn: reclusterSplitFn }
+    );
+    assert.equal(result.kind, "noop");
   });
 });
 

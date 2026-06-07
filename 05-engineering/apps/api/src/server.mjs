@@ -30,6 +30,10 @@ import { clusterItems } from "./ai/cluster-engine.mjs";
 import { embedTexts } from "./ai/embeddings.mjs";
 import { resolveProductionTranslateFn } from "./ai/openai-translator.mjs";
 import { runRefreshPipeline, enrichWhyItMattersForStories } from "./dashboard/refresh-pipeline.mjs";
+import {
+  executeDeferredRecluster,
+  DEFERRED_RECLUSTER_TIMEOUT_MS,
+} from "./dashboard/deferred-recluster.mjs";
 import { createJob, getJob, completeJob, JOB_STATUS } from "./dashboard/refresh-job.mjs";
 import {
   createEmbeddingSemanticScorer,
@@ -1631,6 +1635,35 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         });
     }
 
+    // B2: deferred re-cluster. After the fast snapshot write, fire-and-forget a
+    // bounded (≤2, sequential, 45s-each) re-cluster over the B1 `reclusterQueue`.
+    // Patches only the affected story slots in place; failures/timeouts leave the
+    // Phase-1 snapshot unchanged. The generation guard (watermark) makes a newer
+    // refresh landing first a safe no-op. The interactive response never blocks
+    // on this. Fires for ANY run that produced a non-empty queue + stories
+    // (re-cluster quality is not interactive-only).
+    if ((log.reclusterQueueCount ?? 0) > 0 && finalPayload.stories.length > 0) {
+      const generation = finalPayload._watermark;
+      const basePayload = finalPayload;
+      const queue = log.reclusterQueue ?? [];
+      void Promise.resolve()
+        .then(() =>
+          _reclusterExecutor.execute({
+            userId: identity.userId,
+            generation,
+            basePayload,
+            queue,
+            settings: settingsWithNarrative,
+            clusterModel,
+          })
+        )
+        .catch((err) => {
+          console.warn(
+            `[recluster.exec] async re-cluster threw (non-fatal): ${err instanceof Error ? err.message : err}`
+          );
+        });
+    }
+
     const elapsedMs = Date.now() - startedAt;
     const sel = log.selection ?? {};
     console.log(
@@ -1819,7 +1852,7 @@ const _LAST_RUN_META_LIFTED_KEYS = Object.freeze([
   "funnel", "recall", "translation", "beatFit", "clusterModel", "embeddingModel",
   "usedFallbackClustering", "clusteringFailureReason", "clusteringAttempts",
   "clusteringLatencyMs", "tags", "whatChanged", "whyItMatters", "timings",
-  "outcomes", "ingestionSource", "whyEnrichment", "profile",
+  "outcomes", "ingestionSource", "whyEnrichment", "profile", "reclusterExecution",
 ]);
 function liftedMetaToLastRunMeta(meta) {
   const out = {};
@@ -1907,6 +1940,80 @@ async function enrichSnapshotWhyItMatters({ userId, generation, basePayload }, o
  * to observe scheduling or to drive the upgrade deterministically.
  */
 export const _whyEnricher = { enrich: enrichSnapshotWhyItMatters };
+
+/**
+ * B2: deferred re-cluster executor for the persisted snapshot.
+ *
+ * Runs AFTER the fast Phase-1 snapshot write, fire-and-forget. Re-reads the
+ * snapshot, GUARDS on the refresh generation (`_watermark`), runs the bounded
+ * (≤2, sequential, 45s-each) re-cluster over the B1 `reclusterQueue`, and writes
+ * the patched stories back — only the affected slots change. Deterministic and
+ * idempotent under the generation guard:
+ *   - generation mismatch (a newer refresh landed) → no-op (kind: "stale")
+ *   - missing snapshot / empty stories / empty queue → no-op
+ * On a no-mutation outcome (all candidates failed/timed-out/not-found) the
+ * stories are preserved untouched; the run's diagnostics are still recorded on
+ * `_lastRunMeta.reclusterExecution` so the outcome is observable on read.
+ * `opts` carries test seams (`clusterFn` / `timeoutMs`); production uses the
+ * shared cluster engine + the locked 45s budget.
+ */
+async function executeDeferredReclusterSnapshot(
+  { userId, generation, basePayload, queue, settings, clusterModel },
+  opts = {}
+) {
+  if (!Array.isArray(queue) || queue.length === 0) return { kind: "noop" };
+  const current = await _snapshotRepo.read(userId).catch(() => null);
+  if (!current) return { kind: "missing" };
+  if (current._watermark !== generation) return { kind: "stale" };
+  const baseStories = Array.isArray(basePayload?.stories) ? basePayload.stories : [];
+  if (baseStories.length === 0) return { kind: "empty" };
+
+  const { stories: patchedStories, mutated, diagnostics } = await executeDeferredRecluster({
+    queue,
+    stories: baseStories,
+    settings,
+    clusterModel,
+    clusterFn: opts.clusterFn ?? _clusterEngine.cluster,
+    timeoutMs: opts.timeoutMs ?? DEFERRED_RECLUSTER_TIMEOUT_MS,
+  });
+
+  // Re-guard immediately before the write in case a newer refresh raced in
+  // while the (potentially slow) re-cluster was running.
+  const latest = await _snapshotRepo.read(userId).catch(() => null);
+  if (!latest || latest._watermark !== generation) return { kind: "stale" };
+
+  // Merge the LATEST same-generation metadata (e.g. a concurrent why-enrichment
+  // write) so recording B2 diagnostics never regresses sibling fields. Stories
+  // are written from `basePayload` (patched) to avoid the lossy read-lift.
+  const latestRunMeta = liftedMetaToLastRunMeta(latest._meta);
+  const nextPayload = {
+    ...basePayload,
+    ...(typeof latest._meta?.lastCheckedAt === "string"
+      ? { _lastCheckedAt: latest._meta.lastCheckedAt }
+      : {}),
+    stories: mutated ? patchedStories : basePayload.stories,
+    _lastRunMeta: {
+      ...(basePayload._lastRunMeta ?? {}),
+      ...latestRunMeta,
+      reclusterExecution: diagnostics,
+    },
+  };
+  await _snapshotRepo.write(userId, nextPayload);
+  console.log(
+    `[recluster.exec] user=${userId} generation=${generation}` +
+      ` queued=${diagnostics.totalQueued} attempted=${diagnostics.attempted}` +
+      ` succeeded=${diagnostics.succeeded} failed=${diagnostics.failed}` +
+      ` timedOut=${diagnostics.timedOut} status=${diagnostics.status} mutated=${mutated}`
+  );
+  return { kind: mutated ? "patched" : "recorded", diagnostics };
+}
+
+/**
+ * Mutable B2 hook. Production runs `executeDeferredReclusterSnapshot`
+ * fire-and-forget after the fast snapshot write; tests override `execute` to
+ * observe scheduling or drive the re-cluster deterministically.
+ */
+export const _reclusterExecutor = { execute: executeDeferredReclusterSnapshot };
 
 /**
  * Mutable execution hook for the shared refresh flow.  Both
