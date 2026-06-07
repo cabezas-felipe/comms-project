@@ -187,9 +187,15 @@ export async function runDashboardCalibration({ floors = DEFAULT_CALIBRATION_FLO
       0
     );
     const failures = evaluateGuardrails({ stories, log, reutersCount });
+    // `finalStories` is the embed-floor admission signal — "candidate pool size
+    // as the floor changes" (one grounded story per deduped item). Read the
+    // PRE-cap count (`overflowCap.overflowInputCount`) so the A4 post-healer
+    // max-5 presentation cap doesn't flatten the calibration signal; fall back
+    // to the shipped count when the diagnostic is absent.
+    const preCapStoryCount = log?.overflowCap?.overflowInputCount ?? stories.length;
     rows.push({
       floor,
-      finalStories: stories.length,
+      finalStories: preCapStoryCount,
       usedFallbackClustering: log?.usedFallbackClustering === true,
       clusteringFailureReason: log?.clusteringFailureReason ?? null,
       keywordRecallCount: log?.recall?.keywordRecallCount ?? null,

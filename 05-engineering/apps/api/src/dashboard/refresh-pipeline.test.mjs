@@ -54,6 +54,9 @@ import {
   compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
+  compareOverflowRank,
+  applyMetaStoryOverflowCap,
+  MAX_META_STORIES,
   enrichWhyItMattersForStories,
   prioritizeLane2Candidates,
   buildSourceGroundedWhyFallback,
@@ -7705,6 +7708,235 @@ test("runRefreshPipeline (A3): ambiguous un-normalized ES over-merge is preserve
   );
 });
 
+// ─── A4: post-healer max-5 overflow cap ──────────────────────────────────────
+//
+// The dashboard ships at most 5 meta-stories. These pin the pipeline-level cap:
+// when the post-healer survivor set exceeds 5, the deterministic Q6-C survival
+// ranking trims the overflow and surfaces it on `log.overflowCap`.
+
+// Unit: the survival comparator honors each ranking tier in order.
+test("compareOverflowRank: multi-source > beat-fit > fresher > metaStoryId", () => {
+  // Tier 1: more sources survives (ranks ahead, i.e. negative).
+  assert.ok(
+    compareOverflowRank(
+      { sourceCount: 2, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
+      { sourceCount: 1, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
+    ) < 0,
+    "more sources outranks everything else"
+  );
+  // Tier 2: equal sources → higher beat-fit survives.
+  assert.ok(
+    compareOverflowRank(
+      { sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 999, metaStoryId: "z" },
+      { sourceCount: 1, maxBeatFitScore: 0.1, minMinutesAgo: 0, metaStoryId: "a" }
+    ) < 0,
+    "higher beat-fit outranks freshness/id"
+  );
+  // Tier 3: equal sources + beat-fit → fresher (lower minutesAgo) survives.
+  assert.ok(
+    compareOverflowRank(
+      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "z" },
+      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 99, metaStoryId: "a" }
+    ) < 0,
+    "fresher outranks id"
+  );
+  // Tier 4: all equal → metaStoryId ascending.
+  assert.ok(
+    compareOverflowRank(
+      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "a" },
+      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "b" }
+    ) < 0,
+    "lower metaStoryId survives the final tie-break"
+  );
+});
+
+// Unit: the cap keeps the top-5 survivors in their original (R1) order and drops
+// the deterministic loser.
+test("applyMetaStoryOverflowCap: drops the lowest-ranked, preserves survivor order", () => {
+  const entry = (metaStoryId, sourceCount, maxBeatFitScore, minMinutesAgo) => ({
+    story: { metaStoryId },
+    sortKey: { metaStoryId, sourceCount, maxBeatFitScore, minMinutesAgo },
+  });
+  // Six single-source entries, identical beat-fit/recency → metaStoryId decides.
+  // Input order is the R1 display order (s0..s5).
+  const entries = ["s0", "s1", "s2", "s3", "s4", "s5"].map((id) => entry(id, 1, 0.5, 30));
+
+  const { kept, dropped, diagnostics } = applyMetaStoryOverflowCap(entries);
+
+  assert.equal(diagnostics.overflowCapApplied, true);
+  assert.equal(diagnostics.overflowInputCount, 6);
+  assert.equal(diagnostics.overflowOutputCount, 5);
+  assert.equal(diagnostics.overflowDroppedCount, 1);
+  // Highest metaStoryId loses the tie-break.
+  assert.deepEqual(diagnostics.overflowDroppedMetaStoryIds, ["s5"]);
+  assert.deepEqual(dropped.map((e) => e.sortKey.metaStoryId), ["s5"]);
+  // Survivors keep R1 order (s0..s4), not the survival-rank order.
+  assert.deepEqual(kept.map((e) => e.sortKey.metaStoryId), ["s0", "s1", "s2", "s3", "s4"]);
+
+  // A one-source-richer entry always survives regardless of position.
+  const withMulti = [entry("s5", 3, 0.1, 99), ...["s0", "s1", "s2", "s3", "s4"].map((id) => entry(id, 1, 0.5, 30))];
+  const res2 = applyMetaStoryOverflowCap(withMulti);
+  assert.ok(!res2.diagnostics.overflowDroppedMetaStoryIds.includes("s5"), "multi-source story must never be the drop");
+  assert.deepEqual(res2.diagnostics.overflowDroppedMetaStoryIds, ["s4"]);
+});
+
+test("applyMetaStoryOverflowCap: no-op at or below the cap", () => {
+  const entries = ["a", "b", "c"].map((id) => ({ story: { metaStoryId: id }, sortKey: { metaStoryId: id, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 30 } }));
+  const { kept, dropped, diagnostics } = applyMetaStoryOverflowCap(entries);
+  assert.equal(diagnostics.overflowCapApplied, false);
+  assert.equal(diagnostics.overflowDroppedCount, 0);
+  assert.equal(dropped.length, 0);
+  assert.equal(kept.length, 3);
+  assert.equal(MAX_META_STORIES, 5);
+});
+
+test("runRefreshPipeline (A4): post-healer >5 stories is capped to 5 with diagnostics", async () => {
+  // Six single-source meta-stories (none split by the healer) all grounded
+  // against the same item. Identical rank inputs → the metaStoryId tie-break
+  // decides; the highest id ("ms-cap-5") is the deterministic drop.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const clusterStories = Array.from({ length: 6 }, (_, i) => ({
+    meta_story_id: `ms-cap-${i}`,
+    title: `Capped story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i}.`,
+    source_item_ids: ["src-1"],
+    summary: `Summary ${i}.`,
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+    factual_claims: [`Reuters reports verified development ${i}.`],
+    claim_evidence_map: { "0": ["src-1"] },
+  }));
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => clusterStories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(payload.stories.length, 5, "dashboard ships at most 5 meta-stories");
+  assert.equal(log.metaStoryCount, 5);
+  // Additive overflow diagnostics surfaced.
+  assert.equal(log.overflowCap.overflowCapApplied, true);
+  assert.equal(log.overflowCap.overflowInputCount, 6);
+  assert.equal(log.overflowCap.overflowOutputCount, 5);
+  assert.equal(log.overflowCap.overflowDroppedCount, 1);
+  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, ["ms-cap-5"]);
+  // The dropped story is absent from the payload; the other five ship.
+  const shippedIds = payload.stories.map((s) => s.metaStoryId).sort();
+  assert.deepEqual(shippedIds, ["ms-cap-0", "ms-cap-1", "ms-cap-2", "ms-cap-3", "ms-cap-4"]);
+});
+
+test("runRefreshPipeline (A4): multi-source story survives the cap over single-source rows", async () => {
+  // 7 items: a 2-source corroborated story (M) + five single-source stories.
+  // Post-healer = 6 stories; the cap drops one SINGLE-source row (multi-source
+  // ranks ahead), so M always survives.
+  const rawItems = [
+    makeItem({ sourceId: "src-a", outlet: "Reuters", minutesAgo: 30 }),
+    makeItem({ sourceId: "src-b", outlet: "El Tiempo", minutesAgo: 31 }),
+    ...Array.from({ length: 5 }, (_, i) =>
+      makeItem({ sourceId: `src-s${i}`, outlet: "Reuters", minutesAgo: 30 })
+    ),
+  ];
+  const multiStory = {
+    meta_story_id: "ms-multi",
+    title: "Multi-source diplomatic story across outlets",
+    subtitle: "Two outlets corroborate.",
+    source_item_ids: ["src-a", "src-b"],
+    summary: "Corroborated.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+    factual_claims: ["Two outlets corroborate the same development."],
+    // Corroborated (≥2 sources on one claim) → the healer leaves it merged.
+    claim_evidence_map: { "0": ["src-a", "src-b"] },
+  };
+  const singleStories = Array.from({ length: 5 }, (_, i) => ({
+    meta_story_id: `ms-single-${i}`,
+    title: `Single-source story ${i}: Colombia diplomatic update`,
+    subtitle: `Subtitle ${i}.`,
+    source_item_ids: [`src-s${i}`],
+    summary: `Summary ${i}.`,
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+    factual_claims: [`Reuters reports verified development ${i}.`],
+    claim_evidence_map: { "0": [`src-s${i}`] },
+  }));
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [multiStory, ...singleStories],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(payload.stories.length, 5);
+  assert.equal(log.overflowCap.overflowCapApplied, true);
+  assert.equal(log.overflowCap.overflowDroppedCount, 1);
+  // The multi-source story is never the drop; the dropped row is single-source
+  // with the highest metaStoryId tie-break ("ms-single-4").
+  assert.ok(
+    payload.stories.some((s) => s.metaStoryId === "ms-multi"),
+    "multi-source story must survive the cap"
+  );
+  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, ["ms-single-4"]);
+});
+
+test("runRefreshPipeline (A4): no cap applied when ≤5 stories ship", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const clusterStories = Array.from({ length: 5 }, (_, i) => ({
+    meta_story_id: `ms-ok-${i}`,
+    title: `Story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i}.`,
+    source_item_ids: ["src-1"],
+    summary: `Summary ${i}.`,
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+    factual_claims: [`Reuters reports verified development ${i}.`],
+    claim_evidence_map: { "0": ["src-1"] },
+  }));
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => clusterStories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(payload.stories.length, 5);
+  assert.equal(log.overflowCap.overflowCapApplied, false);
+  assert.equal(log.overflowCap.overflowInputCount, 5);
+  assert.equal(log.overflowCap.overflowOutputCount, 5);
+  assert.equal(log.overflowCap.overflowDroppedCount, 0);
+  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, []);
+});
+
+test("runRefreshPipeline (A4): overflow_cap rejection-log entries written for dropped rows", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const clusterStories = Array.from({ length: 6 }, (_, i) => ({
+    meta_story_id: `ms-rej-${i}`,
+    title: `Story ${i}: US Colombia diplomatic developments`,
+    subtitle: `Subtitle ${i}.`,
+    source_item_ids: ["src-1"],
+    summary: `Summary ${i}.`,
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+    factual_claims: [`Reuters reports verified development ${i}.`],
+    claim_evidence_map: { "0": ["src-1"] },
+  }));
+
+  const written = [];
+  await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => clusterStories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    writeRejectionsFn: async (records) => { written.push(...records); },
+  });
+
+  const overflowRecords = written.filter((r) => r.reason_code === "overflow_cap");
+  assert.equal(overflowRecords.length, 1, "one overflow_cap rejection record for the dropped story");
+  assert.equal(overflowRecords[0].meta_story_id, "ms-rej-5");
+});
+
 test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats serial wall-clock (order preserved)", async () => {
   // Slice 6: Phase 5 now fans the per-story why-it-matters resolver calls out
   // through a bounded `pMap` pool instead of awaiting them serially.  Pins:
@@ -7712,11 +7944,14 @@ test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats se
   //   2. payload story order is the deterministic R1 order (unaffected by why
   //      completion order),
   //   3. wall-clock for the stage reflects parallel waves, not the serial sum.
-  const STORY_COUNT = 6;
+  // Five stories — the post-healer overflow cap (A4) ships at most 5 meta-
+  // stories, so this concurrency fixture sits at the cap (a 6th would be
+  // trimmed). Five with concurrency 4 still reaches the in-flight ceiling.
+  const STORY_COUNT = 5;
   const PER_STORY_DELAY_MS = 100;
   const localDelay = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // Six distinct stories so none get merged/deduped before Phase 5.  Built off
+  // Five distinct stories so none get merged/deduped before Phase 5.  Built off
   // MOCK_META_STORIES[0] (which grounds against the rawItems) with unique
   // ids/titles/sources.  Ids are lexically ascending so the R1 tiebreaker
   // (metaStoryId) yields the same order as construction.
@@ -7757,7 +7992,7 @@ test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats se
     });
 
     const whyStories = payload.stories.filter((s) => s.metaStoryId.startsWith("ms-why-par-"));
-    assert.equal(whyStories.length, STORY_COUNT, "all six stories survive to the payload");
+    assert.equal(whyStories.length, STORY_COUNT, "all five stories survive to the payload");
     for (const s of whyStories) {
       assert.ok(s.whyItMatters && s.whyItMatters.length > 0, `whyItMatters populated for ${s.metaStoryId}`);
     }
@@ -7773,10 +8008,10 @@ test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats se
       "story order in payload is the deterministic R1 order, independent of parallel completion order (R1)"
     );
 
-    // Concurrency cap honored — at most 4 why writers in flight; with 6 stories
+    // Concurrency cap honored — at most 4 why writers in flight; with 5 stories
     // and cap 4 the ceiling is actually reached.
     assert.ok(maxInFlight <= 4, `max in-flight why writers must be <= 4, saw ${maxInFlight}`);
-    assert.equal(maxInFlight, 4, "concurrency 4 with 6 stories must reach the cap");
+    assert.equal(maxInFlight, 4, "concurrency 4 with 5 stories must reach the cap");
 
     // Stage telemetry surfaced on the returned log.
     assert.equal(log.whyItMatters.whyConcurrency, 4, "whyConcurrency surfaced on log.whyItMatters");

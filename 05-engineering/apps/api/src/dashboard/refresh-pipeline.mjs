@@ -439,6 +439,102 @@ export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
   };
 }
 
+// ─── A4: post-healer meta-story overflow cap ─────────────────────────────────
+//
+// Locked product decision: the dashboard ships AT MOST 5 meta-stories. The
+// split-healer (A3) can, in rare over-merge cases, emit more rows than the
+// clustering contract's nominal 5 (e.g. a wide disjoint over-merge bundled into
+// 6+ sub-stories). This deterministic cap runs AFTER grounding so it trims only
+// the published survivor set, and it maximizes what ships (post-grounding count,
+// not pre-grounding) — grounding drops happen first, then this caps to 5.
+//
+// Drop ranking (Q6 C) is a SURVIVAL order (best first → top 5 survive). It is
+// deliberately distinct from the R1 *display* order: survivors keep their R1
+// order; only WHICH stories survive is decided here.
+//   1. multi-source first   — more `source_item_ids` wins (a corroborated,
+//                              multi-outlet story is higher value than a lone
+//                              single-source row)
+//   2. higher beat-fit      — best relevance score across the story's sources
+//   3. fresher              — lower `minMinutesAgo`
+//   4. metaStoryId ascending — stable, deterministic final tie-break
+export const MAX_META_STORIES = 5;
+
+/**
+ * Survival comparator for the overflow cap (see Q6 C above). Operates on the
+ * per-story rank inputs `{ sourceCount, maxBeatFitScore, minMinutesAgo,
+ * metaStoryId }`. Negative → `a` ranks ahead of (survives over) `b`. Pure;
+ * exported for focused unit testing of the ranking contract.
+ */
+export function compareOverflowRank(a, b) {
+  const asc = Number.isFinite(a?.sourceCount) ? a.sourceCount : 0;
+  const bsc = Number.isFinite(b?.sourceCount) ? b.sourceCount : 0;
+  if (asc !== bsc) return bsc - asc; // more sources first
+  const abf = Number.isFinite(a?.maxBeatFitScore) ? a.maxBeatFitScore : 0;
+  const bbf = Number.isFinite(b?.maxBeatFitScore) ? b.maxBeatFitScore : 0;
+  if (abf !== bbf) return bbf - abf; // higher beat-fit first
+  const am = Number.isFinite(a?.minMinutesAgo) ? a.minMinutesAgo : Number.POSITIVE_INFINITY;
+  const bm = Number.isFinite(b?.minMinutesAgo) ? b.minMinutesAgo : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm; // fresher first
+  const aid = a?.metaStoryId ?? "";
+  const bid = b?.metaStoryId ?? "";
+  if (aid < bid) return -1;
+  if (aid > bid) return 1;
+  return 0;
+}
+
+/**
+ * Cap a list of `{ story, sortKey }` entries to `cap` meta-stories. Entries are
+ * assumed to already be in R1 display order; survivors are returned in that same
+ * order (only the bottom-ranked overflow is removed). `sortKey` must carry the
+ * rank inputs consumed by `compareOverflowRank` (plus `metaStoryId`).
+ *
+ * Returns the kept entries, the dropped entries (for rejection logging), and the
+ * additive overflow diagnostics. A no-op (≤ cap) reports `overflowCapApplied:
+ * false` and drops nothing. Never mutates the input array. Exported for testing.
+ */
+export function applyMetaStoryOverflowCap(entries, cap = MAX_META_STORIES) {
+  const list = Array.isArray(entries) ? entries : [];
+  const inputCount = list.length;
+  const baseDiagnostics = {
+    overflowCapApplied: false,
+    overflowInputCount: inputCount,
+    overflowOutputCount: inputCount,
+    overflowDroppedCount: 0,
+    overflowDroppedMetaStoryIds: [],
+  };
+
+  if (inputCount <= cap) {
+    return { kept: list, dropped: [], diagnostics: baseDiagnostics };
+  }
+
+  // Rank by survival order, breaking final ties on the original (R1) index so
+  // the cap itself is fully deterministic. Survivors = the top `cap` by rank.
+  const ranked = list
+    .map((entry, idx) => ({ entry, idx }))
+    .sort((x, y) => {
+      const c = compareOverflowRank(x.entry?.sortKey, y.entry?.sortKey);
+      return c !== 0 ? c : x.idx - y.idx;
+    });
+  const keepIdx = new Set(ranked.slice(0, cap).map((r) => r.idx));
+  const dropped = ranked.slice(cap).map((r) => r.entry);
+  const kept = list.filter((_, idx) => keepIdx.has(idx)); // preserves R1 order
+  const overflowDroppedMetaStoryIds = dropped
+    .map((e) => e?.sortKey?.metaStoryId)
+    .filter((id) => typeof id === "string" && id);
+
+  return {
+    kept,
+    dropped,
+    diagnostics: {
+      overflowCapApplied: true,
+      overflowInputCount: inputCount,
+      overflowOutputCount: kept.length,
+      overflowDroppedCount: dropped.length,
+      overflowDroppedMetaStoryIds,
+    },
+  };
+}
+
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
 // Why a Jaccard-based merge instead of pure evidence hashing:
@@ -2777,15 +2873,64 @@ export async function runRefreshPipeline({
         );
     return {
       story: buildStory(ms, sourceItems, settings),
-      sortKey: { maxBeatFitScore, minMinutesAgo, metaStoryId: ms.meta_story_id },
+      // `sourceCount` (A4 overflow rank input) is the meta-story's full source
+      // set; grounded stories have all ids resolved, so this matches the
+      // published `sources.length`.
+      sortKey: {
+        maxBeatFitScore,
+        minMinutesAgo,
+        metaStoryId: ms.meta_story_id,
+        sourceCount: Array.isArray(ms.source_item_ids) ? ms.source_item_ids.length : 0,
+      },
     };
   });
   storiesWithSortKeys.sort((a, b) => compareStoriesR1(a.sortKey, b.sortKey));
+
+  // A4: enforce the locked post-healer max-5 cap. Applied AFTER grounding (so it
+  // trims only published survivors) and AFTER the R1 sort (so survivors keep
+  // display order). Deterministic Q6-C survival ranking; additive diagnostics +
+  // optional `overflow_cap` rejection-log entries for the dropped rows.
+  const overflowCapResult = applyMetaStoryOverflowCap(storiesWithSortKeys);
+  const overflowDiagnostics = overflowCapResult.diagnostics;
+  const cappedEntries = overflowCapResult.kept;
+  if (overflowDiagnostics.overflowCapApplied) {
+    console.warn(
+      `[pipeline.overflow-cap] post-healer cap — input=${overflowDiagnostics.overflowInputCount}` +
+        ` output=${overflowDiagnostics.overflowOutputCount}` +
+        ` dropped=${overflowDiagnostics.overflowDroppedCount}` +
+        ` dropped_ids=[${overflowDiagnostics.overflowDroppedMetaStoryIds.join(",")}]`
+    );
+    if (writeRejectionsFn && overflowCapResult.dropped.length > 0) {
+      const overflowRejections = overflowCapResult.dropped.map(({ story, sortKey }) => ({
+        meta_story_id: sortKey?.metaStoryId ?? story?.metaStoryId ?? null,
+        reason_code: "overflow_cap",
+        source_item_ids: Array.isArray(story?.sources)
+          ? story.sources.map((s) => s.id).filter(Boolean)
+          : [],
+        debug_payload: {
+          title: story?.title ?? null,
+          sourceCount: sortKey?.sourceCount ?? null,
+          maxBeatFitScore: sortKey?.maxBeatFitScore ?? null,
+          minMinutesAgo: Number.isFinite(sortKey?.minMinutesAgo) ? sortKey.minMinutesAgo : null,
+        },
+        watermark: watermarkInfo.watermark,
+        created_at: rejectedAt,
+      }));
+      try {
+        await writeRejectionsFn(overflowRejections);
+      } catch (err) {
+        console.warn(
+          `[pipeline.overflow-cap] rejection-log write failed: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
+  }
+
   // `let` (not const): D2 fail-closed-per-story may filter unrecoverable stories
   // out of this array after the narrative stages (see the `narrativeStability`
   // block below). Everything downstream (funnel, metaStoryCount, payload) then
   // reflects the published survivor set.
-  let stories = storiesWithSortKeys.map(({ story }) => story);
+  let stories = cappedEntries.map(({ story }) => story);
 
   // ── Phase 4: optional semantic tag uplift (topics + keywords only) ──────
   // Runs AFTER the deterministic stories are built and sorted — the overlay
@@ -2800,10 +2945,11 @@ export async function runRefreshPipeline({
   let semanticKeywordsAggMut = semanticKeywordsAgg;
   if (stories.length > 0) {
     // We re-resolve sourceItems per story from the cluster-output meta-stories
-    // (groundedStories) — the same map already used for `buildStory`.
-    for (let i = 0; i < storiesWithSortKeys.length; i++) {
+    // (groundedStories) — the same map already used for `buildStory`. Iterate
+    // the post-cap survivor set (A4) so dropped overflow rows are not enriched.
+    for (let i = 0; i < cappedEntries.length; i++) {
       const ms = groundedStories.find(
-        (m) => m.meta_story_id === storiesWithSortKeys[i].sortKey.metaStoryId
+        (m) => m.meta_story_id === cappedEntries[i].sortKey.metaStoryId
       );
       if (!ms) continue;
       const sourceItems = ms.source_item_ids
@@ -3449,6 +3595,10 @@ export async function runRefreshPipeline({
       bundledStoryCount: clusterSplitDiagnostics.bundledStoryCount ?? 0,
       reclusterCandidateIds: clusterSplitDiagnostics.reclusterCandidateIds ?? [],
     },
+    // A4 — post-healer max-5 overflow cap. `overflowCapApplied` is false on the
+    // common path (≤5 stories); when true, `overflowDropped*` records which
+    // stories were trimmed by the deterministic Q6-C survival ranking.
+    overflowCap: overflowDiagnostics,
     groundingFailures,
     // Phase 3 strict-grounding metrics
     droppedUngroundedStoryCount,
