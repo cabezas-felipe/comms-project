@@ -22,12 +22,12 @@
 //     while a shorter TTL would force redundant live fetches.
 
 import { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
+import { mapIngestionKindToContractKind } from "./source-kind.mjs";
 import { REFRESH_INTERVAL_MS } from "../contracts-runtime/index.mjs";
 
 const DEFAULT_TTL_MS = REFRESH_INTERVAL_MS;
 const SNIPPET_MAX_LEN = 500;
 const DEFAULT_WEIGHT = 50;
-const DEFAULT_KIND = "traditional";
 
 const RECENT_ITEMS_TABLE = "ingestion_recent_items";
 
@@ -201,7 +201,10 @@ export function cacheRowsToRawItems(rows, manifestFeeds = [], { now = Date.now()
       body: typeof row.snippet === "string" && row.snippet.length > 0 ? [row.snippet] : [],
       minutesAgo,
       outlet,
-      kind: typeof manifest?.kind === "string" ? manifest.kind : DEFAULT_KIND,
+      // Map the manifest's INGESTION kind (`"rss"`) to the contract kind
+      // (`"traditional"`); a missing/unknown manifest kind also resolves to the
+      // safe default so cache-origin items never carry a schema-invalid kind.
+      kind: mapIngestionKindToContractKind(manifest?.kind),
       weight: typeof manifest?.weight === "number" ? manifest.weight : DEFAULT_WEIGHT,
     });
   }

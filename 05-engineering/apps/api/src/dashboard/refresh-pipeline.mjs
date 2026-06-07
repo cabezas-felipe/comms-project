@@ -54,6 +54,7 @@ import {
   resolveSemanticBeatFitConfig,
 } from "./semantic-beat-fit.mjs";
 import { dedupeSourceItems } from "../ingestion/source-deduper.mjs";
+import { mapIngestionKindToContractKind } from "../ingestion/source-kind.mjs";
 import { assignMetaStoryTags, assignMetaStoryTagsDetailed } from "./meta-story-tags.mjs";
 import {
   TAGS_DIAGNOSTICS_SCHEMA_VERSION,
@@ -1516,7 +1517,11 @@ function buildStory(metaStory, sourceItems, settings) {
         id: item.sourceId,
         outlet: item.outlet,
         byline: item.byline,
-        kind: item.kind,
+        // D2 write-boundary guard: map any ingestion kind ("rss") to a valid
+        // contract kind ("traditional" | "social") so a persisted snapshot can
+        // never fail `dashboardPayloadSchema` on read, even if upstream
+        // ingestion regresses. Shares the D1 mapper.
+        kind: mapIngestionKindToContractKind(item.kind),
         weight: item.weight,
         url: item.url,
         minutesAgo: item.minutesAgo,

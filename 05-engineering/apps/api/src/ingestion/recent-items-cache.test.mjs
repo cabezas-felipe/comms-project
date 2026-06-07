@@ -247,7 +247,9 @@ test("cacheRowsToRawItems: joins each row with its manifest entry to recover out
   assert.equal(item.sourceId, "wapo-politics::abc123");
   assert.equal(item.feedId, "wapo-politics");
   assert.equal(item.outlet, "The Washington Post");
-  assert.equal(item.kind, "rss");
+  // D1: manifest INGESTION kind "rss" maps to the contract kind "traditional"
+  // (cache-origin items must never carry "rss" into the pipeline / schema).
+  assert.equal(item.kind, "traditional");
   assert.equal(item.weight, 95);
   assert.equal(item.url, "https://wapo.example.com/article-1");
   assert.equal(item.headline, "Test headline");
@@ -272,6 +274,18 @@ test("cacheRowsToRawItems: snippet → body[] with empty fallback when snippet i
   assert.deepEqual(withSnippet.body, ["First paragraph body."]);
   const [withoutSnippet] = cacheRowsToRawItems([{ ...CACHE_ROW, snippet: null }], MANIFEST, { now: NOW });
   assert.deepEqual(withoutSnippet.body, []);
+});
+
+test("cacheRowsToRawItems: manifest kind 'rss' maps to contract kind 'traditional' (D1)", () => {
+  const [item] = cacheRowsToRawItems([CACHE_ROW], MANIFEST, { now: NOW });
+  assert.equal(item.kind, "traditional");
+});
+
+test("cacheRowsToRawItems: manifest kind 'social' maps to contract kind 'social' (D1)", () => {
+  const manifest = [{ id: "x-handle", name: "Some Handle", publisher: "Some Handle", kind: "social", weight: 60 }];
+  const row = { ...CACHE_ROW, source_id: "x-handle::1", feed_id: "x-handle" };
+  const [item] = cacheRowsToRawItems([row], manifest, { now: NOW });
+  assert.equal(item.kind, "social");
 });
 
 test("cacheRowsToRawItems: rows without a manifest match get safe defaults (kind=traditional, weight=50)", () => {

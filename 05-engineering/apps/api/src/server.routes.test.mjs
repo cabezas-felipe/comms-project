@@ -501,6 +501,57 @@ test("GET /api/dashboard returns persisted snapshot when one exists", async () =
   }
 });
 
+// ─── D2: dashboard GET contract safety on source kinds ───────────────────────
+
+function snapshotWithSourceKinds(kinds) {
+  return {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [{
+      id: "d2-story", metaStoryId: "d2-story", title: "D2 Story", subtitle: "A subtitle.",
+      geographies: ["US"], topic: "Diplomatic relations", summary: "Summary.",
+      whyItMatters: "Why.", whatChanged: "No material update since your last refresh.",
+      priority: "standard", outletCount: kinds.length,
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      sources: kinds.map((kind, i) => ({
+        id: `src-${i}`, outlet: "Reuters", kind, weight: 75, url: `#${i}`, minutesAgo: 30, headline: "H", body: ["B"],
+      })),
+    }],
+    _meta: { hasSnapshot: true, refreshedAt: new Date().toISOString() },
+  };
+}
+
+test("GET /api/dashboard (D2): a snapshot with contract-valid source kinds is served and schema-valid", async () => {
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => snapshotWithSourceKinds(["traditional", "social"]);
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.stories.length, 1);
+    assert.deepEqual(res.body.stories[0].sources.map((s) => s.kind).sort(), ["social", "traditional"]);
+    const parsed = dashboardPayloadSchema.safeParse(res.body);
+    assert.ok(parsed.success, `response must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
+test("GET /api/dashboard (D2): a snapshot carrying kind 'rss' fail-closes to empty (read-time guard, validation NOT relaxed)", async () => {
+  // The D2 write-boundary guard prevents this snapshot from being written at
+  // all; this documents that IF a legacy/regressed snapshot still carries the
+  // invalid ingestion kind, the read route stays fail-closed to empty rather
+  // than serving a schema-invalid payload. We do NOT broaden the accepted kinds.
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => snapshotWithSourceKinds(["rss"]);
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.stories.length, 0, "schema-invalid 'rss' kind must fail-closed to empty stories");
+    assert.equal(res.body._meta?.hasSnapshot, false);
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
 test("GET /api/dashboard lifts persisted _lastRunMeta.outcomes + ingestionSource into _meta (Slice 3 read path)", async () => {
   // Persist a real snapshot carrying Slice 3 run-level observability under
   // `_lastRunMeta`, then read it back through the LIVE read path (no stubbing)

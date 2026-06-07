@@ -58,15 +58,22 @@ deferred re-cluster, **C** = diagnostics + tests.
      .filter((k) => k.startsWith("tempo.settings.v1"))
      .forEach((k) => localStorage.removeItem(k));     // settings cache (global + per-user)
    ```
-5. **For Spanish-feed E2E** (translated ES → English stories), the translation
-   stage must be live (it is a fail-open no-op otherwise — see
-   [`.env.example`](../apps/api/.env.example) and the
+5. **Local English E2E** — for a landing → dashboard run that turns the Spanish
+   feeds into **English** stories, the translation stage must be live (it is a
+   fail-open no-op otherwise — see [`.env.example`](../apps/api/.env.example)
+   "Local E2E: Spanish feeds → English stories" and the
    [translation runbook](runbook-translation-activation.md)):
    - `TEMPO_TRANSLATION_ENABLED=true`
    - `TEMPO_OPENAI_API_KEY=<key>` set **and** `TEMPO_AI_MOCK_ONLY` unset (a real
      `translateFn` is wired only on a non-mock box with a key).
-   - Mock-only / no-key → translation is a no-op; ES stories stay Spanish (expected,
-     not a bug).
+   - **Restart the API after changing env** — these are read at process start,
+     not per-request (`npm run dev:api`, or restart `npm run dev`).
+   - **Verify in the API logs** on the next refresh:
+     - `[pipeline.translation] enabled=true …` (the stage is on), and
+     - when the candidate pool has Spanish items: `needed>0` **and** `translated>0`.
+   - Mock-only / no-key → translation is a no-op; ES stories stay Spanish. This is
+     **expected — not a clustering or split-healer regression** (the items simply
+     passed through untranslated).
 
 ---
 
@@ -179,6 +186,24 @@ npm run test --workspace=@tempo/api
      (or `noop`) on the next refresh/read.
 5. If anything looks wrong, pull `_meta` via the `curl | jq` line in §4 and use the
    §5 levers to roll back the suspect stage.
+
+### E2E success checklist (English run)
+
+A landing → onboarding → dashboard pass is **green** when all of the following hold
+(after the reset in §1.3–§1.4 and the env in §1.5):
+
+- [ ] **1–5 stories visible** on the dashboard (never 0 for a populated beat; never >5).
+- [ ] **Story titles and subtitles are in English**, even when the underlying
+      sources are Spanish.
+- [ ] API logs show `[pipeline.translation] enabled=true` and, when ES items were in
+      the pool, `needed>0 translated>0` (per §1.5).
+- [ ] **No** `[dashboard.get] … failed schema validation … returning empty` line in
+      the API logs (that line means the snapshot fail-closed on read — investigate the
+      persisted payload, e.g. an invalid `sources[].kind`).
+
+If stories render but titles are **Spanish**, re-check §1.5: translation is almost
+certainly off / mock-only / missing a key — that is expected behavior, not a
+clustering or split-healer regression.
 
 ---
 
