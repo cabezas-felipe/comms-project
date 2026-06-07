@@ -21,6 +21,7 @@
 import { withTimeout } from "../ai/guardrails.mjs";
 import { verifyGrounding } from "../ai/cluster-engine.mjs";
 import { MAX_META_STORIES } from "./refresh-pipeline.mjs";
+import { mapIngestionKindToContractKind } from "../ingestion/source-kind.mjs";
 
 export const DEFERRED_RECLUSTER_TIMEOUT_MS = 45000;
 export const DEFERRED_RECLUSTER_MAX = 2;
@@ -79,7 +80,10 @@ function shapeReclusteredStory(metaStory, parentStory, itemsById) {
       id: i.sourceId,
       outlet: i.outlet,
       byline: i.byline,
-      kind: i.kind,
+      // D2 write-boundary guard: a patched/split story's sources go straight
+      // into the snapshot, so map any ingestion kind ("rss") to a valid
+      // contract kind here too (shares the D1 mapper).
+      kind: mapIngestionKindToContractKind(i.kind),
       weight: i.weight,
       url: i.url,
       minutesAgo: i.minutesAgo,

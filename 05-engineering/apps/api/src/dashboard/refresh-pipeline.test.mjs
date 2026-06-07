@@ -68,6 +68,8 @@ import {
 // reclusterQueue straight into the deferred re-cluster executor.
 import { executeDeferredRecluster } from "./deferred-recluster.mjs";
 import { PUBLISH_WINDOW_MINUTES } from "../ingestion/source-deduper.mjs";
+// D2: assert projected story sources satisfy the dashboard contract.
+import { dashboardPayloadSchema } from "../contracts-runtime/index.mjs";
 // Hoisted from further down the file: ESM imports must sit at module top level,
 // not inside the describe() wrapper that scopes this file's env knobs.
 import {
@@ -8288,6 +8290,105 @@ test("C2 handoff (B1→B2): the pipeline's reclusterQueue feeds the executor and
   assert.equal(diagnostics.succeeded, 1);
   assert.equal(diagnostics.candidates[0].outcome, "split");
   assert.deepEqual(diagnostics.candidates[0].newMetaStoryIds, ["re-0", "re-1"]);
+});
+
+// ─── D2: write-boundary kind guard (contract safety at projection) ───────────
+//
+// Even if upstream ingestion regresses and feeds source items carrying the
+// INGESTION kind "rss", the projected story sources must only ever emit the
+// CONTRACT kinds "traditional" | "social" so a persisted snapshot can never
+// fail `dashboardPayloadSchema` on read.
+
+test("runRefreshPipeline (D2): source items with kind 'rss' project to 'traditional' and pass the contract schema", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "rss-1", outlet: "Reuters", minutesAgo: 30, kind: "rss" }),
+    makeItem({ sourceId: "soc-1", outlet: "@latamwatcher", minutesAgo: 31, kind: "social" }),
+  ];
+  const { payload } = await runRefreshPipeline({
+    // Configure the social source so both items survive source-selection.
+    settings: { ...BASE_SETTINGS, socialSources: ["@latamwatcher"] },
+    rawItems,
+    // One corroborated 2-source story so both sources land in one published
+    // story's `sources[]` (the healer leaves a corroborated cluster intact).
+    clusterFn: async () => [{
+      meta_story_id: "kind-guard",
+      title: "Kind guard story",
+      subtitle: "sub",
+      source_item_ids: ["rss-1", "soc-1"],
+      summary: "merged",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+      factual_claims: ["Both outlets corroborate the same development."],
+      claim_evidence_map: { "0": ["rss-1", "soc-1"] },
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(payload.stories.length, 1);
+  const kinds = payload.stories[0].sources.map((s) => s.kind);
+  // "rss" → "traditional"; "social" passes through. No raw ingestion kind leaks.
+  assert.deepEqual([...kinds].sort(), ["social", "traditional"]);
+  assert.ok(payload.stories.every((s) => s.sources.every((src) => src.kind === "traditional" || src.kind === "social")));
+
+  // The full published payload must satisfy the dashboard contract.
+  const parsed = dashboardPayloadSchema.safeParse({
+    contractVersion: payload.contractVersion,
+    stories: payload.stories,
+  });
+  assert.ok(parsed.success, `payload must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
+});
+
+test("runRefreshPipeline (D2): the deferred re-cluster patch keeps sources contract-safe", async () => {
+  // Run the pipeline with an 'rss' source, then re-cluster the published story
+  // through the B2 executor. The patched stories' sources must remain
+  // contract-safe and the result must still pass the schema.
+  const rawItems = [
+    // Both outlets are configured traditional sources so the items survive
+    // source-selection; both carry the ingestion kind "rss".
+    makeItem({ sourceId: "rss-a", outlet: "Reuters", minutesAgo: 30, kind: "rss" }),
+    makeItem({ sourceId: "rss-b", outlet: "El Tiempo", minutesAgo: 31, kind: "rss" }),
+  ];
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [{
+      meta_story_id: "deferred-kind",
+      title: "Deferred kind story", subtitle: "sub",
+      source_item_ids: ["rss-a", "rss-b"],
+      summary: "merged",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+      factual_claims: ["Both outlets corroborate."],
+      claim_evidence_map: { "0": ["rss-a", "rss-b"] },
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1);
+
+  const splitStub = async (items) =>
+    items.map((it, i) => ({
+      meta_story_id: `dk-${i}`,
+      title: `Re-clustered ${i}`, subtitle: "s", summary: "sum",
+      source_item_ids: [it.sourceId],
+      tags: { topics: [], keywords: [], geographies: [] },
+      factual_claims: ["A grounded claim."],
+      claim_evidence_map: { "0": [it.sourceId] },
+    }));
+  const { stories: patched, mutated } = await executeDeferredRecluster({
+    queue: [{ metaStoryId: "deferred-kind" }],
+    stories: payload.stories,
+    settings: BASE_SETTINGS,
+    clusterModel: "mock-anthropic-haiku",
+    clusterFn: splitStub,
+  });
+
+  assert.equal(mutated, true);
+  assert.ok(
+    patched.every((s) => s.sources.every((src) => src.kind === "traditional" || src.kind === "social")),
+    "patched story sources must only carry contract kinds"
+  );
+  const parsed = dashboardPayloadSchema.safeParse({ contractVersion: "2026-05-19-meta-story-fields", stories: patched });
+  assert.ok(parsed.success, `patched payload must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
 });
 
 test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats serial wall-clock (order preserved)", async () => {

@@ -129,6 +129,36 @@ test("happy path (split): candidate re-clusters into 2 stories, slot expands in 
   assert.deepEqual(diagnostics.candidates[0].newMetaStoryIds, ["split-0", "split-1"]);
 });
 
+test("D2 write-boundary guard: a parent story with kind 'rss' yields patched sources with contract-safe kinds", async () => {
+  // Simulate a legacy / regressed parent snapshot whose sources carry the
+  // ingestion kind "rss". The patched (split) stories must project only the
+  // contract kinds "traditional" | "social".
+  const parent = {
+    ...snapStory("legacy", ["r1", "r2"]),
+    sources: [
+      { id: "r1", outlet: "Reuters", byline: "B", kind: "rss", weight: 75, url: "https://e/r1", minutesAgo: 30, headline: "H r1", body: ["b"] },
+      { id: "r2", outlet: "@handle", byline: "B", kind: "social", weight: 60, url: "https://e/r2", minutesAgo: 31, headline: "H r2", body: ["b"] },
+    ],
+  };
+  const { stories: out, mutated } = await executeDeferredRecluster({
+    queue: [{ metaStoryId: "legacy" }],
+    stories: [parent],
+    settings: SETTINGS,
+    clusterModel: MODEL,
+    clusterFn: clusterSplit,
+  });
+
+  assert.equal(mutated, true);
+  const kinds = out.flatMap((s) => s.sources.map((src) => src.kind));
+  assert.ok(kinds.length > 0, "patched stories must carry sources");
+  assert.ok(
+    kinds.every((k) => k === "traditional" || k === "social"),
+    `patched sources must only carry contract kinds, saw: ${JSON.stringify(kinds)}`
+  );
+  // "rss" → "traditional"; "social" passes through (one each).
+  assert.deepEqual([...kinds].sort(), ["social", "traditional"]);
+});
+
 test("timeout: candidate is not patched, next candidate still attempted (sequential)", async () => {
   const stories = [snapStory("slow", ["s1"]), snapStory("fast", ["f1", "f2"])];
   const queue = [{ metaStoryId: "slow" }, { metaStoryId: "fast" }];
