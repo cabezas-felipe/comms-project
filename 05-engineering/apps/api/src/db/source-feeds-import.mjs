@@ -17,13 +17,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
+import { mapIngestionKindToContractKind } from "../ingestion/source-kind.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const FEEDS_FILE = path.resolve(__dirname, "../../data/source-feeds.json");
-
-// Maps source-feeds.json "kind" → source_entities "kind"
-const ENTITY_KIND = { rss: "traditional", social: "social" };
 
 async function main() {
   const url = process.env.SUPABASE_URL;
@@ -44,7 +42,9 @@ async function main() {
   let skipped = 0;
 
   for (const feed of feeds) {
-    const entityKind = ENTITY_KIND[feed.kind] ?? "traditional";
+    // Shared ingestion→contract kind mapping (rss→traditional, social→social,
+    // anything else→traditional) — identical to the prior local ENTITY_KIND map.
+    const entityKind = mapIngestionKindToContractKind(feed.kind);
 
     // Upsert source_entities keyed on (kind, canonical_name).
     const entityRow = { canonical_name: feed.name, kind: entityKind };
