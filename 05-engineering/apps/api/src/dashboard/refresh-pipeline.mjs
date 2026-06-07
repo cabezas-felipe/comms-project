@@ -4,7 +4,7 @@ import {
   generateMetaStoryId,
   readClusteringRepairDiagnostics,
   classifyClusteringFailureSubtype,
-  CLUSTERING_FAILURE_SUBTYPE,
+  clusteringReasonFromSubtype,
 } from "../ai/cluster-engine.mjs";
 import {
   applyGeoFilter,
@@ -2569,14 +2569,11 @@ export async function runRefreshPipeline({
       // failure so `_meta.clusteringFailureReason` distinguishes a timeout
       // (capacity / slow round-trip) from a hard error (schema, auth, etc.).
       // Prompt 1: classify the terminal failure into a stable subtype, then
-      // DERIVE the coarse legacy reason from it so the two stay in lockstep.
-      // `timeout_budget` maps to "timeout" (byte-identical to the prior regex
-      // split); every other subtype maps to "error".
+      // DERIVE the coarse legacy reason from it so the two stay in lockstep
+      // (`clusteringReasonFromSubtype` is the single source of that mapping —
+      // timeout_budget → "timeout", every other subtype → "error").
       clusteringFailureSubtype = classifyClusteringFailureSubtype(lastErr);
-      clusteringFailureReason =
-        clusteringFailureSubtype === CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET
-          ? "timeout"
-          : "error";
+      clusteringFailureReason = clusteringReasonFromSubtype(clusteringFailureSubtype);
       rawMetaStories = [];
       usedFallbackClustering = true;
       console.warn(
@@ -2633,14 +2630,12 @@ export async function runRefreshPipeline({
         // Keep the last attempt's repair diagnostics for `_meta`.
         clusteringRepair = readClusteringRepairDiagnostics(recoveryErr);
         // Prompt 1: classify the recovery attempt's own failure and derive its
-        // legacy reason from the subtype (mirrors the primary loop). The
-        // terminal `clusteringFailureSubtype` (set by the primary loop) is left
-        // untouched — the recovery subtype is reported separately.
+        // legacy reason from the subtype via the same shared mapping as the
+        // primary loop. The terminal `clusteringFailureSubtype` (set by the
+        // primary loop) is left untouched — the recovery subtype is reported
+        // separately.
         clusteringRecoverySubtype = classifyClusteringFailureSubtype(recoveryErr);
-        clusteringRecoveryReason =
-          clusteringRecoverySubtype === CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET
-            ? "timeout"
-            : "error";
+        clusteringRecoveryReason = clusteringReasonFromSubtype(clusteringRecoverySubtype);
         // Preserve the fail-closed outcome set above (0 meta-stories).
         rawMetaStories = [];
         console.warn(

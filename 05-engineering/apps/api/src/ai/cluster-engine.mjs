@@ -511,6 +511,17 @@ export function classifyClusteringFailureSubtype(err) {
   return CLUSTERING_FAILURE_SUBTYPE.UNKNOWN;
 }
 
+/**
+ * Derive the coarse legacy `clusteringFailureReason` (`"timeout" | "error"`)
+ * from a clustering failure subtype.  Single source of truth for the
+ * subtype→reason mapping so the two never drift: `timeout_budget` maps to
+ * "timeout" (byte-identical to the pre-Prompt-1 regex split); every other
+ * subtype maps to "error".  Pure; exported for unit testing of the contract.
+ */
+export function clusteringReasonFromSubtype(subtype) {
+  return subtype === CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET ? "timeout" : "error";
+}
+
 // Clustering completion token budget.  Named (not a new tuning knob — same
 // value that was inline) so the observability line can report it verbatim.
 export const CLUSTER_MAX_TOKENS = 2048;
