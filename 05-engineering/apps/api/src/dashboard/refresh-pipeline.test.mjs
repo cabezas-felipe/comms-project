@@ -1936,6 +1936,106 @@ test("runRefreshPipeline: ≥2 grounded factual_claims → subtitle ≠ summary 
   );
 });
 
+// ─── A2: translation-first → split-healer English output (integration) ───────
+//
+// End-to-end proof that translation runs POST-GEO / PRE-RECALL so the
+// normalized English evidence reaches BOTH the clustering input set and the
+// split healer. Two Spanish (`lang:"es"`) items are over-merged by the injected
+// clusterFn (disjoint single-source claim_evidence_map → the healer splits them
+// into one story per source). After A1, each split story reads its title /
+// subtitle / summary through `readHeadline` / `readBody`, so with normalized
+// English present the published stories must be ENGLISH, never the Spanish
+// originals. Hermetic: deterministic `translateFn` stub, no live provider.
+test("runRefreshPipeline: ES items translated pre-cluster → split-healer stories are English", async () => {
+  // Deterministic ES→EN segment translator keyed by sourceId. `segments[0]` is
+  // the headline, `segments.slice(1)` the body snippets (buildEvidenceSegments
+  // contract); the stub returns the same-length English array.
+  const EN = {
+    "es-a": {
+      headline: "Colombia coffee prices reach a record high",
+      body: ["Growers report a stronger harvest this season."],
+    },
+    "es-b": {
+      headline: "Colombia volcano eruption triggers an evacuation alert",
+      body: ["Seismic tremors force residents to flee."],
+    },
+  };
+  const translateFn = async (segments, { sourceId }) => {
+    const en = EN[sourceId];
+    const out = en ? [en.headline, ...en.body] : segments.slice();
+    while (out.length < segments.length) out.push("");
+    return out.slice(0, segments.length);
+  };
+
+  const rawItems = [
+    makeItem({
+      sourceId: "es-a",
+      outlet: "El Tiempo",
+      minutesAgo: 30,
+      lang: "es",
+      headline: "Los precios del café en Colombia alcanzan un récord histórico",
+      body: ["Los caficultores reportan una cosecha más fuerte esta temporada."],
+    }),
+    makeItem({
+      sourceId: "es-b",
+      outlet: "Reuters",
+      minutesAgo: 31,
+      lang: "es",
+      headline: "Alerta de evacuación por erupción volcánica en Colombia",
+      body: ["Los temblores sísmicos obligan a los residentes a huir."],
+    }),
+  ];
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    // Over-merge both ES items into one cluster with a disjoint single-source
+    // claim_evidence_map — the deterministic over-merge fingerprint the healer
+    // splits back into one meta-story per source.
+    clusterFn: async () => [{
+      meta_story_id: "over-merged-es",
+      title: "Colombia Roundup",
+      subtitle: "Varios desarrollos.",
+      source_item_ids: ["es-a", "es-b"],
+      summary: "Resumen combinado.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] },
+      factual_claims: ["claim a", "claim b"],
+      claim_evidence_map: { "0": ["es-a"], "1": ["es-b"] },
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // Enable translation without env mutation; inject the deterministic stub.
+    translateFn,
+    translationConfig: { enabled: true, concurrency: 2, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 },
+  });
+
+  // Translation ran pre-cluster and normalized both ES sources.
+  assert.equal(log.translation.enabled, true);
+  assert.equal(log.translation.neededCount, 2);
+  assert.equal(log.translation.translatedCount, 2);
+
+  // The over-merge was split back into one story per source.
+  assert.equal(log.clusterSplit.splitCount, 1);
+  assert.equal(payload.stories.length, 2);
+
+  // Every published field is English (normalized), never the Spanish original.
+  const SPANISH_TOKENS = ["café", "récord", "erupción", "Alerta", "caficultores", "temblores", "Resumen", "Varios"];
+  for (const s of payload.stories) {
+    const blob = `${s.title} ${s.subtitle} ${s.summary}`;
+    assert.ok(blob.includes("Colombia"), `story should carry English evidence: ${blob}`);
+    for (const tok of SPANISH_TOKENS) {
+      assert.ok(!blob.includes(tok), `published story must not leak Spanish "${tok}": ${blob}`);
+    }
+  }
+
+  // Titles are exactly the normalized English headlines (order-independent).
+  const titles = payload.stories.map((s) => s.title).sort();
+  assert.deepEqual(titles, [
+    "Colombia coffee prices reach a record high",
+    "Colombia volcano eruption triggers an evacuation alert",
+  ].sort());
+});
+
 test("runRefreshPipeline: poison subtitle on partial_source_ids cannot reach output (strict drop)", async () => {
   const rawItems = [
     makeItem({ sourceId: "real-id", outlet: "Reuters", minutesAgo: 30, headline: "Real grounded headline" }),
