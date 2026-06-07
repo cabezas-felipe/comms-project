@@ -17,6 +17,7 @@ import {
   formatClusterObsLine,
   CLUSTER_MAX_TOKENS,
   classifyClusteringFailureSubtype,
+  clusteringReasonFromSubtype,
   CLUSTERING_FAILURE_SUBTYPE,
 } from "./cluster-engine.mjs";
 import { validateSmokeOutput, runClusterSmoke } from "./evals/cluster-smoke-core.mjs";
@@ -1308,4 +1309,28 @@ test("classifyClusteringFailureSubtype: timeout wins even with repair diagnostic
 test("classifyClusteringFailureSubtype: null/undefined → unknown (never throws)", () => {
   assert.equal(classifyClusteringFailureSubtype(null), CLUSTERING_FAILURE_SUBTYPE.UNKNOWN);
   assert.equal(classifyClusteringFailureSubtype(undefined), CLUSTERING_FAILURE_SUBTYPE.UNKNOWN);
+});
+
+test("clusteringReasonFromSubtype: timeout_budget → timeout", () => {
+  assert.equal(
+    clusteringReasonFromSubtype(CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET),
+    "timeout"
+  );
+  // Locked against the literal too, since downstream consumers key off the value.
+  assert.equal(clusteringReasonFromSubtype("timeout_budget"), "timeout");
+});
+
+test("clusteringReasonFromSubtype: every non-timeout subtype → error", () => {
+  assert.equal(clusteringReasonFromSubtype(CLUSTERING_FAILURE_SUBTYPE.PARSE), "error");
+  assert.equal(
+    clusteringReasonFromSubtype(CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST),
+    "error"
+  );
+  assert.equal(clusteringReasonFromSubtype(CLUSTERING_FAILURE_SUBTYPE.UNKNOWN), "error");
+});
+
+test("clusteringReasonFromSubtype: unknown/undefined subtype → error (documents current behavior)", () => {
+  assert.equal(clusteringReasonFromSubtype("not_a_real_subtype"), "error");
+  assert.equal(clusteringReasonFromSubtype(undefined), "error");
+  assert.equal(clusteringReasonFromSubtype(null), "error");
 });
