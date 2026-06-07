@@ -7642,6 +7642,69 @@ test("runRefreshPipeline (Slice 2): a same-event election pair is not split", as
   assert.equal(payload.stories.length, 1, "high-overlap same-event pair must stay merged");
   assert.equal(log.clusterSplit.splitCount, 0);
 });
+
+test("runRefreshPipeline (A3): ambiguous un-normalized ES over-merge is preserved + flagged for re-cluster", async () => {
+  // Two unrelated Spanish items, translation NOT enabled (no translateFn) so
+  // they reach clustering un-normalized. The clusterFn over-merges them under a
+  // non-disjoint / non-corroborated claim map. The raw-text overlap is low, but
+  // it can't be trusted cross-language — A3 must PRESERVE the merge in Phase 1
+  // and flag it for the deferred re-cluster, never atomize it.
+  const rawItems = [
+    makeItem({
+      sourceId: "es-cafe",
+      outlet: "Reuters",
+      topic: "Diplomatic relations",
+      geographies: ["Colombia"],
+      minutesAgo: 30,
+      lang: "es",
+      headline: "Colombia: la cosecha de café alcanza un récord",
+      body: ["Los caficultores reportan rendimientos más altos."],
+    }),
+    makeItem({
+      sourceId: "es-volcan",
+      outlet: "Reuters",
+      topic: "Diplomatic relations",
+      geographies: ["Colombia"],
+      minutesAgo: 45,
+      lang: "es",
+      headline: "Alerta de evacuación por erupción volcánica en Colombia",
+      body: ["Los temblores sísmicos obligan a los residentes a huir."],
+    }),
+  ];
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    // Non-disjoint, non-corroborated claim map → only the (gated) low-overlap
+    // path could act, and it is suppressed because the evidence isn't English.
+    clusterFn: async () => [{
+      meta_story_id: "ambiguous-es",
+      title: "Colombia Roundup",
+      subtitle: "Varios desarrollos.",
+      source_item_ids: ["es-cafe", "es-volcan"],
+      summary: "Resumen combinado.",
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] },
+      factual_claims: ["una afirmación"],
+      claim_evidence_map: { "0": ["es-cafe"] },
+    }],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // translation intentionally NOT enabled — the items stay un-normalized.
+  });
+
+  // The over-merge is preserved (1 story), NOT atomized into 2.
+  assert.equal(payload.stories.length, 1, "ambiguous ES over-merge must be preserved in Phase 1");
+  assert.equal(log.clusterSplit.splitCount, 0);
+  // ...and flagged for the Phase-2 deferred re-cluster via additive diagnostics.
+  assert.equal(log.clusterSplit.deferredCount, 1);
+  assert.equal(log.clusterSplit.deferReasons.ambiguous_unnormalized_overlap, 1);
+  assert.equal(log.clusterSplit.bundledStoryCount, 0);
+  assert.ok(
+    log.clusterSplit.reclusterCandidateIds.includes("ambiguous-es"),
+    "the deferred meta-story id must be surfaced for Phase-2 handoff"
+  );
+});
+
 test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats serial wall-clock (order preserved)", async () => {
   // Slice 6: Phase 5 now fans the per-story why-it-matters resolver calls out
   // through a bounded `pMap` pool instead of awaiting them serially.  Pins:

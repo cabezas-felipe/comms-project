@@ -2666,6 +2666,17 @@ export async function runRefreshPipeline({
   );
   rawMetaStories = clusterSplitResult.stories;
   const clusterSplitDiagnostics = clusterSplitResult.diagnostics;
+  console.log(
+    `[pipeline.cluster-split] enabled=${clusterSplitDiagnostics.enabled}` +
+      ` input=${clusterSplitDiagnostics.inputCount}` +
+      ` output=${clusterSplitDiagnostics.outputCount}` +
+      ` splits=${clusterSplitDiagnostics.splitCount}` +
+      ` low_overlap=${clusterSplitDiagnostics.splitReasons?.low_token_overlap ?? 0}` +
+      ` disjoint=${clusterSplitDiagnostics.splitReasons?.disjoint_claim_evidence ?? 0}` +
+      ` bundled=${clusterSplitDiagnostics.bundledStoryCount ?? 0}` +
+      ` deferred=${clusterSplitDiagnostics.deferredCount ?? 0}` +
+      ` recluster_candidates=${(clusterSplitDiagnostics.reclusterCandidateIds ?? []).length}`
+  );
 
   // 7. Resolve stable meta_story_id with lineage continuity:
   //    Read prior snapshot, attempt to match each new cluster against a prior
@@ -3422,12 +3433,21 @@ export async function runRefreshPipeline({
     // Slice 2 — post-cluster split healer diagnostics. `enabled` reflects the
     // resolved config; `splitCount` / `splitReasons` show how many over-merged
     // clusters were split and why (low_token_overlap | disjoint_claim_evidence).
+    // A3 adds (additive, non-breaking): `deferredCount` / `deferReasons` for
+    // ambiguous clusters left intact and flagged for the Phase-2 deferred
+    // re-cluster pass, `bundledStoryCount` for multi-source bundles a split kept
+    // together instead of atomizing, and `reclusterCandidateIds` listing the
+    // meta_story_ids that carry the `_reclusterCandidate` handoff flag.
     clusterSplit: {
       enabled: clusterSplitDiagnostics.enabled,
       inputCount: clusterSplitDiagnostics.inputCount,
       outputCount: clusterSplitDiagnostics.outputCount,
       splitCount: clusterSplitDiagnostics.splitCount,
       splitReasons: clusterSplitDiagnostics.splitReasons,
+      deferredCount: clusterSplitDiagnostics.deferredCount ?? 0,
+      deferReasons: clusterSplitDiagnostics.deferReasons ?? {},
+      bundledStoryCount: clusterSplitDiagnostics.bundledStoryCount ?? 0,
+      reclusterCandidateIds: clusterSplitDiagnostics.reclusterCandidateIds ?? [],
     },
     groundingFailures,
     // Phase 3 strict-grounding metrics
