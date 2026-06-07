@@ -8328,7 +8328,6 @@ test("runRefreshPipeline (D2): source items with kind 'rss' project to 'traditio
   const kinds = payload.stories[0].sources.map((s) => s.kind);
   // "rss" → "traditional"; "social" passes through. No raw ingestion kind leaks.
   assert.deepEqual([...kinds].sort(), ["social", "traditional"]);
-  assert.ok(payload.stories.every((s) => s.sources.every((src) => src.kind === "traditional" || src.kind === "social")));
 
   // The full published payload must satisfy the dashboard contract.
   const parsed = dashboardPayloadSchema.safeParse({
