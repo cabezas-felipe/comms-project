@@ -150,12 +150,7 @@ test("D2 write-boundary guard: a parent story with kind 'rss' yields patched sou
 
   assert.equal(mutated, true);
   const kinds = out.flatMap((s) => s.sources.map((src) => src.kind));
-  assert.ok(kinds.length > 0, "patched stories must carry sources");
-  assert.ok(
-    kinds.every((k) => k === "traditional" || k === "social"),
-    `patched sources must only carry contract kinds, saw: ${JSON.stringify(kinds)}`
-  );
-  // "rss" → "traditional"; "social" passes through (one each).
+  // "rss" → "traditional"; "social" passes through (one each) — and nothing else.
   assert.deepEqual([...kinds].sort(), ["social", "traditional"]);
 });
 
