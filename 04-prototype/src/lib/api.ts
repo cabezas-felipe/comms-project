@@ -64,6 +64,30 @@ export interface DashboardFetchResult {
    * "nothing pending". Parsed defensively; never schema-validated.
    */
   whyEnrichment: DashboardWhyEnrichmentMeta | null;
+  /**
+   * C1: split-healer (A3) run diagnostics lifted from `_meta.clusterSplit`
+   * (split/defer counts + reasons + bundling). Dev/debug aid only; `null` when
+   * absent. Parsed defensively — never schema-validated, never gates behavior.
+   */
+  clusterSplit: DashboardClusterSplitMeta | null;
+  /**
+   * C1: overflow cap (A4) diagnostics lifted from `_meta.overflowCap` (whether
+   * the post-healer max-5 cap trimmed stories + which were dropped). `null` when
+   * absent. Defensive parse.
+   */
+  overflowCap: DashboardOverflowCapMeta | null;
+  /**
+   * C1: deferred re-cluster EXECUTION outcome (B2) lifted from
+   * `_meta.reclusterExecution`. Present only after the deferred pass runs (a
+   * subsequent GET read), so `null` on the immediate refresh response and on
+   * older APIs. Defensive parse.
+   */
+  reclusterExecution: DashboardReclusterExecutionMeta | null;
+  /**
+   * C1: number of B1 deferred re-cluster candidates queued this run, lifted from
+   * `_meta.reclusterQueueCount`. `null` when absent.
+   */
+  reclusterQueueCount: number | null;
 }
 
 /** Subset of the server progressive-enrichment state surfaced for the client poll loop. */
@@ -111,6 +135,39 @@ export interface DashboardRecallMeta {
   finalRelevant: number | null;
   similarityRejected: number | null;
   minSimilarityThreshold: number | null;
+}
+
+/** C1: split-healer (A3) run diagnostics for the debug panel. */
+export interface DashboardClusterSplitMeta {
+  enabled: boolean | null;
+  inputCount: number | null;
+  outputCount: number | null;
+  splitCount: number | null;
+  deferredCount: number | null;
+  bundledStoryCount: number | null;
+  reclusterCandidateIds: string[];
+  splitReasons: Record<string, number>;
+  deferReasons: Record<string, number>;
+}
+
+/** C1: overflow cap (A4) diagnostics for the debug panel. */
+export interface DashboardOverflowCapMeta {
+  overflowCapApplied: boolean;
+  overflowInputCount: number | null;
+  overflowOutputCount: number | null;
+  overflowDroppedCount: number | null;
+  overflowDroppedMetaStoryIds: string[];
+}
+
+/** C1: deferred re-cluster execution (B2) outcome for the debug panel. */
+export interface DashboardReclusterExecutionMeta {
+  status: string | null;
+  totalQueued: number | null;
+  attempted: number | null;
+  succeeded: number | null;
+  failed: number | null;
+  timedOut: number | null;
+  candidates: Array<{ metaStoryId: string | null; outcome: string | null }>;
 }
 
 export interface DashboardBootstrapResult extends DashboardFetchResult {
@@ -292,6 +349,75 @@ function parseRecallMetaSafe(raw: unknown): DashboardRecallMeta | null {
   };
 }
 
+// Coerce an object of numeric counters (e.g. splitReasons) defensively.
+function numRecordSafe(v: unknown): Record<string, number> {
+  if (!v || typeof v !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof val === "number" && Number.isFinite(val)) out[k] = val;
+  }
+  return out;
+}
+
+// Coerce a string-array defensively (drop non-string entries).
+function strArrSafe(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * Lift the split-healer (A3) diagnostics off `_meta.clusterSplit` (C1). Same
+ * defensive posture as `parseFunnelMetaSafe`: missing/garbled → `null`,
+ * individual fields degrade. Dev-only — never gates behavior, never throws.
+ */
+function parseClusterSplitMetaSafe(raw: unknown): DashboardClusterSplitMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  return {
+    enabled: typeof c.enabled === "boolean" ? c.enabled : null,
+    inputCount: numOrNull(c.inputCount),
+    outputCount: numOrNull(c.outputCount),
+    splitCount: numOrNull(c.splitCount),
+    deferredCount: numOrNull(c.deferredCount),
+    bundledStoryCount: numOrNull(c.bundledStoryCount),
+    reclusterCandidateIds: strArrSafe(c.reclusterCandidateIds),
+    splitReasons: numRecordSafe(c.splitReasons),
+    deferReasons: numRecordSafe(c.deferReasons),
+  };
+}
+
+/** Lift the overflow cap (A4) diagnostics off `_meta.overflowCap` (C1). */
+function parseOverflowCapMetaSafe(raw: unknown): DashboardOverflowCapMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  return {
+    overflowCapApplied: o.overflowCapApplied === true,
+    overflowInputCount: numOrNull(o.overflowInputCount),
+    overflowOutputCount: numOrNull(o.overflowOutputCount),
+    overflowDroppedCount: numOrNull(o.overflowDroppedCount),
+    overflowDroppedMetaStoryIds: strArrSafe(o.overflowDroppedMetaStoryIds),
+  };
+}
+
+/** Lift the deferred re-cluster execution (B2) outcome off `_meta.reclusterExecution` (C1). */
+function parseReclusterExecutionMetaSafe(raw: unknown): DashboardReclusterExecutionMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const candidates = Array.isArray(r.candidates)
+    ? r.candidates
+        .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+        .map((c) => ({ metaStoryId: strOrNull(c.metaStoryId), outcome: strOrNull(c.outcome) }))
+    : [];
+  return {
+    status: strOrNull(r.status),
+    totalQueued: numOrNull(r.totalQueued),
+    attempted: numOrNull(r.attempted),
+    succeeded: numOrNull(r.succeeded),
+    failed: numOrNull(r.failed),
+    timedOut: numOrNull(r.timedOut),
+    candidates,
+  };
+}
+
 // Mirrors server-side resolver precedence: bearer > email_recognition.
 // Not production auth for the email path — prototype identity layer only.
 async function buildIdentityHeaders(): Promise<Record<string, string>> {
@@ -371,8 +497,15 @@ async function requestDashboard<TExtras extends object>({
       const funnel = parseFunnelMetaSafe(meta?.funnel);
       const recall = parseRecallMetaSafe(meta?.recall);
       const whyEnrichment = parseWhyEnrichmentMetaSafe(meta?.whyEnrichment);
+      const clusterSplit = parseClusterSplitMetaSafe(meta?.clusterSplit);
+      const overflowCap = parseOverflowCapMetaSafe(meta?.overflowCap);
+      const reclusterExecution = parseReclusterExecutionMetaSafe(meta?.reclusterExecution);
+      const reclusterQueueCount = numOrNull(meta?.reclusterQueueCount);
       const extras = parseExtras ? parseExtras(raw) : ({} as TExtras);
-      return { payload, selection, refreshedAt, lastCheckedAt, ...clustering, funnel, recall, whyEnrichment, ...extras };
+      return {
+        payload, selection, refreshedAt, lastCheckedAt, ...clustering, funnel, recall, whyEnrichment,
+        clusterSplit, overflowCap, reclusterExecution, reclusterQueueCount, ...extras,
+      };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw error;

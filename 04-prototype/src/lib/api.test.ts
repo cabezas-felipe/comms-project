@@ -416,6 +416,99 @@ describe("Slice 3: funnel + recall diagnostics from _meta", () => {
   });
 });
 
+describe("C1: split / overflow / re-cluster diagnostics from _meta", () => {
+  it("lifts clusterSplit + overflowCap + reclusterExecution + reclusterQueueCount when present", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          clusterSplit: {
+            enabled: true, inputCount: 4, outputCount: 5, splitCount: 1,
+            splitReasons: { low_token_overlap: 1, disjoint_claim_evidence: 0 },
+            deferredCount: 1, deferReasons: { ambiguous_unnormalized_overlap: 1, ambiguous_overlap_conflict: 0 },
+            bundledStoryCount: 1, reclusterCandidateIds: ["ms-d"],
+          },
+          overflowCap: {
+            overflowCapApplied: true, overflowInputCount: 6, overflowOutputCount: 5,
+            overflowDroppedCount: 1, overflowDroppedMetaStoryIds: ["ms-drop"],
+          },
+          reclusterExecution: {
+            status: "completed", totalQueued: 1, attempted: 1, succeeded: 1, failed: 0, timedOut: 0,
+            candidates: [{ metaStoryId: "ms-d", outcome: "split" }],
+          },
+          reclusterQueueCount: 1,
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.clusterSplit?.splitCount).toBe(1);
+    expect(result.clusterSplit?.deferredCount).toBe(1);
+    expect(result.clusterSplit?.splitReasons.low_token_overlap).toBe(1);
+    expect(result.clusterSplit?.reclusterCandidateIds).toEqual(["ms-d"]);
+    expect(result.overflowCap?.overflowCapApplied).toBe(true);
+    expect(result.overflowCap?.overflowDroppedMetaStoryIds).toEqual(["ms-drop"]);
+    expect(result.reclusterExecution?.status).toBe("completed");
+    expect(result.reclusterExecution?.succeeded).toBe(1);
+    expect(result.reclusterExecution?.candidates[0]).toEqual({ metaStoryId: "ms-d", outcome: "split" });
+    expect(result.reclusterQueueCount).toBe(1);
+  });
+
+  it("returns null blocks when absent (backward compat)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: CONTRACT_VERSION, stories: [], _meta: {} }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.clusterSplit).toBeNull();
+    expect(result.overflowCap).toBeNull();
+    expect(result.reclusterExecution).toBeNull();
+    expect(result.reclusterQueueCount).toBeNull();
+  });
+
+  it("parses cleanly with no _meta at all (no throw)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: CONTRACT_VERSION, stories: [] }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.clusterSplit).toBeNull();
+    expect(result.overflowCap).toBeNull();
+    expect(result.reclusterExecution).toBeNull();
+  });
+
+  it("degrades malformed C1 fields without throwing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          clusterSplit: { splitCount: "many", splitReasons: "nope", reclusterCandidateIds: [1, "ok", null] },
+          overflowCap: { overflowCapApplied: "yes", overflowDroppedMetaStoryIds: "x" },
+          reclusterExecution: { status: 7, candidates: "none" },
+          reclusterQueueCount: "two",
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    // Block is non-null (object present) but fields degrade safely.
+    expect(result.clusterSplit?.splitCount).toBeNull();
+    expect(result.clusterSplit?.splitReasons).toEqual({});
+    expect(result.clusterSplit?.reclusterCandidateIds).toEqual(["ok"]); // non-strings dropped
+    expect(result.overflowCap?.overflowCapApplied).toBe(false); // non-true → false
+    expect(result.overflowCap?.overflowDroppedMetaStoryIds).toEqual([]);
+    expect(result.reclusterExecution?.status).toBeNull();
+    expect(result.reclusterExecution?.candidates).toEqual([]);
+    expect(result.reclusterQueueCount).toBeNull();
+  });
+});
+
 describe("Slice 2: clustering fail-closed diagnostics from _meta", () => {
   it("happy path — no clustering keys → clusteringFailed=false, nulls elsewhere", async () => {
     const fetcher = vi.fn().mockResolvedValue({

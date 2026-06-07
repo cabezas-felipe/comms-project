@@ -153,6 +153,25 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // poll loop can read `_meta.whyEnrichment.pending` and stop at 0.  Optional
     // for backward compat with snapshots written before Slice 5.
     if (_lastRunMeta.whyEnrichment !== undefined) meta.whyEnrichment = _lastRunMeta.whyEnrichment;
+    // C1 — split-healer (A3) diagnostics: enabled / input-output counts /
+    // splitCount + splitReasons / deferredCount + deferReasons /
+    // bundledStoryCount / reclusterCandidateIds. Surfaced so `?debug=1` and
+    // GET /api/dashboard can explain what the split-healer did without a replay.
+    // Optional for backward compat with snapshots written before the healer.
+    if (_lastRunMeta.clusterSplit !== undefined) meta.clusterSplit = _lastRunMeta.clusterSplit;
+    // C1 — overflow cap (A4) diagnostics: whether the post-healer max-5 cap
+    // trimmed stories and which metaStoryIds were dropped. Optional for
+    // backward compat with snapshots written before the cap.
+    if (_lastRunMeta.overflowCap !== undefined) meta.overflowCap = _lastRunMeta.overflowCap;
+    // C1 — deferred re-cluster QUEUE (B1): the ranked ≤2 candidates and the
+    // queued/candidate counts. The companion EXECUTION outcome (B2) lands on
+    // `reclusterExecution` after the deferred pass runs. Both optional.
+    if (_lastRunMeta.reclusterQueue !== undefined) meta.reclusterQueue = _lastRunMeta.reclusterQueue;
+    if (_lastRunMeta.reclusterQueueCount !== undefined) meta.reclusterQueueCount = _lastRunMeta.reclusterQueueCount;
+    // B2: deferred re-cluster execution outcome (queued/attempted/succeeded/
+    // failed/timedOut + per-candidate outcomes + status). Optional for backward
+    // compat with snapshots written before the deferred re-cluster executor.
+    if (_lastRunMeta.reclusterExecution !== undefined) meta.reclusterExecution = _lastRunMeta.reclusterExecution;
     // Slice 7: per-stage wall-clock timings (ingestion + pipeline). Optional —
     // absent on pre-Slice-7 snapshots, so older reads simply omit the key.
     if (_lastRunMeta.timings !== undefined) meta.timings = _lastRunMeta.timings;

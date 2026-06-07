@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
 const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
@@ -1652,6 +1652,228 @@ test("Slice 5 enrichment: failed upgrade degrades to valid non-empty fallback (s
     assert.equal(snap._meta.whyEnrichment.deferred, false, "enrichment marks done even on degrade");
     assert.equal(snap._meta.whyEnrichment.completed, 0, "no stories upgraded when the resolver fails");
   });
+});
+
+// ─── B2: deferred re-cluster executor (snapshot patching) ────────────────────
+
+const BASE_SETTINGS_FOR_B2 = { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] };
+// Seed a snapshot whose single story carries TWO sources and is the B1 queue
+// candidate; returns the in-memory base payload (the executor's write source).
+async function seedReclusterSnapshot(userId, generation) {
+  const basePayload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "merged", metaStoryId: "merged", title: "Merged", subtitle: "sub",
+        geographies: ["Colombia"], topic: "Diplomatic relations", summary: "merged summary",
+        whyItMatters: "why copy", whatChanged: "wc", priority: "standard", outletCount: 2,
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] },
+        sources: [
+          { id: "rc1", outlet: "Reuters", kind: "traditional", weight: 70, url: "https://x/rc1", minutesAgo: 30, headline: "Coffee", body: ["b1"] },
+          { id: "rc2", outlet: "El Tiempo", kind: "traditional", weight: 70, url: "https://x/rc2", minutesAgo: 31, headline: "Volcano", body: ["b2"] },
+        ],
+      },
+    ],
+    _watermark: generation,
+    _everSeenMetaStoryIds: [],
+    _lastRunMeta: {},
+  };
+  await _snapshotRepo.write(userId, basePayload);
+  return basePayload;
+}
+const RECLUSTER_QUEUE = [{ metaStoryId: "merged", suspicionScore: 124, reason: "ambiguous_unnormalized_overlap" }];
+// clusterFn that splits the candidate's two sources into two grounded stories.
+const reclusterSplitFn = async (items) =>
+  items.map((it, i) => ({
+    meta_story_id: `re-${i}`,
+    title: `Re-clustered ${i}`,
+    subtitle: "s", summary: "sum",
+    source_item_ids: [it.sourceId],
+    tags: { topics: [], keywords: [], geographies: [] },
+    factual_claims: ["A grounded claim."],
+    claim_evidence_map: { "0": [it.sourceId] },
+  }));
+
+test("B2 deferred re-cluster: success path patches affected slot + records diagnostics on _meta", async () => {
+  await withIsolatedUser("b2-success", async () => {
+    const userId = "b2-success";
+    const basePayload = await seedReclusterSnapshot(userId, "gen-b2");
+    const result = await _reclusterExecutor.execute(
+      { userId, generation: "gen-b2", basePayload, queue: RECLUSTER_QUEUE, settings: BASE_SETTINGS_FOR_B2, clusterModel: "mock-anthropic-haiku" },
+      { clusterFn: reclusterSplitFn }
+    );
+    assert.equal(result.kind, "patched");
+    const snap = await _snapshotRepo.read(userId);
+    // The single merged slot was split into two stories in place.
+    assert.deepEqual(snap.stories.map((s) => s.metaStoryId), ["re-0", "re-1"]);
+    // B2 diagnostics surfaced on read via _meta.reclusterExecution.
+    assert.equal(snap._meta.reclusterExecution.status, "completed");
+    assert.equal(snap._meta.reclusterExecution.attempted, 1);
+    assert.equal(snap._meta.reclusterExecution.succeeded, 1);
+    assert.equal(snap._meta.reclusterExecution.candidates[0].outcome, "split");
+  });
+});
+
+test("B2 deferred re-cluster: failure leaves snapshot stories unchanged but records the outcome", async () => {
+  await withIsolatedUser("b2-fail", async () => {
+    const userId = "b2-fail";
+    const basePayload = await seedReclusterSnapshot(userId, "gen-b2-fail");
+    const result = await _reclusterExecutor.execute(
+      { userId, generation: "gen-b2-fail", basePayload, queue: RECLUSTER_QUEUE, settings: BASE_SETTINGS_FOR_B2, clusterModel: "mock-anthropic-haiku" },
+      { clusterFn: async () => { throw new Error("provider down"); } }
+    );
+    assert.equal(result.kind, "recorded");
+    const snap = await _snapshotRepo.read(userId);
+    // Stories untouched (Phase-1 snapshot preserved).
+    assert.deepEqual(snap.stories.map((s) => s.metaStoryId), ["merged"]);
+    assert.equal(snap._meta.reclusterExecution.status, "failed");
+    assert.equal(snap._meta.reclusterExecution.failed, 1);
+    assert.equal(snap._meta.reclusterExecution.candidates[0].outcome, "error");
+  });
+});
+
+test("B2 deferred re-cluster: stale generation guard is a no-op (no write)", async () => {
+  await withIsolatedUser("b2-stale", async () => {
+    const userId = "b2-stale";
+    const basePayload = await seedReclusterSnapshot(userId, "gen-current");
+    const writeSpy = [];
+    const prevWrite = _snapshotRepo.write;
+    _snapshotRepo.write = async (...args) => { writeSpy.push(args); return prevWrite(...args); };
+    try {
+      const result = await _reclusterExecutor.execute(
+        { userId, generation: "gen-OLD", basePayload, queue: RECLUSTER_QUEUE, settings: BASE_SETTINGS_FOR_B2, clusterModel: "mock-anthropic-haiku" },
+        { clusterFn: reclusterSplitFn }
+      );
+      assert.equal(result.kind, "stale");
+      assert.equal(writeSpy.length, 0, "stale generation must NOT write");
+    } finally {
+      _snapshotRepo.write = prevWrite;
+    }
+  });
+});
+
+test("B2 deferred re-cluster: empty queue is a no-op", async () => {
+  await withIsolatedUser("b2-noop", async () => {
+    const userId = "b2-noop";
+    const basePayload = await seedReclusterSnapshot(userId, "gen-noop");
+    const result = await _reclusterExecutor.execute(
+      { userId, generation: "gen-noop", basePayload, queue: [], settings: BASE_SETTINGS_FOR_B2, clusterModel: "mock-anthropic-haiku" },
+      { clusterFn: reclusterSplitFn }
+    );
+    assert.equal(result.kind, "noop");
+  });
+});
+
+// ─── C1: split / overflow / re-cluster diagnostics visibility ────────────────
+
+// Minimal success stub whose `log` carries the A3/A4/B1 diagnostics blocks.
+function c1DiagnosticsPipelineStub() {
+  return async (opts) => ({
+    payload: {
+      contractVersion: opts.contractVersion,
+      stories: [{
+        id: "c1-story", metaStoryId: "c1-story", title: "C1", subtitle: "s",
+        geographies: ["US"], topic: "Diplomatic relations", summary: "sum",
+        whyItMatters: "why", whatChanged: "wc", priority: "standard", outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: ["US"] }, sources: [],
+      }],
+    },
+    log: {
+      unchanged: false, poolCount: 4, relevantCount: 1, usedFallbackClustering: false,
+      groundingFailures: 0, droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+      watermark: "c1-watermark", candidateCount: 1, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "test" },
+      clusterSplit: {
+        enabled: true, inputCount: 2, outputCount: 3, splitCount: 1,
+        splitReasons: { low_token_overlap: 1, disjoint_claim_evidence: 0 },
+        deferredCount: 1, deferReasons: { ambiguous_unnormalized_overlap: 1, ambiguous_overlap_conflict: 0 },
+        bundledStoryCount: 0, reclusterCandidateIds: ["ms-d"],
+      },
+      overflowCap: {
+        overflowCapApplied: false, overflowInputCount: 3, overflowOutputCount: 3,
+        overflowDroppedCount: 0, overflowDroppedMetaStoryIds: [],
+      },
+      reclusterQueue: [{ metaStoryId: "ms-d", suspicionScore: 124, reason: "ambiguous_unnormalized_overlap" }],
+      reclusterQueueCount: 1,
+    },
+  });
+}
+
+test("C1: refresh response _meta surfaces clusterSplit/overflowCap/reclusterQueue and persists them", async () => {
+  await withIsolatedUser("c1-resp", async () => {
+    let capturedPayload = null;
+    const prevWrite = _snapshotRepo.write;
+    const prevRun = _refreshPipeline.run;
+    const prevGetLocks = _snapshotRepo.getLocks;
+    const prevInsertLocks = _snapshotRepo.insertLocks;
+    const prevRecluster = _reclusterExecutor.execute;
+    _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+    _snapshotRepo.getLocks = async () => new Map();
+    _snapshotRepo.insertLocks = async () => {};
+    _reclusterExecutor.execute = async () => ({ kind: "noop" }); // don't run deferred work here
+    _refreshPipeline.run = c1DiagnosticsPipelineStub();
+    try {
+      await request(app).put("/api/settings").send(VALID_BODY).set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      // Immediate response _meta surfaces A3/A4/B1 diagnostics.
+      assert.equal(res.body._meta.clusterSplit.splitCount, 1);
+      assert.equal(res.body._meta.clusterSplit.deferredCount, 1);
+      assert.deepEqual(res.body._meta.clusterSplit.reclusterCandidateIds, ["ms-d"]);
+      assert.equal(res.body._meta.overflowCap.overflowCapApplied, false);
+      assert.equal(res.body._meta.reclusterQueueCount, 1);
+      assert.equal(res.body._meta.reclusterQueue[0].metaStoryId, "ms-d");
+      // B2 EXECUTION outcome is NOT on the immediate response (runs after).
+      assert.equal(res.body._meta.reclusterExecution, undefined);
+      // …and the blocks are persisted into _lastRunMeta for the read path.
+      assert.ok(capturedPayload._lastRunMeta.clusterSplit);
+      assert.ok(capturedPayload._lastRunMeta.overflowCap);
+      assert.equal(capturedPayload._lastRunMeta.reclusterQueueCount, 1);
+    } finally {
+      _snapshotRepo.write = prevWrite;
+      _refreshPipeline.run = prevRun;
+      _snapshotRepo.getLocks = prevGetLocks;
+      _snapshotRepo.insertLocks = prevInsertLocks;
+      _reclusterExecutor.execute = prevRecluster;
+    }
+  });
+});
+
+test("C1: GET /api/dashboard lifts persisted clusterSplit/overflowCap/reclusterExecution into _meta (read path)", async () => {
+  const LIFT_USER = "c1-lift-user";
+  const payload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [{
+      id: "lift-1", metaStoryId: "lift-1", title: "T", subtitle: "sub",
+      geographies: ["US"], topic: "Diplomatic relations", summary: "Summary.",
+      whyItMatters: "Why.", whatChanged: "No material update since your last refresh.",
+      priority: "standard", outletCount: 1,
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      sources: [{ id: "src-1", outlet: "Reuters", kind: "traditional", weight: 75, url: "#", minutesAgo: 30, headline: "H", body: ["B"] }],
+    }],
+    _lastRunMeta: {
+      clusterSplit: { enabled: true, inputCount: 4, outputCount: 5, splitCount: 1, splitReasons: { low_token_overlap: 1, disjoint_claim_evidence: 0 }, deferredCount: 0, deferReasons: { ambiguous_unnormalized_overlap: 0, ambiguous_overlap_conflict: 0 }, bundledStoryCount: 0, reclusterCandidateIds: [] },
+      overflowCap: { overflowCapApplied: true, overflowInputCount: 6, overflowOutputCount: 5, overflowDroppedCount: 1, overflowDroppedMetaStoryIds: ["ms-drop"] },
+      reclusterExecution: { enabled: true, totalQueued: 1, attempted: 1, succeeded: 1, failed: 0, timedOut: 0, cappedToMax: false, totalLatencyMs: 9, status: "completed", candidates: [{ metaStoryId: "ms-d", outcome: "confirmed", splitInto: 1, latencyMs: 8 }] },
+    },
+  };
+  const prevResolver = _auth.resolver;
+  _auth.resolver = async () => ({ userId: LIFT_USER, source: "bearer" });
+  await _snapshotRepo.write(LIFT_USER, payload);
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.clusterSplit.splitCount, 1);
+    assert.equal(res.body._meta.overflowCap.overflowCapApplied, true);
+    assert.deepEqual(res.body._meta.overflowCap.overflowDroppedMetaStoryIds, ["ms-drop"]);
+    assert.equal(res.body._meta.reclusterExecution.status, "completed");
+    assert.equal(res.body._meta.reclusterExecution.succeeded, 1);
+    assert.equal(res.body._meta.reclusterExecution.candidates[0].outcome, "confirmed");
+    // Internal persistence field must never leak to clients.
+    assert.equal(res.body._lastRunMeta, undefined);
+  } finally {
+    _auth.resolver = prevResolver;
+  }
 });
 
 // ─── Slice 1: fail-closed clustering snapshot continuity ─────────────────────

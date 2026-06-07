@@ -439,6 +439,202 @@ export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
   };
 }
 
+// ─── A4: post-healer meta-story overflow cap ─────────────────────────────────
+//
+// Locked product decision: the dashboard ships AT MOST 5 meta-stories. The
+// split-healer (A3) can, in rare over-merge cases, emit more rows than the
+// clustering contract's nominal 5 (e.g. a wide disjoint over-merge bundled into
+// 6+ sub-stories). This deterministic cap runs AFTER grounding so it trims only
+// the published survivor set, and it maximizes what ships (post-grounding count,
+// not pre-grounding) — grounding drops happen first, then this caps to 5.
+//
+// Drop ranking (Q6 C) is a SURVIVAL order (best first → top 5 survive). It is
+// deliberately distinct from the R1 *display* order: survivors keep their R1
+// order; only WHICH stories survive is decided here.
+//   1. multi-source first   — more `source_item_ids` wins (a corroborated,
+//                              multi-outlet story is higher value than a lone
+//                              single-source row)
+//   2. higher beat-fit      — best relevance score across the story's sources
+//   3. fresher              — lower `minMinutesAgo`
+//   4. metaStoryId ascending — stable, deterministic final tie-break
+export const MAX_META_STORIES = 5;
+
+/**
+ * Survival comparator for the overflow cap (see Q6 C above). Operates on the
+ * per-story rank inputs `{ sourceCount, maxBeatFitScore, minMinutesAgo,
+ * metaStoryId }`. Negative → `a` ranks ahead of (survives over) `b`. Pure;
+ * exported for focused unit testing of the ranking contract.
+ */
+export function compareOverflowRank(a, b) {
+  const asc = Number.isFinite(a?.sourceCount) ? a.sourceCount : 0;
+  const bsc = Number.isFinite(b?.sourceCount) ? b.sourceCount : 0;
+  if (asc !== bsc) return bsc - asc; // more sources first
+  const abf = Number.isFinite(a?.maxBeatFitScore) ? a.maxBeatFitScore : 0;
+  const bbf = Number.isFinite(b?.maxBeatFitScore) ? b.maxBeatFitScore : 0;
+  if (abf !== bbf) return bbf - abf; // higher beat-fit first
+  const am = Number.isFinite(a?.minMinutesAgo) ? a.minMinutesAgo : Number.POSITIVE_INFINITY;
+  const bm = Number.isFinite(b?.minMinutesAgo) ? b.minMinutesAgo : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm; // fresher first
+  const aid = a?.metaStoryId ?? "";
+  const bid = b?.metaStoryId ?? "";
+  if (aid < bid) return -1;
+  if (aid > bid) return 1;
+  return 0;
+}
+
+/**
+ * Cap a list of `{ story, sortKey }` entries to `cap` meta-stories. Entries are
+ * assumed to already be in R1 display order; survivors are returned in that same
+ * order (only the bottom-ranked overflow is removed). `sortKey` must carry the
+ * rank inputs consumed by `compareOverflowRank` (plus `metaStoryId`).
+ *
+ * Returns the kept entries, the dropped entries (for rejection logging), and the
+ * additive overflow diagnostics. A no-op (≤ cap) reports `overflowCapApplied:
+ * false` and drops nothing. Never mutates the input array. Exported for testing.
+ */
+export function applyMetaStoryOverflowCap(entries, cap = MAX_META_STORIES) {
+  const list = Array.isArray(entries) ? entries : [];
+  const inputCount = list.length;
+  const baseDiagnostics = {
+    overflowCapApplied: false,
+    overflowInputCount: inputCount,
+    overflowOutputCount: inputCount,
+    overflowDroppedCount: 0,
+    overflowDroppedMetaStoryIds: [],
+  };
+
+  if (inputCount <= cap) {
+    return { kept: list, dropped: [], diagnostics: baseDiagnostics };
+  }
+
+  // Rank by survival order, breaking final ties on the original (R1) index so
+  // the cap itself is fully deterministic. Survivors = the top `cap` by rank.
+  const ranked = list
+    .map((entry, idx) => ({ entry, idx }))
+    .sort((x, y) => {
+      const c = compareOverflowRank(x.entry?.sortKey, y.entry?.sortKey);
+      return c !== 0 ? c : x.idx - y.idx;
+    });
+  const keepIdx = new Set(ranked.slice(0, cap).map((r) => r.idx));
+  const dropped = ranked.slice(cap).map((r) => r.entry);
+  const kept = list.filter((_, idx) => keepIdx.has(idx)); // preserves R1 order
+  const overflowDroppedMetaStoryIds = dropped
+    .map((e) => e?.sortKey?.metaStoryId)
+    .filter((id) => typeof id === "string" && id);
+
+  return {
+    kept,
+    dropped,
+    diagnostics: {
+      overflowCapApplied: true,
+      overflowInputCount: inputCount,
+      overflowOutputCount: kept.length,
+      overflowDroppedCount: dropped.length,
+      overflowDroppedMetaStoryIds,
+    },
+  };
+}
+
+// ─── B1: deferred re-cluster candidate queue (flagging + ranking only) ────────
+//
+// A3's split-healer DEFERS ambiguous over-merges instead of atomizing them,
+// stamping each survivor with `_reclusterCandidate: true` + a `_reclusterReason`
+// (`ambiguous_overlap_conflict` | `ambiguous_unnormalized_overlap`). B1 turns
+// those flags into a deterministic, ranked, bounded QUEUE that a future B2
+// executor can reconsider. This slice is metadata-ONLY: it runs NO re-cluster,
+// patches NO snapshot, and does NOT change story selection/output. The queue is
+// surfaced additively on `_meta.reclusterQueue`.
+//
+// Suspicion score (higher = more likely to need deferred re-cluster):
+//   + RECLUSTER_FLAG_WEIGHT          the explicit A3 defer flag (dominant term,
+//                                     so any flagged story outranks an unflagged
+//                                     one regardless of the structural terms)
+//   + reason weight                  `ambiguous_overlap_conflict` (the claim map
+//                                     said "independent" but the text reunified —
+//                                     a concrete disentanglement target) ranks
+//                                     above `ambiguous_unnormalized_overlap`
+//                                     (low overlap we simply couldn't confirm
+//                                     cross-language)
+//   + min(sourceCount, CAP) * W      more sources merged under ambiguity = more
+//                                     to disentangle (bounded so it never
+//                                     overtakes the reason term)
+export const RECLUSTER_QUEUE_MAX = 2;
+const RECLUSTER_FLAG_WEIGHT = 100;
+const RECLUSTER_REASON_WEIGHTS = Object.freeze({
+  ambiguous_overlap_conflict: 30,
+  ambiguous_unnormalized_overlap: 20,
+});
+const RECLUSTER_SOURCE_WEIGHT = 2;
+const RECLUSTER_SOURCE_CAP = 5; // bound the structural term (≤ +10)
+
+/**
+ * Score a single (grounded) meta-story as a deferred re-cluster candidate.
+ * Returns null when the story carries no `_reclusterCandidate` flag (only A3's
+ * explicit defers are candidates in B1). Pure; exported for focused testing.
+ */
+export function scoreReclusterCandidate(story) {
+  if (!story || typeof story !== "object" || story._reclusterCandidate !== true) {
+    return null;
+  }
+  const reason = typeof story._reclusterReason === "string" ? story._reclusterReason : null;
+  const reasonCodes = ["recluster_flag"];
+  let suspicionScore = RECLUSTER_FLAG_WEIGHT;
+  if (reason) {
+    reasonCodes.push(reason);
+    suspicionScore += RECLUSTER_REASON_WEIGHTS[reason] ?? 0;
+  }
+  const sourceItemIds = Array.isArray(story.source_item_ids)
+    ? story.source_item_ids.filter((id) => typeof id === "string" && id)
+    : [];
+  const sourceCount = sourceItemIds.length;
+  suspicionScore += Math.min(sourceCount, RECLUSTER_SOURCE_CAP) * RECLUSTER_SOURCE_WEIGHT;
+  return {
+    metaStoryId: story.meta_story_id ?? null,
+    suspicionScore,
+    reason,
+    reasonCodes,
+    sourceItemIds,
+    sourceCount,
+  };
+}
+
+/**
+ * Build the deferred re-cluster queue from a list of grounded meta-stories.
+ * Candidates are the A3-flagged stories; they are ranked by suspicion score
+ * (desc) then `metaStoryId` (asc, stable), de-duplicated by `metaStoryId`, and
+ * capped at `maxQueue` (default 2). Returns the queue plus additive counts.
+ * Pure; exported for focused testing.
+ */
+export function buildReclusterQueue(stories, maxQueue = RECLUSTER_QUEUE_MAX) {
+  const list = Array.isArray(stories) ? stories : [];
+  const candidates = [];
+  const seen = new Set();
+  for (const story of list) {
+    const scored = scoreReclusterCandidate(story);
+    if (!scored) continue;
+    const key = scored.metaStoryId ?? `__noid_${candidates.length}`;
+    if (seen.has(key)) continue; // no duplicates
+    seen.add(key);
+    candidates.push(scored);
+  }
+  candidates.sort((a, b) => {
+    if (a.suspicionScore !== b.suspicionScore) return b.suspicionScore - a.suspicionScore;
+    const aid = a.metaStoryId ?? "";
+    const bid = b.metaStoryId ?? "";
+    if (aid < bid) return -1;
+    if (aid > bid) return 1;
+    return 0;
+  });
+  const reclusterQueue = candidates.slice(0, maxQueue);
+  return {
+    reclusterQueue,
+    reclusterQueueCount: reclusterQueue.length,
+    // Total flagged candidates before the cap — additive visibility into how
+    // many were dropped because the queue is bounded to `maxQueue`.
+    reclusterCandidateCount: candidates.length,
+  };
+}
+
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
 // Why a Jaccard-based merge instead of pure evidence hashing:
@@ -2666,6 +2862,17 @@ export async function runRefreshPipeline({
   );
   rawMetaStories = clusterSplitResult.stories;
   const clusterSplitDiagnostics = clusterSplitResult.diagnostics;
+  console.log(
+    `[pipeline.cluster-split] enabled=${clusterSplitDiagnostics.enabled}` +
+      ` input=${clusterSplitDiagnostics.inputCount}` +
+      ` output=${clusterSplitDiagnostics.outputCount}` +
+      ` splits=${clusterSplitDiagnostics.splitCount}` +
+      ` low_overlap=${clusterSplitDiagnostics.splitReasons?.low_token_overlap ?? 0}` +
+      ` disjoint=${clusterSplitDiagnostics.splitReasons?.disjoint_claim_evidence ?? 0}` +
+      ` bundled=${clusterSplitDiagnostics.bundledStoryCount ?? 0}` +
+      ` deferred=${clusterSplitDiagnostics.deferredCount ?? 0}` +
+      ` recluster_candidates=${(clusterSplitDiagnostics.reclusterCandidateIds ?? []).length}`
+  );
 
   // 7. Resolve stable meta_story_id with lineage continuity:
   //    Read prior snapshot, attempt to match each new cluster against a prior
@@ -2766,15 +2973,80 @@ export async function runRefreshPipeline({
         );
     return {
       story: buildStory(ms, sourceItems, settings),
-      sortKey: { maxBeatFitScore, minMinutesAgo, metaStoryId: ms.meta_story_id },
+      // `sourceCount` (A4 overflow rank input) is the meta-story's full source
+      // set; grounded stories have all ids resolved, so this matches the
+      // published `sources.length`.
+      sortKey: {
+        maxBeatFitScore,
+        minMinutesAgo,
+        metaStoryId: ms.meta_story_id,
+        sourceCount: Array.isArray(ms.source_item_ids) ? ms.source_item_ids.length : 0,
+      },
     };
   });
   storiesWithSortKeys.sort((a, b) => compareStoriesR1(a.sortKey, b.sortKey));
+
+  // A4: enforce the locked post-healer max-5 cap. Applied AFTER grounding (so it
+  // trims only published survivors) and AFTER the R1 sort (so survivors keep
+  // display order). Deterministic Q6-C survival ranking; additive diagnostics +
+  // optional `overflow_cap` rejection-log entries for the dropped rows.
+  const overflowCapResult = applyMetaStoryOverflowCap(storiesWithSortKeys);
+  const overflowDiagnostics = overflowCapResult.diagnostics;
+  const cappedEntries = overflowCapResult.kept;
+  if (overflowDiagnostics.overflowCapApplied) {
+    console.warn(
+      `[pipeline.overflow-cap] post-healer cap — input=${overflowDiagnostics.overflowInputCount}` +
+        ` output=${overflowDiagnostics.overflowOutputCount}` +
+        ` dropped=${overflowDiagnostics.overflowDroppedCount}` +
+        ` dropped_ids=[${overflowDiagnostics.overflowDroppedMetaStoryIds.join(",")}]`
+    );
+    if (writeRejectionsFn && overflowCapResult.dropped.length > 0) {
+      const overflowRejections = overflowCapResult.dropped.map(({ story, sortKey }) => ({
+        meta_story_id: sortKey?.metaStoryId ?? story?.metaStoryId ?? null,
+        reason_code: "overflow_cap",
+        source_item_ids: Array.isArray(story?.sources)
+          ? story.sources.map((s) => s.id).filter(Boolean)
+          : [],
+        debug_payload: {
+          title: story?.title ?? null,
+          sourceCount: sortKey?.sourceCount ?? null,
+          maxBeatFitScore: sortKey?.maxBeatFitScore ?? null,
+          minMinutesAgo: Number.isFinite(sortKey?.minMinutesAgo) ? sortKey.minMinutesAgo : null,
+        },
+        watermark: watermarkInfo.watermark,
+        created_at: rejectedAt,
+      }));
+      try {
+        await writeRejectionsFn(overflowRejections);
+      } catch (err) {
+        console.warn(
+          `[pipeline.overflow-cap] rejection-log write failed: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    }
+  }
+
+  // B1: build the deferred re-cluster queue from the A3 `_reclusterCandidate`
+  // flags carried on the grounded meta-stories. Metadata ONLY — no executor runs
+  // here, no snapshot is patched, and story selection/output is unchanged. The
+  // ranked, ≤2 queue is surfaced additively on `_meta.reclusterQueue` for the
+  // future B2 executor. Built from `groundedStories` (the full flagged set,
+  // independent of the A4 presentation cap) so candidacy reflects cluster
+  // quality, not whether the story landed in the shipped top-5.
+  const reclusterQueueResult = buildReclusterQueue(groundedStories);
+  if (reclusterQueueResult.reclusterQueueCount > 0) {
+    console.log(
+      `[pipeline.recluster-queue] candidates=${reclusterQueueResult.reclusterCandidateCount}` +
+        ` queued=${reclusterQueueResult.reclusterQueueCount}` +
+        ` ids=[${reclusterQueueResult.reclusterQueue.map((c) => c.metaStoryId).join(",")}]`
+    );
+  }
+
   // `let` (not const): D2 fail-closed-per-story may filter unrecoverable stories
   // out of this array after the narrative stages (see the `narrativeStability`
   // block below). Everything downstream (funnel, metaStoryCount, payload) then
   // reflects the published survivor set.
-  let stories = storiesWithSortKeys.map(({ story }) => story);
+  let stories = cappedEntries.map(({ story }) => story);
 
   // ── Phase 4: optional semantic tag uplift (topics + keywords only) ──────
   // Runs AFTER the deterministic stories are built and sorted — the overlay
@@ -2789,10 +3061,11 @@ export async function runRefreshPipeline({
   let semanticKeywordsAggMut = semanticKeywordsAgg;
   if (stories.length > 0) {
     // We re-resolve sourceItems per story from the cluster-output meta-stories
-    // (groundedStories) — the same map already used for `buildStory`.
-    for (let i = 0; i < storiesWithSortKeys.length; i++) {
+    // (groundedStories) — the same map already used for `buildStory`. Iterate
+    // the post-cap survivor set (A4) so dropped overflow rows are not enriched.
+    for (let i = 0; i < cappedEntries.length; i++) {
       const ms = groundedStories.find(
-        (m) => m.meta_story_id === storiesWithSortKeys[i].sortKey.metaStoryId
+        (m) => m.meta_story_id === cappedEntries[i].sortKey.metaStoryId
       );
       if (!ms) continue;
       const sourceItems = ms.source_item_ids
@@ -3422,13 +3695,33 @@ export async function runRefreshPipeline({
     // Slice 2 — post-cluster split healer diagnostics. `enabled` reflects the
     // resolved config; `splitCount` / `splitReasons` show how many over-merged
     // clusters were split and why (low_token_overlap | disjoint_claim_evidence).
+    // A3 adds (additive, non-breaking): `deferredCount` / `deferReasons` for
+    // ambiguous clusters left intact and flagged for the Phase-2 deferred
+    // re-cluster pass, `bundledStoryCount` for multi-source bundles a split kept
+    // together instead of atomizing, and `reclusterCandidateIds` listing the
+    // meta_story_ids that carry the `_reclusterCandidate` handoff flag.
     clusterSplit: {
       enabled: clusterSplitDiagnostics.enabled,
       inputCount: clusterSplitDiagnostics.inputCount,
       outputCount: clusterSplitDiagnostics.outputCount,
       splitCount: clusterSplitDiagnostics.splitCount,
       splitReasons: clusterSplitDiagnostics.splitReasons,
+      deferredCount: clusterSplitDiagnostics.deferredCount ?? 0,
+      deferReasons: clusterSplitDiagnostics.deferReasons ?? {},
+      bundledStoryCount: clusterSplitDiagnostics.bundledStoryCount ?? 0,
+      reclusterCandidateIds: clusterSplitDiagnostics.reclusterCandidateIds ?? [],
     },
+    // A4 — post-healer max-5 overflow cap. `overflowCapApplied` is false on the
+    // common path (≤5 stories); when true, `overflowDropped*` records which
+    // stories were trimmed by the deterministic Q6-C survival ranking.
+    overflowCap: overflowDiagnostics,
+    // B1 — deferred re-cluster queue (flagging + ranking only; NO executor runs
+    // in this slice). `reclusterQueue` is the ranked, ≤2-item handoff list for
+    // the future B2 executor; `reclusterQueueCount` / `reclusterCandidateCount`
+    // expose queued-vs-total. Empty `[]` / 0 on the common path.
+    reclusterQueue: reclusterQueueResult.reclusterQueue,
+    reclusterQueueCount: reclusterQueueResult.reclusterQueueCount,
+    reclusterCandidateCount: reclusterQueueResult.reclusterCandidateCount,
     groundingFailures,
     // Phase 3 strict-grounding metrics
     droppedUngroundedStoryCount,
