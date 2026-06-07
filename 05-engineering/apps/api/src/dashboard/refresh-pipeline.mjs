@@ -535,6 +535,106 @@ export function applyMetaStoryOverflowCap(entries, cap = MAX_META_STORIES) {
   };
 }
 
+// ─── B1: deferred re-cluster candidate queue (flagging + ranking only) ────────
+//
+// A3's split-healer DEFERS ambiguous over-merges instead of atomizing them,
+// stamping each survivor with `_reclusterCandidate: true` + a `_reclusterReason`
+// (`ambiguous_overlap_conflict` | `ambiguous_unnormalized_overlap`). B1 turns
+// those flags into a deterministic, ranked, bounded QUEUE that a future B2
+// executor can reconsider. This slice is metadata-ONLY: it runs NO re-cluster,
+// patches NO snapshot, and does NOT change story selection/output. The queue is
+// surfaced additively on `_meta.reclusterQueue`.
+//
+// Suspicion score (higher = more likely to need deferred re-cluster):
+//   + RECLUSTER_FLAG_WEIGHT          the explicit A3 defer flag (dominant term,
+//                                     so any flagged story outranks an unflagged
+//                                     one regardless of the structural terms)
+//   + reason weight                  `ambiguous_overlap_conflict` (the claim map
+//                                     said "independent" but the text reunified —
+//                                     a concrete disentanglement target) ranks
+//                                     above `ambiguous_unnormalized_overlap`
+//                                     (low overlap we simply couldn't confirm
+//                                     cross-language)
+//   + min(sourceCount, CAP) * W      more sources merged under ambiguity = more
+//                                     to disentangle (bounded so it never
+//                                     overtakes the reason term)
+export const RECLUSTER_QUEUE_MAX = 2;
+const RECLUSTER_FLAG_WEIGHT = 100;
+const RECLUSTER_REASON_WEIGHTS = Object.freeze({
+  ambiguous_overlap_conflict: 30,
+  ambiguous_unnormalized_overlap: 20,
+});
+const RECLUSTER_SOURCE_WEIGHT = 2;
+const RECLUSTER_SOURCE_CAP = 5; // bound the structural term (≤ +10)
+
+/**
+ * Score a single (grounded) meta-story as a deferred re-cluster candidate.
+ * Returns null when the story carries no `_reclusterCandidate` flag (only A3's
+ * explicit defers are candidates in B1). Pure; exported for focused testing.
+ */
+export function scoreReclusterCandidate(story) {
+  if (!story || typeof story !== "object" || story._reclusterCandidate !== true) {
+    return null;
+  }
+  const reason = typeof story._reclusterReason === "string" ? story._reclusterReason : null;
+  const reasonCodes = ["recluster_flag"];
+  let suspicionScore = RECLUSTER_FLAG_WEIGHT;
+  if (reason) {
+    reasonCodes.push(reason);
+    suspicionScore += RECLUSTER_REASON_WEIGHTS[reason] ?? 0;
+  }
+  const sourceItemIds = Array.isArray(story.source_item_ids)
+    ? story.source_item_ids.filter((id) => typeof id === "string" && id)
+    : [];
+  const sourceCount = sourceItemIds.length;
+  suspicionScore += Math.min(sourceCount, RECLUSTER_SOURCE_CAP) * RECLUSTER_SOURCE_WEIGHT;
+  return {
+    metaStoryId: story.meta_story_id ?? null,
+    suspicionScore,
+    reason,
+    reasonCodes,
+    sourceItemIds,
+    sourceCount,
+  };
+}
+
+/**
+ * Build the deferred re-cluster queue from a list of grounded meta-stories.
+ * Candidates are the A3-flagged stories; they are ranked by suspicion score
+ * (desc) then `metaStoryId` (asc, stable), de-duplicated by `metaStoryId`, and
+ * capped at `maxQueue` (default 2). Returns the queue plus additive counts.
+ * Pure; exported for focused testing.
+ */
+export function buildReclusterQueue(stories, maxQueue = RECLUSTER_QUEUE_MAX) {
+  const list = Array.isArray(stories) ? stories : [];
+  const candidates = [];
+  const seen = new Set();
+  for (const story of list) {
+    const scored = scoreReclusterCandidate(story);
+    if (!scored) continue;
+    const key = scored.metaStoryId ?? `__noid_${candidates.length}`;
+    if (seen.has(key)) continue; // no duplicates
+    seen.add(key);
+    candidates.push(scored);
+  }
+  candidates.sort((a, b) => {
+    if (a.suspicionScore !== b.suspicionScore) return b.suspicionScore - a.suspicionScore;
+    const aid = a.metaStoryId ?? "";
+    const bid = b.metaStoryId ?? "";
+    if (aid < bid) return -1;
+    if (aid > bid) return 1;
+    return 0;
+  });
+  const reclusterQueue = candidates.slice(0, maxQueue);
+  return {
+    reclusterQueue,
+    reclusterQueueCount: reclusterQueue.length,
+    // Total flagged candidates before the cap — additive visibility into how
+    // many were dropped because the queue is bounded to `maxQueue`.
+    reclusterCandidateCount: candidates.length,
+  };
+}
+
 // ─── Lineage continuity (prior-snapshot keyed merge) ─────────────────────────
 //
 // Why a Jaccard-based merge instead of pure evidence hashing:
@@ -2926,6 +3026,22 @@ export async function runRefreshPipeline({
     }
   }
 
+  // B1: build the deferred re-cluster queue from the A3 `_reclusterCandidate`
+  // flags carried on the grounded meta-stories. Metadata ONLY — no executor runs
+  // here, no snapshot is patched, and story selection/output is unchanged. The
+  // ranked, ≤2 queue is surfaced additively on `_meta.reclusterQueue` for the
+  // future B2 executor. Built from `groundedStories` (the full flagged set,
+  // independent of the A4 presentation cap) so candidacy reflects cluster
+  // quality, not whether the story landed in the shipped top-5.
+  const reclusterQueueResult = buildReclusterQueue(groundedStories);
+  if (reclusterQueueResult.reclusterQueueCount > 0) {
+    console.log(
+      `[pipeline.recluster-queue] candidates=${reclusterQueueResult.reclusterCandidateCount}` +
+        ` queued=${reclusterQueueResult.reclusterQueueCount}` +
+        ` ids=[${reclusterQueueResult.reclusterQueue.map((c) => c.metaStoryId).join(",")}]`
+    );
+  }
+
   // `let` (not const): D2 fail-closed-per-story may filter unrecoverable stories
   // out of this array after the narrative stages (see the `narrativeStability`
   // block below). Everything downstream (funnel, metaStoryCount, payload) then
@@ -3599,6 +3715,13 @@ export async function runRefreshPipeline({
     // common path (≤5 stories); when true, `overflowDropped*` records which
     // stories were trimmed by the deterministic Q6-C survival ranking.
     overflowCap: overflowDiagnostics,
+    // B1 — deferred re-cluster queue (flagging + ranking only; NO executor runs
+    // in this slice). `reclusterQueue` is the ranked, ≤2-item handoff list for
+    // the future B2 executor; `reclusterQueueCount` / `reclusterCandidateCount`
+    // expose queued-vs-total. Empty `[]` / 0 on the common path.
+    reclusterQueue: reclusterQueueResult.reclusterQueue,
+    reclusterQueueCount: reclusterQueueResult.reclusterQueueCount,
+    reclusterCandidateCount: reclusterQueueResult.reclusterCandidateCount,
     groundingFailures,
     // Phase 3 strict-grounding metrics
     droppedUngroundedStoryCount,

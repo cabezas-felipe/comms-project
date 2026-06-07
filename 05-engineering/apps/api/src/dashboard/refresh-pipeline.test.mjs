@@ -57,6 +57,9 @@ import {
   compareOverflowRank,
   applyMetaStoryOverflowCap,
   MAX_META_STORIES,
+  scoreReclusterCandidate,
+  buildReclusterQueue,
+  RECLUSTER_QUEUE_MAX,
   enrichWhyItMattersForStories,
   prioritizeLane2Candidates,
   buildSourceGroundedWhyFallback,
@@ -7935,6 +7938,180 @@ test("runRefreshPipeline (A4): overflow_cap rejection-log entries written for dr
   const overflowRecords = written.filter((r) => r.reason_code === "overflow_cap");
   assert.equal(overflowRecords.length, 1, "one overflow_cap rejection record for the dropped story");
   assert.equal(overflowRecords[0].meta_story_id, "ms-rej-5");
+});
+
+// ─── B1: deferred re-cluster candidate queue (flagging + ranking only) ───────
+//
+// B1 turns A3's `_reclusterCandidate` defer flags into a deterministic, ranked,
+// ≤2 queue on `_meta.reclusterQueue`. No executor runs; output is unchanged.
+
+// Build an un-translated Spanish item (lang es, no normalized*), so a
+// non-disjoint / non-corroborated over-merge of two such items DEFERS under A3
+// (ambiguous_unnormalized_overlap) and becomes a B1 candidate.
+function esDeferItem(sourceId, headline, body) {
+  return makeItem({
+    sourceId,
+    outlet: "Reuters",
+    topic: "Diplomatic relations",
+    geographies: ["Colombia"],
+    minutesAgo: 30,
+    lang: "es",
+    headline,
+    body,
+  });
+}
+// A merged (non-disjoint, non-corroborated) cluster over a pair of ES items.
+function esDeferCluster(metaStoryId, idA, idB) {
+  return {
+    meta_story_id: metaStoryId,
+    title: "Colombia Roundup",
+    subtitle: "Varios desarrollos.",
+    source_item_ids: [idA, idB],
+    summary: "Resumen.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["Colombia"] },
+    factual_claims: ["una afirmación"],
+    claim_evidence_map: { "0": [idA] }, // 1 group, 1 source → not disjoint, not corroborated
+  };
+}
+const ES_CAFE = ["Colombia: la cosecha de café alcanza un récord", ["Los caficultores reportan rendimientos más altos."]];
+const ES_VOLCAN = ["Alerta de evacuación por erupción volcánica en Colombia", ["Los temblores sísmicos obligan a huir."]];
+
+test("scoreReclusterCandidate: only flagged stories score; components add deterministically", () => {
+  // Unflagged → not a candidate.
+  assert.equal(scoreReclusterCandidate({ meta_story_id: "x", source_item_ids: ["a"] }), null);
+  assert.equal(scoreReclusterCandidate(undefined), null);
+
+  // Flagged: 100 (flag) + reason weight + min(sourceCount,5)*2.
+  const conflict = scoreReclusterCandidate({
+    meta_story_id: "c",
+    _reclusterCandidate: true,
+    _reclusterReason: "ambiguous_overlap_conflict",
+    source_item_ids: ["a", "b"],
+  });
+  assert.equal(conflict.suspicionScore, 100 + 30 + 4);
+  assert.deepEqual(conflict.reasonCodes, ["recluster_flag", "ambiguous_overlap_conflict"]);
+  assert.deepEqual(conflict.sourceItemIds, ["a", "b"]);
+  assert.equal(conflict.sourceCount, 2);
+
+  const unnormalized = scoreReclusterCandidate({
+    meta_story_id: "u",
+    _reclusterCandidate: true,
+    _reclusterReason: "ambiguous_unnormalized_overlap",
+    source_item_ids: ["a", "b", "c"],
+  });
+  assert.equal(unnormalized.suspicionScore, 100 + 20 + 6);
+  // conflict (134) outranks unnormalized-with-more-sources (126): the reason
+  // term dominates the bounded structural term.
+  assert.ok(conflict.suspicionScore > unnormalized.suspicionScore);
+});
+
+test("buildReclusterQueue: ranks by suspicion score, stable metaStoryId tie-break, no dupes", () => {
+  const mk = (id, reason, sources) => ({
+    meta_story_id: id,
+    _reclusterCandidate: true,
+    _reclusterReason: reason,
+    source_item_ids: sources,
+  });
+  // Two equal-score (124) unnormalized 2-source stories with ids "z" and "a"
+  // plus a higher-score conflict story "m".
+  const { reclusterQueue, reclusterQueueCount, reclusterCandidateCount } = buildReclusterQueue([
+    mk("z", "ambiguous_unnormalized_overlap", ["s1", "s2"]),
+    mk("m", "ambiguous_overlap_conflict", ["s3", "s4"]),
+    mk("a", "ambiguous_unnormalized_overlap", ["s5", "s6"]),
+  ]);
+  assert.equal(reclusterCandidateCount, 3);
+  assert.equal(reclusterQueueCount, 2); // capped
+  // m (134) first; then the 124 tie broken by metaStoryId asc → "a" before "z".
+  assert.deepEqual(reclusterQueue.map((c) => c.metaStoryId), ["m", "a"]);
+  assert.equal(RECLUSTER_QUEUE_MAX, 2);
+});
+
+test("buildReclusterQueue: empty when no candidates", () => {
+  const { reclusterQueue, reclusterQueueCount, reclusterCandidateCount } = buildReclusterQueue([
+    { meta_story_id: "a", source_item_ids: ["x"] },
+    { meta_story_id: "b", source_item_ids: ["y", "z"] },
+  ]);
+  assert.deepEqual(reclusterQueue, []);
+  assert.equal(reclusterQueueCount, 0);
+  assert.equal(reclusterCandidateCount, 0);
+});
+
+test("runRefreshPipeline (B1): a deferred ES over-merge becomes a ranked queue item", async () => {
+  const rawItems = [
+    esDeferItem("es-cafe", ...ES_CAFE),
+    esDeferItem("es-volcan", ...ES_VOLCAN),
+  ];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [esDeferCluster("ambiguous-es", "es-cafe", "es-volcan")],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  // Output unchanged (the merge is preserved by A3, shipped as 1 story).
+  assert.equal(payload.stories.length, 1);
+  // B1 queue surfaces the deferred cluster.
+  assert.equal(log.reclusterQueueCount, 1);
+  assert.equal(log.reclusterCandidateCount, 1);
+  const item = log.reclusterQueue[0];
+  assert.equal(item.metaStoryId, "ambiguous-es");
+  assert.equal(item.reason, "ambiguous_unnormalized_overlap");
+  assert.deepEqual(item.reasonCodes, ["recluster_flag", "ambiguous_unnormalized_overlap"]);
+  assert.equal(item.sourceCount, 2);
+  assert.deepEqual(item.sourceItemIds, ["es-cafe", "es-volcan"]);
+  assert.equal(item.suspicionScore, 100 + 20 + 4);
+});
+
+test("runRefreshPipeline (B1): queue is capped at 2 with stable tie-break across 3 deferred clusters", async () => {
+  // Three independent deferred ES over-merges (rq-1/rq-2/rq-3), all equal score
+  // (2 sources, unnormalized) → metaStoryId asc keeps rq-1 & rq-2, drops rq-3.
+  const rawItems = [
+    esDeferItem("es-1a", ...ES_CAFE), esDeferItem("es-1b", ...ES_VOLCAN),
+    esDeferItem("es-2a", ...ES_CAFE), esDeferItem("es-2b", ...ES_VOLCAN),
+    esDeferItem("es-3a", ...ES_CAFE), esDeferItem("es-3b", ...ES_VOLCAN),
+  ];
+  // Give each pair distinct sourceIds (above) so they don't dedupe by URL.
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [
+      esDeferCluster("rq-3", "es-3a", "es-3b"),
+      esDeferCluster("rq-1", "es-1a", "es-1b"),
+      esDeferCluster("rq-2", "es-2a", "es-2b"),
+    ],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(log.reclusterCandidateCount, 3, "all three deferred clusters are candidates");
+  assert.equal(log.reclusterQueueCount, 2, "queue is bounded to 2");
+  assert.deepEqual(
+    log.reclusterQueue.map((c) => c.metaStoryId),
+    ["rq-1", "rq-2"],
+    "equal scores → metaStoryId ascending; rq-3 is dropped by the cap"
+  );
+});
+
+test("runRefreshPipeline (B1): no candidates → empty queue, additive diagnostics intact", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(payload.stories.length, 1);
+  // B1 additive fields present and empty.
+  assert.deepEqual(log.reclusterQueue, []);
+  assert.equal(log.reclusterQueueCount, 0);
+  assert.equal(log.reclusterCandidateCount, 0);
+  // Backward-compatible: prior additive diagnostics blocks still present.
+  assert.ok(log.clusterSplit, "clusterSplit diagnostics preserved");
+  assert.ok(log.overflowCap, "overflowCap diagnostics preserved");
+  assert.equal(log.overflowCap.overflowCapApplied, false);
 });
 
 test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats serial wall-clock (order preserved)", async () => {
