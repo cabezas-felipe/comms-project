@@ -31,6 +31,7 @@ import {
   resolveGeographyAlias,
 } from "../contracts-runtime/index.mjs";
 import { generateMetaStoryId } from "../ai/cluster-engine.mjs";
+import { readHeadline, readBody } from "../ingestion/evidence-translator.mjs";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -173,16 +174,27 @@ function evidenceText(item) {
   return [headline, ...bodyLines(item, 2)].filter(Boolean).join(" ");
 }
 
+// Body lines for the OUTPUT (split-story) path, read through the normalized
+// evidence readers so a translated (English) body is preferred when present and
+// the untouched originals are used otherwise. Detection scoring keeps using the
+// raw `bodyLines` above (split-trigger logic is out of scope for this slice).
+function readBodyLines(item, n) {
+  return readBody(item)
+    .filter((l) => typeof l === "string" && l.trim())
+    .map((l) => l.trim())
+    .slice(0, n);
+}
+
 function extractiveSubtitle(item) {
-  const lines = bodyLines(item, 1);
+  const lines = readBodyLines(item, 1);
   if (lines.length > 0) return lines[0];
-  if (typeof item?.headline === "string" && item.headline.trim()) return item.headline.trim();
-  return "";
+  const headline = readHeadline(item).trim();
+  return headline || "";
 }
 
 function extractiveSummary(item, fallbackTitle) {
-  const headline = typeof item?.headline === "string" && item.headline.trim() ? item.headline.trim() : fallbackTitle;
-  const lines = bodyLines(item, 2);
+  const headline = readHeadline(item).trim() || fallbackTitle;
+  const lines = readBodyLines(item, 2);
   const parts = [headline, ...lines].filter(Boolean);
   return parts.join(". ");
 }
@@ -243,10 +255,8 @@ function allPairwiseBelowThreshold(items, geoStopTokens, threshold) {
 
 // Build one meta-story per source item from a split.
 function buildSplitStory(sourceId, item, parentTags) {
-  const title =
-    typeof item?.headline === "string" && item.headline.trim()
-      ? item.headline.trim()
-      : String(sourceId);
+  const headline = readHeadline(item).trim();
+  const title = headline || String(sourceId);
   const subtitle = extractiveSubtitle(item) || title;
   const summary = extractiveSummary(item, title);
   const tags =

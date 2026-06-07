@@ -217,6 +217,55 @@ test("diagnostics counters reflect splitCount and both splitReasons", () => {
   assert.equal(stories.length, 5);
 });
 
+test("A1: split story title/subtitle/summary derive from normalized English evidence", () => {
+  // Two Spanish items that were translated upstream: originals stay Spanish,
+  // normalized* carry the English evidence. The split path must emit English.
+  const a = {
+    ...item("a", "Colombia: precios del café suben", ["Los caficultores esperan mejores cosechas."]),
+    lang: "es",
+    normalizedHeadline: "Colombia coffee prices rise",
+    normalizedBody: ["Growers expect better harvests."],
+    _translation: { needed: true, applied: true, failed: false, fromCache: false, reason: null, lang: "es" },
+  };
+  const b = {
+    ...item("b", "Alerta por erupción de volcán en Colombia", ["Temblores sísmicos motivan evacuaciones."]),
+    lang: "es",
+    normalizedHeadline: "Colombia volcano eruption warning",
+    normalizedBody: ["Seismic tremors prompt evacuations."],
+    _translation: { needed: true, applied: true, failed: false, fromCache: false, reason: null, lang: "es" },
+  };
+  const story = metaStory({ source_item_ids: ["a", "b"] });
+
+  const { stories, diagnostics } = splitOverMergedClusters([story], mapOf(a, b), SETTINGS, ON);
+
+  assert.equal(stories.length, 2);
+  assert.equal(diagnostics.splitCount, 1);
+  // Titles use the normalized English headline, not the Spanish original.
+  assert.equal(stories[0].title, "Colombia coffee prices rise");
+  assert.equal(stories[1].title, "Colombia volcano eruption warning");
+  // Subtitle/summary/factual_claims all flow from the normalized evidence.
+  assert.equal(stories[0].subtitle, "Growers expect better harvests.");
+  assert.equal(stories[0].summary, "Colombia coffee prices rise. Growers expect better harvests.");
+  assert.deepEqual(stories[0].factual_claims, ["Colombia coffee prices rise"]);
+});
+
+test("A1: with no normalization, split story falls back to original headline/body", () => {
+  // No normalized* fields present → readers return the originals unchanged.
+  const a = item("a", "Colombia coffee harvest forecast", ["Coffee yields expected to rise."]);
+  const b = item("b", "Colombia volcano eruption warning", ["Seismic tremors prompt evacuation alerts."]);
+  const story = metaStory({ source_item_ids: ["a", "b"] });
+
+  const { stories, diagnostics } = splitOverMergedClusters([story], mapOf(a, b), SETTINGS, ON);
+
+  assert.equal(stories.length, 2);
+  assert.equal(diagnostics.splitCount, 1);
+  assert.equal(stories[0].title, a.headline);
+  assert.equal(stories[1].title, b.headline);
+  assert.equal(stories[0].subtitle, "Coffee yields expected to rise.");
+  assert.equal(stories[0].summary, "Colombia coffee harvest forecast. Coffee yields expected to rise.");
+  assert.deepEqual(stories[0].factual_claims, [a.headline]);
+});
+
 test("resolveClusterSplitConfig honors env defaults and overrides", () => {
   const def = resolveClusterSplitConfig({});
   assert.equal(def.enabled, true);
