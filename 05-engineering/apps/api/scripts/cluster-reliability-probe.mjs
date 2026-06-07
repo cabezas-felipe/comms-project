@@ -276,13 +276,23 @@ export function countBy(items, selector) {
   return counts;
 }
 
+/**
+ * Prompt 1.1: read the clustering failure subtype from a refresh `_meta`,
+ * preferring the top-level key and falling back to the `outcomes` rollup (older
+ * servers surfaced it only there). Pure; returns null when neither is present.
+ */
+export function extractClusteringFailureSubtype(meta) {
+  const m = meta ?? {};
+  return m.clusteringFailureSubtype ?? m.outcomes?.clusteringFailureSubtype ?? null;
+}
+
 // ─── summary + gate (pure) ───────────────────────────────────────────────────
 
 /**
  * Build the summary object from collected per-run records.
  * A run record: { stories:number, usedFallbackClustering:boolean,
- *   clusteringFailureReason:string|null, refreshSkippedReason:string|null,
- *   pipelineMs:number|null }
+ *   clusteringFailureReason:string|null, clusteringFailureSubtype:string|null,
+ *   refreshSkippedReason:string|null, pipelineMs:number|null }
  *
  * `opts.latencyScope` (Step 4.1):
  *   - LATENCY_SCOPE.ALL (default) — p95PipelineMs spans every run's numeric
@@ -314,6 +324,10 @@ export function summarize(records, opts = {}) {
     medianStories: median(storyCounts),
     p95PipelineMs: percentile(pipelineMsValues, 0.95),
     clusteringFailureReasons: countBy(records, (r) => r.clusteringFailureReason),
+    // Prompt 1: additive subtype histogram so a NO-GO on successRate can be read
+    // by failure SUBTYPE (parse | provider_request | unknown | timeout_budget),
+    // not just the coarse reason. Visibility only — never feeds `evaluateGate`.
+    clusteringFailureSubtypes: countBy(records, (r) => r.clusteringFailureSubtype),
     refreshSkippedReasons: countBy(records, (r) => r.refreshSkippedReason),
     // Step 4.1: latency-scope transparency (additive).
     latencyScope,
@@ -388,6 +402,7 @@ async function runOnce({ baseUrl, email, userId, profile = null }) {
       stories: 0,
       usedFallbackClustering: true, // treat non-200 / unparseable as a failed run
       clusteringFailureReason: `http_${res.status}`,
+      clusteringFailureSubtype: null, // probe-level HTTP failure, not a clustering subtype
       clusteringAttempts: null,
       clusteringLatencyMs: null,
       pipelineMs: null,
@@ -401,6 +416,9 @@ async function runOnce({ baseUrl, email, userId, profile = null }) {
     stories: Array.isArray(json.stories) ? json.stories.length : 0,
     usedFallbackClustering: meta.usedFallbackClustering === true,
     clusteringFailureReason: meta.clusteringFailureReason ?? null,
+    // Prompt 1.1: prefer top-level subtype, fall back to the outcomes rollup
+    // (older servers surfaced it only there), else null. Visibility only.
+    clusteringFailureSubtype: extractClusteringFailureSubtype(meta),
     clusteringAttempts: meta.clusteringAttempts ?? null,
     clusteringLatencyMs: meta.clusteringLatencyMs ?? null,
     pipelineMs: meta.timings?.pipelineMs ?? null,
@@ -436,6 +454,7 @@ function formatRunLine(i, total, rec) {
     `clusterLatencyMs=${lat}`,
     `pipelineMs=${rec.pipelineMs ?? "-"}`,
     rec.clusteringFailureReason ? `failReason=${rec.clusteringFailureReason}` : null,
+    rec.clusteringFailureSubtype ? `failSubtype=${rec.clusteringFailureSubtype}` : null,
     rec.refreshSkippedReason ? `skipped=${rec.refreshSkippedReason}` : null,
   ]
     .filter(Boolean)
@@ -529,6 +548,7 @@ async function main() {
         stories: 0,
         usedFallbackClustering: true,
         clusteringFailureReason: "probe_request_error",
+        clusteringFailureSubtype: null, // probe-level request error, not a clustering subtype
         clusteringAttempts: null,
         clusteringLatencyMs: null,
         pipelineMs: null,

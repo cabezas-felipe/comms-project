@@ -20,6 +20,7 @@ const {
   shouldStopSampling,
   recomputeTargetMet,
   evaluateProbeDecision,
+  extractClusteringFailureSubtype,
 } = await import("./cluster-reliability-probe.mjs");
 
 // ─── parseArgs ───────────────────────────────────────────────────────────────
@@ -320,6 +321,100 @@ test("summarize: mixed success/fallback computes rate + reason counts", () => {
   assert.deepEqual(s.refreshSkippedReasons, {
     clustering_failed_snapshot_preserved: 1,
   });
+});
+
+test("summarize: Prompt 1 subtype histogram splits the coarse error bucket", () => {
+  // Same coarse reason ("error") on two runs, distinct subtypes — the subtype
+  // histogram must separate them so a NO-GO can be attributed. Visibility only:
+  // successRate / medianStories are unaffected.
+  const records = [
+    rec({ stories: 3 }),
+    rec({
+      stories: 0,
+      usedFallbackClustering: true,
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: "parse",
+    }),
+    rec({
+      stories: 0,
+      usedFallbackClustering: true,
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: "provider_request",
+    }),
+    rec({
+      stories: 0,
+      usedFallbackClustering: true,
+      clusteringFailureReason: "timeout",
+      clusteringFailureSubtype: "timeout_budget",
+    }),
+  ];
+  const s = summarize(records);
+  assert.deepEqual(s.clusteringFailureReasons, { error: 2, timeout: 1 });
+  assert.deepEqual(s.clusteringFailureSubtypes, {
+    parse: 1,
+    provider_request: 1,
+    timeout_budget: 1,
+  });
+});
+
+// ─── Prompt 1.1: subtype extraction from _meta (top-level + outcomes fallback) ─
+
+test("extractClusteringFailureSubtype: reads top-level _meta.clusteringFailureSubtype", () => {
+  assert.equal(
+    extractClusteringFailureSubtype({ clusteringFailureSubtype: "parse" }),
+    "parse"
+  );
+});
+
+test("extractClusteringFailureSubtype: falls back to _meta.outcomes when top-level absent", () => {
+  assert.equal(
+    extractClusteringFailureSubtype({ outcomes: { clusteringFailureSubtype: "provider_request" } }),
+    "provider_request"
+  );
+});
+
+test("extractClusteringFailureSubtype: top-level wins over outcomes; null when neither present", () => {
+  assert.equal(
+    extractClusteringFailureSubtype({
+      clusteringFailureSubtype: "timeout_budget",
+      outcomes: { clusteringFailureSubtype: "parse" },
+    }),
+    "timeout_budget"
+  );
+  assert.equal(extractClusteringFailureSubtype({}), null);
+  assert.equal(extractClusteringFailureSubtype(null), null);
+  assert.equal(extractClusteringFailureSubtype({ outcomes: {} }), null);
+});
+
+test("summarize: subtype histogram works end-to-end from the outcomes-only _meta shape", () => {
+  // Simulate the records a probe builds against a server that exposes the subtype
+  // ONLY under `_meta.outcomes` (the gap Prompt 1.1 closes). Extraction must
+  // recover it so the histogram is populated, not empty.
+  const metas = [
+    { clusteringFailureReason: null }, // success run, no failure
+    { clusteringFailureReason: "error", outcomes: { clusteringFailureSubtype: "parse" } },
+    { clusteringFailureReason: "error", outcomes: { clusteringFailureSubtype: "provider_request" } },
+    // Mixed: a newer server exposing the top-level key alongside outcomes.
+    { clusteringFailureReason: "timeout", clusteringFailureSubtype: "timeout_budget", outcomes: { clusteringFailureSubtype: "timeout_budget" } },
+  ];
+  const records = metas.map((meta, i) => ({
+    stories: i === 0 ? 3 : 0,
+    usedFallbackClustering: meta.clusteringFailureReason != null,
+    clusteringFailureReason: meta.clusteringFailureReason ?? null,
+    clusteringFailureSubtype: extractClusteringFailureSubtype(meta),
+    refreshSkippedReason: null,
+    pipelineMs: 1000,
+  }));
+  const s = summarize(records);
+  assert.deepEqual(s.clusteringFailureSubtypes, {
+    parse: 1,
+    provider_request: 1,
+    timeout_budget: 1,
+  });
+  // Gate math is unaffected by the additive subtype field.
+  assert.equal(s.runs, 4);
+  assert.equal(s.successRate, 0.25);
+  assert.equal(s.medianStories, 0);
 });
 
 test("summarize: ignores non-numeric pipelineMs in p95", () => {

@@ -1560,6 +1560,11 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     // pipeline returns predating these fields.
     if (log.usedFallbackClustering !== undefined) lastRunMeta.usedFallbackClustering = log.usedFallbackClustering;
     if (log.clusteringFailureReason !== undefined) lastRunMeta.clusteringFailureReason = log.clusteringFailureReason;
+    // Prompt 1.2: persist the failure subtype + recovery subtype so GET
+    // /api/dashboard can lift the same top-level keys the refresh response
+    // surfaces (consistency across immediate response and snapshot reads).
+    if (log.clusteringFailureSubtype !== undefined) lastRunMeta.clusteringFailureSubtype = log.clusteringFailureSubtype;
+    if (log.clusteringRecoverySubtype !== undefined) lastRunMeta.clusteringRecoverySubtype = log.clusteringRecoverySubtype;
     if (log.clusteringAttempts !== undefined) lastRunMeta.clusteringAttempts = log.clusteringAttempts;
     if (log.clusteringLatencyMs !== undefined) lastRunMeta.clusteringLatencyMs = log.clusteringLatencyMs;
     if (log.funnel !== undefined) lastRunMeta.funnel = log.funnel;
@@ -1725,6 +1730,12 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
           // clustering run can explain the empty dashboard without a reload.
           usedFallbackClustering: log.usedFallbackClustering,
           clusteringFailureReason: log.clusteringFailureReason,
+          // Prompt 1.1: surface the failure subtype at top-level `_meta` (it was
+          // previously only on `_meta.outcomes`), so the reliability probe reads
+          // it without an outcomes fallback. Null when there is no terminal
+          // failure. Additive; derived from the reason, never gates anything.
+          clusteringFailureSubtype: log.clusteringFailureSubtype ?? null,
+          clusteringRecoverySubtype: log.clusteringRecoverySubtype ?? null,
           clusteringAttempts: log.clusteringAttempts,
           clusteringLatencyMs: log.clusteringLatencyMs,
           // Phase 2 lightweight decision trace.  Optional, compact,

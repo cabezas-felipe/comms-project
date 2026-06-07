@@ -8481,4 +8481,150 @@ test("PR B recovery: small candidate set (no genuine reduction) does NOT trigger
   assert.equal(log.clusteringAttempts, 2);
 });
 
+// ─── Prompt 1: clustering failure subtype instrumentation ────────────────────
+//
+// The coarse `clusteringFailureReason` ('timeout' | 'error') is split into a
+// stable, additive `clusteringFailureSubtype`. The legacy reason is DERIVED from
+// the subtype, so the timeout→reason mapping is byte-identical to before and the
+// route's Slice 1 continuity gate (non-null reason on fail-closed) is preserved.
+
+test("Prompt 1 subtype: provider-request fail-closed → reason=error, subtype=provider_request", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => {
+      throw new Error(
+        "TEMPO_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) is required for anthropic: clustering models"
+      );
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 0);
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "error", "legacy reason unchanged for non-timeout");
+  assert.equal(log.clusteringFailureSubtype, "provider_request");
+  assert.equal(log.outcomes.clusteringFailureSubtype, "provider_request", "rollup mirrors the subtype");
+});
+
+test("Prompt 1 subtype: parse-class fail-closed → reason=error, subtype=parse", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => {
+      const err = new Error("Clustering response parse failed after safe-trim repair: schema");
+      err._clusteringRepair = {
+        attempted: true,
+        succeeded: false,
+        failureReason: "schema_validation_error",
+      };
+      throw err;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringFailureSubtype, "parse");
+});
+
+test("Prompt 1 subtype: timeout fail-closed → reason=timeout, subtype=timeout_budget", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(log.clusteringFailureReason, "timeout", "timeout→reason mapping is byte-identical");
+  assert.equal(log.clusteringFailureSubtype, "timeout_budget");
+});
+
+test("Prompt 1 subtype: unattributable fail-closed → reason=error, subtype=unknown", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { throw new Error("something inexplicable happened"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringFailureSubtype, "unknown");
+});
+
+test("Prompt 1 subtype: successful run carries null reason AND null subtype", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(log.clusteringFailureReason, null);
+  assert.equal(log.clusteringFailureSubtype, null, "no terminal failure → null subtype");
+  assert.equal(log.outcomes.clusteringFailureSubtype, null);
+});
+
+test("Prompt 1 subtype: recovered run clears the terminal subtype", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  const recoveredStory = {
+    meta_story_id: "recovered-1",
+    title: "Recovered Story",
+    subtitle: "Recovered after reduced-input retry.",
+    source_item_ids: ["src-0"],
+    summary: "Recovered.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+  };
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async (items) => {
+      calls += 1;
+      if (calls <= 2) {
+        const err = new Error("Clustering response parse failed: schema validation");
+        err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+        throw err;
+      }
+      return [recoveredStory];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1, "recovered story published");
+  assert.equal(log.clusteringFailureReason, null);
+  assert.equal(log.clusteringFailureSubtype, null, "recovered run is not a terminal failure");
+  assert.equal(log.clusteringRecoverySubtype, null, "recovery succeeded → no recovery subtype");
+});
+
+test("Prompt 1 subtype: recovery failure reports its own subtype while terminal subtype stays parse", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      const err = new Error("Clustering response parse failed: schema validation");
+      err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+      throw err;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary + 1 recovery attempt");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved");
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringFailureSubtype, "parse", "terminal subtype from the primary loop");
+  assert.equal(log.clusteringRecoveryReason, "error");
+  assert.equal(log.clusteringRecoverySubtype, "parse", "recovery's own subtype is reported separately");
+});
+
 });

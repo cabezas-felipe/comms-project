@@ -3,6 +3,8 @@ import {
   verifyGrounding,
   generateMetaStoryId,
   readClusteringRepairDiagnostics,
+  classifyClusteringFailureSubtype,
+  CLUSTERING_FAILURE_SUBTYPE,
 } from "../ai/cluster-engine.mjs";
 import {
   applyGeoFilter,
@@ -2324,6 +2326,9 @@ export async function runRefreshPipeline({
         usedFallbackClustering: false,
         // Clustering never ran on the watermark short-circuit.
         clusteringFailureReason: null,
+        // Prompt 1: no terminal failure on a skip → subtype is null too. Keeps
+        // the `_meta` shape consistent across full-run and skip paths.
+        clusteringFailureSubtype: null,
         clusteringAttempts: 0,
         // C2: clustering never ran, so no repair was attempted — defaults keep
         // the `_meta` shape consistent across both paths.
@@ -2359,6 +2364,8 @@ export async function runRefreshPipeline({
           storiesPublished: 0,
           clusteringAttempts: 0,
           clusteringFailureReason: null,
+          // Prompt 1: subtype null on the skip path, mirroring the full-run rollup.
+          clusteringFailureSubtype: null,
           usedFallbackClustering: false,
           ...geoDiagnostics,
         },
@@ -2467,6 +2474,13 @@ export async function runRefreshPipeline({
   let rawMetaStories;
   let usedFallbackClustering = false;
   let clusteringFailureReason = null; // 'timeout' | 'error' | null
+  // Prompt 1: stable, additive sub-classification of a terminal clustering
+  // failure (see CLUSTERING_FAILURE_SUBTYPE). Splits the coarse `error` bucket
+  // into parse / provider_request / unknown (and timeout_budget for the timeout
+  // reason) for incident triage. Null whenever there is no terminal failure
+  // (success, recovered run, or clustering never ran). `clusteringFailureReason`
+  // is derived FROM this subtype so the two never drift.
+  let clusteringFailureSubtype = null;
   let clusteringAttempts = 0;
   const clusteringAttemptLatencyMs = [];
   // PR B Step 1: Option B auto-recovery tier diagnostics.  A bounded, single
@@ -2476,6 +2490,9 @@ export async function runRefreshPipeline({
   let clusteringRecoveryAttempted = false;
   let clusteringRecoverySucceeded = false;
   let clusteringRecoveryReason = null; // recovery failure class ('error'|'timeout') or null
+  // Prompt 1: subtype of the recovery attempt's OWN failure (mirrors
+  // clusteringFailureSubtype). Null when recovery didn't run or succeeded.
+  let clusteringRecoverySubtype = null;
   // C2 + Slice 3: clustering JSON repair diagnostics for the last attempt
   // (success or failure both carry them via `_clusteringRepair`).  Shape
   // mirrors `EMPTY_CLUSTERING_REPAIR` — `rawFailureClass` / `schemaErrorBucket`
@@ -2551,12 +2568,19 @@ export async function runRefreshPipeline({
       // Both attempts failed → fail closed with zero stories.  Classify the
       // failure so `_meta.clusteringFailureReason` distinguishes a timeout
       // (capacity / slow round-trip) from a hard error (schema, auth, etc.).
-      const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
-      clusteringFailureReason = /timed out|timeout|abort/i.test(msg) ? "timeout" : "error";
+      // Prompt 1: classify the terminal failure into a stable subtype, then
+      // DERIVE the coarse legacy reason from it so the two stay in lockstep.
+      // `timeout_budget` maps to "timeout" (byte-identical to the prior regex
+      // split); every other subtype maps to "error".
+      clusteringFailureSubtype = classifyClusteringFailureSubtype(lastErr);
+      clusteringFailureReason =
+        clusteringFailureSubtype === CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET
+          ? "timeout"
+          : "error";
       rawMetaStories = [];
       usedFallbackClustering = true;
       console.warn(
-        `[pipeline] clustering FAILED after ${clusteringAttempts} attempt(s) (reason=${clusteringFailureReason}) — publishing 0 meta-stories (fail-closed)`
+        `[pipeline] clustering FAILED after ${clusteringAttempts} attempt(s) (reason=${clusteringFailureReason} subtype=${clusteringFailureSubtype}) — publishing 0 meta-stories (fail-closed)`
       );
     }
 
@@ -2599,6 +2623,8 @@ export async function runRefreshPipeline({
         clusteringRecoverySucceeded = true;
         usedFallbackClustering = false;
         clusteringFailureReason = null;
+        // Recovered run is NOT a terminal failure — clear the subtype too.
+        clusteringFailureSubtype = null;
         console.warn(
           `[pipeline] clustering RECOVERED on reduced input (${recoveryInput.length} of ${clusterInputItems.length} items) — publishing recovered meta-stories`
         );
@@ -2606,12 +2632,19 @@ export async function runRefreshPipeline({
         clusteringAttemptLatencyMs.push(Date.now() - recoveryStartedAt);
         // Keep the last attempt's repair diagnostics for `_meta`.
         clusteringRepair = readClusteringRepairDiagnostics(recoveryErr);
-        const rmsg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr);
-        clusteringRecoveryReason = /timed out|timeout|abort/i.test(rmsg) ? "timeout" : "error";
+        // Prompt 1: classify the recovery attempt's own failure and derive its
+        // legacy reason from the subtype (mirrors the primary loop). The
+        // terminal `clusteringFailureSubtype` (set by the primary loop) is left
+        // untouched — the recovery subtype is reported separately.
+        clusteringRecoverySubtype = classifyClusteringFailureSubtype(recoveryErr);
+        clusteringRecoveryReason =
+          clusteringRecoverySubtype === CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET
+            ? "timeout"
+            : "error";
         // Preserve the fail-closed outcome set above (0 meta-stories).
         rawMetaStories = [];
         console.warn(
-          `[pipeline] clustering recovery FAILED (reason=${clusteringRecoveryReason}) — remaining fail-closed (0 meta-stories)`
+          `[pipeline] clustering recovery FAILED (reason=${clusteringRecoveryReason} subtype=${clusteringRecoverySubtype}) — remaining fail-closed (0 meta-stories)`
         );
       }
     }
@@ -3293,6 +3326,12 @@ export async function runRefreshPipeline({
     // per-attempt array (same length) so an operator can see how long each
     // attempt ran before the timeout/error.
     clusteringFailureReason,
+    // Prompt 1: stable sub-classification of the terminal failure splitting the
+    // coarse `error`/`timeout` reason into parse | provider_request | unknown |
+    // timeout_budget. Null when there is no terminal failure (success, recovered
+    // run, watermark skip). Additive — `clusteringFailureReason` is unchanged and
+    // is derived FROM this value, so existing consumers keep working.
+    clusteringFailureSubtype,
     clusteringAttempts,
     // C2 (clustering JSON resilience): single safe-trim repair diagnostics for
     // the last clustering attempt.  `clusteringRepairAttempted` is true when the
@@ -3341,6 +3380,10 @@ export async function runRefreshPipeline({
     clusteringRecoveryAttempted,
     clusteringRecoverySucceeded,
     clusteringRecoveryReason,
+    // Prompt 1: subtype of the recovery attempt's own failure (parse |
+    // provider_request | unknown | timeout_budget), or null when recovery didn't
+    // run or succeeded. Mirrors `clusteringFailureSubtype` for the recovery tier.
+    clusteringRecoverySubtype,
     timings: pipelineTimings,
     // Slice 4: latency-shaping profile applied to this run.  Additive,
     // deterministic snapshot of the resolved knobs (name + the geo budget /
@@ -3374,6 +3417,9 @@ export async function runRefreshPipeline({
       storiesPublished: stories.length,
       clusteringAttempts,
       clusteringFailureReason,
+      // Prompt 1: subtype travels with the reason in the rollup so the SLO/summary
+      // surface can split `error` without walking the full diagnostics tree.
+      clusteringFailureSubtype,
       usedFallbackClustering,
       ...geoDiagnostics,
     },
