@@ -45,6 +45,12 @@ import {
   COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
   COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT,
   COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
+  COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
+  CLUSTER_CALL_MIN_TIMEOUT_MS,
+  COLD_START_CLUSTER_DEADLINE_MS,
+  COLD_START_CLUSTER_MIN_ENVELOPE_MS,
+  resolveClusterCallTimeoutMs,
+  resolveClusterEnvelopeBudgetMs,
   compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
@@ -832,6 +838,142 @@ test("resolveRefreshProfile: cold_start profile yields the locked first-run knob
   assert.equal(p.deferGeoLane2, true);
   assert.equal(p.clusterInputCap, COLD_START_CLUSTER_INPUT_CAP_DEFAULT);
   assert.equal(p.clusterInputCap, 10);
+  // PR B Step 2: cold_start carries a clustering wall-clock envelope cap so the
+  // 2-attempt loop can never run two back-to-back 45s timeouts (~90s).
+  assert.equal(p.clusterTotalBudgetMs, COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT);
+  assert.equal(p.clusterTotalBudgetMs, 60000);
+});
+
+test("resolveRefreshProfile: default + interactive carry no clustering envelope cap (Step 2)", () => {
+  // Only cold_start opts into the total-budget clamp; every other profile keeps
+  // a flat per-attempt timeout (clusterTotalBudgetMs === null), so their
+  // clustering behavior is byte-identical to the pre-Step-2 path.
+  assert.equal(resolveRefreshProfile(null).clusterTotalBudgetMs, null);
+  assert.equal(resolveRefreshProfile("scheduled").clusterTotalBudgetMs, null);
+  assert.equal(resolveRefreshProfile("interactive").clusterTotalBudgetMs, null);
+});
+
+test("resolveClusterCallTimeoutMs: clamp contract (PR B Step 2)", () => {
+  // No total budget → flat per-attempt timeout passthrough (default/interactive).
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: null, totalBudgetMs: null }),
+    null,
+    "default profile (no per-attempt, no budget) → no override"
+  );
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 22000, totalBudgetMs: null, elapsedMs: 9999 }),
+    22000,
+    "flat per-attempt timeout ignores elapsed when there is no total budget"
+  );
+  // cold_start, first attempt (elapsed≈0) → keeps the full locked 45s.
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 0 }),
+    45000,
+    "first attempt keeps the full per-attempt timeout"
+  );
+  // cold_start retry after the first attempt timed out at 45s → bounded to the
+  // 15s the 60s budget left behind (this is the p95 win: 45+15 not 45+45).
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 45000 }),
+    15000,
+    "retry timeout is clamped to the remaining budget"
+  );
+  // Budget nearly/over-spent → floored so the retry still gets a real shot and
+  // overshoot past the budget is bounded by the floor.
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 58000 }),
+    CLUSTER_CALL_MIN_TIMEOUT_MS,
+    "near-exhausted budget floors the retry timeout"
+  );
+  assert.equal(
+    resolveClusterCallTimeoutMs({ perAttemptTimeoutMs: 45000, totalBudgetMs: 60000, elapsedMs: 90000 }),
+    CLUSTER_CALL_MIN_TIMEOUT_MS,
+    "over-spent budget never goes below the floor (no 0ms instant-timeout call)"
+  );
+});
+
+test("resolveClusterEnvelopeBudgetMs: deadline-aware envelope contract (Step 4.1)", () => {
+  // No configured budget (default/interactive) → no envelope, regardless of args.
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: null, deadlineMs: 75000, pipelineElapsedMs: 5000 }),
+    null,
+    "profiles without a configured budget get no envelope"
+  );
+  // No deadline → configured budget returned verbatim (pre-Step-4.1 behavior).
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: 60000, deadlineMs: null, pipelineElapsedMs: 30000 }),
+    60000,
+    "without a deadline the envelope equals the configured budget"
+  );
+  // Fast upstream (elapsed small): deadline does NOT bind → full 60s envelope.
+  // This is the common case — proves no regression vs Step 2.
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: 60000,
+      deadlineMs: 75000,
+      pipelineElapsedMs: 10000,
+      minEnvelopeMs: 20000,
+    }),
+    60000,
+    "fast upstream keeps the full configured envelope (no common-path regression)"
+  );
+  // Exactly at the bind point (deadline - elapsed == budget) → still full budget.
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: 60000,
+      deadlineMs: 75000,
+      pipelineElapsedMs: 15000,
+      minEnvelopeMs: 20000,
+    }),
+    60000,
+    "boundary: deadline minus elapsed equal to budget keeps the full envelope"
+  );
+  // Slow upstream: envelope trimmed to the wall-clock left until the deadline.
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: 60000,
+      deadlineMs: 75000,
+      pipelineElapsedMs: 30000,
+      minEnvelopeMs: 20000,
+    }),
+    45000,
+    "slow upstream trims the envelope to (deadline - elapsed)"
+  );
+  // Very slow upstream: trimmed value would fall below the floor → floored, so
+  // clustering still gets a real shot (fail-closed / recovery preserved).
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({
+      totalBudgetMs: 60000,
+      deadlineMs: 75000,
+      pipelineElapsedMs: 70000,
+      minEnvelopeMs: 20000,
+    }),
+    20000,
+    "near/over-deadline floors the envelope at the minimum"
+  );
+});
+
+test("resolveClusterEnvelopeBudgetMs: cold_start locked constants compose to the documented envelope", () => {
+  // Tie the math to the actual cold_start constants so a constant change is
+  // caught here. With the real 60s budget / 75s deadline / 20s floor:
+  //   - upstream 10s → full 60s (common path unchanged)
+  //   - upstream 40s → 35s envelope (trimmed)
+  //   - upstream 80s → 20s floor
+  const budget = COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT;
+  const deadline = COLD_START_CLUSTER_DEADLINE_MS;
+  const floor = COLD_START_CLUSTER_MIN_ENVELOPE_MS;
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: budget, deadlineMs: deadline, pipelineElapsedMs: 10000, minEnvelopeMs: floor }),
+    budget
+  );
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: budget, deadlineMs: deadline, pipelineElapsedMs: 40000, minEnvelopeMs: floor }),
+    deadline - 40000
+  );
+  assert.equal(
+    resolveClusterEnvelopeBudgetMs({ totalBudgetMs: budget, deadlineMs: deadline, pipelineElapsedMs: 80000, minEnvelopeMs: floor }),
+    floor
+  );
 });
 
 test("resolveRefreshProfile: interactive profile yields bounded fast-path knobs (env-overridable)", () => {
@@ -7916,6 +8058,103 @@ test("Slice 3: cold_start tightens the cluster cap to 10 (effective cap surfaced
     "cold_start surfaces the profile cap (10) as the effective cap");
 });
 
+test("PR B Step 2: cold_start threads the per-attempt timeout and surfaces the clustering envelope cap", async () => {
+  // First attempt succeeds immediately, so the budget clamp is a no-op (elapsed
+  // ≈ 0 → min(45000, 60000) = 45000): the locked 45s per-attempt timeout is
+  // threaded unchanged, and `_meta.profile.clusterTotalBudgetMs` advertises the
+  // 60s envelope that WOULD have bounded a retry.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const seenClusterOpts = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      seenClusterOpts.push(opts);
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+  });
+  assert.equal(payload.stories.length, 1, "cold_start still yields stories (trust preserved)");
+  assert.equal(seenClusterOpts.length, 1, "first attempt succeeds → single clustering call");
+  assert.equal(
+    seenClusterOpts[0]?.timeoutMs,
+    COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
+    "first attempt keeps the full locked 45s per-attempt timeout"
+  );
+  assert.equal(seenClusterOpts[0]?.timeoutMs, 45000);
+  assert.equal(log.profile.name, "cold_start");
+  assert.equal(
+    log.profile.clusterTotalBudgetMs,
+    COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
+    "cold_start surfaces the 60s clustering envelope on _meta.profile"
+  );
+  assert.equal(log.profile.clusterTotalBudgetMs, 60000);
+});
+
+test("PR B Step 2: cold_start still retries once (attempts ALWAYS 2) under the envelope cap", async () => {
+  // The total-budget clamp must NOT weaken resilience: a transient first-attempt
+  // failure is still retried, and a successful retry publishes rather than
+  // failing closed. Each call carries a budget-bounded timeout (≤ 45s).
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  let attempts = 0;
+  const seenClusterOpts = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      attempts++;
+      seenClusterOpts.push(opts);
+      if (attempts === 1) throw new Error("transient blip");
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+  });
+  assert.equal(attempts, 2, "cold_start retries once (initial + one retry)");
+  assert.equal(payload.stories.length, 1, "recovers on the retry rather than shipping empty");
+  assert.equal(log.usedFallbackClustering, false);
+  assert.equal(log.clusteringFailureReason, null);
+  assert.equal(log.clusteringAttempts, 2);
+  for (const opts of seenClusterOpts) {
+    assert.ok(
+      opts?.timeoutMs > 0 && opts.timeoutMs <= COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
+      "every clustering call is bounded by the per-attempt timeout / remaining budget"
+    );
+  }
+});
+
+test("Step 4.1: cold_start common path (fast hermetic upstream) is unchanged — full 45s first attempt threaded", async () => {
+  // Hermetic upstream is effectively instant, so pipelineElapsed at cluster start
+  // is ~0 → the deadline does NOT bind → effective envelope stays the full 60s and
+  // the first attempt still threads the locked 45s. This is the no-regression
+  // guarantee: the Step 4.1 deadline-awareness only trims slow-upstream OUTLIERS,
+  // which are exercised by the pure-helper contract test above (real wall-clock
+  // can't be injected end-to-end deterministically).
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const seenClusterOpts = [];
+  const { payload } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async (_items, _settings, _model, opts) => {
+      seenClusterOpts.push(opts);
+      return MOCK_META_STORIES;
+    },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(seenClusterOpts.length, 1);
+  assert.equal(
+    seenClusterOpts[0]?.timeoutMs,
+    COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT,
+    "fast upstream → full 45s first-attempt timeout (deadline did not bind)"
+  );
+});
+
 test("Slice 3: default profile keeps CLUSTER_INPUT_CAP (15) as the effective cap", async () => {
   // 20 items under the default profile — the global cap (15) still governs, and
   // the effective-cap diagnostic reports 15 (not the cold_start 10).
@@ -8102,6 +8341,290 @@ test("Slice 3 follow-up: SLO does not overcount a recovered run as a failure (te
   assert.equal(recovered.windowSize, 1, "recovered run is sampled (it attempted clustering)");
   assert.equal(recovered.clusterTimeoutRate, 0, "recovered run counts as a non-timeout, not a failure");
   assert.deepEqual(recovered.breaches, [], "no breach from a recovered run");
+});
+
+// ─── PR B Step 1: Option B clustering auto-recovery tier ──────────────────────
+//
+// A non-timeout (parse/schema-style) primary clustering failure triggers ONE
+// bounded recovery attempt on a reduced (top-half, min 6) candidate set.
+// Recovery success publishes recovered stories and clears the fail-closed
+// flags; recovery failure preserves the fail-closed (0 stories) outcome. Timeout
+// failures never trigger recovery. No `gracefulFallbackClustering` buckets ever.
+
+// 10 relevant items (beat-fit bypassed) so exactly 10 reach clustering and the
+// reduced recovery cap (max(6, floor(10/2))=6) genuinely shrinks the input.
+function makeRecoveryRawItems(n = 10) {
+  return Array.from({ length: n }, (_, i) =>
+    makeItem({ sourceId: `src-${i}`, outlet: "Reuters", minutesAgo: i })
+  );
+}
+
+test("PR B recovery: non-timeout error → recovery on reduced input succeeds and publishes", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  // Recovered story references src-0 (freshest → ranked first → inside the
+  // reduced set) and carries no factual_claims, so it grounds and publishes.
+  const recoveredStory = {
+    meta_story_id: "recovered-1",
+    title: "Recovered Story",
+    subtitle: "Recovered after reduced-input retry.",
+    source_item_ids: ["src-0"],
+    summary: "Recovered.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+  };
+  let calls = 0;
+  let recoveryInputLen = null;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async (items) => {
+      calls += 1;
+      if (calls <= 2) {
+        // Primary attempts (initial + one retry) fail with a non-timeout error.
+        const err = new Error("Clustering response parse failed: schema validation");
+        err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+        throw err;
+      }
+      recoveryInputLen = items.length; // the reduced recovery set
+      return [recoveredStory];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary attempts + 1 recovery attempt");
+  assert.equal(recoveryInputLen, 6, "recovery used the reduced (50%, min 6) input");
+  assert.equal(payload.stories.length, 1, "recovered story is published");
+  assert.equal(log.usedFallbackClustering, false, "recovery clears fail-closed");
+  assert.equal(log.clusteringFailureReason, null, "no terminal failure after recovery");
+  assert.equal(log.clusteringRecoveryAttempted, true);
+  assert.equal(log.clusteringRecoverySucceeded, true);
+  assert.equal(log.clusteringRecoveryReason, null);
+  assert.equal(log.clusteringAttempts, 3, "attempt count includes the recovery attempt");
+  assert.equal(log.clusteringLatencyMs.length, 3, "one latency sample per attempt incl. recovery");
+});
+
+test("PR B recovery: recovery also fails → remains fail-closed with recovery flags set", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      const err = new Error("Clustering response parse failed: schema validation");
+      err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+      throw err;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary attempts + 1 recovery attempt");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved: zero stories (no fallback buckets)");
+  // No fabricated "* Updates"/"General Updates" buckets ever ship.
+  assert.deepEqual(payload.stories, [], "no gracefulFallbackClustering stories");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "error", "terminal reason preserved");
+  assert.equal(log.clusteringRecoveryAttempted, true);
+  assert.equal(log.clusteringRecoverySucceeded, false);
+  assert.equal(log.clusteringRecoveryReason, "error", "recovery's own failure class");
+  assert.equal(log.clusteringAttempts, 3);
+});
+
+test("PR B recovery: timeout-class failure does NOT trigger recovery", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)");
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 2, "timeout path keeps the locked 2-attempt behavior — no recovery call");
+  assert.equal(payload.stories.length, 0, "fail-closed on timeout");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "timeout");
+  assert.equal(log.clusteringRecoveryAttempted, false, "recovery not attempted for timeouts");
+  assert.equal(log.clusteringRecoverySucceeded, false);
+  assert.equal(log.clusteringRecoveryReason, null);
+  assert.equal(log.clusteringAttempts, 2);
+});
+
+test("PR B recovery: small candidate set (no genuine reduction) does NOT trigger recovery", async () => {
+  // 6 items → reduced cap max(6, floor(6/2))=6 → no actual shrink → recovery is
+  // skipped (it would be an identical retry). Locks the reducibility guard.
+  const rawItems = makeRecoveryRawItems(6);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      const err = new Error("Clustering response parse failed: schema validation");
+      err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+      throw err;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 2, "no recovery call when the set cannot be reduced");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringRecoveryAttempted, false);
+  assert.equal(log.clusteringAttempts, 2);
+});
+
+// ─── Prompt 1: clustering failure subtype instrumentation ────────────────────
+//
+// The coarse `clusteringFailureReason` ('timeout' | 'error') is split into a
+// stable, additive `clusteringFailureSubtype`. The legacy reason is DERIVED from
+// the subtype, so the timeout→reason mapping is byte-identical to before and the
+// route's Slice 1 continuity gate (non-null reason on fail-closed) is preserved.
+
+test("Prompt 1 subtype: provider-request fail-closed → reason=error, subtype=provider_request", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => {
+      throw new Error(
+        "TEMPO_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) is required for anthropic: clustering models"
+      );
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 0);
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "error", "legacy reason unchanged for non-timeout");
+  assert.equal(log.clusteringFailureSubtype, "provider_request");
+  assert.equal(log.outcomes.clusteringFailureSubtype, "provider_request", "rollup mirrors the subtype");
+});
+
+test("Prompt 1 subtype: parse-class fail-closed → reason=error, subtype=parse", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => {
+      const err = new Error("Clustering response parse failed after safe-trim repair: schema");
+      err._clusteringRepair = {
+        attempted: true,
+        succeeded: false,
+        failureReason: "schema_validation_error",
+      };
+      throw err;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringFailureSubtype, "parse");
+});
+
+test("Prompt 1 subtype: timeout fail-closed → reason=timeout, subtype=timeout_budget", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(log.clusteringFailureReason, "timeout", "timeout→reason mapping is byte-identical");
+  assert.equal(log.clusteringFailureSubtype, "timeout_budget");
+});
+
+test("Prompt 1 subtype: unattributable fail-closed → reason=error, subtype=unknown", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { throw new Error("something inexplicable happened"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringFailureSubtype, "unknown");
+});
+
+test("Prompt 1 subtype: successful run carries null reason AND null subtype", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(log.clusteringFailureReason, null);
+  assert.equal(log.clusteringFailureSubtype, null, "no terminal failure → null subtype");
+  assert.equal(log.outcomes.clusteringFailureSubtype, null);
+});
+
+test("Prompt 1 subtype: recovered run clears the terminal subtype", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  const recoveredStory = {
+    meta_story_id: "recovered-1",
+    title: "Recovered Story",
+    subtitle: "Recovered after reduced-input retry.",
+    source_item_ids: ["src-0"],
+    summary: "Recovered.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+  };
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async (items) => {
+      calls += 1;
+      if (calls <= 2) {
+        const err = new Error("Clustering response parse failed: schema validation");
+        err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+        throw err;
+      }
+      return [recoveredStory];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1, "recovered story published");
+  assert.equal(log.clusteringFailureReason, null);
+  assert.equal(log.clusteringFailureSubtype, null, "recovered run is not a terminal failure");
+  assert.equal(log.clusteringRecoverySubtype, null, "recovery succeeded → no recovery subtype");
+});
+
+test("Prompt 1 subtype: recovery failure reports its own subtype while terminal subtype stays parse", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      const err = new Error("Clustering response parse failed: schema validation");
+      err._clusteringRepair = { attempted: true, succeeded: false, failureReason: "schema_validation_error" };
+      throw err;
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary + 1 recovery attempt");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved");
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.equal(log.clusteringFailureSubtype, "parse", "terminal subtype from the primary loop");
+  assert.equal(log.clusteringRecoveryReason, "error");
+  assert.equal(log.clusteringRecoverySubtype, "parse", "recovery's own subtype is reported separately");
 });
 
 });

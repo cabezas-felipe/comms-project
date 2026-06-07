@@ -12,6 +12,12 @@ import {
   parseClusteringResponse,
   safeTrimRepair,
   readClusteringRepairDiagnostics,
+  clusterWithAnthropic,
+  deriveClusterObs,
+  formatClusterObsLine,
+  CLUSTER_MAX_TOKENS,
+  classifyClusteringFailureSubtype,
+  CLUSTERING_FAILURE_SUBTYPE,
 } from "./cluster-engine.mjs";
 import { validateSmokeOutput, runClusterSmoke } from "./evals/cluster-smoke-core.mjs";
 import { buildClusteringPrompt, CLUSTERING_PROMPT_VERSION } from "./prompts.mjs";
@@ -981,4 +987,325 @@ test("Slice 3 continuity contract: malformed output throws a non-timeout error c
   assert.equal(repair.attempted, true);
   assert.equal(repair.succeeded, false);
   assert.equal(repair.failureReason, "json_parse_error");
+});
+
+// ─── Step 2: structured-path observability ([cluster-engine.obs]) ────────────
+//
+// Deterministic, offline coverage of the three execution paths via an injected
+// fake Anthropic client (no network), plus pure-helper coverage. Each path must
+// emit exactly one `[cluster-engine.obs]` line with the documented fields.
+
+// Reuses the schema-valid `VALID_CLUSTER_JSON` envelope declared earlier in
+// this file (passes clusteringOutputSchema).
+
+// Fake Anthropic client: messages.create resolves to the canned message.
+function fakeAnthropic(message) {
+  return { messages: { create: async () => message } };
+}
+
+function anthropicTextMessage(text, stopReason = "end_turn") {
+  return { stop_reason: stopReason, content: [{ type: "text", text }] };
+}
+
+// Run fn with console.log/error captured; returns { result, error, lines }.
+async function withConsoleCapture(fn) {
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  const lines = [];
+  console.log = (...a) => lines.push({ stream: "log", text: a.join(" ") });
+  console.error = (...a) => lines.push({ stream: "error", text: a.join(" ") });
+  console.warn = () => {}; // silence repair-path warnings; not under test here
+  let result, error;
+  try {
+    result = await fn();
+  } catch (err) {
+    error = err;
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+    console.warn = origWarn;
+  }
+  return { result, error, lines };
+}
+
+function obsLines(lines) {
+  return lines.filter((l) => l.text.startsWith("[cluster-engine.obs]"));
+}
+
+// — pure helpers —
+
+test("deriveClusterObs: structured success (no repair attempted)", () => {
+  const o = deriveClusterObs({ attempted: false, succeeded: false });
+  assert.deepEqual(o, { mode: "structured", result: "ok", errorClass: null });
+});
+
+test("deriveClusterObs: legacy fallback success carries fallbackTo + raw class", () => {
+  const o = deriveClusterObs({
+    attempted: true,
+    succeeded: true,
+    rawFailureClass: "json_parse_error",
+  });
+  assert.deepEqual(o, {
+    mode: "legacy",
+    result: "fallback",
+    errorClass: "json_parse_error",
+    fallbackTo: "legacy",
+  });
+});
+
+test("deriveClusterObs: terminal failure → result=fail, no fallbackTo", () => {
+  const o = deriveClusterObs({
+    attempted: true,
+    succeeded: false,
+    failureReason: "no_json_region",
+    rawFailureClass: "json_parse_error",
+  });
+  assert.equal(o.mode, "legacy");
+  assert.equal(o.result, "fail");
+  assert.equal(o.errorClass, "no_json_region");
+  assert.equal(o.fallbackTo, undefined);
+});
+
+test("formatClusterObsLine: stable key order; renders null; omits absent fallbackTo", () => {
+  const line = formatClusterObsLine({
+    mode: "structured",
+    result: "ok",
+    model: "claude-haiku-4-5",
+    maxTokens: 2048,
+    stopReason: null,
+    errorClass: null,
+  });
+  assert.equal(
+    line,
+    "[cluster-engine.obs] mode=structured result=ok model=claude-haiku-4-5 maxTokens=2048 stopReason=null errorClass=null"
+  );
+});
+
+test("formatClusterObsLine: includes fallbackTo when set", () => {
+  const line = formatClusterObsLine({
+    mode: "legacy",
+    result: "fallback",
+    model: "m",
+    maxTokens: 2048,
+    stopReason: "end_turn",
+    errorClass: "json_parse_error",
+    fallbackTo: "legacy",
+  });
+  assert.match(line, /fallbackTo=legacy$/);
+});
+
+// — integration via injected client: the three paths —
+
+test("obs path 1: structured success emits one ok line on stdout", async () => {
+  const { result, error, lines } = await withConsoleCapture(() =>
+    clusterWithAnthropic({
+      apiKey: "test",
+      model: "claude-haiku-4-5",
+      items: [makeItem()],
+      settings: BASE_SETTINGS,
+      client: fakeAnthropic(anthropicTextMessage(VALID_CLUSTER_JSON)),
+    })
+  );
+  assert.equal(error, undefined, "structured success must not throw");
+  assert.ok(Array.isArray(result) && result.length === 1, "returns parsed stories");
+  const obs = obsLines(lines);
+  assert.equal(obs.length, 1, "exactly one obs line");
+  assert.equal(obs[0].stream, "log", "success goes to stdout");
+  assert.match(obs[0].text, /mode=structured/);
+  assert.match(obs[0].text, /result=ok/);
+  assert.match(obs[0].text, /model=claude-haiku-4-5/);
+  assert.match(obs[0].text, new RegExp(`maxTokens=${CLUSTER_MAX_TOKENS}`));
+  assert.match(obs[0].text, /stopReason=end_turn/);
+  assert.match(obs[0].text, /errorClass=null/);
+  assert.doesNotMatch(obs[0].text, /fallbackTo/, "no fallbackTo on the structured path");
+});
+
+test("obs path 2: structured fails → legacy repair succeeds → fallback line", async () => {
+  // Markdown-fenced JSON fails the strict parse (SyntaxError) then recovers via
+  // the safe-trim repair pass → mode=legacy result=fallback fallbackTo=legacy.
+  const fenced = "```json\n" + VALID_CLUSTER_JSON + "\n```";
+  const { result, error, lines } = await withConsoleCapture(() =>
+    clusterWithAnthropic({
+      apiKey: "test",
+      model: "claude-haiku-4-5",
+      items: [makeItem()],
+      settings: BASE_SETTINGS,
+      client: fakeAnthropic(anthropicTextMessage(fenced)),
+    })
+  );
+  assert.equal(error, undefined, "recovered path must not throw");
+  assert.ok(Array.isArray(result) && result.length === 1, "returns recovered stories");
+  const obs = obsLines(lines);
+  assert.equal(obs.length, 1, "exactly one obs line");
+  assert.equal(obs[0].stream, "log", "recovery goes to stdout");
+  assert.match(obs[0].text, /mode=legacy/);
+  assert.match(obs[0].text, /result=fallback/);
+  assert.match(obs[0].text, /errorClass=json_parse_error/);
+  assert.match(obs[0].text, /fallbackTo=legacy/);
+});
+
+test("obs path 3: both paths fail → terminal fail line on stderr; rethrows", async () => {
+  // Non-JSON text: strict parse fails AND safe-trim finds no JSON region.
+  const { result, error, lines } = await withConsoleCapture(() =>
+    clusterWithAnthropic({
+      apiKey: "test",
+      model: "claude-haiku-4-5",
+      items: [makeItem()],
+      settings: BASE_SETTINGS,
+      client: fakeAnthropic(anthropicTextMessage("totally not json at all")),
+    })
+  );
+  assert.ok(error instanceof Error, "terminal failure must rethrow");
+  assert.equal(result, undefined);
+  const obs = obsLines(lines);
+  assert.equal(obs.length, 1, "exactly one obs line");
+  assert.equal(obs[0].stream, "error", "failure goes to stderr");
+  assert.match(obs[0].text, /result=fail/);
+  assert.match(obs[0].text, /errorClass=no_json_region/);
+  assert.doesNotMatch(obs[0].text, /fallbackTo/, "no fallbackTo on terminal failure");
+});
+
+test("obs: empty model response → structured fail (errorClass=empty_response)", async () => {
+  const { error, lines } = await withConsoleCapture(() =>
+    clusterWithAnthropic({
+      apiKey: "test",
+      model: "claude-haiku-4-5",
+      items: [makeItem()],
+      settings: BASE_SETTINGS,
+      client: fakeAnthropic(anthropicTextMessage("   ")),
+    })
+  );
+  assert.ok(error instanceof Error, "empty response must throw");
+  const obs = obsLines(lines);
+  assert.equal(obs.length, 1, "exactly one obs line");
+  assert.equal(obs[0].stream, "error");
+  assert.match(obs[0].text, /mode=structured/);
+  assert.match(obs[0].text, /result=fail/);
+  assert.match(obs[0].text, /errorClass=empty_response/);
+});
+
+test("obs: stopReason renders null when the provider omits it", async () => {
+  const { lines } = await withConsoleCapture(() =>
+    clusterWithAnthropic({
+      apiKey: "test",
+      model: "m",
+      items: [makeItem()],
+      settings: BASE_SETTINGS,
+      client: fakeAnthropic(anthropicTextMessage(VALID_CLUSTER_JSON, null)),
+    })
+  );
+  const obs = obsLines(lines);
+  assert.equal(obs.length, 1);
+  assert.match(obs[0].text, /stopReason=null/);
+});
+
+// ─── Prompt 1: clustering failure subtype taxonomy ───────────────────────────
+
+test("classifyClusteringFailureSubtype: timeout/abort messages → timeout_budget", () => {
+  for (const msg of [
+    "Anthropic clustering timed out (claude-sonnet-4-6)",
+    "operation timeout exceeded",
+    "The operation was aborted",
+  ]) {
+    assert.equal(
+      classifyClusteringFailureSubtype(new Error(msg)),
+      CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET,
+      msg
+    );
+  }
+});
+
+test("classifyClusteringFailureSubtype: error carrying _clusteringRepair → parse", () => {
+  const err = new Error("Clustering response parse failed: schema validation");
+  err._clusteringRepair = {
+    attempted: true,
+    succeeded: false,
+    failureReason: "schema_validation_error",
+  };
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PARSE
+  );
+});
+
+test("classifyClusteringFailureSubtype: parse takes priority over a provider-looking message", () => {
+  // A parse error whose message also happens to mention an API key must still
+  // classify as parse — the repair-diagnostics signal is authoritative.
+  const err = new Error("api key parse failed");
+  err._clusteringRepair = { attempted: true, succeeded: false };
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PARSE
+  );
+});
+
+test("classifyClusteringFailureSubtype: missing-API-key throw → provider_request", () => {
+  const err = new Error(
+    "TEMPO_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) is required for anthropic: clustering models"
+  );
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+});
+
+test("classifyClusteringFailureSubtype: empty provider response throw → provider_request", () => {
+  const err = new Error("Anthropic returned empty clustering response");
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+});
+
+test("classifyClusteringFailureSubtype: SDK APIError (numeric status) → provider_request", () => {
+  const err = new Error("rate limited");
+  err.status = 429;
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+});
+
+test("classifyClusteringFailureSubtype: APIError-named error → provider_request", () => {
+  const err = new Error("upstream connect error");
+  err.name = "APIConnectionError";
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+});
+
+test("classifyClusteringFailureSubtype: 'unavailable' → provider_request; truly generic → unknown", () => {
+  // "unavailable" is a recognized provider/transport signal…
+  assert.equal(
+    classifyClusteringFailureSubtype(new Error("model unavailable")),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+  // …but a message with no recognized signal must fall through to unknown
+  // rather than being force-fit into a provider bucket.
+  assert.equal(
+    classifyClusteringFailureSubtype(new Error("something inexplicable happened")),
+    CLUSTERING_FAILURE_SUBTYPE.UNKNOWN
+  );
+  assert.equal(
+    classifyClusteringFailureSubtype("transient blip"),
+    CLUSTERING_FAILURE_SUBTYPE.UNKNOWN
+  );
+});
+
+test("classifyClusteringFailureSubtype: timeout wins even with repair diagnostics present", () => {
+  // Deterministic priority: a timed-out message classifies as timeout_budget
+  // regardless of any attached repair object.
+  const err = new Error("Anthropic clustering timed out (m)");
+  err._clusteringRepair = { attempted: true, succeeded: false };
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET
+  );
+});
+
+test("classifyClusteringFailureSubtype: null/undefined → unknown (never throws)", () => {
+  assert.equal(classifyClusteringFailureSubtype(null), CLUSTERING_FAILURE_SUBTYPE.UNKNOWN);
+  assert.equal(classifyClusteringFailureSubtype(undefined), CLUSTERING_FAILURE_SUBTYPE.UNKNOWN);
 });

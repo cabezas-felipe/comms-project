@@ -23,6 +23,8 @@ The Lovable reference UI stays in [`../04-prototype`](../04-prototype) and depen
 Detailed rationale: [dashboard-story-pool-walkthrough.md](docs/dashboard-story-pool-walkthrough.md). Operator scenarios: [dashboard-story-pool-scenario-map.md](docs/dashboard-story-pool-scenario-map.md).
 Cold-start orchestration spec: [cold-start-v1.md](docs/cold-start-v1.md).
 
+Cold-start clustering envelope (PR B Step 2): the `cold_start` profile keeps the locked 45s per-attempt clustering timeout and 2 attempts, but bounds the **sum** of those attempts with a wall-clock budget (`COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT = 60000`) in [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs). The first attempt gets the full 45s; a retry inherits only the budget the first attempt left behind (floored at `CLUSTER_CALL_MIN_TIMEOUT_MS`). This caps the worst-case clustering span at ~60s (instead of two back-to-back 45s timeouts ≈ 90s) so cold-start `pipelineMs` trends under the 90s `PIPELINE_SLOW_MS` budget; trust is unchanged (still 2 attempts, fail-closed, PR B Step 1 recovery untouched). The cap is surfaced on `_meta.profile.clusterTotalBudgetMs` and the `[pipeline.profile]` log line.
+
 ## Commands
 
 Run from **this directory** (`05-engineering/`):
@@ -160,7 +162,22 @@ To open up beyond Phase 1, **unset** the narrowing override so ingestion falls t
 
 Three knobs and one locked policy govern how the refresh pipeline fails safe so users never see fabricated or low-signal stories.
 
-**Fail-closed clustering (locked policy).** Clustering runs once; on throw/timeout it retries **once**; if the retry also fails the pipeline publishes **zero meta-stories** (empty dashboard). It never ships `gracefulFallbackClustering` "General Updates"-style buckets to users — an empty dashboard is the honest signal that clustering failed. Diagnostics are persisted under `_meta`: `usedFallbackClustering` (**true means clustering failed and zero stories were published**, not “degraded fallback buckets shipped”), `clusteringFailureReason` (`timeout` \| `error` \| `null`), `clusteringAttempts`, `clusteringLatencyMs` (per-attempt). See [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) and scenario-map row **I-fallback**.
+**Fail-closed clustering (locked policy).** Clustering runs once; on throw/timeout it retries **once**; if the retry also fails the pipeline publishes **zero meta-stories** (empty dashboard). It never ships `gracefulFallbackClustering` "General Updates"-style buckets to users — an empty dashboard is the honest signal that clustering failed. Diagnostics are persisted under `_meta`: `usedFallbackClustering` (**true means clustering failed and zero stories were published**, not “degraded fallback buckets shipped”), `clusteringFailureReason` (`timeout` \| `error` \| `null`), `clusteringFailureSubtype` (finer attribution of the reason — `parse` \| `provider_request` \| `timeout_budget` \| `unknown` \| `null`; see **Failure subtype taxonomy** below), `clusteringAttempts`, `clusteringLatencyMs` (per-attempt). See [`refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) and scenario-map row **I-fallback**.
+
+**Auto-recovery tier (Option B, PR B).** Before falling closed, a **non-timeout** primary failure (`clusteringFailureReason = error` — i.e. a parse/schema-style failure) triggers **one** bounded recovery attempt on a **reduced** candidate set (50% of the cluster-input cap, floor 6 items), and only when that genuinely shrinks the input. If recovery parses cleanly its stories publish normally (and `usedFallbackClustering` flips back to `false`, `clusteringFailureReason` to `null`); if it fails, the **fail-closed outcome above is preserved unchanged** (zero stories). **Timeout-class** failures never trigger recovery (the latency budget is already spent). It never emits `gracefulFallbackClustering` buckets — trust posture is unchanged. Additive `_meta` diagnostics: `clusteringRecoveryAttempted`, `clusteringRecoverySucceeded`, `clusteringRecoveryReason` (`error` \| `timeout` \| `null`), `clusteringRecoverySubtype` (same taxonomy as the failure subtype, for the recovery attempt's own failure); the recovery attempt is also counted in `clusteringAttempts` / `clusteringLatencyMs`.
+
+**Log-side observability.** Each real-provider clustering round-trip also emits one stable, greppable line — prefix `[cluster-engine.obs]` — recording which execution path it took: `mode=structured|legacy`, `result=ok|fallback|fail`, plus `model`, `maxTokens`, `stopReason`, `errorClass`, and `fallbackTo=legacy` (only on a structured→legacy recovery). The three outcomes are: structured success (`result=ok`), structured parse failed then the safe-trim/legacy repair recovered (`result=fallback`), and both paths failed (`result=fail`, on stderr). This is diagnostics-only — it never alters clustering behavior, the returned stories, or the fail-closed policy above. See [`cluster-engine.mjs`](apps/api/src/ai/cluster-engine.mjs).
+
+**Failure subtype taxonomy (diagnostics only).** When clustering fails closed, the coarse `clusteringFailureReason` is additionally classified into a stable, snake_case **subtype** for triage:
+
+| subtype | meaning | typical fix family |
+| --- | --- | --- |
+| `parse` | model output couldn't be parsed/validated into the clustering contract (JSON/schema/empty payload) | parse-resilience hardening |
+| `provider_request` | the provider call itself failed or returned an unusable envelope (missing API key, auth, rate-limit, overload, transport fault, empty provider response) | guarded provider/transport mitigation |
+| `timeout_budget` | the clustering wall-clock budget was exhausted (timed out / aborted) | budget-envelope adjustment |
+| `unknown` | a non-timeout failure we couldn't attribute to a class above — a non-empty `unknown` rate is itself a signal the taxonomy needs another bucket | improve attribution first |
+
+The legacy reason is **derived from** the subtype (`timeout_budget`→`timeout`, everything else→`error`), so the existing `clusteringFailureReason` contract is byte-identical and the subtype is purely additive. Classifier: `classifyClusteringFailureSubtype()` in [`cluster-engine.mjs`](apps/api/src/ai/cluster-engine.mjs) (pure, deterministic). The **same** subtype is surfaced consistently on **(1)** the immediate refresh response `_meta.clusteringFailureSubtype`, **(2)** the run-outcome rollup `_meta.outcomes.clusteringFailureSubtype`, **(3)** the persisted snapshot read path — `GET /api/dashboard` lifts it from `_lastRunMeta` into `_meta` ([`dashboard-snapshot-repo.mjs`](apps/api/src/db/dashboard-snapshot-repo.mjs)), and **(4)** the probe summary's `clusteringFailureSubtypes` histogram (read via `extractClusteringFailureSubtype()` — top-level `_meta` first, falling back to the outcomes rollup for older snapshots). It is **visibility/diagnostics only — it never changes gate thresholds, fail-closed behavior, or the published stories.**
 
 | Env var | Default | Scope | Purpose |
 |---------|---------|-------|---------|
@@ -236,6 +253,40 @@ Run after the think-tank onboarding blurb is saved (topics: economy / elections 
 - [ ] `npm run eval:dashboard-refresh-golden` passes locally (hermetic regression guard — see [evals README](apps/api/src/ai/evals/README.md#dashboard-refresh-golden-slice-2)).
 - [ ] (Optional, before any floor change) `npm run eval:dashboard-calibration` — compare floors and confirm guardrails hold; pair the table with `?debug=1` quality review.
 - [ ] (CI / pre-PR) `npm run eval:dashboard-quality-gate` — golden + calibration in one command; must exit `0`.
+
+## Clustering reliability probe (live gate)
+
+`npm run cluster:probe` ([`scripts/cluster-reliability-probe.mjs`](apps/api/scripts/cluster-reliability-probe.mjs)) hammers `POST /api/dashboard/refresh` for one user N times and enforces the clustering reliability gate. Use it to baseline reliability before/after a clustering change.
+
+> **Before a pilot or a clustering-reliability merge,** run the full [Clustering MVP readiness gate](docs/clustering-mvp-gate.md) — the operator checklist that wraps the quality gate, this probe, and a manual golden sanity pass, with a signoff template and failure triage.
+
+> **Live probe** — requires the API server running (`npm run dev`) and, for `--email`, Supabase admin env (`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `apps/api/.env`). It only *observes* refresh responses; it does not change product behavior.
+
+```sh
+cd 05-engineering/apps/api
+npm run cluster:probe -- --email <your-invited-email>          # 20 runs, 3s cooldown (defaults)
+npm run cluster:probe -- --user-id <uuid> --runs 20
+npm run cluster:probe -- --email <email> --runs 30 --cooldown-ms 5000 --base-url http://localhost:8787
+npm run cluster:probe -- --email <email> --mode cold-start --require-recompute --runs 20 --base-url http://localhost:8787
+```
+
+`--email` is the preferred, portable mode (uses `x-recognized-email`); `--user-id` runs a single preflight first and exits clearly if the server's `x-user-id` path is not accepted. `--mode cold-start` targets `?profile=cold_start` and scopes latency to recompute runs. `--require-recompute` keeps sampling until it collects the requested recompute count (bounded by an attempt cap) and exits non-zero on insufficient recompute sample quality.
+
+**Gate (pass requires both):** `successRate >= 0.95` (fraction of runs with `_meta.usedFallbackClustering === false`) **and** `medianStories >= 2` (median `stories.length`). Default `N = 20` runs.
+
+**Pass/fail:** exits `0` only when the reliability gate passes; otherwise exits **non-zero** and prints which threshold failed. In recompute-enforced runs (`--require-recompute`), the probe adds an independent sample-quality gate: if the recompute target is not met, it exits non-zero with `SAMPLE-QUALITY FAIL` even when success-rate and story-count thresholds pass.
+
+The final summary JSON includes baseline fields (`runs`, `successRate`, `medianStories`, `p95PipelineMs`, `clusteringFailureReasons`, `clusteringFailureSubtypes`, `refreshSkippedReasons`) plus Step 4.1 transparency fields (`latencyScope`, `recomputeRuns`, `skippedRuns`, `latencyRunsCounted`, `requireRecompute`, `recomputeTarget`, `recomputeTargetMet`, `attempts`). `clusteringFailureSubtypes` is a histogram of the **Failure subtype taxonomy** above — it splits the coarse `clusteringFailureReasons` `error` bucket into `parse` / `provider_request` / `unknown` for triage. The probe reads the subtype from each response's top-level `_meta.clusteringFailureSubtype`, falling back to `_meta.outcomes.clusteringFailureSubtype` for older servers. It is diagnostics only and **never feeds the pass/fail gate**. Pure helpers are unit-tested offline in [`scripts/cluster-reliability-probe.test.mjs`](apps/api/scripts/cluster-reliability-probe.test.mjs).
+
+### Nightly clustering reliability workflow (background monitoring)
+
+**Workflow:** `Cluster reliability nightly` ([`.github/workflows/cluster-reliability-nightly.yml`](../.github/workflows/cluster-reliability-nightly.yml)) runs the probe above against a deployed API every night and uploads the results. It is **background monitoring only** — the manual [Clustering MVP readiness gate](docs/clustering-mvp-gate.md) is still required before pilots and before merging clustering-reliability changes.
+
+- **Cadence:** `15 4 * * *` (04:15 UTC nightly), plus manual `workflow_dispatch`. The minute (`:15`) is offset from the hourly cadence-tick (`:05`) and ingestion-warm (`:35`) jobs and away from the 09:00 UTC source-digest, so the scheduled jobs don't contend for runner capacity.
+- **Thresholds:** owned entirely by the probe (`successRate >= 0.95` **and** `medianStories >= 2`). The job **fails when the probe exits non-zero** — no threshold logic is duplicated in the workflow.
+- **Where to view runs/artifacts:** GitHub → **Actions** → **"Cluster reliability nightly"** → a run → **Artifacts**: `cluster-reliability-nightly-<run_id>` contains `cluster-probe.log` (full probe stdout/stderr) and `cluster-probe-summary.json` (extracted summary). Artifacts upload even on failure (retained 30 days).
+- **Required repo secrets** (Settings → Secrets and variables → Actions): `CLUSTER_PROBE_EMAIL` (invited test user), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `TEMPO_ANTHROPIC_API_KEY` (or `ANTHROPIC_API_KEY`). A missing secret fails the run fast with a clear message before any live HTTP.
+- **Manual dispatch + input overrides:** Actions → "Cluster reliability nightly" → **Run workflow**. Optional inputs (all default to the probe's own defaults): `runs` (default `20`), `cooldown_ms` (default `3000`), `base_url` (default `https://tempo-gray-psi.vercel.app`). Example: `runs=30`, `cooldown_ms=5000`, `base_url=https://tempo-gray-psi.vercel.app`.
 
 ## Server-side cadence tick (Sub-slice 2.5)
 

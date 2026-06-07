@@ -418,20 +418,214 @@ export function readClusteringRepairDiagnostics(source) {
   return { ...EMPTY_CLUSTERING_REPAIR };
 }
 
-async function clusterWithAnthropic({ apiKey, model, items, settings, timeoutMs }) {
-  const client = new Anthropic({ apiKey, timeout: timeoutMs });
+// ─── Prompt 1: clustering failure subtype taxonomy ───────────────────────────
+//
+// The pipeline's terminal `clusteringFailureReason` is intentionally coarse —
+// `'timeout' | 'error' | null` — and the catch-all `error` bucket hides several
+// distinct, separately-actionable failure modes (a malformed model payload, a
+// provider/transport fault, an unattributable error).  Prompt 1 adds a STABLE,
+// additive sub-classification so an operator can split `error` WITHOUT changing
+// any gate threshold or the existing reason contract.  The mapping:
+//
+//   timeout_budget   — the clustering wall-clock budget was exhausted (the call
+//                      timed out / was aborted).  This is the SAME signal that
+//                      drives `clusteringFailureReason === "timeout"`; the
+//                      pipeline derives the legacy reason from the subtype so the
+//                      two never drift.
+//   parse            — the model returned a response we could not parse/validate
+//                      into the clustering contract (carries the C2/Slice-3
+//                      `_clusteringRepair` diagnostics — JSON syntax, schema, or
+//                      empty/again-empty payload from `parseClusteringResponse`).
+//   provider_request — the provider call itself failed or returned an unusable
+//                      envelope: missing API key, auth/permission, rate-limit,
+//                      overload, connection/transport fault, or an empty provider
+//                      response (the engine's own `clusterWithAnthropic` /
+//                      `clusterItems` throw sites, plus Anthropic SDK errors).
+//   unknown          — a non-timeout failure we could not attribute to a class
+//                      above.  A non-empty `unknown` rate is itself a signal that
+//                      the taxonomy needs another bucket — never a silent drop.
+//
+// Pure and deterministic (regex + own-property checks only) so the mapping is
+// unit-lockable without a real provider.  Subtype names are snake_case and
+// frozen — downstream dashboards/logs key off them.
+export const CLUSTERING_FAILURE_SUBTYPE = Object.freeze({
+  TIMEOUT_BUDGET: "timeout_budget",
+  PARSE: "parse",
+  PROVIDER_REQUEST: "provider_request",
+  UNKNOWN: "unknown",
+});
+
+// Same regex the pipeline used to split timeout from error — kept here so the
+// subtype and the legacy `clusteringFailureReason` derive from ONE source and
+// the timeout→reason mapping stays byte-identical to the pre-Prompt-1 behavior.
+const CLUSTER_TIMEOUT_MESSAGE_RE = /timed out|timeout|abort/i;
+
+// Concrete provider/transport failure signals.  Covers the engine's own throw
+// sites (missing API key, "returned empty clustering response") plus common
+// Anthropic SDK / Node transport error language.  Deliberately conservative:
+// anything not matched here (and not a parse failure or timeout) stays `unknown`
+// rather than being force-fit into `provider_request`.
+const CLUSTER_PROVIDER_MESSAGE_RE =
+  /api[_ ]?key|anthropic_api_key|rate[ _-]?limit|overloaded|temporarily unavailable|service unavailable|\bunavailable\b|authentication|unauthorized|forbidden|permission|connection error|econnreset|enotfound|etimedout|fetch failed|socket hang up|returned empty|empty[^]*?response|status code|\b(?:429|5\d{2})\b/i;
+
+// True when a thrown error looks like a provider/transport fault: an Anthropic
+// SDK `APIError` (numeric `status`) / connection error (by name), or a concrete
+// provider message.  Kept narrow so generic messages fall through to `unknown`.
+function isProviderRequestError(err, msg) {
+  if (err && typeof err === "object") {
+    if (typeof err.status === "number") return true;
+    const name = typeof err.name === "string" ? err.name : "";
+    const ctor =
+      err.constructor && typeof err.constructor.name === "string"
+        ? err.constructor.name
+        : "";
+    if (/APIError|APIConnection|Anthropic/i.test(`${name} ${ctor}`)) return true;
+  }
+  return CLUSTER_PROVIDER_MESSAGE_RE.test(msg);
+}
+
+/**
+ * Classify a thrown clustering failure into a stable subtype (see
+ * `CLUSTERING_FAILURE_SUBTYPE`).  Deterministic priority:
+ *   1. timeout_budget   — message matches the timeout/abort regex
+ *   2. parse            — error carries `_clusteringRepair` diagnostics
+ *   3. provider_request — SDK API error (numeric `status` / APIError-ish name)
+ *                         or a concrete provider/transport message
+ *   4. unknown          — none of the above
+ *
+ * Additive + fail-closed-preserving: this NEVER changes whether clustering
+ * failed, only how the (already terminal) failure is labeled.  Pure; exported
+ * for unit testing of the mapping contract.
+ */
+export function classifyClusteringFailureSubtype(err) {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  if (CLUSTER_TIMEOUT_MESSAGE_RE.test(msg)) {
+    return CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET;
+  }
+  if (err && typeof err === "object" && err._clusteringRepair) {
+    return CLUSTERING_FAILURE_SUBTYPE.PARSE;
+  }
+  if (isProviderRequestError(err, msg)) {
+    return CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST;
+  }
+  return CLUSTERING_FAILURE_SUBTYPE.UNKNOWN;
+}
+
+// Clustering completion token budget.  Named (not a new tuning knob — same
+// value that was inline) so the observability line can report it verbatim.
+export const CLUSTER_MAX_TOKENS = 2048;
+
+// ─── Step 2: structured-path observability ───────────────────────────────────
+//
+// One stable, greppable line per clustering attempt/outcome, prefix
+// `[cluster-engine.obs]`, so an operator can see which execution path each
+// refresh took WITHOUT decoding the C2/Slice-3 repair diagnostics.  The three
+// outcomes map onto the existing parse paths (no behavior change):
+//   - structured success            → mode=structured result=ok
+//   - structured failed → recovered → mode=legacy     result=fallback fallbackTo=legacy
+//   - both paths failed (terminal)  → mode=legacy     result=fail
+// "legacy" is the safe-trim repair path (the looser, pre-structured handling
+// the strict parse falls back to).  This is diagnostics-only — it never alters
+// the returned stories or the thrown error.
+
+/**
+ * Map a normalized clustering repair-diagnostics object to the observability
+ * outcome fields.  Pure; exported for unit testing.  `fallbackTo` is present
+ * ONLY on the recovered (fallback) outcome, per the field contract.
+ *
+ * @param {{ attempted:boolean, succeeded:boolean, failureReason?:string|null, rawFailureClass?:string|null }} repair
+ * @returns {{ mode:string, result:string, errorClass:string|null, fallbackTo?:string }}
+ */
+export function deriveClusterObs(repair) {
+  if (!repair || !repair.attempted) {
+    // Strict structured parse succeeded with no repair pass.
+    return { mode: "structured", result: "ok", errorClass: null };
+  }
+  if (repair.succeeded) {
+    // Strict parse failed; the safe-trim (legacy) repair pass recovered.
+    return {
+      mode: "legacy",
+      result: "fallback",
+      errorClass: repair.rawFailureClass ?? null,
+      fallbackTo: "legacy",
+    };
+  }
+  // Both the strict and the repair path failed — terminal clustering failure.
+  return {
+    mode: "legacy",
+    result: "fail",
+    errorClass: repair.failureReason ?? repair.rawFailureClass ?? "parse_error",
+  };
+}
+
+/**
+ * Format the observability line with a stable key order.  `errorClass` and
+ * `stopReason` always render (as `null` when absent) so the field set per line
+ * is predictable; `fallbackTo` is omitted unless set.  Pure; exported for tests.
+ */
+export function formatClusterObsLine(fields) {
+  const order = ["mode", "result", "model", "maxTokens", "stopReason", "errorClass", "fallbackTo"];
+  const parts = [];
+  for (const key of order) {
+    const value = fields[key];
+    if (value === undefined) continue; // omit absent optional fields (fallbackTo)
+    parts.push(`${key}=${value === null ? "null" : value}`);
+  }
+  return `[cluster-engine.obs] ${parts.join(" ")}`;
+}
+
+// Emit one observability line. Failures go to stderr (console.error), successes
+// and recoveries to stdout. Returns the line for test assertions.
+function emitClusterObs(outcome, ctx) {
+  const fields = {
+    mode: outcome.mode,
+    result: outcome.result,
+    model: ctx.model,
+    maxTokens: ctx.maxTokens,
+    stopReason: ctx.stopReason ?? null,
+    errorClass: outcome.errorClass ?? null,
+  };
+  if (outcome.fallbackTo) fields.fallbackTo = outcome.fallbackTo;
+  const line = formatClusterObsLine(fields);
+  if (outcome.result === "fail") console.error(line);
+  else console.log(line);
+  return line;
+}
+
+/**
+ * Run one real-provider clustering round-trip and parse it, emitting exactly one
+ * `[cluster-engine.obs]` line for the outcome.  Exported so tests can inject a
+ * fake `client` (any object with `messages.create`) and drive the three paths
+ * deterministically with no network.  Production callers omit `client` and a
+ * real Anthropic client is constructed.
+ */
+export async function clusterWithAnthropic({ apiKey, model, items, settings, timeoutMs, client }) {
+  const anthropic = client ?? new Anthropic({ apiKey, timeout: timeoutMs });
   const prompt = buildClusteringPrompt(items, settings);
-  const message = await client.messages.create({
+  const message = await anthropic.messages.create({
     model,
-    max_tokens: 2048,
+    max_tokens: CLUSTER_MAX_TOKENS,
     messages: [{ role: "user", content: prompt }],
   });
-  const block = message.content[0];
+  const obsCtx = {
+    model,
+    maxTokens: CLUSTER_MAX_TOKENS,
+    stopReason: message?.stop_reason ?? null,
+  };
+  const block = message?.content?.[0];
   if (!block || block.type !== "text" || !block.text.trim()) {
+    emitClusterObs({ mode: "structured", result: "fail", errorClass: "empty_response" }, obsCtx);
     throw new Error("Anthropic returned empty clustering response");
   }
-  const { stories, repair } = parseClusteringResponse(block.text);
-  return attachRepairDiagnostics(stories, repair);
+  let parsed;
+  try {
+    parsed = parseClusteringResponse(block.text);
+  } catch (err) {
+    emitClusterObs(deriveClusterObs(readClusteringRepairDiagnostics(err)), obsCtx);
+    throw err;
+  }
+  emitClusterObs(deriveClusterObs(parsed.repair), obsCtx);
+  return attachRepairDiagnostics(parsed.stories, parsed.repair);
 }
 
 // ─── Fallback: graceful grouping without LLM ─────────────────────────────────

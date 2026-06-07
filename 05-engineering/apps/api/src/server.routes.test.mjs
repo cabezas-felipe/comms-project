@@ -561,6 +561,55 @@ test("GET /api/dashboard lifts persisted _lastRunMeta.outcomes + ingestionSource
   }
 });
 
+test("GET /api/dashboard lifts persisted clustering subtype fields to top-level _meta (Prompt 1.2)", async () => {
+  const LIFT_USER = "slice3-lift-subtype-user";
+  const payload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "lift-subtype-story-1",
+        metaStoryId: "lift-subtype-story-1",
+        title: "Lift Subtype Story",
+        subtitle: "A subtitle.",
+        geographies: ["US"],
+        topic: "Diplomatic relations",
+        summary: "Summary.",
+        whyItMatters: "Why.",
+        whatChanged: "No material update since your last refresh.",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+        sources: [{ id: "src-1", outlet: "Reuters", kind: "traditional", weight: 75, url: "#", minutesAgo: 30, headline: "Headline", body: ["Body."] }],
+      },
+    ],
+    _lastRunMeta: {
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: "provider_request",
+      clusteringRecoverySubtype: "parse",
+      outcomes: {
+        storiesPublished: 1,
+        clusteringAttempts: 2,
+        clusteringFailureReason: "error",
+        clusteringFailureSubtype: "provider_request",
+        usedFallbackClustering: true,
+      },
+    },
+  };
+  const prevResolver = _auth.resolver;
+  _auth.resolver = async () => ({ userId: LIFT_USER, source: "bearer" });
+  await _snapshotRepo.write(LIFT_USER, payload);
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta?.hasSnapshot, true);
+    assert.equal(res.body._meta?.clusteringFailureReason, "error");
+    assert.equal(res.body._meta?.clusteringFailureSubtype, "provider_request");
+    assert.equal(res.body._meta?.clusteringRecoverySubtype, "parse");
+  } finally {
+    _auth.resolver = prevResolver;
+  }
+});
+
 // ─── Topic taxonomy backward compatibility ─────────────────────────────────────
 // These tests verify that normalizeTopicLabel is applied during relevance filtering
 // so legacy item labels ("Security cooperation") match settings written in normalized
@@ -881,6 +930,15 @@ test("POST /api/dashboard/refresh: runs pipeline and persists snapshot, returns 
     assert.ok(Array.isArray(res.body.stories), "response must include stories array");
     assert.ok(res.body._meta?.hasSnapshot === true, "response must include _meta.hasSnapshot=true");
     assert.ok(typeof res.body._meta?.refreshedAt === "string", "response must include _meta.refreshedAt");
+    // Prompt 1.1: the failure-subtype key is always present at top-level _meta;
+    // it is null whenever there is no terminal clustering failure.
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(res.body._meta, "clusteringFailureSubtype"),
+      "response _meta must expose clusteringFailureSubtype"
+    );
+    if (res.body._meta.clusteringFailureReason == null) {
+      assert.equal(res.body._meta.clusteringFailureSubtype, null, "no failure → null subtype");
+    }
     // Phase 2: selection metadata surfaced on POST /api/dashboard/refresh
     const sel = res.body._meta?.selection;
     assert.ok(sel, "response must include _meta.selection");
@@ -1602,6 +1660,10 @@ test("Slice 5 enrichment: failed upgrade degrades to valid non-empty fallback (s
 // pipeline publishes ZERO stories and classifies the failure.  This is exactly
 // the shape `runRefreshPipeline` returns on its locked fail-closed path.
 function failClosedClusteringPipelineStub(reason = "timeout") {
+  // Prompt 1.1: mirror the real pipeline by carrying the failure subtype on the
+  // log (top-level + outcomes). Representative mapping: timeout→timeout_budget,
+  // non-timeout→provider_request.
+  const subtype = reason === "timeout" ? "timeout_budget" : "provider_request";
   return async (opts) => ({
     payload: { contractVersion: opts.contractVersion, stories: [] },
     log: {
@@ -1611,6 +1673,8 @@ function failClosedClusteringPipelineStub(reason = "timeout") {
       metaStoryCount: 0,
       usedFallbackClustering: true,
       clusteringFailureReason: reason,
+      clusteringFailureSubtype: subtype,
+      clusteringRecoverySubtype: null,
       clusteringAttempts: 2,
       clusteringLatencyMs: [120, 130],
       groundingFailures: 0,
@@ -1626,6 +1690,7 @@ function failClosedClusteringPipelineStub(reason = "timeout") {
         storiesPublished: 0,
         clusteringAttempts: 2,
         clusteringFailureReason: reason,
+        clusteringFailureSubtype: subtype,
         usedFallbackClustering: true,
       },
     },
@@ -1758,6 +1823,9 @@ test("POST /api/dashboard/refresh: clustering fail-closed with NO prior snapshot
       assert.notEqual(res.body._meta?.snapshotPreserved, true, "snapshotPreserved must NOT be set without a prior healthy snapshot");
       // Failure remains observable via the normal fail-closed diagnostics.
       assert.equal(res.body._meta?.clusteringFailureReason, "error");
+      // Prompt 1.1: the failure subtype is forwarded at top-level `_meta` on the
+      // "ran" branch (this is the gap the patch closes — probe reads it here).
+      assert.equal(res.body._meta?.clusteringFailureSubtype, "provider_request");
       assert.equal(res.body._meta?.usedFallbackClustering, true);
     });
   } finally {
