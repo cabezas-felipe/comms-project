@@ -131,7 +131,7 @@ From [refresh-pipeline.mjs](../apps/api/src/dashboard/refresh-pipeline.mjs) (pos
 | Dimension | Gate | Score | Recall profile | Label-only | Notes |
 |-----------|------|-------|------------------|------------|--------|
 | **Traditional + social sources** | **Yes** | — | — | — | **C2:** If the user has **zero** configured sources, **fail-closed** — no items enter relevance/clustering until sources are configured (or a future explicit “defaults” product flag exists). |
-| **Geographies** | **Yes** when list non-empty ([`applyGeoFilter`](../apps/api/src/dashboard/geo-filter.mjs)); **no gate** when empty | **Yes** (beat-fit) | — | **Yes** (shipped tags) | Stricter geo behavior in **F**. |
+| **Geographies** | **Gate only in `hard` mode** (rollback) via [`applyGeoFilter`](../apps/api/src/dashboard/geo-filter.mjs); **no gate** by default (`soft`) or when the list is empty | **Yes** (beat-fit) | — | **Yes** (shipped tags) | Admission mode + rationale in **F**. |
 | **Topics** | **Yes** at lexical recall (see **D**); **noop** if both topics and keywords empty | **Yes** ([`scoreBeatFit`](../apps/api/src/dashboard/beat-fit-scorer.mjs)) | Via profile text ([`buildProfileText`](../apps/api/src/ingestion/embedding-recall.mjs)) | **Yes** (shipped tags) | |
 | **Keywords** | **Yes** at lexical recall (**D**); **noop** if both empty | **Yes** (beat-fit) | Via profile text | **Yes** (shipped tags) | |
 | **Onboarding narrative** | **No** | — (not scored directly today) | **Yes** — profile text for embeddings | **No** | Must not be sole admission path; **E** + **G**. |
@@ -279,9 +279,22 @@ Pure observability — does **not** gate behavior. Surfaced for `_meta.recall` c
 
 **Code:** [`geo-filter.mjs`](../apps/api/src/dashboard/geo-filter.mjs); invoked from [refresh-pipeline](../apps/api/src/dashboard/refresh-pipeline.mjs) after source selection + hold merge.
 
-**Role (Chunk C):** Geographies are a **gate** when the user configures at least one geo; plus **score** and **label** downstream (beat-fit, shipped tags). **Assessor SKU** is finalized in **Chunk N**.
+**Role (Chunk C):** Geographies are **score** and **label** signals by default (beat-fit, shipped tags), and a **gate only in `hard` rollback mode**. **Assessor SKU** is finalized in **Chunk N**.
 
-### Product decisions (locked)
+### Admission mode — `soft` is the default (geo is no longer an admission gate)
+
+`TEMPO_GEO_ADMISSION_MODE` selects whether geo gates admission. **The production default is `soft`.** The F1–F4 gate decisions below describe the **`hard`** path, which now runs only when an operator explicitly rolls back.
+
+- **`soft` (DEFAULT):** geography never blocks admission. **No** lane-1/lane-2 split as an admission control, **no** Lane 2 defer, **no** hold-bucket write, and the `geoAssessFn` is **not** called. Every recent candidate continues to the downstream stages (recall **D**/**E** → beat-fit **G** → dedupe → clustering), which decide relevance. All downstream caps are unchanged. Geo still contributes **score** and **label** downstream (beat-fit, shipped tags) — it just stops gating the candidate pool. Diagnostics: `geoLane2DeferredCount`, `geoHeldCount`, and `geoAssessedCount` are all **0**; `geoAdmissionBypassed = true`.
+- **`hard` (rollback):** the legacy gate described in **F1–F4** — lane split, `geoAssessFn` thresholds, defer under budget, and the hold bucket.
+
+**Why soft is the default:** the hard gate produced **false negatives** for election/political-monitoring coverage whose text omits an explicit configured-geography token (e.g. Spanish "elecciones" headlines that never name "Colombia"). Those items carried no lexical geo signal, fell into Lane 2, and were deferred to the hold bucket before clustering ever saw them. Soft removes that admission drop; downstream recall/beat-fit/clustering decide relevance instead.
+
+**Rollback:** set `TEMPO_GEO_ADMISSION_MODE=hard` (unset/empty/invalid → `soft`; only the exact value `hard` rolls back). Read per refresh run — no deploy needed. The active mode is on `_meta.outcomes.geoAdmissionMode` / `geoAdmissionBypassed`. Config: [`geo-admission-config.mjs`](../apps/api/src/dashboard/geo-admission-config.mjs).
+
+**Cleanup status (rollback-only → removal candidate):** the hard gate is isolated in `runHardGeoAdmissionGate` (`@deprecated`, in [refresh-pipeline](../apps/api/src/dashboard/refresh-pipeline.mjs)), and the F1–F4 surfaces below — Lane 2 defer, the **hold bucket** (F4a), and the `geoAssessFn` thresholds (F2/F3) — are now exercised **only** under `hard`. They are slated for removal after the soft-default stability milestone. **Before removing,** verify no hard-mode usage in telemetry: no runs with `_meta.outcomes.geoAdmissionMode === "hard"` and no `[pipeline.geo] hard admission gate ACTIVE` log lines over the agreed window (e.g. 30 days). Removal also retires the hold-bucket read/write path.
+
+### Product decisions (locked) — apply in `hard` mode
 
 | # | Topic | Decision |
 |---|--------|----------|
@@ -308,7 +321,7 @@ Items below threshold go to **`held`**. When hold read/write is wired, held item
 
 ### Spec blurb (paste-friendly)
 
-> **Geo gate (v1):** If the user configures **no** geographies, geo filter is a **no-op** (all pass). If configured: **explicit_match** to user geos always passes; **implicit** (no item geos) and **explicit_conflict** use **`geoAssessFn`** with thresholds **0.80** / **0.90** respectively; below threshold → **hold**. Held items are **re-merged** on the next refresh when persistence is enabled. Production **must** use a **non-mock** assessor (**F3b**); **Chunk N** names the implementation. Beat-fit and shipped tags still apply downstream (**C**, **G**, **K**).
+> **Geo admission (v1):** Default mode **`soft`** — geo does **not** gate admission: no lane split, defer, hold, or assessor call; every recent candidate continues to recall/beat-fit/clustering, and geo still contributes **score**/**label** downstream. Rollback to the **`hard`** gate with `TEMPO_GEO_ADMISSION_MODE=hard`: if the user configures **no** geographies it is a **no-op** (all pass); if configured, **explicit_match** always passes, **implicit** / **explicit_conflict** use **`geoAssessFn`** at thresholds **0.80** / **0.90**, below-threshold → **hold**, held items **re-merged** next refresh. Production **must** use a **non-mock** assessor (**F3b**); **Chunk N** names the implementation. Beat-fit and shipped tags apply downstream (**C**, **G**, **K**) in both modes.
 
 ### Implementation backlog (from Chunk F)
 

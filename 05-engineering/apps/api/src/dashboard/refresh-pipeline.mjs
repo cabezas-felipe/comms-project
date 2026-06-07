@@ -36,6 +36,10 @@ import {
 } from "./beat-fit-scorer.mjs";
 import { itemMentionsConfiguredGeography } from "./geo-lexical-match.mjs";
 import {
+  resolveGeoAdmissionMode,
+  geoAdmissionDiagnostics,
+} from "./geo-admission-config.mjs";
+import {
   resolveRecallConfig,
   runEmbeddingRecall,
 } from "../ingestion/embedding-recall.mjs";
@@ -1439,6 +1443,80 @@ export function prioritizeLane2Candidates(
 }
 
 /**
+ * Legacy geo-admission gate — the lane-1/lane-2 funnel, budget-bounded Lane 2
+ * assessment, profile-driven defer, and the hold bucket.
+ *
+ * @deprecated ROLLBACK-ONLY. Since Prompt 4 the production default is `soft`
+ *   (`TEMPO_GEO_ADMISSION_MODE` unset → no geo admission gate), which never
+ *   calls this helper. It runs only when an operator explicitly sets
+ *   `TEMPO_GEO_ADMISSION_MODE=hard` to roll back. This is a removal candidate
+ *   once the soft default has been stable: before deleting, confirm telemetry
+ *   shows no runs with `_meta.outcomes.geoAdmissionMode === "hard"` (and no
+ *   `[pipeline.geo] hard admission gate ACTIVE` log lines) over the agreed
+ *   stability window. Behavior here is byte-for-byte the pre-Prompt-5 inline
+ *   path; do not change it while rollback must stay faithful.
+ *
+ * @returns {{
+ *   geoPassedItems: object[], geoHeldItems: object[],
+ *   geoLane2DeferredItems: object[], geoBudgetHit: boolean,
+ *   geoLane2DeferredReason: ("profile_defer"|null)
+ * }}
+ */
+async function runHardGeoAdmissionGate({
+  lane1Items,
+  lane2Ordered,
+  configuredGeos,
+  geoAssessFn,
+  geoDiag,
+  geoStartedAt,
+  budgetMs,
+  deferLane2,
+}) {
+  // Lane 1 always runs to completion (budget does not interrupt it).
+  const lane1Result = await applyGeoFilter(lane1Items, configuredGeos, geoAssessFn, geoDiag);
+  const geoPassedItems = [...lane1Result.included];
+  const geoHeldItems = [...lane1Result.held];
+  const geoLane2DeferredItems = [];
+  let geoBudgetHit = false;
+
+  // Slice 2 (cold_start): when the active profile sets `deferGeoLane2`, ALL of
+  // Lane 2 (including held-bucket re-evals) is deferred to the hold path without
+  // assessment — an intentional, profile-driven defer, NOT budget pressure. We
+  // skip the wave loop entirely (no `applyGeoFilter` / assessor calls for Lane 2)
+  // and leave `geoBudgetHit = false` (locked decision) so SLO/log consumers don't
+  // misread this as the geo budget being exhausted.
+  const geoLane2DeferredReason = deferLane2 ? "profile_defer" : null;
+  if (deferLane2) {
+    geoLane2DeferredItems.push(...lane2Ordered);
+  } else {
+    // Lane 2 runs in concurrency-sized waves; the budget is re-checked before
+    // each wave so the stage stops cleanly at a pool boundary instead of
+    // mid-flight. Iterate the PRIORITY-ORDERED set so the most-likely-relevant
+    // items are assessed before the budget runs out; the deferred slice is the
+    // lowest-priority tail.
+    const lane2WaveSize = Math.max(1, resolveGeoAssessConcurrency());
+    for (let i = 0; i < lane2Ordered.length; i += lane2WaveSize) {
+      if (Date.now() - geoStartedAt >= budgetMs) {
+        geoBudgetHit = true;
+        geoLane2DeferredItems.push(...lane2Ordered.slice(i));
+        break;
+      }
+      const wave = lane2Ordered.slice(i, i + lane2WaveSize);
+      const waveResult = await applyGeoFilter(wave, configuredGeos, geoAssessFn, geoDiag);
+      geoPassedItems.push(...waveResult.included);
+      geoHeldItems.push(...waveResult.held);
+    }
+  }
+  return {
+    geoPassedItems,
+    geoHeldItems,
+    geoLane2DeferredItems,
+    geoBudgetHit,
+    geoLane2DeferredReason,
+  };
+}
+
+/**
  * Converts a meta-story + its resolved source items into the response story shape
  * expected by dashboardPayloadSchema.  Derives schema-constrained fields (topic,
  * geographies, priority) from the source items so they stay within enum bounds.
@@ -1691,6 +1769,10 @@ export async function runRefreshPipeline({
   beatFitEnabled = true,
   embedFn = null,
   recallConfig = null,
+  // Geo admission mode override (tests only). Production falls through to
+  // `resolveGeoAdmissionMode()` which reads `TEMPO_GEO_ADMISSION_MODE` (default
+  // "soft"). Mirrors the `recallConfig` seam.
+  geoAdmissionMode: geoAdmissionModeOverride = null,
   // Slice 14 — translation-first evidence normalization (ES→EN). `translateFn`
   // is the injected batch segment translator; production wraps the AI router,
   // tests pass a deterministic stub. `translationConfig` overrides
@@ -1783,6 +1865,13 @@ export async function runRefreshPipeline({
 }) {
   const profile = resolveRefreshProfile(refreshProfile);
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
+  // Geo admission mode, resolved once per run.
+  const resolvedGeoAdmissionMode = resolveGeoAdmissionMode({
+    override: geoAdmissionModeOverride,
+  });
+  const { geoAdmissionMode, geoAdmissionBypassed } = geoAdmissionDiagnostics(
+    resolvedGeoAdmissionMode
+  );
   const effectiveSemanticTagConfig = semanticTagConfig ?? resolveSemanticTagConfig();
   const effectiveSemanticBeatFitConfig =
     semanticBeatFitConfig ?? resolveSemanticBeatFitConfig();
@@ -1998,64 +2087,78 @@ export async function runRefreshPipeline({
     if (selectedSourceIds.has(item.sourceId) && hasGeoSignal(item)) lane1Items.push(item);
     else lane2Items.push(item);
   }
-  // Slice 6: reorder Lane 2 so the most-likely-relevant + cheapest-to-admit
-  // candidates are assessed first under budget pressure; the deferred tail
-  // (written to the hold path, re-evaluated next refresh) is then the least
-  // promising items.  Pass/fail logic and the hold-path continuity are
-  // unchanged — only assessment order shifts.  `relevantSignalIds` reuses the
-  // memo populated during lane-split (memo hits, no recomputation).
-  const lane2RelevantSignalIds = new Set(
-    lane2Items.filter((item) => hasGeoSignal(item)).map((item) => item.sourceId)
-  );
-  const lane2Ordered = prioritizeLane2Candidates(lane2Items, {
-    selectedSourceIds,
-    relevantSignalIds: lane2RelevantSignalIds,
-  });
   // A1.1 (recall protection): the set of must-see sourceIds, used after the
   // recall gate to union Lane 1 survivors that topic/keyword recall would
   // otherwise drop (an explicit-geo item whose *text* never names the geo).
+  // Used in BOTH modes — under soft, geo signal still *widens recall* here; it
+  // simply no longer gates admission.
   const lane1SourceIds = new Set(lane1Items.map((i) => i.sourceId));
 
   // A1.2: request-scoped geo diagnostics — created per run and threaded into
   // `applyGeoFilter`, so 429/retry counts can't bleed across overlapping
-  // refreshes the way the old global-snapshot delta could.
+  // refreshes the way the old global-snapshot delta could. Under soft the
+  // assessor never runs, so these stay at their zero-init values.
   const geoDiag = createGeoDiagnostics();
   const geoStartedAt = Date.now();
 
-  // Lane 1 always runs to completion (budget does not interrupt it).
-  const lane1Result = await applyGeoFilter(lane1Items, configuredGeos, geoAssessFn, geoDiag);
-  const geoPassedItems = [...lane1Result.included];
-  const geoHeldItems = [...lane1Result.held];
-
-  // Lane 2 runs in concurrency-sized waves; the budget is re-checked before each
-  // wave so the stage stops cleanly at a pool boundary instead of mid-flight.
-  const geoLane2DeferredItems = [];
-  let geoBudgetHit = false;
-  // Slice 2 (cold_start): when the active profile sets `deferGeoLane2`, ALL of
-  // Lane 2 (including held-bucket re-evals) is deferred to the hold path without
-  // assessment — an intentional, profile-driven defer, NOT budget pressure. We
-  // skip the wave loop entirely (no `applyGeoFilter` / assessor calls for Lane 2)
-  // and leave `geoBudgetHit = false` (locked decision) so SLO/log consumers don't
-  // misread this as the geo budget being exhausted.
-  const geoLane2DeferredReason = profile.deferGeoLane2 ? "profile_defer" : null;
-  if (profile.deferGeoLane2) {
-    geoLane2DeferredItems.push(...lane2Ordered);
+  // ── Geo admission ───────────────────────────────────────────────────────────
+  //
+  //   SOFT (active default, TEMPO_GEO_ADMISSION_MODE unset/soft): geography is
+  //   NOT an admission control. Admit every candidate — no assessor call, no
+  //   Lane 2 defer, no hold-bucket write. Downstream stages (translation,
+  //   recall, beat-fit, dedupe, clustering caps) decide relevance. The lane
+  //   split above is kept only for `lane1SourceIds` recall protection and the
+  //   informational lane counts, so the held/deferred/assessed counters are 0.
+  //
+  //   HARD (rollback-only, TEMPO_GEO_ADMISSION_MODE=hard): the legacy lane
+  //   funnel, isolated in `runHardGeoAdmissionGate`. See that helper's
+  //   @deprecated note — it exists solely for rollback and is a removal
+  //   candidate once the soft default has been stable.
+  let geoPassedItems;
+  let geoHeldItems;
+  let geoLane2DeferredItems;
+  let geoBudgetHit;
+  let geoLane2DeferredReason;
+  if (geoAdmissionBypassed) {
+    // SOFT — admit the full candidate set; geo gates nothing.
+    geoPassedItems = [...candidateItems];
+    geoHeldItems = [];
+    geoLane2DeferredItems = [];
+    geoBudgetHit = false;
+    geoLane2DeferredReason = null;
   } else {
-    const lane2WaveSize = Math.max(1, resolveGeoAssessConcurrency());
-    // Iterate the PRIORITY-ORDERED Lane 2 set so the most-likely-relevant items
-    // are assessed before the budget runs out; the deferred slice is the
-    // lowest-priority tail.
-    for (let i = 0; i < lane2Ordered.length; i += lane2WaveSize) {
-      if (Date.now() - geoStartedAt >= effectiveGeoBudgetMs) {
-        geoBudgetHit = true;
-        geoLane2DeferredItems.push(...lane2Ordered.slice(i));
-        break;
-      }
-      const wave = lane2Ordered.slice(i, i + lane2WaveSize);
-      const waveResult = await applyGeoFilter(wave, configuredGeos, geoAssessFn, geoDiag);
-      geoPassedItems.push(...waveResult.included);
-      geoHeldItems.push(...waveResult.held);
-    }
+    // HARD (rollback) — greppable marker so operators can audit rollback usage
+    // before this path is removed (see telemetry note on the helper).
+    console.log(
+      "[pipeline.geo] hard admission gate ACTIVE (rollback path; TEMPO_GEO_ADMISSION_MODE=hard)"
+    );
+    // Slice 6: reorder Lane 2 so the most-likely-relevant + cheapest-to-admit
+    // candidates are assessed first under budget pressure; the deferred tail is
+    // the least promising items. Hard-path only — `relevantSignalIds` reuses the
+    // lane-split memo (memo hits, no recomputation).
+    const lane2RelevantSignalIds = new Set(
+      lane2Items.filter((item) => hasGeoSignal(item)).map((item) => item.sourceId)
+    );
+    const lane2Ordered = prioritizeLane2Candidates(lane2Items, {
+      selectedSourceIds,
+      relevantSignalIds: lane2RelevantSignalIds,
+    });
+    ({
+      geoPassedItems,
+      geoHeldItems,
+      geoLane2DeferredItems,
+      geoBudgetHit,
+      geoLane2DeferredReason,
+    } = await runHardGeoAdmissionGate({
+      lane1Items,
+      lane2Ordered,
+      configuredGeos,
+      geoAssessFn,
+      geoDiag,
+      geoStartedAt,
+      budgetMs: effectiveGeoBudgetMs,
+      deferLane2: profile.deferGeoLane2,
+    }));
   }
 
   const geoEndedAt = Date.now();
@@ -2074,17 +2177,30 @@ export async function runRefreshPipeline({
   // configuredGeos set assesses nothing, and budget-deferred Lane 2 items are
   // never assessed.  Observability only: lets an operator confirm the assess
   // pool's workload against geoMs (Slice 3) and the pre-pass's effect (A2).
-  const geoAssessedCount = [...geoPassedItems, ...geoHeldItems].filter(
-    (i) =>
-      !i.geoLexicalBypass &&
-      (i.geoCategory === GEO_CATEGORY.EXPLICIT_CONFLICT ||
-        i.geoCategory === GEO_CATEGORY.IMPLICIT_GEO)
-  ).length;
+  //  In soft mode the assessor never runs, so this is unconditionally 0 (the
+  //  filter would also yield 0 since admitted items carry no geo annotations,
+  //  but we short-circuit to make the bypass explicit).
+  const geoAssessedCount = geoAdmissionBypassed
+    ? 0
+    : [...geoPassedItems, ...geoHeldItems].filter(
+        (i) =>
+          !i.geoLexicalBypass &&
+          (i.geoCategory === GEO_CATEGORY.EXPLICIT_CONFLICT ||
+            i.geoCategory === GEO_CATEGORY.IMPLICIT_GEO)
+      ).length;
 
   // A1.1 — per-refresh geo diagnostics, surfaced in `_meta`/logs on both the
   // normal and watermark-skip return paths so lane/budget behavior is auditable
   // without re-deriving it. Retains the A1 rate-limit/retry counters.
   const geoDiagnostics = {
+    // Geo admission mode + runtime-bypass flag. These travel on `log.geo` and
+    // `log.outcomes` → `_meta.outcomes` for both the full-run and watermark-skip
+    // paths. On a full run `geoAdmissionBypassed` reflects what actually
+    // happened this run: true means the gate was bypassed (soft — all
+    // candidates admitted, nothing deferred/held/assessed), false means the
+    // hard lane funnel ran.
+    geoAdmissionMode,
+    geoAdmissionBypassed,
     geoLane1Count,
     geoLane2Count,
     geoLane2DeferredCount,
@@ -2120,6 +2236,13 @@ export async function runRefreshPipeline({
   // to the hold path. Deferred items carry no geo metadata yet — the hold reader
   // strips geoCategory/geoConfidence anyway, so a bare item re-enters next
   // refresh's candidate pool cleanly for a fresh assessment.
+  //
+  // TODO(geo-soft-cleanup): the hold bucket is a HARD-mode (rollback-only)
+  // artifact. Under the soft default both arrays are empty, so this writes `[]`
+  // — which intentionally CLEARS any bucket left by a prior hard run (drains the
+  // backlog; tests assert the empty-write). Once the hard path is removed after
+  // the soft-default stability window, this write, `readHeldFn`/`writeHeldFn`,
+  // and the hold-bucket repo become removable. Keep faithful until then.
   const geoHoldToWrite = [...geoHeldItems, ...geoLane2DeferredItems];
   if (writeHeldFn) {
     try {
@@ -2154,6 +2277,12 @@ export async function runRefreshPipeline({
       ` held=${geoHeldItems.length}` +
       ` rate_limited=${geoRateLimitedCount} retries=${geoRetryCount}` +
       ` backoff_ms=${geoBackoffMsTotal} latency_ms=${geoMs}`
+  );
+  // Surface the admission mode + actual runtime bypass for this run. In soft,
+  // assess/defer/held counters are zero and every candidate was admitted (lane
+  // counts still report composition); in hard the lane funnel ran as reported.
+  console.log(
+    `[pipeline.geo] admission_mode=${geoAdmissionMode} bypassed=${geoAdmissionBypassed}`
   );
 
   // 4b-bis. Translation-first evidence normalization (Slice 14).

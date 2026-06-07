@@ -10,6 +10,12 @@ import assert from "node:assert/strict";
 //     `semanticBeatFitEmbedFn`; the dedicated semantic tests opt in explicitly.
 //   - TEMPO_BEAT_FIT_THRESHOLD="0.40": the MVP default dropped to 0.20
 //     (recall-first); these fixtures were tuned against the 0.40 precision gate.
+//   - TEMPO_GEO_ADMISSION_MODE="hard": most geo fixtures predate soft mode and
+//     assert the lane-1/lane-2 + defer/hold funnel. The production default is
+//     now "soft" (Prompt 4); pinning hard keeps those fixtures testing the
+//     funnel they were written for. Soft-specific tests pass
+//     `geoAdmissionMode: "soft"` (override wins), and the default-flip test
+//     clears this pin to verify the true unset default resolves to soft.
 //
 // These knobs are read from process.env at *call time* by the pipeline.  Under
 // per-file process isolation (`node --test` default) setting them at module top
@@ -21,6 +27,7 @@ import assert from "node:assert/strict";
 const _PREV_RECALL_MODE = process.env.TEMPO_RECALL_MODE;
 const _PREV_SEMANTIC_BEAT_FIT_ENABLED = process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED;
 const _PREV_BEAT_FIT_THRESHOLD = process.env.TEMPO_BEAT_FIT_THRESHOLD;
+const _PREV_GEO_ADMISSION_MODE = process.env.TEMPO_GEO_ADMISSION_MODE;
 
 import {
   selectSourcePool,
@@ -139,6 +146,7 @@ describe("refresh-pipeline", () => {
     process.env.TEMPO_RECALL_MODE = "keyword";
     process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED = "false";
     process.env.TEMPO_BEAT_FIT_THRESHOLD = "0.40";
+    process.env.TEMPO_GEO_ADMISSION_MODE = "hard";
   });
   afterEach(() => {
     if (_PREV_RECALL_MODE === undefined) delete process.env.TEMPO_RECALL_MODE;
@@ -147,6 +155,8 @@ describe("refresh-pipeline", () => {
     else process.env.TEMPO_SEMANTIC_BEAT_FIT_ENABLED = _PREV_SEMANTIC_BEAT_FIT_ENABLED;
     if (_PREV_BEAT_FIT_THRESHOLD === undefined) delete process.env.TEMPO_BEAT_FIT_THRESHOLD;
     else process.env.TEMPO_BEAT_FIT_THRESHOLD = _PREV_BEAT_FIT_THRESHOLD;
+    if (_PREV_GEO_ADMISSION_MODE === undefined) delete process.env.TEMPO_GEO_ADMISSION_MODE;
+    else process.env.TEMPO_GEO_ADMISSION_MODE = _PREV_GEO_ADMISSION_MODE;
   });
 
 // ─── selectSourcePool ─────────────────────────────────────────────────────────
@@ -1329,6 +1339,246 @@ test("runRefreshPipeline: Lane 2 is deferred (and not clustered) when budget is 
   assert.equal(log.geo.geoBudgetHit, true);
   assert.ok(!seenIds.includes("defer-a") && !seenIds.includes("defer-b"),
     "deferred Lane 2 items must not reach clustering this refresh");
+});
+
+test("runRefreshPipeline: default run (env unset) surfaces geoAdmissionMode=soft / bypassed=true on log.geo and log.outcomes (Prompt 4)", async () => {
+  // Clear the suite's hard pin so the pipeline resolves the TRUE production
+  // default from an unset env. afterEach restores it.
+  delete process.env.TEMPO_GEO_ADMISSION_MODE;
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "opportunistic", outlet: "Reuters", geographies: [], headline: "Unrelated filler" }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    beatFitEnabled: false,
+  });
+  assert.equal(log.geo.geoAdmissionMode, "soft");
+  assert.equal(log.geo.geoAdmissionBypassed, true);
+  // Flows into log.outcomes (→ _meta.outcomes) via the `...geoDiagnostics` spread.
+  assert.equal(log.outcomes.geoAdmissionMode, "soft");
+  assert.equal(log.outcomes.geoAdmissionBypassed, true);
+});
+
+test("runRefreshPipeline: soft mode bypasses the geo admission gate — no defer/hold, all candidates reach clustering (Prompt 2)", async () => {
+  // Two items carry NO geo signal (no explicit geography overlap, no
+  // configured-geography lexical mention) → Lane 2. Under the hard gate with a
+  // zero budget they would be deferred to the hold path before clustering. Soft
+  // must admit them instead.
+  const rawItems = [
+    makeItem({ sourceId: "mustsee", outlet: "Reuters", geographies: ["US"] }),
+    makeItem({ sourceId: "defer-a", outlet: "Reuters", geographies: [], headline: "Filler one" }),
+    makeItem({ sourceId: "defer-b", outlet: "Reuters", geographies: [], headline: "Filler two" }),
+  ];
+  const runArgs = {
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // The assessor must NOT be consulted in soft mode — fail the test loudly if
+    // the soft path ever calls it.
+    geoAssessFn: async () => { throw new Error("geo assessor must not run in soft mode"); },
+    geoStageBudgetMs: 0,
+    beatFitEnabled: false,
+  };
+
+  // Hard control: the no-signal Lane 2 items are deferred, never clustered.
+  const hardSeen = [];
+  let hardWrittenHeld = null;
+  const { log: hardLog } = await runRefreshPipeline({
+    ...runArgs,
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    writeHeldFn: async (items) => { hardWrittenHeld = items; },
+    clusterFn: async (items) => { hardSeen.push(...items.map((i) => i.sourceId)); return []; },
+  });
+  assert.ok(!hardSeen.includes("defer-a") && !hardSeen.includes("defer-b"),
+    "hard mode defers the no-signal Lane 2 items before clustering");
+  assert.equal(hardLog.geo.geoLane2DeferredCount, 2);
+  assert.deepEqual((hardWrittenHeld ?? []).map((i) => i.sourceId).sort(), ["defer-a", "defer-b"],
+    "hard mode writes the deferred items to the hold path");
+
+  // Soft: every candidate is admitted; nothing deferred/held/assessed.
+  const softSeen = [];
+  let softWrittenHeld = null;
+  const { log: softLog } = await runRefreshPipeline({
+    ...runArgs,
+    geoAdmissionMode: "soft",
+    writeHeldFn: async (items) => { softWrittenHeld = items; },
+    clusterFn: async (items) => { softSeen.push(...items.map((i) => i.sourceId)); return []; },
+  });
+  assert.equal(softLog.geo.geoAdmissionMode, "soft");
+  assert.equal(softLog.geo.geoAdmissionBypassed, true);
+  assert.equal(softLog.outcomes.geoAdmissionMode, "soft");
+  assert.equal(softLog.outcomes.geoAdmissionBypassed, true);
+  // The items hard mode would defer now reach clustering.
+  assert.ok(softSeen.includes("defer-a") && softSeen.includes("defer-b"),
+    "soft mode admits the no-signal Lane 2 items into clustering");
+  assert.ok(softSeen.includes("mustsee"), "must-see item is still admitted in soft mode");
+  // Lane 2 is not deferred as an admission blocker, and gate counters are zero.
+  assert.equal(softLog.geo.geoLane2DeferredCount, 0);
+  assert.equal(softLog.geo.geoLane2DeferredReason, null);
+  assert.equal(softLog.geo.geoBudgetHit, false);
+  assert.equal(softLog.geo.geoAssessedCount, 0);
+  assert.equal(softLog.geo.geoHeldCount, 0);
+  // No hold items are written in soft mode (the bucket is cleared, not appended).
+  assert.deepEqual(softWrittenHeld, [], "soft mode writes an empty hold bucket");
+});
+
+// ─── Prompt 3: Semana-like election geo-admission regression ──────────────────
+//
+// Reproduces the diagnosed failure: Spanish election headlines that omit the
+// configured geography (e.g. "elecciones" without "Colombia") carry no lexical
+// geo signal and land in Lane 2. Under the hard gate with cold-start-style
+// constraints they are deferred to the hold path BEFORE clustering ever sees
+// them. Soft must admit them so downstream stages (recall / beat-fit /
+// clustering caps) decide relevance instead of the geo gate.
+//
+// These election fixtures use a CONFIGURED source ("El Tiempo") so they clear
+// source selection, and a configured topic ("Migration policy") so the
+// keyword-recall stage (TEMPO_RECALL_MODE=keyword in this suite) passes them
+// once admitted — the assertions isolate GEO ADMISSION, not source/recall
+// gating. The text is Spanish election coverage that never names a configured
+// geography, so it carries no lexical geo signal and falls into Lane 2.
+const SEMANA_ELECTION_ITEMS = [
+  {
+    sourceId: "semana-1",
+    outlet: "El Tiempo",
+    topic: "Migration policy",
+    geographies: [],
+    headline: "Elecciones presidenciales: las encuestas que mueven la campaña",
+    body: ["Análisis de los aspirantes y el pulso de la contienda electoral."],
+  },
+  {
+    sourceId: "semana-2",
+    outlet: "El Tiempo",
+    topic: "Migration policy",
+    geographies: [],
+    headline: "Debate electoral: los precandidatos miden fuerzas",
+    body: ["Cobertura del debate y las propuestas de campaña."],
+  },
+  {
+    sourceId: "semana-3",
+    outlet: "El Tiempo",
+    topic: "Migration policy",
+    geographies: [],
+    headline: "Encuestas: el voto joven y la intención de participación",
+    body: ["Seguimiento de la jornada y los comicios próximos."],
+  },
+];
+const SEMANA_ELECTION_IDS = SEMANA_ELECTION_ITEMS.map((i) => i.sourceId);
+
+test("runRefreshPipeline (Prompt 3): hard mode defers signal-less Semana-like election items before clustering", async () => {
+  const rawItems = [
+    // Must-see control: explicit configured geography → Lane 1, admitted in BOTH modes.
+    makeItem({ sourceId: "control-mustsee", outlet: "Reuters", geographies: ["Colombia"] }),
+    ...SEMANA_ELECTION_ITEMS.map((o) => makeItem(o)),
+  ];
+  const seen = [];
+  let writtenHeld = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    // Soft is the default now; pin hard explicitly so this test exercises the
+    // rollback gate regardless of the suite-wide pin.
+    geoAdmissionMode: "hard",
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    writeHeldFn: async (items) => { writtenHeld = items; },
+    clusterFn: async (items) => { seen.push(...items.map((i) => i.sourceId)); return []; },
+    // Cold-start-style constraint: zero geo budget defers ALL of Lane 2 deterministically.
+    geoStageBudgetMs: 0,
+    beatFitEnabled: false,
+  });
+
+  // Hard mode re-engages the gate and behaves as before soft existed.
+  assert.equal(log.geo.geoAdmissionMode, "hard");
+  assert.equal(log.geo.geoAdmissionBypassed, false);
+  // The election items never reach clustering — the geo gate dropped them.
+  for (const id of SEMANA_ELECTION_IDS) {
+    assert.ok(!seen.includes(id), `hard mode must defer election item ${id} before clustering`);
+  }
+  assert.ok(seen.includes("control-mustsee"), "the explicit-geo control still clusters in hard mode");
+  assert.ok(log.geo.geoLane2DeferredCount > 0, "hard mode defers Lane 2 under a zero geo budget");
+  // The deferred election items land in the hold path for re-evaluation.
+  const heldIds = (writtenHeld ?? []).map((i) => i.sourceId);
+  for (const id of SEMANA_ELECTION_IDS) {
+    assert.ok(heldIds.includes(id), `hard mode writes deferred election item ${id} to the hold path`);
+  }
+});
+
+test("runRefreshPipeline (Prompt 3): soft mode admits Semana-like election items into clustering (no geo-gate drop)", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "control-mustsee", outlet: "Reuters", geographies: ["Colombia"] }),
+    ...SEMANA_ELECTION_ITEMS.map((o) => makeItem(o)),
+  ];
+  const seen = [];
+  let writtenHeld = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    geoAdmissionMode: "soft",
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // Assessor must NOT run in soft mode — throw to fail loudly if the gate is consulted.
+    geoAssessFn: async () => { throw new Error("geo assessor must not run in soft mode"); },
+    writeHeldFn: async (items) => { writtenHeld = items; },
+    clusterFn: async (items) => { seen.push(...items.map((i) => i.sourceId)); return []; },
+    // Same cold-start-style constraint as the hard control: proves the budget is
+    // irrelevant when admission is bypassed.
+    geoStageBudgetMs: 0,
+    beatFitEnabled: false,
+  });
+
+  // Regression guard: the items hard mode dropped now reach clustering.
+  for (const id of SEMANA_ELECTION_IDS) {
+    assert.ok(seen.includes(id), `soft mode must admit election item ${id} into clustering`);
+  }
+  assert.ok(seen.includes("control-mustsee"), "the explicit-geo control still clusters in soft mode");
+  // No geo-admission gate ran: nothing deferred, held, or assessed.
+  assert.equal(log.geo.geoLane2DeferredCount, 0);
+  assert.equal(log.geo.geoHeldCount, 0);
+  assert.equal(log.geo.geoAssessedCount, 0);
+  assert.equal(log.geo.geoBudgetHit, false);
+  // Hold path is written as an empty bucket (no deferred election items).
+  assert.deepEqual(writtenHeld, [], "soft mode writes an empty hold bucket");
+  // Admission diagnostics flow on BOTH log.geo and log.outcomes (_meta.outcomes plumbing).
+  assert.equal(log.geo.geoAdmissionMode, "soft");
+  assert.equal(log.geo.geoAdmissionBypassed, true);
+  assert.equal(log.outcomes.geoAdmissionMode, "soft");
+  assert.equal(log.outcomes.geoAdmissionBypassed, true);
+});
+
+test("runRefreshPipeline (Prompt 4): rollback contract — explicit hard restores the gate and carries the geo admission fields on outcomes", async () => {
+  // Now that soft is the default, this guards the ROLLBACK path: an explicit
+  // `hard` (here via the override seam; production sets TEMPO_GEO_ADMISSION_MODE=hard)
+  // must re-engage the gate and report hard/bypassed=false. Also confirms the
+  // `_meta.outcomes` plumbing contract on a normal full run.
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems: [makeItem({ sourceId: "control-mustsee", outlet: "Reuters", geographies: ["Colombia"] })],
+    geoAdmissionMode: "hard",
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAssessFn: async () => ({ confidence: 0.85 }),
+    clusterFn: async () => [],
+    beatFitEnabled: false,
+  });
+  assert.equal(log.geo.geoAdmissionMode, "hard");
+  assert.equal(log.geo.geoAdmissionBypassed, false);
+  // Outcomes diagnostics expose the same fields (→ _meta.outcomes via liftSnapshotMeta).
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(log.outcomes, "geoAdmissionMode") &&
+      Object.prototype.hasOwnProperty.call(log.outcomes, "geoAdmissionBypassed"),
+    "outcomes diagnostics must carry geoAdmissionMode + geoAdmissionBypassed"
+  );
+  assert.equal(log.outcomes.geoAdmissionMode, "hard");
+  assert.equal(log.outcomes.geoAdmissionBypassed, false);
 });
 
 test("runRefreshPipeline: deferred Lane 2 items are written to the hold path for re-evaluation", async () => {
