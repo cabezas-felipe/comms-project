@@ -47,6 +47,114 @@ export const GATE = Object.freeze({
   defaultBaseUrl: "http://localhost:8787",
 });
 
+// ─── measurement modes (Step 4.1) ────────────────────────────────────────────
+//
+// `default`    — latency summary spans ALL runs (backward-compatible).
+// `cold-start` — latency summary is scoped to RECOMPUTE runs only (runs where
+//                clustering actually ran, i.e. `refreshSkippedReason == null`),
+//                so a watermark-skip-dominated probe doesn't understate the
+//                cold-start p95. Gate thresholds (successRate / medianStories)
+//                are computed over all runs in BOTH modes — gate semantics are
+//                identical regardless of mode.
+export const PROBE_MODE = Object.freeze({
+  DEFAULT: "default",
+  COLD_START: "cold-start",
+});
+
+// Latency scope passed to `summarize`. Mirrors PROBE_MODE but named for what it
+// controls (which runs feed p95PipelineMs).
+export const LATENCY_SCOPE = Object.freeze({
+  ALL: "all",
+  RECOMPUTE: "recompute",
+});
+
+/** A run is a "recompute" iff the pipeline did NOT short-circuit (no skip reason). */
+export function isRecomputeRun(record) {
+  return record?.refreshSkippedReason == null;
+}
+
+// ─── recompute-enforced sampling (Step 4.1 / Prompt 2b) ──────────────────────
+//
+// Problem this solves: after the first refresh writes a non-empty snapshot, a
+// static candidate set produces an identical watermark, so every subsequent run
+// short-circuits (`unchanged_watermark`). A fixed `--runs N` loop can therefore
+// yield a latency p95 based on a single recompute run — not trustworthy.
+//
+// `--require-recompute` changes the loop from "do exactly N requests" to "keep
+// requesting until N RECOMPUTE runs are collected", bounded by
+// `N * RECOMPUTE_ATTEMPT_MULTIPLIER` total attempts so a server that keeps
+// skipping can never spin forever. Skip runs are still recorded (for the
+// recompute/skip counts) but don't count toward the target. The latency summary
+// (recompute-scoped in cold-start mode) is then computed over a meaningful
+// sample. Gate semantics are unchanged: successRate / medianStories still span
+// every run that was issued.
+export const RECOMPUTE_ATTEMPT_MULTIPLIER = 5;
+
+/**
+ * Resolve the loop bound. Pure.
+ *   - `requireRecompute` false → fixed loop of `runs` attempts (backward-compatible).
+ *   - `requireRecompute` true  → collect `runs` recompute runs, capped at
+ *     `runs * RECOMPUTE_ATTEMPT_MULTIPLIER` attempts.
+ */
+export function resolveSamplingPlan({ runs, requireRecompute = false }) {
+  if (!requireRecompute) {
+    return { requireRecompute: false, targetRecomputeRuns: null, maxAttempts: runs };
+  }
+  return {
+    requireRecompute: true,
+    targetRecomputeRuns: runs,
+    maxAttempts: runs * RECOMPUTE_ATTEMPT_MULTIPLIER,
+  };
+}
+
+/**
+ * Loop guard. Pure. Stop when the attempt cap is hit, or (recompute mode) when
+ * the recompute target is reached.
+ */
+export function shouldStopSampling({ attempts, recomputeRuns, plan }) {
+  if (attempts >= plan.maxAttempts) return true;
+  if (plan.targetRecomputeRuns != null && recomputeRuns >= plan.targetRecomputeRuns) {
+    return true;
+  }
+  return false;
+}
+
+/** True iff a recompute-enforced run actually reached its recompute target. Pure. */
+export function recomputeTargetMet({ plan, recomputeRuns }) {
+  if (!plan.requireRecompute) return true;
+  return recomputeRuns >= plan.targetRecomputeRuns;
+}
+
+/**
+ * Final probe decision (pure). Combines the reliability gate with a strict
+ * SAMPLE-QUALITY gate that is active ONLY in recompute-enforced mode:
+ *
+ *   - Reliability gate (successRate / medianStories) — unchanged; `gate` is the
+ *     `evaluateGate(...)` result and its semantics are untouched.
+ *   - Sample-quality gate — when `--require-recompute` is on and the recompute
+ *     target was NOT met, the run FAILS regardless of the reliability gate,
+ *     because the latency p95 is based on too few recompute runs to trust for a
+ *     cold-start hard-gate decision.
+ *
+ * Returns `{ pass, exitCode, reasons, gatePass, sampleQualityOk }`. In default
+ * mode (no enforcement) `sampleQualityOk` is always true, so `pass === gate.pass`
+ * and the exit semantics are byte-identical to before this fix.
+ */
+export function evaluateProbeDecision({ gate, plan, recomputeRuns }) {
+  const sampleQualityOk =
+    !plan?.requireRecompute || recomputeTargetMet({ plan, recomputeRuns });
+  const reasons = [...(gate?.reasons ?? [])];
+  if (!sampleQualityOk) {
+    reasons.push(
+      `recompute sample insufficient: collected ${recomputeRuns}/${plan.targetRecomputeRuns} ` +
+        `recompute run(s) in up to ${plan.maxAttempts} attempts — cold-start p95 is NOT trustworthy`
+    );
+  }
+  const gatePass = gate?.pass === true;
+  const pass = gatePass && sampleQualityOk;
+  return { pass, exitCode: pass ? 0 : 1, reasons, gatePass, sampleQualityOk };
+}
+
 // ─── argv parsing ────────────────────────────────────────────────────────────
 
 /**
@@ -61,6 +169,16 @@ export function parseArgs(argv) {
     runs: GATE.defaultRuns,
     cooldownMs: GATE.defaultCooldownMs,
     baseUrl: GATE.defaultBaseUrl,
+    // Step 4.1: measurement mode. "default" preserves the existing summary
+    // exactly; "cold-start" requests the cold_start profile (`?profile=cold_start`)
+    // AND scopes the LATENCY summary to recompute runs (watermark-skip runs
+    // excluded) so p95PipelineMs reflects real cold-start clustering work, not
+    // skip-dominated fast paths. Gate thresholds are unaffected.
+    mode: PROBE_MODE.DEFAULT,
+    // Step 4.1 / Prompt 2b: keep sampling until `runs` recompute runs are
+    // collected (bounded) instead of issuing exactly `runs` requests. Default
+    // false → backward-compatible fixed-N loop.
+    requireRecompute: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -69,7 +187,15 @@ export function parseArgs(argv) {
     else if (a === "--runs") out.runs = Number(argv[++i]);
     else if (a === "--cooldown-ms") out.cooldownMs = Number(argv[++i]);
     else if (a === "--base-url") out.baseUrl = argv[++i];
+    else if (a === "--mode") out.mode = argv[++i];
+    else if (a === "--require-recompute") out.requireRecompute = true;
     else return { ok: false, error: `Unknown argument: ${a}` };
+  }
+  if (out.mode !== PROBE_MODE.DEFAULT && out.mode !== PROBE_MODE.COLD_START) {
+    return {
+      ok: false,
+      error: `--mode must be "${PROBE_MODE.DEFAULT}" or "${PROBE_MODE.COLD_START}".`,
+    };
   }
   if (!out.email && !out.userId) {
     return { ok: false, error: "Provide one of --email <email> or --user-id <uuid>." };
@@ -77,7 +203,7 @@ export function parseArgs(argv) {
   if (out.email && out.userId) {
     return { ok: false, error: "Provide only one of --email or --user-id, not both." };
   }
-  if (!Number.isFinite(out.runs) || out.runs < 1) {
+  if (!Number.isFinite(out.runs) || out.runs < 1 || !Number.isInteger(out.runs)) {
     return { ok: false, error: "--runs must be a positive integer." };
   }
   if (!Number.isFinite(out.cooldownMs) || out.cooldownMs < 0) {
@@ -100,8 +226,21 @@ Options:
   --runs <n>             Number of refreshes (default ${GATE.defaultRuns})
   --cooldown-ms <ms>     Pause between runs (default ${GATE.defaultCooldownMs})
   --base-url <url>       API base url (default ${GATE.defaultBaseUrl})
+  --mode <mode>          "${PROBE_MODE.DEFAULT}" (latency over all runs) or "${PROBE_MODE.COLD_START}"
+                         (requests ?profile=cold_start; latency p95 over recompute
+                         runs only; default ${PROBE_MODE.DEFAULT})
+  --require-recompute    Keep sampling until <runs> recompute runs are collected
+                         (capped at <runs>×${RECOMPUTE_ATTEMPT_MULTIPLIER} attempts) so p95 isn't skip-diluted.
+                         STRICT: if the target is NOT met the probe exits non-zero
+                         (sample-quality fail) — the cold-start p95 is untrustworthy.
+                         The probe cannot force a server recompute on its own (the
+                         watermark is content-driven); to actually collect recompute
+                         runs, reset the test user's dashboard snapshot between runs
+                         (so the watermark changes) or use a freshly-onboarded user.
 
-Gate: successRate >= ${GATE.minSuccessRate} AND medianStories >= ${GATE.minMedianStories}. Exit non-zero on fail.`;
+Gate: successRate >= ${GATE.minSuccessRate} AND medianStories >= ${GATE.minMedianStories}. Exit non-zero on fail.
+Gate thresholds span all runs regardless of --mode / --require-recompute.
+--require-recompute adds an independent sample-quality gate (also exits non-zero).`;
 }
 
 // ─── math helpers (pure) ─────────────────────────────────────────────────────
@@ -137,19 +276,46 @@ export function countBy(items, selector) {
   return counts;
 }
 
+/**
+ * Prompt 1.1: read the clustering failure subtype from a refresh `_meta`,
+ * preferring the top-level key and falling back to the `outcomes` rollup (older
+ * servers surfaced it only there). Pure; returns null when neither is present.
+ */
+export function extractClusteringFailureSubtype(meta) {
+  const m = meta ?? {};
+  return m.clusteringFailureSubtype ?? m.outcomes?.clusteringFailureSubtype ?? null;
+}
+
 // ─── summary + gate (pure) ───────────────────────────────────────────────────
 
 /**
  * Build the summary object from collected per-run records.
  * A run record: { stories:number, usedFallbackClustering:boolean,
- *   clusteringFailureReason:string|null, refreshSkippedReason:string|null,
- *   pipelineMs:number|null }
+ *   clusteringFailureReason:string|null, clusteringFailureSubtype:string|null,
+ *   refreshSkippedReason:string|null, pipelineMs:number|null }
+ *
+ * `opts.latencyScope` (Step 4.1):
+ *   - LATENCY_SCOPE.ALL (default) — p95PipelineMs spans every run's numeric
+ *     pipelineMs. Backward-compatible: identical to the pre-Step-4.1 summary.
+ *   - LATENCY_SCOPE.RECOMPUTE — p95PipelineMs spans only recompute runs (no
+ *     `refreshSkippedReason`), so watermark-skip runs don't dilute the
+ *     cold-start latency tail.
+ *
+ * `runs`, `successRate`, and `medianStories` ALWAYS span all runs in both
+ * scopes — gate semantics never change. The additive `recomputeRuns` /
+ * `skippedRuns` / `latencyScope` / `latencyRunsCounted` fields make the scope
+ * explicit and auditable.
  */
-export function summarize(records) {
+export function summarize(records, opts = {}) {
+  const latencyScope = opts.latencyScope ?? LATENCY_SCOPE.ALL;
   const runs = records.length;
   const successes = records.filter((r) => r.usedFallbackClustering === false).length;
   const storyCounts = records.map((r) => r.stories);
-  const pipelineMsValues = records
+  const recomputeRecords = records.filter(isRecomputeRun);
+  const recomputeRuns = recomputeRecords.length;
+  const latencySource =
+    latencyScope === LATENCY_SCOPE.RECOMPUTE ? recomputeRecords : records;
+  const pipelineMsValues = latencySource
     .map((r) => r.pipelineMs)
     .filter((v) => typeof v === "number" && Number.isFinite(v));
   return {
@@ -158,7 +324,16 @@ export function summarize(records) {
     medianStories: median(storyCounts),
     p95PipelineMs: percentile(pipelineMsValues, 0.95),
     clusteringFailureReasons: countBy(records, (r) => r.clusteringFailureReason),
+    // Prompt 1: additive subtype histogram so a NO-GO on successRate can be read
+    // by failure SUBTYPE (parse | provider_request | unknown | timeout_budget),
+    // not just the coarse reason. Visibility only — never feeds `evaluateGate`.
+    clusteringFailureSubtypes: countBy(records, (r) => r.clusteringFailureSubtype),
     refreshSkippedReasons: countBy(records, (r) => r.refreshSkippedReason),
+    // Step 4.1: latency-scope transparency (additive).
+    latencyScope,
+    recomputeRuns,
+    skippedRuns: runs - recomputeRuns,
+    latencyRunsCounted: pipelineMsValues.length,
   };
 }
 
@@ -200,12 +375,16 @@ function sleep(ms) {
  * Identity: prefer x-recognized-email (the prototype path the server supports);
  * fall back to x-user-id when only a userId is known.
  */
-async function runOnce({ baseUrl, email, userId }) {
+async function runOnce({ baseUrl, email, userId, profile = null }) {
   const headers = { "content-type": "application/json" };
   if (email) headers["x-recognized-email"] = email;
   else if (userId) headers["x-user-id"] = userId;
 
-  const res = await fetch(`${baseUrl.replace(/\/$/, "")}/api/dashboard/refresh`, {
+  // Step 4.1: cold-start validation must exercise the cold_start profile the
+  // server gates behind `?profile=cold_start` (default/omitted → default
+  // profile). Backward-compatible: when `profile` is null the URL is unchanged.
+  const query = profile ? `?profile=${encodeURIComponent(profile)}` : "";
+  const res = await fetch(`${baseUrl.replace(/\/$/, "")}/api/dashboard/refresh${query}`, {
     method: "POST",
     headers,
     body: "{}",
@@ -223,6 +402,7 @@ async function runOnce({ baseUrl, email, userId }) {
       stories: 0,
       usedFallbackClustering: true, // treat non-200 / unparseable as a failed run
       clusteringFailureReason: `http_${res.status}`,
+      clusteringFailureSubtype: null, // probe-level HTTP failure, not a clustering subtype
       clusteringAttempts: null,
       clusteringLatencyMs: null,
       pipelineMs: null,
@@ -236,6 +416,9 @@ async function runOnce({ baseUrl, email, userId }) {
     stories: Array.isArray(json.stories) ? json.stories.length : 0,
     usedFallbackClustering: meta.usedFallbackClustering === true,
     clusteringFailureReason: meta.clusteringFailureReason ?? null,
+    // Prompt 1.1: prefer top-level subtype, fall back to the outcomes rollup
+    // (older servers surfaced it only there), else null. Visibility only.
+    clusteringFailureSubtype: extractClusteringFailureSubtype(meta),
     clusteringAttempts: meta.clusteringAttempts ?? null,
     clusteringLatencyMs: meta.clusteringLatencyMs ?? null,
     pipelineMs: meta.timings?.pipelineMs ?? null,
@@ -271,6 +454,7 @@ function formatRunLine(i, total, rec) {
     `clusterLatencyMs=${lat}`,
     `pipelineMs=${rec.pipelineMs ?? "-"}`,
     rec.clusteringFailureReason ? `failReason=${rec.clusteringFailureReason}` : null,
+    rec.clusteringFailureSubtype ? `failSubtype=${rec.clusteringFailureSubtype}` : null,
     rec.refreshSkippedReason ? `skipped=${rec.refreshSkippedReason}` : null,
   ]
     .filter(Boolean)
@@ -316,7 +500,7 @@ async function main() {
 
   console.log(
     `[probe] baseUrl=${args.baseUrl} identity=${email ? `email:${email}` : `user-id:${userId}`}` +
-      `${userId && email ? ` (userId=${userId})` : ""} runs=${args.runs} cooldownMs=${args.cooldownMs}`
+      `${userId && email ? ` (userId=${userId})` : ""} runs=${args.runs} cooldownMs=${args.cooldownMs} mode=${args.mode}`
   );
   console.log(
     `[probe] gate: successRate>=${GATE.minSuccessRate} medianStories>=${GATE.minMedianStories}`
@@ -346,42 +530,79 @@ async function main() {
     }
   }
 
+  // Cold-start mode drives the server's cold_start profile; recompute-enforced
+  // sampling keeps going until enough recompute runs are collected (bounded).
+  const profile = args.mode === PROBE_MODE.COLD_START ? "cold_start" : null;
+  const plan = resolveSamplingPlan({ runs: args.runs, requireRecompute: args.requireRecompute });
+
   const records = [];
-  for (let i = 1; i <= args.runs; i++) {
+  let attempts = 0;
+  let recomputeRuns = 0;
+  while (!shouldStopSampling({ attempts, recomputeRuns, plan })) {
+    attempts++;
     let rec;
     try {
-      rec = await runOnce({ baseUrl: args.baseUrl, email, userId });
+      rec = await runOnce({ baseUrl: args.baseUrl, email, userId, profile });
     } catch (err) {
       rec = {
         stories: 0,
         usedFallbackClustering: true,
         clusteringFailureReason: "probe_request_error",
+        clusteringFailureSubtype: null, // probe-level request error, not a clustering subtype
         clusteringAttempts: null,
         clusteringLatencyMs: null,
         pipelineMs: null,
         refreshSkippedReason: null,
         httpStatus: 0,
       };
-      console.error(`[probe] run ${i} request error: ${err instanceof Error ? err.message : err}`);
+      console.error(`[probe] run ${attempts} request error: ${err instanceof Error ? err.message : err}`);
     }
     records.push(rec);
-    console.log(formatRunLine(i, args.runs, rec));
-    if (i < args.runs && args.cooldownMs > 0) await sleep(args.cooldownMs);
+    if (isRecomputeRun(rec)) recomputeRuns++;
+    console.log(formatRunLine(attempts, plan.maxAttempts, rec));
+    if (!shouldStopSampling({ attempts, recomputeRuns, plan }) && args.cooldownMs > 0) {
+      await sleep(args.cooldownMs);
+    }
   }
 
-  const summary = summarize(records);
+  const latencyScope =
+    args.mode === PROBE_MODE.COLD_START ? LATENCY_SCOPE.RECOMPUTE : LATENCY_SCOPE.ALL;
+  const targetMet = recomputeTargetMet({ plan, recomputeRuns });
+  const summary = {
+    ...summarize(records, { latencyScope }),
+    // Step 4.1 / Prompt 2b: recompute-enforcement transparency (additive).
+    requireRecompute: plan.requireRecompute,
+    recomputeTarget: plan.targetRecomputeRuns,
+    recomputeTargetMet: targetMet,
+    attempts,
+  };
   const gate = evaluateGate(summary);
+  const decision = evaluateProbeDecision({ gate, plan, recomputeRuns });
 
   console.log("\n[probe] summary:");
   console.log(JSON.stringify(summary, null, 2));
 
-  if (gate.pass) {
+  if (decision.pass) {
     console.log("\n[probe] GATE PASS ✅");
     process.exit(0);
-  } else {
-    console.log(`\n[probe] GATE FAIL ❌ — ${gate.reasons.join("; ")}`);
-    process.exit(1);
   }
+  // Distinguish the two failure causes so the operator knows whether to act on
+  // reliability (successRate/medianStories) or on sample quality (recompute).
+  if (!decision.sampleQualityOk) {
+    console.error(
+      `\n[probe] SAMPLE-QUALITY FAIL ❌ — collected ${recomputeRuns}/${plan.targetRecomputeRuns} ` +
+        `recompute run(s) in ${attempts} attempt(s) (cap ${plan.maxAttempts}).\n` +
+        `[probe] The cold-start p95 is based on too few recompute runs to trust for the hard gate.\n` +
+        `[probe] Fix: force fresh recompute candidates between runs — reset the test user's dashboard\n` +
+        `[probe] snapshot (so the watermark changes) or use a freshly-onboarded user, then re-run.`
+    );
+    if (!decision.gatePass) {
+      console.error(`[probe] (reliability gate also failed: ${gate.reasons.join("; ")})`);
+    }
+    process.exit(decision.exitCode); // non-zero
+  }
+  console.log(`\n[probe] GATE FAIL ❌ — ${decision.reasons.join("; ")}`);
+  process.exit(decision.exitCode); // non-zero
 }
 
 if (isEntryPoint) {

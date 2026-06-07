@@ -436,6 +436,47 @@ test("readSnapshot: snapshots without clustering diagnostics omit the keys (back
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusteringAttempts"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusteringLatencyMs"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "usedFallbackClustering"), false);
+  // Prompt 1.2: subtype keys are likewise absent on legacy snapshots.
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusteringFailureSubtype"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusteringRecoverySubtype"), false);
+});
+
+test("writeSnapshot + readSnapshot: Prompt 1.2 clustering failure subtype round-trips into _meta", async () => {
+  const userId = "lastrun-meta-clustering-subtype";
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: {
+      usedFallbackClustering: true,
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: "provider_request",
+      clusteringRecoverySubtype: "parse",
+      clusteringAttempts: 3,
+    },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  // Subtype keys surface at top-level _meta, consistent with the refresh response.
+  assert.equal(result._meta.clusteringFailureSubtype, "provider_request");
+  assert.equal(result._meta.clusteringRecoverySubtype, "parse");
+  // Existing clustering fields are untouched.
+  assert.equal(result._meta.clusteringFailureReason, "error");
+  assert.equal(result._meta.clusteringAttempts, 3);
+});
+
+test("readSnapshot: failure subtype lifts even when recovery subtype is absent (partial)", async () => {
+  const userId = "lastrun-meta-clustering-subtype-partial";
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: {
+      clusteringFailureReason: "timeout",
+      clusteringFailureSubtype: "timeout_budget",
+    },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta.clusteringFailureSubtype, "timeout_budget");
+  // No recovery subtype persisted → key must be absent (no undefined placeholder).
+  assert.equal(Object.prototype.hasOwnProperty.call(result._meta, "clusteringRecoverySubtype"), false);
 });
 
 test("readSnapshot: snapshots without _lastRunMeta omit funnel/recall/beatFit/clusterModel/embeddingModel (backward compat)", async () => {

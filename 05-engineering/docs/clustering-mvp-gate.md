@@ -39,14 +39,14 @@ cd 05-engineering/apps/api && npm run eval:dashboard-quality-gate
 
 - [ ] Exits `0` (golden eval + calibration sweep both green). This is the offline regression guard — see [evals README → Dashboard Quality Gate](../apps/api/src/ai/evals/README.md#dashboard-quality-gate-slice-6).
 
-### 3. Run the live reliability probe (defaults, `N=20`)
+### 3. Run the live reliability probe (cold-start, recompute-enforced, `N=20`)
 
 ```sh
 cd 05-engineering/apps/api
-npm run cluster:probe -- --email <your-invited-email>
+npm run cluster:probe -- --email <your-invited-email> --mode cold-start --require-recompute --runs 20 --cooldown-ms 3000 --base-url http://localhost:8787
 ```
 
-`--email` is the preferred mode (uses `x-recognized-email`). Full usage: [Clustering reliability probe](../README.md#clustering-reliability-probe-live-gate).
+`--email` is the preferred mode (uses `x-recognized-email`). This Step 4.1 command enforces a recompute-quality sample for cold-start latency and fails non-zero if that sample is insufficient (`SAMPLE-QUALITY FAIL`). Full usage: [Clustering reliability probe](../README.md#clustering-reliability-probe-live-gate).
 
 ### 4. Confirm thresholds
 
@@ -54,8 +54,22 @@ Read the probe's final summary JSON and the exit code:
 
 - [ ] `successRate >= 0.95` (fraction of runs with `_meta.usedFallbackClustering === false`)
 - [ ] `medianStories >= 2` (median `stories.length`)
-- [ ] Probe process exited `0` (it fails non-zero if either threshold is missed)
-- [ ] **Advisory (PR A phase):** `p95PipelineMs <= 90000` (90s) — matches the `pipeline_slow` SLO breach threshold (`PIPELINE_SLOW_MS`, see [refresh SLO runbook](runbook-refresh-slo.md)). Cold-start has a tighter UX target (submit → first meta-story ≤ 45s, [cold-start spec](cold-start-v1.md)); for this phase `p95 <= 90s` is the gate-relevant reference and is **advisory, not blocking**.
+- [ ] Probe process exited `0` (it fails non-zero if reliability thresholds are missed **or** recompute sample quality is insufficient)
+- [ ] `recomputeTargetMet === true` in summary JSON (sample quality is decision-grade)
+- [ ] `p95PipelineMs <= 90000` (90s) in cold-start mode — Step 4.1 hard perf gate (aligns to the `pipeline_slow` SLO threshold; see [refresh SLO runbook](runbook-refresh-slo.md))
+
+**The four criteria above are the full GO/NO-GO gate — GO requires ALL of them.** `clusteringFailureSubtypes` is **diagnostics only** and never part of the pass/fail decision; you read it (next) only to *triage* a failing `successRate`.
+
+#### Reading the subtype histogram (GO/NO-GO interpretation)
+
+The summary JSON's `clusteringFailureSubtypes` splits the coarse `error` bucket into actionable classes (see [README → Failure subtype taxonomy](../README.md#dashboard-trust-controls-slice-1)):
+
+- **GO sample** — `successRate >= 0.95` with `clusteringFailureSubtypes` empty (`{}`) or only a stray non-dominant entry. Record it; **do not** apply a fix (see the null-result note below).
+- **NO-GO sample** — `successRate < 0.95`. Read the **dominant** subtype to decide the single fix:
+  - `parse` → model output couldn't be parsed/validated → parse-resilience hardening.
+  - `provider_request` → provider/transport fault (missing key, auth, rate-limit, overload, empty response) → one guarded provider/transport mitigation (and confirm the Anthropic key/quota first).
+  - `timeout_budget` → clustering wall-clock budget exhausted → one budget-envelope adjustment (no cap broadening).
+  - `unknown` → unattributable non-timeout failure → improve attribution for that signature first (or the smallest safe fallback for the exact observed pattern).
 
 ### 5. Manual golden-path sanity check
 
@@ -67,7 +81,7 @@ Quick eyeball on the live dashboard for the invited user (no `?debug=1` dependen
 - [ ] No obvious duplicate stack (e.g. a liveblog repeated as many near-identical stories).
 - [ ] Story titles/subtitles read as English, coherent, and on-topic for the user's settings.
 
-> For deeper inspection, the same outcomes are queryable in logs via the `[cluster-engine.obs]` line (`mode` / `result` / `errorClass`) and on `_meta` (`usedFallbackClustering`, `clusteringFailureReason`, `clusteringAttempts`).
+> For deeper inspection, the same outcomes are queryable in logs via the `[cluster-engine.obs]` line (`mode` / `result` / `errorClass`) and on `_meta` (`usedFallbackClustering`, `clusteringFailureReason`, `clusteringFailureSubtype`, `clusteringAttempts`) — the subtype is also surfaced on persisted `GET /api/dashboard` reads, so a thin/empty dashboard can be triaged without re-running the probe.
 
 ## Signoff template
 
@@ -86,7 +100,8 @@ Results
 - [3/4] Live probe (N=20):             PASS / FAIL   (exit code: ___)
       - successRate:        ____   (need >= 0.95)
       - medianStories:      ____   (need >= 2)
-      - p95PipelineMs:      ____   (advisory <= 90000)
+      - p95PipelineMs:      ____   (need <= 90000 in cold-start mode)
+      - recomputeTargetMet: ____   (need true)
 - [5] Manual golden sanity:            PASS / FAIL
 
 Notes / risks:
@@ -99,10 +114,14 @@ Notes / risks:
 - Read which sub-check regressed (golden vs calibration). Re-run `npm run eval:dashboard-refresh-golden` alone to isolate a golden regression.
 - A calibration/floor failure usually means a `DEFAULT_EMBED_MIN_SIMILARITY` or recall change — revisit the floor-change ship/no-ship policy in the README before touching defaults.
 
-**`successRate < 0.95` (too many fallback runs)**
-- Inspect the probe's `clusteringFailureReasons` counts. `timeout`-dominated → provider latency or too-tight `TEMPO_AI_CLUSTER_TIMEOUT_MS`; `error`-dominated → parse/schema failures.
-- Grep server logs for `[cluster-engine.obs] ... result=fail` and read `errorClass` (`empty_response`, `no_json_region`, `schema_validation_error`, …) to classify the failure mode.
-- Confirm the Anthropic key is valid and not rate-limited.
+**`successRate < 0.95` (too many fallback runs)** — drive the fix off the **dominant subtype**, one fix at a time:
+1. Inspect `clusteringFailureSubtypes` (finer than `clusteringFailureReasons`) and identify the **single dominant** subtype. If it's a tie or unclear, collect a larger decision-grade sample before acting.
+2. Apply **exactly one** minimal-risk fix for that subtype only (see the per-subtype fix families under "Reading the subtype histogram" above). No bundled fixes; preserve fail-closed behavior; do not change gate thresholds.
+3. **Re-run this strict gate** (step 3) to confirm the dominant subtype's incidence dropped and `successRate >= 0.95`, with no fail-closed regression.
+- For deeper classification, grep server logs for `[cluster-engine.obs] ... result=fail` and read `errorClass` (`empty_response`, `no_json_region`, `schema_validation_error`, …).
+- Confirm the Anthropic key is valid and not rate-limited (a `provider_request`-dominated histogram points here first).
+
+> **Null-result discipline.** If a decision-grade sample shows **no failures** (`successRate` passes, `clusteringFailureSubtypes` empty), record the null result and signoff — **do not** apply a speculative fix. Changing behavior to address a failure mode that isn't occurring risks regressing a passing gate and is not attributable to evidence.
 
 **`medianStories < 2` (thin output)**
 - Likely upstream of clustering: check the invited user's settings actually saved (sources/topics present) and that ingestion has warm items. Confirm `_meta.selection` shows matched sources and a non-trivial `relevantItemCount`.

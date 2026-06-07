@@ -418,6 +418,99 @@ export function readClusteringRepairDiagnostics(source) {
   return { ...EMPTY_CLUSTERING_REPAIR };
 }
 
+// ─── Prompt 1: clustering failure subtype taxonomy ───────────────────────────
+//
+// The pipeline's terminal `clusteringFailureReason` is intentionally coarse —
+// `'timeout' | 'error' | null` — and the catch-all `error` bucket hides several
+// distinct, separately-actionable failure modes (a malformed model payload, a
+// provider/transport fault, an unattributable error).  Prompt 1 adds a STABLE,
+// additive sub-classification so an operator can split `error` WITHOUT changing
+// any gate threshold or the existing reason contract.  The mapping:
+//
+//   timeout_budget   — the clustering wall-clock budget was exhausted (the call
+//                      timed out / was aborted).  This is the SAME signal that
+//                      drives `clusteringFailureReason === "timeout"`; the
+//                      pipeline derives the legacy reason from the subtype so the
+//                      two never drift.
+//   parse            — the model returned a response we could not parse/validate
+//                      into the clustering contract (carries the C2/Slice-3
+//                      `_clusteringRepair` diagnostics — JSON syntax, schema, or
+//                      empty/again-empty payload from `parseClusteringResponse`).
+//   provider_request — the provider call itself failed or returned an unusable
+//                      envelope: missing API key, auth/permission, rate-limit,
+//                      overload, connection/transport fault, or an empty provider
+//                      response (the engine's own `clusterWithAnthropic` /
+//                      `clusterItems` throw sites, plus Anthropic SDK errors).
+//   unknown          — a non-timeout failure we could not attribute to a class
+//                      above.  A non-empty `unknown` rate is itself a signal that
+//                      the taxonomy needs another bucket — never a silent drop.
+//
+// Pure and deterministic (regex + own-property checks only) so the mapping is
+// unit-lockable without a real provider.  Subtype names are snake_case and
+// frozen — downstream dashboards/logs key off them.
+export const CLUSTERING_FAILURE_SUBTYPE = Object.freeze({
+  TIMEOUT_BUDGET: "timeout_budget",
+  PARSE: "parse",
+  PROVIDER_REQUEST: "provider_request",
+  UNKNOWN: "unknown",
+});
+
+// Same regex the pipeline used to split timeout from error — kept here so the
+// subtype and the legacy `clusteringFailureReason` derive from ONE source and
+// the timeout→reason mapping stays byte-identical to the pre-Prompt-1 behavior.
+const CLUSTER_TIMEOUT_MESSAGE_RE = /timed out|timeout|abort/i;
+
+// Concrete provider/transport failure signals.  Covers the engine's own throw
+// sites (missing API key, "returned empty clustering response") plus common
+// Anthropic SDK / Node transport error language.  Deliberately conservative:
+// anything not matched here (and not a parse failure or timeout) stays `unknown`
+// rather than being force-fit into `provider_request`.
+const CLUSTER_PROVIDER_MESSAGE_RE =
+  /api[_ ]?key|anthropic_api_key|rate[ _-]?limit|overloaded|temporarily unavailable|service unavailable|\bunavailable\b|authentication|unauthorized|forbidden|permission|connection error|econnreset|enotfound|etimedout|fetch failed|socket hang up|returned empty|empty[^]*?response|status code|\b(?:429|5\d{2})\b/i;
+
+// True when a thrown error looks like a provider/transport fault: an Anthropic
+// SDK `APIError` (numeric `status`) / connection error (by name), or a concrete
+// provider message.  Kept narrow so generic messages fall through to `unknown`.
+function isProviderRequestError(err, msg) {
+  if (err && typeof err === "object") {
+    if (typeof err.status === "number") return true;
+    const name = typeof err.name === "string" ? err.name : "";
+    const ctor =
+      err.constructor && typeof err.constructor.name === "string"
+        ? err.constructor.name
+        : "";
+    if (/APIError|APIConnection|Anthropic/i.test(`${name} ${ctor}`)) return true;
+  }
+  return CLUSTER_PROVIDER_MESSAGE_RE.test(msg);
+}
+
+/**
+ * Classify a thrown clustering failure into a stable subtype (see
+ * `CLUSTERING_FAILURE_SUBTYPE`).  Deterministic priority:
+ *   1. timeout_budget   — message matches the timeout/abort regex
+ *   2. parse            — error carries `_clusteringRepair` diagnostics
+ *   3. provider_request — SDK API error (numeric `status` / APIError-ish name)
+ *                         or a concrete provider/transport message
+ *   4. unknown          — none of the above
+ *
+ * Additive + fail-closed-preserving: this NEVER changes whether clustering
+ * failed, only how the (already terminal) failure is labeled.  Pure; exported
+ * for unit testing of the mapping contract.
+ */
+export function classifyClusteringFailureSubtype(err) {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  if (CLUSTER_TIMEOUT_MESSAGE_RE.test(msg)) {
+    return CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET;
+  }
+  if (err && typeof err === "object" && err._clusteringRepair) {
+    return CLUSTERING_FAILURE_SUBTYPE.PARSE;
+  }
+  if (isProviderRequestError(err, msg)) {
+    return CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST;
+  }
+  return CLUSTERING_FAILURE_SUBTYPE.UNKNOWN;
+}
+
 // Clustering completion token budget.  Named (not a new tuning knob — same
 // value that was inline) so the observability line can report it verbatim.
 export const CLUSTER_MAX_TOKENS = 2048;

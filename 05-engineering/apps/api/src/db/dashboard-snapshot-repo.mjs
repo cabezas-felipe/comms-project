@@ -126,6 +126,12 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // Optional for back-compat with snapshots written before Slice 1.
     if (_lastRunMeta.usedFallbackClustering !== undefined) meta.usedFallbackClustering = _lastRunMeta.usedFallbackClustering;
     if (_lastRunMeta.clusteringFailureReason !== undefined) meta.clusteringFailureReason = _lastRunMeta.clusteringFailureReason;
+    // Prompt 1.2: lift the failure subtype (parse | provider_request | unknown |
+    // timeout_budget) and the recovery subtype so GET /api/dashboard exposes the
+    // same top-level subtype keys the immediate refresh response carries.
+    // Optional for back-compat with snapshots written before the subtype taxonomy.
+    if (_lastRunMeta.clusteringFailureSubtype !== undefined) meta.clusteringFailureSubtype = _lastRunMeta.clusteringFailureSubtype;
+    if (_lastRunMeta.clusteringRecoverySubtype !== undefined) meta.clusteringRecoverySubtype = _lastRunMeta.clusteringRecoverySubtype;
     if (_lastRunMeta.clusteringAttempts !== undefined) meta.clusteringAttempts = _lastRunMeta.clusteringAttempts;
     if (_lastRunMeta.clusteringLatencyMs !== undefined) meta.clusteringLatencyMs = _lastRunMeta.clusteringLatencyMs;
     // Phase 4: per-axis semantic tag-mapping aggregate (topics + keywords)

@@ -16,6 +16,8 @@ import {
   deriveClusterObs,
   formatClusterObsLine,
   CLUSTER_MAX_TOKENS,
+  classifyClusteringFailureSubtype,
+  CLUSTERING_FAILURE_SUBTYPE,
 } from "./cluster-engine.mjs";
 import { validateSmokeOutput, runClusterSmoke } from "./evals/cluster-smoke-core.mjs";
 import { buildClusteringPrompt, CLUSTERING_PROMPT_VERSION } from "./prompts.mjs";
@@ -1196,4 +1198,114 @@ test("obs: stopReason renders null when the provider omits it", async () => {
   const obs = obsLines(lines);
   assert.equal(obs.length, 1);
   assert.match(obs[0].text, /stopReason=null/);
+});
+
+// ─── Prompt 1: clustering failure subtype taxonomy ───────────────────────────
+
+test("classifyClusteringFailureSubtype: timeout/abort messages → timeout_budget", () => {
+  for (const msg of [
+    "Anthropic clustering timed out (claude-sonnet-4-6)",
+    "operation timeout exceeded",
+    "The operation was aborted",
+  ]) {
+    assert.equal(
+      classifyClusteringFailureSubtype(new Error(msg)),
+      CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET,
+      msg
+    );
+  }
+});
+
+test("classifyClusteringFailureSubtype: error carrying _clusteringRepair → parse", () => {
+  const err = new Error("Clustering response parse failed: schema validation");
+  err._clusteringRepair = {
+    attempted: true,
+    succeeded: false,
+    failureReason: "schema_validation_error",
+  };
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PARSE
+  );
+});
+
+test("classifyClusteringFailureSubtype: parse takes priority over a provider-looking message", () => {
+  // A parse error whose message also happens to mention an API key must still
+  // classify as parse — the repair-diagnostics signal is authoritative.
+  const err = new Error("api key parse failed");
+  err._clusteringRepair = { attempted: true, succeeded: false };
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PARSE
+  );
+});
+
+test("classifyClusteringFailureSubtype: missing-API-key throw → provider_request", () => {
+  const err = new Error(
+    "TEMPO_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) is required for anthropic: clustering models"
+  );
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+});
+
+test("classifyClusteringFailureSubtype: empty provider response throw → provider_request", () => {
+  const err = new Error("Anthropic returned empty clustering response");
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+});
+
+test("classifyClusteringFailureSubtype: SDK APIError (numeric status) → provider_request", () => {
+  const err = new Error("rate limited");
+  err.status = 429;
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+});
+
+test("classifyClusteringFailureSubtype: APIError-named error → provider_request", () => {
+  const err = new Error("upstream connect error");
+  err.name = "APIConnectionError";
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+});
+
+test("classifyClusteringFailureSubtype: 'unavailable' → provider_request; truly generic → unknown", () => {
+  // "unavailable" is a recognized provider/transport signal…
+  assert.equal(
+    classifyClusteringFailureSubtype(new Error("model unavailable")),
+    CLUSTERING_FAILURE_SUBTYPE.PROVIDER_REQUEST
+  );
+  // …but a message with no recognized signal must fall through to unknown
+  // rather than being force-fit into a provider bucket.
+  assert.equal(
+    classifyClusteringFailureSubtype(new Error("something inexplicable happened")),
+    CLUSTERING_FAILURE_SUBTYPE.UNKNOWN
+  );
+  assert.equal(
+    classifyClusteringFailureSubtype("transient blip"),
+    CLUSTERING_FAILURE_SUBTYPE.UNKNOWN
+  );
+});
+
+test("classifyClusteringFailureSubtype: timeout wins even with repair diagnostics present", () => {
+  // Deterministic priority: a timed-out message classifies as timeout_budget
+  // regardless of any attached repair object.
+  const err = new Error("Anthropic clustering timed out (m)");
+  err._clusteringRepair = { attempted: true, succeeded: false };
+  assert.equal(
+    classifyClusteringFailureSubtype(err),
+    CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET
+  );
+});
+
+test("classifyClusteringFailureSubtype: null/undefined → unknown (never throws)", () => {
+  assert.equal(classifyClusteringFailureSubtype(null), CLUSTERING_FAILURE_SUBTYPE.UNKNOWN);
+  assert.equal(classifyClusteringFailureSubtype(undefined), CLUSTERING_FAILURE_SUBTYPE.UNKNOWN);
 });
