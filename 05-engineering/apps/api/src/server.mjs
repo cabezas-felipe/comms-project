@@ -1611,6 +1611,15 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     // (the client's poll surface) reports pending/completed counts without a
     // replay.  Additive + tolerant for older clients.
     if (log.whyEnrichment !== undefined) lastRunMeta.whyEnrichment = log.whyEnrichment;
+    // C1: persist split-healer (A3), overflow cap (A4), and re-cluster QUEUE
+    // (B1) diagnostics so GET /api/dashboard surfaces them under `_meta` without
+    // a replay. The re-cluster EXECUTION outcome (B2) is written separately by
+    // the deferred executor onto `_lastRunMeta.reclusterExecution`. All additive
+    // and individually optional for back-compat with older pipeline returns.
+    if (log.clusterSplit !== undefined) lastRunMeta.clusterSplit = log.clusterSplit;
+    if (log.overflowCap !== undefined) lastRunMeta.overflowCap = log.overflowCap;
+    if (log.reclusterQueue !== undefined) lastRunMeta.reclusterQueue = log.reclusterQueue;
+    if (log.reclusterQueueCount !== undefined) lastRunMeta.reclusterQueueCount = log.reclusterQueueCount;
     lastRunMeta.ingestionSource = ingestionSource;
     finalPayload._lastRunMeta = lastRunMeta;
 
@@ -1757,6 +1766,15 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
           // translated/failed/timeout counts, degraded rate, latency p50/p95,
           // per-story coverage). Backwards-compatible; OFF by default in prod.
           translation: log.translation,
+          // C1: split-healer (A3), overflow cap (A4), and re-cluster QUEUE (B1)
+          // diagnostics on the immediate refresh response. The re-cluster
+          // EXECUTION outcome (B2) is NOT here — it runs fire-and-forget after
+          // this response and surfaces on subsequent GET reads as
+          // `_meta.reclusterExecution`. Additive; clients ignore unknown keys.
+          clusterSplit: log.clusterSplit,
+          overflowCap: log.overflowCap,
+          reclusterQueue: log.reclusterQueue,
+          reclusterQueueCount: log.reclusterQueueCount,
           funnel: log.funnel,
           // Clustering fail-closed diagnostics (Slice 1) — also surfaced on
           // the immediate refresh response so the first read after a failed
@@ -1853,6 +1871,7 @@ const _LAST_RUN_META_LIFTED_KEYS = Object.freeze([
   "usedFallbackClustering", "clusteringFailureReason", "clusteringAttempts",
   "clusteringLatencyMs", "tags", "whatChanged", "whyItMatters", "timings",
   "outcomes", "ingestionSource", "whyEnrichment", "profile", "reclusterExecution",
+  "clusterSplit", "overflowCap", "reclusterQueue", "reclusterQueueCount",
 ]);
 function liftedMetaToLastRunMeta(meta) {
   const out = {};

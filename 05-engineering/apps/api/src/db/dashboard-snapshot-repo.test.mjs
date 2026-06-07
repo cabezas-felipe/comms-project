@@ -408,6 +408,73 @@ test("writeSnapshot + readSnapshot: _lastRunMeta round-trips into _meta.{funnel,
   assert.equal(result._lastRunMeta, undefined);
 });
 
+// ─── C1: split-healer / overflow-cap / re-cluster diagnostics round-trip ─────
+
+test("writeSnapshot + readSnapshot: C1 clusterSplit/overflowCap/reclusterQueue/reclusterExecution round-trip into _meta", async () => {
+  const userId = "c1-diagnostics-user";
+  const CLUSTER_SPLIT = {
+    enabled: true, inputCount: 4, outputCount: 5, splitCount: 1,
+    splitReasons: { low_token_overlap: 1, disjoint_claim_evidence: 0 },
+    deferredCount: 1, deferReasons: { ambiguous_unnormalized_overlap: 1, ambiguous_overlap_conflict: 0 },
+    bundledStoryCount: 1, reclusterCandidateIds: ["ms-defer-1"],
+  };
+  const OVERFLOW_CAP = {
+    overflowCapApplied: true, overflowInputCount: 6, overflowOutputCount: 5,
+    overflowDroppedCount: 1, overflowDroppedMetaStoryIds: ["ms-drop-9"],
+  };
+  const RECLUSTER_QUEUE = [{ metaStoryId: "ms-defer-1", suspicionScore: 124, reason: "ambiguous_unnormalized_overlap", reasonCodes: ["recluster_flag", "ambiguous_unnormalized_overlap"], sourceItemIds: ["a", "b"], sourceCount: 2 }];
+  const RECLUSTER_EXECUTION = {
+    enabled: true, totalQueued: 1, attempted: 1, succeeded: 1, failed: 0, timedOut: 0,
+    cappedToMax: false, totalLatencyMs: 12, status: "completed",
+    candidates: [{ metaStoryId: "ms-defer-1", outcome: "split", splitInto: 2, newMetaStoryIds: ["re-0", "re-1"], latencyMs: 10 }],
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: {
+      clusterSplit: CLUSTER_SPLIT,
+      overflowCap: OVERFLOW_CAP,
+      reclusterQueue: RECLUSTER_QUEUE,
+      reclusterQueueCount: 1,
+      reclusterExecution: RECLUSTER_EXECUTION,
+    },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta.clusterSplit, CLUSTER_SPLIT);
+  assert.deepEqual(result._meta.overflowCap, OVERFLOW_CAP);
+  assert.deepEqual(result._meta.reclusterQueue, RECLUSTER_QUEUE);
+  assert.equal(result._meta.reclusterQueueCount, 1);
+  assert.deepEqual(result._meta.reclusterExecution, RECLUSTER_EXECUTION);
+  // Internal storage key must not leak at the top level — lifted into _meta.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot: snapshots without C1 diagnostics omit them (backward compat)", async () => {
+  const userId = "c1-absent-user";
+  await writeSnapshot(userId, { ...SAMPLE_PAYLOAD }); // no _lastRunMeta at all
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta.clusterSplit, undefined);
+  assert.equal(result._meta.overflowCap, undefined);
+  assert.equal(result._meta.reclusterQueue, undefined);
+  assert.equal(result._meta.reclusterQueueCount, undefined);
+  assert.equal(result._meta.reclusterExecution, undefined);
+});
+
+test("readSnapshot: partial C1 diagnostics lift only the present keys (no undefined placeholders)", async () => {
+  const userId = "c1-partial-user";
+  const OVERFLOW_CAP = { overflowCapApplied: false, overflowInputCount: 3, overflowOutputCount: 3, overflowDroppedCount: 0, overflowDroppedMetaStoryIds: [] };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: { overflowCap: OVERFLOW_CAP }, // only overflowCap present
+  });
+  const result = await readSnapshot(userId);
+  assert.deepEqual(result._meta.overflowCap, OVERFLOW_CAP);
+  assert.equal(result._meta.clusterSplit, undefined);
+  assert.equal(result._meta.reclusterExecution, undefined);
+  assert.ok(!("clusterSplit" in result._meta), "absent key must not be an undefined placeholder");
+});
+
 test("writeSnapshot + readSnapshot: clustering fail-closed diagnostics round-trip into _meta", async () => {
   const userId = "lastrun-meta-clustering";
   await writeSnapshot(userId, {

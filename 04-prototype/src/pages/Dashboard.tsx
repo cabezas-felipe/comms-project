@@ -24,6 +24,9 @@ import {
   type DashboardFunnelMeta,
   type DashboardRecallMeta,
   type DashboardWhyEnrichmentMeta,
+  type DashboardClusterSplitMeta,
+  type DashboardOverflowCapMeta,
+  type DashboardReclusterExecutionMeta,
 } from "@/lib/api";
 import { DashboardRunDiagnostics } from "@/components/DashboardRunDiagnostics";
 import { formatKeywordLabel } from "@/lib/format";
@@ -197,6 +200,11 @@ export default function Dashboard() {
     selection: DashboardSelectionMeta | null;
     funnel: DashboardFunnelMeta | null;
     recall: DashboardRecallMeta | null;
+    // C1 — split/overflow/re-cluster diagnostics (debug panel only).
+    clusterSplit: DashboardClusterSplitMeta | null;
+    overflowCap: DashboardOverflowCapMeta | null;
+    reclusterExecution: DashboardReclusterExecutionMeta | null;
+    reclusterQueueCount: number | null;
   } | null>(null);
   // Slice 5: progressive whyItMatters enrichment state from the latest fetch.
   // When `deferred && pending > 0`, the dashboard polls GET /api/dashboard and
@@ -323,6 +331,10 @@ export default function Dashboard() {
         selection: result.selection,
         funnel: result.funnel,
         recall: result.recall,
+        clusterSplit: result.clusterSplit,
+        overflowCap: result.overflowCap,
+        reclusterExecution: result.reclusterExecution,
+        reclusterQueueCount: result.reclusterQueueCount,
       });
       // Slice 5: capture progressive-enrichment state so the poll effect can
       // start (deferred + pending) or stay idle.
@@ -517,6 +529,10 @@ export default function Dashboard() {
       selection: heartbeatResult.selection,
       funnel: heartbeatResult.funnel,
       recall: heartbeatResult.recall,
+      clusterSplit: heartbeatResult.clusterSplit,
+      overflowCap: heartbeatResult.overflowCap,
+      reclusterExecution: heartbeatResult.reclusterExecution,
+      reclusterQueueCount: heartbeatResult.reclusterQueueCount,
     });
     setWhyEnrichment(heartbeatResult.whyEnrichment);
   }, [emptyMode, heartbeatResult]);
@@ -756,6 +772,10 @@ export default function Dashboard() {
               funnel={runDiagnostics?.funnel ?? null}
               recall={runDiagnostics?.recall ?? null}
               selection={runDiagnostics?.selection ?? null}
+              clusterSplit={runDiagnostics?.clusterSplit ?? null}
+              overflowCap={runDiagnostics?.overflowCap ?? null}
+              reclusterExecution={runDiagnostics?.reclusterExecution ?? null}
+              reclusterQueueCount={runDiagnostics?.reclusterQueueCount ?? null}
             />
           )}
 
