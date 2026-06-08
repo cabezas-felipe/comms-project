@@ -456,21 +456,37 @@ export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
 // Drop ranking (Q6 C) is a SURVIVAL order (best first → top 5 survive). It is
 // deliberately distinct from the R1 *display* order: survivors keep their R1
 // order; only WHICH stories survive is decided here.
-//   1. multi-source first   — more `source_item_ids` wins (a corroborated,
+//   1. topic/keyword match strength — a story that matches configured
+//                              topics/keywords is favored to survive over an
+//                              unmatched one (2: topic+keyword, 1: either, 0: neither)
+//   2. multi-source first   — more `source_item_ids` wins (a corroborated,
 //                              multi-outlet story is higher value than a lone
 //                              single-source row)
-//   2. higher beat-fit      — best relevance score across the story's sources
-//   3. fresher              — lower `minMinutesAgo`
-//   4. metaStoryId ascending — stable, deterministic final tie-break
+//   3. higher beat-fit      — best relevance score across the story's sources
+//   4. fresher              — lower `minMinutesAgo`
+//   5. metaStoryId ascending — stable, deterministic final tie-break
 export const MAX_META_STORIES = 5;
+
+export function topicKeywordMatchStrength(story) {
+  const tags = story?.tags;
+  const hasTopics = Array.isArray(tags?.topics) && tags.topics.length > 0;
+  const hasKeywords = Array.isArray(tags?.keywords) && tags.keywords.length > 0;
+  if (hasTopics && hasKeywords) return 2;
+  if (hasTopics || hasKeywords) return 1;
+  return 0;
+}
 
 /**
  * Survival comparator for the overflow cap (see Q6 C above). Operates on the
- * per-story rank inputs `{ sourceCount, maxBeatFitScore, minMinutesAgo,
- * metaStoryId }`. Negative → `a` ranks ahead of (survives over) `b`. Pure;
+ * per-story rank inputs `{ topicKeywordMatchStrength, sourceCount,
+ * maxBeatFitScore, minMinutesAgo, metaStoryId }`. Negative → `a` ranks ahead of
+ * (survives over) `b`. Pure;
  * exported for focused unit testing of the ranking contract.
  */
 export function compareOverflowRank(a, b) {
+  const atk = Number.isFinite(a?.topicKeywordMatchStrength) ? a.topicKeywordMatchStrength : 0;
+  const btk = Number.isFinite(b?.topicKeywordMatchStrength) ? b.topicKeywordMatchStrength : 0;
+  if (atk !== btk) return btk - atk; // stronger topic/keyword match first
   const asc = Number.isFinite(a?.sourceCount) ? a.sourceCount : 0;
   const bsc = Number.isFinite(b?.sourceCount) ? b.sourceCount : 0;
   if (asc !== bsc) return bsc - asc; // more sources first
@@ -3111,6 +3127,7 @@ export async function runRefreshPipeline({
       // set; grounded stories have all ids resolved, so this matches the
       // published `sources.length`.
       sortKey: {
+        topicKeywordMatchStrength: topicKeywordMatchStrength(ms),
         maxBeatFitScore,
         minMinutesAgo,
         metaStoryId: ms.meta_story_id,
@@ -3143,6 +3160,7 @@ export async function runRefreshPipeline({
           : [],
         debug_payload: {
           title: story?.title ?? null,
+          topicKeywordMatchStrength: sortKey?.topicKeywordMatchStrength ?? null,
           sourceCount: sortKey?.sourceCount ?? null,
           maxBeatFitScore: sortKey?.maxBeatFitScore ?? null,
           minMinutesAgo: Number.isFinite(sortKey?.minMinutesAgo) ? sortKey.minMinutesAgo : null,

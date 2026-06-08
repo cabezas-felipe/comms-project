@@ -62,6 +62,7 @@ import {
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
   compareOverflowRank,
+  topicKeywordMatchStrength,
   applyMetaStoryOverflowCap,
   MAX_META_STORIES,
   scoreReclusterCandidate,
@@ -7972,37 +7973,55 @@ test("runRefreshPipeline (A3): ambiguous un-normalized ES over-merge is preserve
 // when the post-healer survivor set exceeds 5, the deterministic Q6-C survival
 // ranking trims the overflow and surfaces it on `log.overflowCap`.
 
+test("topicKeywordMatchStrength: 2 topic+keyword, 1 either, 0 neither", () => {
+  assert.equal(topicKeywordMatchStrength({ tags: { topics: ["T"], keywords: ["K"] } }), 2);
+  assert.equal(topicKeywordMatchStrength({ tags: { topics: ["T"], keywords: [] } }), 1);
+  assert.equal(topicKeywordMatchStrength({ tags: { topics: [], keywords: ["K"] } }), 1);
+  assert.equal(topicKeywordMatchStrength({ tags: { topics: [], keywords: [] } }), 0);
+  assert.equal(topicKeywordMatchStrength({ tags: {} }), 0);
+  assert.equal(topicKeywordMatchStrength({}), 0);
+  assert.equal(topicKeywordMatchStrength(null), 0);
+});
+
 // Unit: the survival comparator honors each ranking tier in order.
-test("compareOverflowRank: multi-source > beat-fit > fresher > metaStoryId", () => {
-  // Tier 1: more sources survives (ranks ahead, i.e. negative).
+test("compareOverflowRank: topic/keyword > multi-source > beat-fit > fresher > metaStoryId", () => {
+  // Tier 1: stronger topic/keyword match survives (ranks ahead, i.e. negative).
   assert.ok(
     compareOverflowRank(
-      { sourceCount: 2, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
-      { sourceCount: 1, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
+      { topicKeywordMatchStrength: 0, sourceCount: 9, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
+    ) < 0,
+    "matched outranks unmatched regardless of other factors"
+  );
+  // Tier 2: equal match strength -> more sources survives.
+  assert.ok(
+    compareOverflowRank(
+      { topicKeywordMatchStrength: 1, sourceCount: 2, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
     ) < 0,
     "more sources outranks everything else"
   );
-  // Tier 2: equal sources → higher beat-fit survives.
+  // Tier 3: equal match strength + sources -> higher beat-fit survives.
   assert.ok(
     compareOverflowRank(
-      { sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 999, metaStoryId: "z" },
-      { sourceCount: 1, maxBeatFitScore: 0.1, minMinutesAgo: 0, metaStoryId: "a" }
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 999, metaStoryId: "z" },
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.1, minMinutesAgo: 0, metaStoryId: "a" }
     ) < 0,
     "higher beat-fit outranks freshness/id"
   );
-  // Tier 3: equal sources + beat-fit → fresher (lower minutesAgo) survives.
+  // Tier 4: equal match strength + sources + beat-fit -> fresher survives.
   assert.ok(
     compareOverflowRank(
-      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "z" },
-      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 99, metaStoryId: "a" }
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "z" },
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 99, metaStoryId: "a" }
     ) < 0,
     "fresher outranks id"
   );
-  // Tier 4: all equal → metaStoryId ascending.
+  // Tier 5: all equal -> metaStoryId ascending.
   assert.ok(
     compareOverflowRank(
-      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "a" },
-      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "b" }
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "a" },
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "b" }
     ) < 0,
     "lower metaStoryId survives the final tie-break"
   );
@@ -8193,6 +8212,52 @@ test("runRefreshPipeline (A4): overflow_cap rejection-log entries written for dr
   const overflowRecords = written.filter((r) => r.reason_code === "overflow_cap");
   assert.equal(overflowRecords.length, 1, "one overflow_cap rejection record for the dropped story");
   assert.equal(overflowRecords[0].meta_story_id, "ms-rej-5");
+  assert.equal(overflowRecords[0].debug_payload.topicKeywordMatchStrength, 1);
+});
+
+test("runRefreshPipeline (A4): matched stories survive cap over unmatched", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const matched = (i) => ({
+    meta_story_id: `b-${i}`,
+    title: `Matched story ${i}`,
+    subtitle: `Subtitle ${i}.`,
+    source_item_ids: ["src-1"],
+    summary: `Summary ${i}.`,
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+    factual_claims: [`Reuters reports verified development ${i}.`],
+    claim_evidence_map: { "0": ["src-1"] },
+  });
+  const clusterStories = [
+    {
+      meta_story_id: "a-nomatch",
+      title: "Unmatched story",
+      subtitle: "Subtitle nomatch.",
+      source_item_ids: ["src-1"],
+      summary: "Summary nomatch.",
+      tags: { topics: [], keywords: [], geographies: ["US", "Colombia"] },
+      factual_claims: ["Reuters reports a verified development."],
+      claim_evidence_map: { "0": ["src-1"] },
+    },
+    ...Array.from({ length: 5 }, (_, i) => matched(i)),
+  ];
+  const written = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => clusterStories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    writeRejectionsFn: async (records) => {
+      written.push(...records);
+    },
+  });
+
+  assert.equal(payload.stories.length, 5);
+  assert.equal(log.overflowCap.overflowDroppedCount, 1);
+  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, ["a-nomatch"]);
+  const overflowRecords = written.filter((r) => r.reason_code === "overflow_cap");
+  assert.equal(overflowRecords.length, 1);
+  assert.equal(overflowRecords[0].debug_payload.topicKeywordMatchStrength, 0);
 });
 
 // ─── B1: deferred re-cluster candidate queue (flagging + ranking only) ───────
