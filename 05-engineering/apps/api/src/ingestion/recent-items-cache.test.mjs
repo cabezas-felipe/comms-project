@@ -307,3 +307,32 @@ test("cacheRowsToRawItems: skips rows with empty source_id and returns [] for no
   assert.deepEqual(cacheRowsToRawItems(rows, MANIFEST, { now: NOW }), []);
   assert.deepEqual(cacheRowsToRawItems(null, MANIFEST), []);
 });
+
+test("cacheRowsToRawItems: propagates manifest lang='es' onto the reconstructed item", () => {
+  const manifest = [{ id: "semana-politica", name: "Semana — Política", publisher: "Semana", kind: "rss", weight: 70, lang: "es" }];
+  const row = { ...CACHE_ROW, source_id: "semana-politica::1", feed_id: "semana-politica" };
+  const [item] = cacheRowsToRawItems([row], manifest, { now: NOW });
+  assert.equal(item.lang, "es", "Spanish manifest lang must survive cache reconstruction");
+});
+
+test("cacheRowsToRawItems: trims a whitespace-padded manifest lang", () => {
+  const manifest = [{ id: "infobae-colombia", name: "Infobae — Colombia", publisher: "Infobae", kind: "rss", weight: 70, lang: "  es-CO  " }];
+  const row = { ...CACHE_ROW, source_id: "infobae-colombia::1", feed_id: "infobae-colombia" };
+  const [item] = cacheRowsToRawItems([row], manifest, { now: NOW });
+  assert.equal(item.lang, "es-CO");
+});
+
+test("cacheRowsToRawItems: no lang key when manifest lang is missing/blank/non-string (no fabrication)", () => {
+  const [missing] = cacheRowsToRawItems([CACHE_ROW], MANIFEST, { now: NOW });
+  assert.equal("lang" in missing, false);
+  assert.equal(missing.lang, undefined);
+  const blankManifest = [{ ...MANIFEST[0], lang: "   " }];
+  const [blank] = cacheRowsToRawItems([CACHE_ROW], blankManifest, { now: NOW });
+  assert.equal("lang" in blank, false);
+  const numManifest = [{ ...MANIFEST[0], lang: 42 }];
+  const [num] = cacheRowsToRawItems([CACHE_ROW], numManifest, { now: NOW });
+  assert.equal("lang" in num, false);
+  const orphan = { ...CACHE_ROW, source_id: "ghost::1", feed_id: "unknown-feed" };
+  const [orphanItem] = cacheRowsToRawItems([orphan], MANIFEST, { now: NOW });
+  assert.equal("lang" in orphanItem, false);
+});

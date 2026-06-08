@@ -5,12 +5,35 @@ Production + preview activation of translation-first evidence normalization
 English **post-geo, pre-recall** so it is fairly considered in recall,
 clustering, grounding, and downstream story interpretation.
 
-**Posture (Sprint B1, locked):** translation is **ENABLED in BOTH preview and
-production now**, under controlled monitoring. This is intentional —
-multilingual handling is core product behavior, not optional. The Spanish feeds
-(La Silla Vacía, Semana, Infobae — 6 feeds, `active=true`, `lang=es`) are live
-in `source-feeds.json`, so refreshes now carry real `lang=es` items to
-translate. **Rollback is env-only** — a single flag, no code change (see [Rollback](#4-rollback-env-only)).
+**Posture (locked):** activation is **mode-driven** via `TEMPO_TRANSLATION_MODE`
+(`auto` | `on` | `off`), default `auto`. In `auto`, the stage activates
+automatically when selected feeds carry non-English evidence (`lang != en*`).
+The Spanish feeds (La Silla Vacía, Semana, Infobae — 6 feeds) should carry
+`lang=es` so refreshes translate them without manual toggles. **Rollback is
+env-only** — set mode to `off` (see [Rollback](#4-rollback-env-only)).
+
+### Activation logic (per refresh)
+
+| Mode | Translation runs when… |
+| --- | --- |
+| `off` | never (English-only pass-through) |
+| `on` | always (forces translation attempt) |
+| `auto` (default) | only when matched evidence has non-English `lang` |
+
+Legacy precedence: `TEMPO_TRANSLATION_ENABLED` (if set) overrides mode
+(`true/1` => `on`, `false/0` => `off`).
+
+## Dependency: items must carry `lang` (manifest-driven)
+
+`auto` activation depends on item language metadata:
+
+1. Feed manifest rows identify Spanish feeds (`lang: "es"`), including DB-backed
+   manifest IDs in `feed-manifest-repo.mjs`.
+2. Ingestion propagates feed language to items (`feed-reader.mjs`), and cache-hit
+   reconstruction preserves it (`recent-items-cache.mjs`).
+3. Pipeline sees `item.lang="es"` and activates translation in `auto`.
+
+If a Spanish feed lacks `lang`, `auto` will not trigger for it.
 
 ## What is wired
 
@@ -27,34 +50,38 @@ translate. **Rollback is env-only** — a single flag, no code change (see [Roll
 
 | Decision | Value |
 | --- | --- |
-| Rollout | preview **and** production enabled now (controlled monitoring) |
+| Activation | `TEMPO_TRANSLATION_MODE=auto` (default) |
 | Provider / model | OpenAI small/cheap (`gpt-4o-mini` default) |
-| Enable flag (both envs) | `TEMPO_TRANSLATION_ENABLED=true` |
+| Mode var | `TEMPO_TRANSLATION_MODE=auto\|on\|off` (legacy `TEMPO_TRANSLATION_ENABLED` overrides) |
 | Failure posture | fail-open (untranslated passthrough; never blocks a refresh) |
 | Guardrails | monitor `[pipeline.translation]` + refresh diagnostics per checklist below |
-| Rollback | env-only (no code change), applied on redeploy/restart: `TEMPO_TRANSLATION_ENABLED=false` |
+| Rollback | env-only (no code change), applied on redeploy/restart: `TEMPO_TRANSLATION_MODE=off` |
 
-## No-op safety
+## No-op safety + degradation diagnostics
 
 Even with the flag on, the stage stays a pass-through (zero behavior change)
 whenever **any** of:
 
-- `TEMPO_TRANSLATION_ENABLED` is unset/false (the stage's own gate), or
+- mode is `off`, or
+- mode is `auto` and no non-English items are present, or
 - `resolveProductionTranslateFn()` returns `null` — i.e. `TEMPO_AI_MOCK_ONLY=true`
   or no `TEMPO_OPENAI_API_KEY`, or
-- there are no non-English (`lang != en*`) items in the pool.
 
 So a missing key or mock-only box behaves like translation-off rather than
 failing a refresh.
+
+When translation is needed but unavailable, `_meta.translation` reports:
+`required`, `unavailable`, `unavailableReason`, and `recallRisk`.
 
 ## Operator steps
 
 ### 1. Activation (preview + production)
 
-In **both** the preview and production environments:
+In both preview and production environments:
 
 ```
-TEMPO_TRANSLATION_ENABLED=true
+# TEMPO_TRANSLATION_MODE=auto
+# TEMPO_TRANSLATION_ENABLED=        # leave unset unless intentionally overriding
 TEMPO_OPENAI_API_KEY=<key>          # already set if Whisper/embeddings live
 # TEMPO_TRANSLATION_MODEL=gpt-4o-mini    # optional override (default)
 # TEMPO_TRANSLATION_CONCURRENCY=4        # optional; default 4, clamped 1–8
@@ -68,9 +95,9 @@ Redeploy (or restart) each environment and trigger a refresh.
 Read the `[pipeline.translation]` log line on a refresh. With Spanish feeds
 active you should see real activity:
 
-- **Flag is live** — confirm `enabled=true`:
+- **Mode is live** — confirm `mode=auto` (or `on`) and `enabled=true` on ES runs:
   ```
-  grep "\[pipeline.translation\]" <logs> | grep "enabled=true"
+  grep "\[pipeline.translation\]" <logs> | grep -E "mode=(auto|on)"
   ```
 - **Meaningful translated activity on Spanish items** — when `lang=es` items
   are present, confirm `needed>0` and `translated>0`:
@@ -128,11 +155,11 @@ Translation is considered healthy in an environment when ALL hold:
 
 ### 4. Rollback (env-only)
 
-Env-only rollback (no code change): flip the flag in the affected environment,
+Env-only rollback (no code change): set mode to off in the affected environment,
 then redeploy/restart that environment so the new setting is applied:
 
 ```
-TEMPO_TRANSLATION_ENABLED=false
+TEMPO_TRANSLATION_MODE=off
 ```
 
 The stage reverts to a no-op pass-through (English-only posture) on the next

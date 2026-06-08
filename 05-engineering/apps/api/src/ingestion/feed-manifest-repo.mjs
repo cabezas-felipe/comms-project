@@ -1,5 +1,20 @@
 import { derivePublisherFromFeedName } from "./publisher-from-feed-name.mjs";
 
+// Known Spanish-language feeds in the DB manifest. The `source_feed_mapping`
+// table carries no language column, so we tag these by their stable
+// `manifest_feed_id` here — mirroring the file manifest's `"lang":"es"` rows —
+// so the ingestion path emits `item.lang="es"` and `TEMPO_TRANSLATION_MODE=auto`
+// activates translation for Semana / Infobae / La Silla. Any feed NOT in this
+// set is left untagged (no fabricated language → treated as English).
+const SPANISH_MANIFEST_FEED_IDS = new Set([
+  "semana-politica",
+  "semana-nacion",
+  "semana-estados-unidos",
+  "infobae-colombia",
+  "infobae-estados-unidos",
+  "silla-nacional",
+]);
+
 /**
  * DB-backed manifest reader for ingestion feeds.
  *
@@ -68,6 +83,9 @@ export async function listIngestionFeeds({ supabase }) {
           : derivePublisherFromFeedName(sectionName);
       if (derived) feed.publisher = derived;
     }
+    // Manifest-driven language tag for known Spanish feeds (see set above).
+    // Only set when matched — other feeds stay `lang`-less (English default).
+    if (SPANISH_MANIFEST_FEED_IDS.has(id)) feed.lang = "es";
     feeds.push(feed);
   }
 

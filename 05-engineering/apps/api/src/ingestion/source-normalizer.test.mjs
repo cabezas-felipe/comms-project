@@ -56,6 +56,20 @@ test("normalizeSourceItem defaults optional fields when absent", () => {
   assert.equal(item.byline, undefined);
 });
 
+test("normalizeSourceItem preserves a feed-supplied lang (e.g. Spanish feeds → es)", () => {
+  const item = normalizeSourceItem({ ...MINIMAL_VALID, lang: "es" });
+  assert.equal(item.lang, "es", "lang must survive normalization for translation auto-activation");
+
+  const trimmed = normalizeSourceItem({ ...MINIMAL_VALID, lang: "  es-CO  " });
+  assert.equal(trimmed.lang, "es-CO", "lang is trimmed");
+});
+
+test("normalizeSourceItem leaves lang undefined when absent or blank (no fabrication)", () => {
+  assert.equal(normalizeSourceItem(MINIMAL_VALID).lang, undefined);
+  assert.equal(normalizeSourceItem({ ...MINIMAL_VALID, lang: "   " }).lang, undefined);
+  assert.equal(normalizeSourceItem({ ...MINIMAL_VALID, lang: null }).lang, undefined);
+});
+
 test("normalizeSourceItem defaults clusterId to provisional:${sourceId} when omitted", () => {
   const { clusterId: _omit, ...rest } = MINIMAL_VALID;
   const item = normalizeSourceItem(rest);

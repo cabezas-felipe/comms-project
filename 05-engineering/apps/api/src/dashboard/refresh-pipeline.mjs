@@ -45,10 +45,14 @@ import {
 } from "../ingestion/embedding-recall.mjs";
 import {
   TRANSLATION_COVERAGE_THRESHOLD,
+  TRANSLATION_MODE,
   computeStoryCoverage,
+  computeTranslationActivation,
+  isNonEnglishItem,
   readBodyText,
   readHeadline,
   resolveTranslationConfig,
+  resolveTranslationMode,
   translateEvidenceItems,
 } from "../ingestion/evidence-translator.mjs";
 import {
@@ -1217,6 +1221,16 @@ function joinGeoText(item) {
   return `${headline} ${subtitle} ${body} ${url}`.trim();
 }
 
+function joinOriginalText(item) {
+  const headline = typeof item?.headline === "string" ? item.headline : "";
+  const body = Array.isArray(item?.body)
+    ? item.body.map((s) => String(s ?? "")).join(" ")
+    : typeof item?.body === "string"
+      ? item.body
+      : "";
+  return `${headline} ${body}`.trim();
+}
+
 /**
  * Recall lexical gate: an item passes if it matches ANY configured lexical
  * signal (logical OR) — topic, keyword, OR a configured geography mentioned in
@@ -1314,6 +1328,7 @@ export function analyzeTopicKeywordStage(items, settings) {
     neither: 0,
     passNoConfig: 0,
     passCount: 0,
+    keywordViaTranslatedCount: 0,
     primaryDropCause: null,
   };
 
@@ -1332,6 +1347,13 @@ export function analyzeTopicKeywordStage(items, settings) {
       // evidence when present so the diagnostic breakdown matches the filter.
       const text = readHeadline(item) + " " + readBodyText(item);
       keywordMatch = keywordRegex.test(text);
+      if (
+        keywordMatch &&
+        item?._translation?.applied === true &&
+        !keywordRegex.test(joinOriginalText(item))
+      ) {
+        breakdown.keywordViaTranslatedCount++;
+      }
     }
     const geoMatch =
       hasGeographies && !!itemMentionsConfiguredGeography(joinGeoText(item), geographies);
@@ -2318,15 +2340,55 @@ export async function runRefreshPipeline({
   //     production runs are no-ops until an operator wires `translateFn` and
   //     enables the stage.
   const effectiveTranslationConfig = translationConfig ?? resolveTranslationConfig();
+  const nonEnglishPresent = (geoPassedItems ?? []).some(isNonEnglishItem);
+  const VALID_MODES = new Set([TRANSLATION_MODE.AUTO, TRANSLATION_MODE.ON, TRANSLATION_MODE.OFF]);
+  let translationMode;
+  const injectedMode = effectiveTranslationConfig?.mode;
+  if (typeof injectedMode === "string") {
+    const normalized = injectedMode.trim().toLowerCase();
+    translationMode = VALID_MODES.has(normalized) ? normalized : TRANSLATION_MODE.AUTO;
+  } else if (typeof effectiveTranslationConfig?.enabled === "boolean") {
+    translationMode = effectiveTranslationConfig.enabled ? TRANSLATION_MODE.ON : TRANSLATION_MODE.OFF;
+  } else {
+    translationMode = resolveTranslationMode();
+  }
+  const translationMockOnly =
+    String(process.env.TEMPO_AI_MOCK_ONLY ?? "").trim().toLowerCase() === "true";
+  const translationHasApiKey = Boolean(
+    process.env.TEMPO_OPENAI_API_KEY || process.env.OPENAI_API_KEY
+  );
+  const translationActivation = computeTranslationActivation({
+    mode: translationMode,
+    nonEnglishPresent,
+    hasTranslateFn: typeof translateFn === "function",
+    mockOnly: translationMockOnly,
+    hasApiKey: translationHasApiKey,
+  });
+  const translationShouldRun = translationActivation.shouldRun;
   const translationStartedAt = Date.now();
-  const { items: translatedGeoItems, diagnostics: translationStageDiagnostics } =
+  const { items: translatedGeoItems, diagnostics: rawTranslationDiagnostics } =
     await translateEvidenceItems({
       items: geoPassedItems,
       translateFn,
-      config: effectiveTranslationConfig,
+      config: { ...effectiveTranslationConfig, enabled: translationShouldRun },
       cache: translationCache ?? undefined,
     });
   const translationMs = Math.max(0, Date.now() - translationStartedAt);
+  const translationStageDiagnostics = {
+    ...rawTranslationDiagnostics,
+    mode: translationActivation.mode,
+    required: translationActivation.required,
+    unavailable: translationActivation.unavailable,
+    unavailableReason: translationActivation.unavailableReason,
+    recallRisk: translationActivation.recallRisk,
+  };
+  console.log(
+    `[pipeline.translation] mode=${translationActivation.mode}` +
+      ` required=${translationActivation.required}` +
+      ` unavailable=${translationActivation.unavailable}` +
+      ` reason=${translationActivation.unavailableReason ?? "none"}` +
+      ` recall_risk=${translationActivation.recallRisk}`
+  );
   console.log(
     `[pipeline.translation] version=${translationStageDiagnostics.version}` +
       ` enabled=${translationStageDiagnostics.enabled}` +
@@ -2410,6 +2472,7 @@ export async function runRefreshPipeline({
       ` geoLexicalOnly=${topicKeywordBreakdown.geoLexicalOnly}` +
       ` neither=${topicKeywordBreakdown.neither}` +
       ` pass=${topicKeywordBreakdown.passCount}` +
+      ` keywordViaTranslated=${topicKeywordBreakdown.keywordViaTranslatedCount}` +
       ` hasTopics=${topicKeywordBreakdown.hasTopics}` +
       ` hasKeywords=${topicKeywordBreakdown.hasKeywords}` +
       (topicKeywordBreakdown.primaryDropCause

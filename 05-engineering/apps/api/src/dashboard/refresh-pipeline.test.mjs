@@ -4951,6 +4951,170 @@ function captureClusterFn(capture, limit = null) {
   };
 }
 
+const TRANSLATION_KNOBS = { concurrency: 4, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 };
+const ELECTION_PERSONA = {
+  contractVersion: "2026-05-19-meta-story-fields",
+  topics: [],
+  keywords: ["elections"],
+  geographies: ["Colombia"],
+  traditionalSources: ["Semana"],
+  socialSources: [],
+};
+
+const electionTranslateFn = (segments) =>
+  Promise.resolve(
+    segments.map((s) =>
+      String(s ?? "").replace(
+        /elecciones|electoral|comicios|presidenciales|votación|sondeo/gi,
+        "elections"
+      )
+    )
+  );
+
+test("runRefreshPipeline (translation): mode=off drops ES recall; mode=auto recovers when lang is present", async () => {
+  const rawItems = [
+    makeItem({
+      sourceId: "es-1",
+      outlet: "Semana",
+      lang: "es",
+      topic: "",
+      geographies: [],
+      headline: "Las elecciones regionales se acercan",
+      body: ["Los candidatos cierran sus campañas antes de las elecciones."],
+    }),
+    makeItem({
+      sourceId: "es-2",
+      outlet: "Semana",
+      lang: "es",
+      topic: "",
+      geographies: [],
+      headline: "El sondeo electoral muestra un empate técnico",
+      body: ["La votación podría definirse en segunda vuelta."],
+    }),
+  ];
+
+  const offCapture = { input: null };
+  await runRefreshPipeline({
+    settings: ELECTION_PERSONA,
+    rawItems,
+    clusterFn: captureClusterFn(offCapture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAdmissionMode: "soft",
+    beatFitEnabled: false,
+    translateFn: electionTranslateFn,
+    translationConfig: { mode: "off", ...TRANSLATION_KNOBS },
+  });
+  assert.deepEqual((offCapture.input ?? []).map((i) => i.sourceId), [], "off mode drops the ES items at recall");
+
+  const autoCapture = { input: null };
+  const { log } = await runRefreshPipeline({
+    settings: ELECTION_PERSONA,
+    rawItems,
+    clusterFn: captureClusterFn(autoCapture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAdmissionMode: "soft",
+    beatFitEnabled: false,
+    translateFn: electionTranslateFn,
+    translationConfig: { mode: "auto", ...TRANSLATION_KNOBS },
+  });
+  assert.equal(log.translation.mode, "auto");
+  assert.equal(log.translation.required, true, "propagated lang made nonEnglishPresent true");
+  assert.equal(log.translation.enabled, true, "auto activated on ES feeds");
+  assert.equal(log.translation.recallRisk, false);
+  assert.equal(log.translation.translatedCount, 2);
+  assert.equal((autoCapture.input ?? []).length, 2, "both ES items clear recall and reach clustering");
+});
+
+const ES_ELECTION_RECALL = { mode: "keyword", embedTopK: 5, embedMaxItems: 100, embeddingModel: "text-embedding-3-small" };
+const ES_VARIANT_DICT = [
+  [/elecciones|electoral(es)?|comicios|presidencial(es)?|votaci[oó]n|sondeo|encuestas?/gi, "elections"],
+  [/econom[ií]a|econ[oó]mic[oa]s?|fiscal|inflaci[oó]n|crecimiento/gi, "economy"],
+];
+const variantTranslateFn = (segments) =>
+  Promise.resolve(segments.map((s) => ES_VARIANT_DICT.reduce((a, [re, en]) => a.replace(re, en), String(s ?? ""))));
+
+const SEMANA_ELECTION_PERSONA = {
+  contractVersion: "2026-05-19-meta-story-fields",
+  topics: [],
+  keywords: ["elections", "economy"],
+  geographies: ["Colombia"],
+  traditionalSources: ["Semana"],
+  socialSources: [],
+};
+
+function semanaElectionItems() {
+  const rows = [
+    ["sem-1", "Las elecciones regionales se acercan", "Los candidatos cierran sus campañas antes de las elecciones."],
+    ["sem-2", "La campaña electoral entra en su recta final", "El debate electoral domina la conversación."],
+    ["sem-3", "Los comicios presidenciales definirán el rumbo del país", "Crece la expectativa por los comicios."],
+    ["sem-4", "La economía nacional crece pese a la inflación", "Analistas revisan sus pronósticos sobre la economía."],
+    ["sem-5", "Debate económico domina la agenda legislativa", "El plan económico genera polémica."],
+    ["sem-6", "Resultados de la votación regional sorprenden", "La votación tuvo alta participación."],
+    ["sem-7", "El candidato lidera las encuestas presidenciales", "Las encuestas presidenciales se ajustan."],
+    ["sem-8", "Reforma fiscal y crecimiento económico en debate", "El crecimiento económico preocupa al gobierno."],
+    ["sem-9", "Un nuevo sondeo electoral muestra empate técnico", "El sondeo electoral cambia el panorama."],
+  ];
+  return rows.map(([sourceId, headline, body]) =>
+    makeItem({ sourceId, outlet: "Semana", url: `https://semana.example.com/${sourceId}`, weight: 70, minutesAgo: 20, lang: "es", topic: "", geographies: [], headline, body: [body] })
+  );
+}
+
+async function runSemanaRecall(mode) {
+  const capture = { input: null };
+  const { log } = await runRefreshPipeline({
+    settings: SEMANA_ELECTION_PERSONA,
+    rawItems: semanaElectionItems(),
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAdmissionMode: "soft",
+    beatFitEnabled: false,
+    recallConfig: ES_ELECTION_RECALL,
+    translateFn: variantTranslateFn,
+    translationConfig: { mode, concurrency: 4, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 },
+  });
+  return { reached: (capture.input ?? []).length, breakdown: log.recall.topicKeywordBreakdown };
+}
+
+test("runRefreshPipeline (translation): Spanish election recall — off drops, auto+translator materially recovers (>>+1)", async () => {
+  const off = await runSemanaRecall("off");
+  const auto = await runSemanaRecall("auto");
+
+  assert.equal(off.breakdown.inputCount, 9, "all nine ES items are candidates");
+  assert.equal(off.breakdown.passCount, 0, "off mode drops every ES election item at recall");
+  assert.equal(off.reached, 0);
+
+  assert.equal(auto.breakdown.passCount, 9, "auto recovers all nine via translated normalized recall");
+  assert.equal(auto.reached, 9, "all nine reach clustering input");
+  assert.equal(auto.breakdown.keywordViaTranslatedCount, 9);
+
+  const delta = auto.breakdown.passCount - off.breakdown.passCount;
+  assert.ok(delta >= 8, `expected a material recall gain, got delta=${delta}`);
+});
+
+test("runRefreshPipeline (translation): keywordViaTranslatedCount stays 0 for English-native items (additive, no false attribution)", async () => {
+  const capture = { input: null };
+  const rawItems = [
+    makeItem({ sourceId: "en-1", outlet: "Semana", topic: "", geographies: [], headline: "Colombia elections heat up", body: ["The economy dominates the campaign."] }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: SEMANA_ELECTION_PERSONA,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAdmissionMode: "soft",
+    beatFitEnabled: false,
+    recallConfig: ES_ELECTION_RECALL,
+    translateFn: variantTranslateFn,
+    translationConfig: { mode: "auto", concurrency: 4, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 },
+  });
+  assert.equal(log.recall.topicKeywordBreakdown.passCount, 1, "English item passes on its own text");
+  assert.equal(log.recall.topicKeywordBreakdown.keywordViaTranslatedCount, 0, "no translation credit for English-native recall");
+});
+
 test("cross-feed dedupe: canonical URL + exact headline + time within window collapses to one cluster input", async () => {
   // Same article surfaces from two different feeds (Washington Post —
   // National + Washington Post — World).  feed-reader hashes feedId into
