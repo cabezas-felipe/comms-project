@@ -15,16 +15,27 @@ deferred re-cluster, **C** = diagnostics + tests.
 
 ## 1. Pre-flight checklist
 
-0. **Preferred: one-command E2E prep (strict identity + reset + gates)**:
-   ```bash
-   cd 05-engineering
-   npm run e2e:prepare-user -- --user-id <userId> --email <email>
-   ```
-   This runs `dev:api:clean` (with `TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` and
-   `TEMPO_E2E_STRICT_IDENTITY=true`), then `e2e:reset-user`,
-   `e2e:assert-clean`, and `e2e:preflight` (`--require-web`,
-   `--require-strict-identity`, `--require-web-identity-override`,
-   `--identity-email <email>`). If any gate fails, stop and fix before testing.
+### Happy path — one-command E2E prep (strict identity + reset + gates)
+
+```bash
+cd 05-engineering
+npm run e2e:prepare-user -- --user-id <userId> --email <email>
+```
+
+This is the primary path for a clean E2E run. It starts the API watcher and web
+dev server in the background, then runs `dev:api:clean` (with
+`TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` and `TEMPO_E2E_STRICT_IDENTITY=true`),
+`e2e:reset-user`, `e2e:assert-clean`, and `e2e:preflight` (`--require-web`,
+`--require-strict-identity`, `--require-web-identity-override`,
+`--identity-email <email>`). If any gate fails, stop and fix before testing.
+
+After this passes, jump to §2 — the steps below are only needed as a fallback.
+
+### Manual fallback
+
+Use the numbered steps below only if the one-command prep is unavailable or you
+need to run a single step in isolation; they are the manual equivalents of what
+`e2e:prepare-user` automates.
 
 1. **Start both servers** from `05-engineering/`:
    ```bash
@@ -89,6 +100,13 @@ deferred re-cluster, **C** = diagnostics + tests.
    - Mock-only / no-key → translation is a no-op; ES stories stay Spanish. This is
      **expected — not a clustering or split-healer regression** (the items simply
      passed through untranslated).
+
+> **Known current limitation — Spanish election lexical recall.** Recall for
+> Spanish election terms still depends on the translation stage being live: with
+> translation off / mock-only / no key, Spanish-only election items can be missed
+> because the keyword filter matches on normalized English evidence. Direct
+> Spanish-lexeme recall (matching e.g. `elecciones` without translation) is not
+> yet implemented — track expectations accordingly when reviewing an ES run.
 
 ---
 
