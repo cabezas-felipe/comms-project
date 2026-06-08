@@ -6,6 +6,7 @@ import {
 } from "@tempo/contracts";
 import { supabase } from "./supabase";
 import { getProtoSession } from "./auth";
+import { isE2EIdentityOverrideEnabled } from "./e2e-identity";
 
 export interface DashboardFetchResult {
   payload: DashboardPayload;
@@ -418,9 +419,18 @@ function parseReclusterExecutionMetaSafe(raw: unknown): DashboardReclusterExecut
   };
 }
 
-// Mirrors server-side resolver precedence: bearer > email_recognition.
-// Not production auth for the email path — prototype identity layer only.
+// Identity precedence (default = production-safe): a valid Bearer session wins;
+// the prototype `x-recognized-email` header is only a fallback when Bearer is
+// absent/unusable. The recognized-email-over-Bearer ordering is gated behind the
+// E2E-only `VITE_E2E_IDENTITY_PRECEDENCE=recognized_email` override (see
+// `isE2EIdentityOverrideEnabled`) so a stale persisted Supabase token can't
+// shadow a recognized-user e2e run. Email path is prototype identity only.
 async function buildIdentityHeaders(): Promise<Record<string, string>> {
+  const proto = getProtoSession();
+  // E2E-only override: recognized-email beats Bearer.
+  if (proto && isE2EIdentityOverrideEnabled()) {
+    return { "x-recognized-email": proto.email };
+  }
   try {
     const { data } = await supabase.auth.getSession();
     const token = data.session?.access_token;
@@ -438,7 +448,7 @@ async function buildIdentityHeaders(): Promise<Record<string, string>> {
       }
     }
   } catch { /* supabase not configured */ }
-  const proto = getProtoSession();
+  // Bearer absent/unusable → fall back to the prototype recognized identity.
   if (proto) return { "x-recognized-email": proto.email };
   return {};
 }

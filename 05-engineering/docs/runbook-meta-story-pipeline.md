@@ -15,6 +15,17 @@ deferred re-cluster, **C** = diagnostics + tests.
 
 ## 1. Pre-flight checklist
 
+0. **Preferred: one-command E2E prep (strict identity + reset + gates)**:
+   ```bash
+   cd 05-engineering
+   npm run e2e:prepare-user -- --user-id <userId> --email <email>
+   ```
+   This runs `dev:api:clean` (with `TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` and
+   `TEMPO_E2E_STRICT_IDENTITY=true`), then `e2e:reset-user`,
+   `e2e:assert-clean`, and `e2e:preflight` (`--require-web`,
+   `--require-strict-identity`, `--require-web-identity-override`,
+   `--identity-email <email>`). If any gate fails, stop and fix before testing.
+
 1. **Start both servers** from `05-engineering/`:
    ```bash
    npm run dev          # build:packages, then concurrently dev:api + dev:web
@@ -58,6 +69,8 @@ deferred re-cluster, **C** = diagnostics + tests.
      .filter((k) => k.startsWith("tempo.settings.v1"))
      .forEach((k) => localStorage.removeItem(k));     // settings cache (global + per-user)
    ```
+   For E2E identity routing, run the web app with:
+   `VITE_E2E_IDENTITY_PRECEDENCE=recognized_email`.
 5. **Local English E2E** — for a landing → dashboard run that turns the Spanish
    feeds into **English** stories, the translation stage must be live (it is a
    fail-open no-op otherwise — see [`.env.example`](../apps/api/.env.example)

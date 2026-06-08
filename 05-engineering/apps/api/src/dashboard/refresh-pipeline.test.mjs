@@ -2767,6 +2767,79 @@ test("runRefreshPipeline: priorWatermark match → short-circuit, payload null, 
   assert.equal(clusterCalls, 1, "clusterFn must NOT be invoked under short-circuit");
 });
 
+test("runRefreshPipeline: forceFullRefresh bypasses watermark short-circuit (E2E) and stamps log.e2e", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] };
+
+  // First run computes the watermark.
+  let clusterCalls = 0;
+  const first = await runRefreshPipeline({
+    settings,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  const wm = first.log.watermark;
+  assert.equal(clusterCalls, 1);
+  // Normal run reports the e2e signal as inert.
+  assert.deepEqual(first.log.e2e, { forceFirstFullRefreshApplied: false, watermarkBypassed: false });
+
+  // Same inputs + matching priorWatermark, but forceFullRefresh=true → the
+  // short-circuit is bypassed and the full pipeline runs (clusterFn invoked).
+  const forced = await runRefreshPipeline({
+    settings,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    priorWatermark: wm,
+    forceFullRefresh: true,
+  });
+  assert.notEqual(forced.payload, null, "forced run must produce a payload, not a skip");
+  assert.equal(forced.log.unchanged, false);
+  assert.equal(clusterCalls, 2, "clusterFn runs again under forceFullRefresh");
+  assert.equal(forced.log.e2e.forceFirstFullRefreshApplied, true);
+  assert.equal(forced.log.e2e.watermarkBypassed, true, "watermark matched but was bypassed");
+});
+
+test("runRefreshPipeline: forceFullRefresh=false preserves watermark short-circuit (default unchanged)", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] };
+
+  let clusterCalls = 0;
+  const first = await runRefreshPipeline({
+    settings, rawItems, manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  const wm = first.log.watermark;
+
+  // Explicit forceFullRefresh:false + matching watermark → still short-circuits.
+  const second = await runRefreshPipeline({
+    settings, rawItems, manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    priorWatermark: wm,
+    forceFullRefresh: false,
+  });
+  assert.equal(second.payload, null, "skip still happens when not forcing");
+  assert.equal(second.log.unchanged, true);
+  assert.equal(clusterCalls, 1, "clusterFn must NOT run under the preserved short-circuit");
+  // Skip path reports the e2e signal with shape parity (override not applied).
+  assert.deepEqual(second.log.e2e, { forceFirstFullRefreshApplied: false, watermarkBypassed: false });
+});
+
 test("runRefreshPipeline: priorWatermark mismatch → full run executes (cluster invoked)", async () => {
   const manifestFeeds = [
     { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },

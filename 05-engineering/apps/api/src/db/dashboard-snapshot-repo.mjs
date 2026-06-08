@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONTRACT_VERSION } from "../contracts-runtime/index.mjs";
+import { mapIngestionKindToContractKind } from "../ingestion/source-kind.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./client.mjs";
 
 /** Dashboard contract versions we lift to `CONTRACT_VERSION` on read. */
@@ -82,12 +83,29 @@ function migrateLegacyTakeaway(story) {
   return { ...rest, subtitle };
 }
 
+function normalizeStorySources(sources) {
+  if (!Array.isArray(sources)) return [];
+  return sources.map((source) => {
+    if (!source || typeof source !== "object") return source;
+    return {
+      ...source,
+      // Read-boundary guard: tolerate legacy/polluted rows that persisted
+      // ingestion kinds (e.g. "rss") and coerce back to contract-safe values.
+      kind: mapIngestionKindToContractKind(source.kind),
+    };
+  });
+}
+
 function normalizeStoriesForLoad(stories) {
   if (!Array.isArray(stories)) return [];
   return stories.map((s) => {
     if (!s || typeof s !== "object") return s;
     const migrated = migrateLegacyTakeaway(s);
-    return { ...migrated, tags: normalizeStoryTags(migrated.tags) };
+    return {
+      ...migrated,
+      tags: normalizeStoryTags(migrated.tags),
+      sources: normalizeStorySources(migrated.sources),
+    };
   });
 }
 
@@ -179,6 +197,13 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // Optional for back-compat with snapshots written before Slice 3.
     if (_lastRunMeta.outcomes !== undefined) meta.outcomes = _lastRunMeta.outcomes;
     if (_lastRunMeta.ingestionSource !== undefined) meta.ingestionSource = _lastRunMeta.ingestionSource;
+    // E2E determinism marker. `_lastRunMeta` itself is stripped at this read
+    // boundary, so the "first forced full refresh already happened" marker must
+    // be lifted into `_meta` to survive into the next refresh's prior-snapshot
+    // read. Without this lift the executor's check is always undefined and
+    // `forceFullRefresh` would (incorrectly) stay true on every run. Optional —
+    // absent on snapshots written before the E2E force flag existed.
+    if (_lastRunMeta.e2e !== undefined) meta.e2e = _lastRunMeta.e2e;
   }
   // `_everSeenMetaStoryIds` (what-changed history set) and
   // `_whyItMattersTraces` (why-this-matters trace map) pass through via

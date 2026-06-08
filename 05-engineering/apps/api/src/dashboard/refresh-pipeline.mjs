@@ -1804,6 +1804,12 @@ export async function runRefreshPipeline({
   writeRejectionsFn = null,
   priorWatermark = null,
   priorStoryCount = null,
+  // E2E determinism: when true, the watermark short-circuit is bypassed for this
+  // run so the full clustering/grounding pipeline always executes (no skip even
+  // on an unchanged watermark). Additive — default false leaves the optimization
+  // untouched. The caller (server) decides when this applies (first load after
+  // reset for the recognized E2E user); the pipeline only honors the flag.
+  forceFullRefresh = false,
   beatFitEnabled = true,
   embedFn = null,
   recallConfig = null,
@@ -2685,9 +2691,16 @@ export async function runRefreshPipeline({
   const watermarkMatched = watermarksMatch(priorWatermark, watermarkInfo.watermark);
   const priorWasEmpty =
     typeof priorStoryCount === "number" && priorStoryCount === 0;
+  // E2E override: forcing a full refresh suppresses the short-circuit on this run
+  // regardless of watermark match, so the full pipeline always executes.
+  const watermarkBypassedForE2e = Boolean(forceFullRefresh) && watermarkMatched;
   const watermarkSuppressed =
-    watermarkMatched && priorWasEmpty && dedupedItems.length > 0;
-  if (watermarkSuppressed) {
+    watermarkMatched && (watermarkBypassedForE2e || (priorWasEmpty && dedupedItems.length > 0));
+  if (watermarkBypassedForE2e) {
+    console.log(
+      `[pipeline.watermark] match bypassed (${watermarkInfo.watermark}) — forceFullRefresh (E2E) requested; running full pipeline`
+    );
+  } else if (watermarkSuppressed) {
     console.log(
       `[pipeline.watermark] match suppressed (${watermarkInfo.watermark}) — prior snapshot was empty AND ${dedupedItems.length} candidate(s) ready; re-running clustering rather than serving stale empty`
     );
@@ -2721,6 +2734,12 @@ export async function runRefreshPipeline({
       log: {
         unchanged: true,
         refreshSkippedReason: "unchanged_watermark",
+        // E2E shape parity: on the skip path the override was not applied (a
+        // requested forceFullRefresh would have bypassed this branch entirely).
+        e2e: {
+          forceFirstFullRefreshApplied: Boolean(forceFullRefresh),
+          watermarkBypassed: false,
+        },
         watermark: watermarkInfo.watermark,
         candidateCount: watermarkInfo.candidateCount,
         selectedFeedCount: watermarkInfo.selectedFeedCount,
@@ -3792,6 +3811,14 @@ export async function runRefreshPipeline({
       ` geoMs=${geoMs} clusterMs=${clusterMs} stories=${stories.length}`
   );
   const log = {
+    // E2E determinism signal (surfaced on `_meta.e2e`). `forceFirstFullRefreshApplied`
+    // = the caller requested a forced full refresh for this run; `watermarkBypassed`
+    // = the watermark matched but the short-circuit was skipped because of that
+    // override. Both false on normal (non-E2E) runs.
+    e2e: {
+      forceFirstFullRefreshApplied: Boolean(forceFullRefresh),
+      watermarkBypassed: watermarkBypassedForE2e,
+    },
     totalItems: normalizedItems.length,
     poolCount: recentItems.length,
     recentCount: recentItems.length,

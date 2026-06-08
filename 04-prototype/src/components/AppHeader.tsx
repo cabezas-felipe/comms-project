@@ -13,9 +13,15 @@ import { isUxTestMode } from "@/lib/ux-test-mode";
 
 type AppHeaderProps = {
   lastRefreshedAt?: string | null;
+  /**
+   * True while a refresh attempt is in flight. When set, the header shows an
+   * explicit "Refreshing…" state instead of the (now stale) last-refresh clock,
+   * then reverts to the settled timestamp once the attempt completes.
+   */
+  isRefreshing?: boolean;
 };
 
-export default function AppHeader({ lastRefreshedAt }: AppHeaderProps = {}) {
+export default function AppHeader({ lastRefreshedAt, isRefreshing = false }: AppHeaderProps = {}) {
   const location = useLocation();
   const navigate = useNavigate();
   const { logout, recognizedIdentity } = useAuth();
@@ -48,8 +54,11 @@ export default function AppHeader({ lastRefreshedAt }: AppHeaderProps = {}) {
           {!isSettings && !isUxTestMode && (
             <div className="hidden text-right md:block">
               <div className="eyebrow leading-none">Last refresh</div>
-              <div className="font-mono text-xs text-foreground">
-                {formatRefreshTimestamp(lastRefreshedAt)}
+              <div className="font-mono text-xs text-foreground" aria-live="polite">
+                {/* While a refresh is in flight, never show the prior (stale)
+                    clock — surface an explicit in-progress state instead, then
+                    revert to the settled timestamp on completion. */}
+                {isRefreshing ? "Refreshing…" : formatRefreshTimestamp(lastRefreshedAt)}
               </div>
             </div>
           )}

@@ -19,6 +19,10 @@ import { refreshDashboard, type DashboardFetchResult } from "./api";
 // (e.g. `tempo_dashboard_last_refresh_attempt_at:<uid>`) before multi-user
 // production rollout.
 export const LAST_REFRESH_ATTEMPT_KEY = "tempo_dashboard_last_refresh_attempt_at";
+export function lastRefreshAttemptKeyForUser(userId: string | null | undefined): string {
+  const id = typeof userId === "string" ? userId.trim() : "";
+  return id.length > 0 ? `${LAST_REFRESH_ATTEMPT_KEY}:${id}` : LAST_REFRESH_ATTEMPT_KEY;
+}
 // Re-exported from @tempo/contracts so prototype callers keep their existing
 // import path; contracts is the single source of truth for refresh cadence.
 export { REFRESH_INTERVAL_MS };
@@ -32,10 +36,13 @@ function getDefaultStorage(): Storage | null {
   }
 }
 
-export function readLastAttemptAt(storage: Storage | null = getDefaultStorage()): number | null {
+export function readLastAttemptAt(
+  storage: Storage | null = getDefaultStorage(),
+  key: string = LAST_REFRESH_ATTEMPT_KEY
+): number | null {
   if (!storage) return null;
   try {
-    const raw = storage.getItem(LAST_REFRESH_ATTEMPT_KEY);
+    const raw = storage.getItem(key);
     if (!raw) return null;
     const n = Date.parse(raw);
     return Number.isFinite(n) ? n : null;
@@ -46,11 +53,12 @@ export function readLastAttemptAt(storage: Storage | null = getDefaultStorage())
 
 export function writeLastAttemptAt(
   timestamp: number,
-  storage: Storage | null = getDefaultStorage()
+  storage: Storage | null = getDefaultStorage(),
+  key: string = LAST_REFRESH_ATTEMPT_KEY
 ): void {
   if (!storage) return;
   try {
-    storage.setItem(LAST_REFRESH_ATTEMPT_KEY, new Date(timestamp).toISOString());
+    storage.setItem(key, new Date(timestamp).toISOString());
   } catch {
     /* storage blocked / quota */
   }
@@ -86,6 +94,7 @@ export interface RefreshHeartbeatOptions {
   now?: () => number;
   storage?: Storage | null;
   intervalMs?: number;
+  storageKey?: string;
 }
 
 /**
@@ -104,6 +113,7 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
     now = Date.now,
     storage = getDefaultStorage(),
     intervalMs = REFRESH_INTERVAL_MS,
+    storageKey = LAST_REFRESH_ATTEMPT_KEY,
   } = options;
 
   // Pin callbacks/fetcher behind refs so we don't re-run the scheduling effect
@@ -155,7 +165,7 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
       // the in-flight fetch don't double-attempt.  Failure doesn't reset
       // this — we deliberately want a 60-minute pace even after errors.
       const startedAt = nowRef.current();
-      writeLastAttemptAt(startedAt, storageRef.current);
+      writeLastAttemptAt(startedAt, storageRef.current, storageKey);
       // Capture the token (if any) from onAttemptStart so onAttemptComplete
       // can settle the exact slot this tick owns — protects against
       // out-of-order completions when consumers run multiple attempts.
@@ -175,12 +185,12 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
 
     const evaluate = () => {
       if (cancelled) return;
-      const last = readLastAttemptAt(storageRef.current);
+      const last = readLastAttemptAt(storageRef.current, storageKey);
       if (last === null) {
         // Fresh start (no prior attempt recorded).  Treat *now* as the
         // baseline so we don't fire on every cold boot, and schedule the
         // first tick a full interval out.
-        writeLastAttemptAt(nowRef.current(), storageRef.current);
+        writeLastAttemptAt(nowRef.current(), storageRef.current, storageKey);
         schedule(intervalMs);
         return;
       }
@@ -197,7 +207,7 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
     // Cross-tab sync: when another tab writes the timestamp (or the user
     // clears it manually), recompute due-ness.
     const onStorageEvent = (e: StorageEvent) => {
-      if (e.key === LAST_REFRESH_ATTEMPT_KEY) evaluate();
+      if (e.key === storageKey) evaluate();
     };
     if (typeof window !== "undefined") {
       window.addEventListener("storage", onStorageEvent);
@@ -210,5 +220,5 @@ export function useRefreshHeartbeat(options: RefreshHeartbeatOptions): void {
         window.removeEventListener("storage", onStorageEvent);
       }
     };
-  }, [enabled, intervalMs]);
+  }, [enabled, intervalMs, storageKey]);
 }
