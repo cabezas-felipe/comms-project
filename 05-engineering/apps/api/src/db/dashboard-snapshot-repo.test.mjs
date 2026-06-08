@@ -168,6 +168,43 @@ test("readSnapshot: non-object story.tags coerces to empty three-axis shape", as
   assert.deepEqual(result.stories[0].tags, { topics: [], keywords: [], geographies: [] });
 });
 
+test("readSnapshot: legacy source kind 'rss' is coerced to contract kind 'traditional'", async () => {
+  const userId = "legacy-rss-kind-user";
+  const legacyPayload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [
+      {
+        id: "legacy-rss-1",
+        title: "Legacy RSS Story",
+        subtitle: "Sub.",
+        geographies: ["US"],
+        summary: "S",
+        whyItMatters: "W",
+        whatChanged: "C",
+        priority: "standard",
+        outletCount: 1,
+        tags: { topics: [], keywords: [], geographies: [] },
+        sources: [
+          {
+            id: "src-1",
+            outlet: "Semana",
+            kind: "rss",
+            weight: 50,
+            url: "https://example.com/story",
+            minutesAgo: 10,
+            headline: "Headline",
+            body: ["Body."],
+          },
+        ],
+      },
+    ],
+  };
+  await writeSnapshot(userId, legacyPayload);
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result.stories[0].sources[0].kind, "traditional");
+});
+
 // ─── Meta-story fields PR (Prompt 1): legacy takeaway → subtitle adapter ─────
 
 test("readSnapshot: legacy snapshot with `takeaway` and no `subtitle` lifts takeaway into subtitle on load", async () => {
@@ -260,6 +297,35 @@ test("readSnapshot: result includes _meta.hasSnapshot = true", async () => {
   assert.ok(result !== null);
   assert.equal(result._meta?.hasSnapshot, true);
   assert.ok(typeof result._meta?.refreshedAt === "string");
+});
+
+test("readSnapshot: lifts persisted _lastRunMeta.e2e into _meta.e2e (E2E first-run marker survives read)", async () => {
+  // The executor reads the E2E "already forced" marker off `_meta.e2e`; the raw
+  // `_lastRunMeta` is stripped at the read boundary. This proves the marker the
+  // server persists on `_lastRunMeta.e2e` is lifted to `_meta.e2e` on read so the
+  // first-run-only force resolves correctly in real runtime (HIGH-1 fix).
+  const userId = "e2e-marker-lift-user";
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: {
+      clusterModel: "mock",
+      e2e: { forceFirstFullRefreshApplied: true, watermarkBypassed: true },
+    },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta?.e2e?.forceFirstFullRefreshApplied, true);
+  assert.equal(result._meta?.e2e?.watermarkBypassed, true);
+  // Raw _lastRunMeta must NOT survive the read boundary.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot: omits _meta.e2e when the snapshot carries no e2e marker", async () => {
+  const userId = "e2e-marker-absent-user";
+  await writeSnapshot(userId, { ...SAMPLE_PAYLOAD, _lastRunMeta: { clusterModel: "mock" } });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta?.e2e, undefined);
 });
 
 test("writeSnapshot: overwrites existing snapshot on second call", async () => {

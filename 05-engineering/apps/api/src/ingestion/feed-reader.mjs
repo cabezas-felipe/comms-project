@@ -712,6 +712,15 @@ export function mapEntry(feed, entry, fetchedAt = Date.now()) {
     // that an outlet-name string match would miss.  Empty string when the
     // manifest row had no id (defensive — every row should have one).
     feedId: String(feed.id ?? ""),
+    // Feed-level language tag (manifest-driven; Spanish feeds carry
+    // `"lang":"es"`). Propagated onto the item so the translation-first stage
+    // can distinguish non-English evidence and so
+    // `TEMPO_TRANSLATION_MODE=auto` activates when those feeds are matched.
+    // Feeds with no declared language stay absent (→ undefined → treated as
+    // English downstream) — never fabricated.
+    ...(typeof feed.lang === "string" && feed.lang.trim().length > 0
+      ? { lang: feed.lang.trim() }
+      : {}),
     // Publisher brand on the user-facing outlet field — never the section
     // name.  Manifest-supplied `feed.publisher` wins; otherwise we strip the
     // trailing "— Section" off `feed.name` (B2 fallback); only then do we

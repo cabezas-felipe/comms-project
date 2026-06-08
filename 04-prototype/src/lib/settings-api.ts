@@ -5,6 +5,7 @@ import {
 } from "@tempo/contracts";
 import { supabase } from "./supabase";
 import { getProtoSession } from "./auth";
+import { isE2EIdentityOverrideEnabled } from "./e2e-identity";
 
 const SETTINGS_STORAGE_KEY_BASE = "tempo.settings.v1";
 const SETTINGS_API_ENDPOINT = "/api/settings";
@@ -16,20 +17,39 @@ function wait(ms: number): Promise<void> {
   });
 }
 
+// Storage-key precedence mirrors getAuthHeaders so local fallback isolation
+// stays in sync with the identity actually sent to the server. Default: the
+// Supabase session id wins; the recognized-user id is a fallback. The E2E-only
+// override (VITE_E2E_IDENTITY_PRECEDENCE=recognized_email) flips this to prefer
+// the recognized user so an e2e run isolates by the recognized identity.
 async function getStorageKey(): Promise<string> {
+  const proto = getProtoSession();
+  if (proto?.userId && isE2EIdentityOverrideEnabled()) {
+    return `${SETTINGS_STORAGE_KEY_BASE}.${proto.userId}`;
+  }
   try {
     const { data } = await supabase.auth.getSession();
     if (data.session?.user?.id) return `${SETTINGS_STORAGE_KEY_BASE}.${data.session.user.id}`;
   } catch {
     // supabase not configured
   }
-  // Prototype recognized-identity fallback: use recognized userId for per-user isolation.
-  const proto = getProtoSession();
+  // Bearer/session absent → fall back to the recognized-user id when present.
   if (proto?.userId) return `${SETTINGS_STORAGE_KEY_BASE}.${proto.userId}`;
+  // Unrecognized fallback key (single-anon bucket).
   return SETTINGS_STORAGE_KEY_BASE;
 }
 
+// Identity precedence (default = production-safe): a Bearer session wins; the
+// prototype recognized-email header is a fallback when no Bearer exists. The
+// recognized-email-over-Bearer ordering is gated behind the E2E-only override
+// (VITE_E2E_IDENTITY_PRECEDENCE=recognized_email) — kept in sync with the
+// dashboard API's buildIdentityHeaders via isE2EIdentityOverrideEnabled.
 async function getAuthHeaders(): Promise<Record<string, string>> {
+  const proto = getProtoSession();
+  // E2E-only override: recognized-email beats Bearer.
+  if (proto && isE2EIdentityOverrideEnabled()) {
+    return { "x-recognized-email": proto.email };
+  }
   try {
     const { data } = await supabase.auth.getSession();
     if (data.session?.access_token) {
@@ -38,11 +58,8 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
   } catch {
     // supabase not configured
   }
-  // Prototype recognized-identity fallback (not production auth).
-  const proto = getProtoSession();
-  if (proto) {
-    return { "x-recognized-email": proto.email };
-  }
+  // Bearer absent → fall back to the prototype recognized identity.
+  if (proto) return { "x-recognized-email": proto.email };
   return {};
 }
 

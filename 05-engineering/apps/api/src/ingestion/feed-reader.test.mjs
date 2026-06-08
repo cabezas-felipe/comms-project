@@ -204,6 +204,28 @@ test("mapEntry: minutesAgo computed from pubDate, defaults to 0 when date missin
   assert.equal(noDate.minutesAgo, 0, "missing date → minutesAgo defaults to 0");
 });
 
+test("mapEntry: propagates feed-level lang onto the item (manifest-driven, e.g. Spanish feeds)", () => {
+  const feed = { id: "semana-politica", name: "Semana — Política", publisher: "Semana", weight: 70, lang: "es" };
+  const m = mapEntry(feed, { title: "Las elecciones", link: "https://semana.example.com/a", guid: "s1", pubDate: nowMinusMinutes(10) });
+  assert.equal(m.lang, "es", "Spanish feed lang must survive into the item");
+});
+
+test("mapEntry: trims a whitespace-padded feed lang", () => {
+  const feed = { id: "f", name: "F", weight: 50, lang: "  es-CO  " };
+  const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });
+  assert.equal(m.lang, "es-CO");
+});
+
+test("mapEntry: omits lang for feeds with no declared language (no fabrication)", () => {
+  const feed = { id: "wapo-pol", name: "Washington Post — Politics", weight: 95 };
+  const m = mapEntry(feed, { title: "T", link: "https://wapo.example.com/a", guid: "w1", pubDate: nowMinusMinutes(5) });
+  assert.equal("lang" in m, false, "English feeds carry no lang key");
+  assert.equal(m.lang, undefined);
+
+  const blank = mapEntry({ id: "f", name: "F", weight: 50, lang: "   " }, { title: "T", link: "https://x/b", guid: "b", pubDate: nowMinusMinutes(5) });
+  assert.equal("lang" in blank, false);
+});
+
 test("mapEntry: clusterId is omitted (filled by normalizer with provisional:${sourceId})", () => {
   const feed = { id: "f", name: "F", weight: 50 };
   const m = mapEntry(feed, { title: "T", link: "https://x/a", guid: "a", pubDate: nowMinusMinutes(5) });

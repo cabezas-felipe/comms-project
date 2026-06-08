@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTRACT_VERSION } from "@tempo/contracts";
 import {
   bootstrapDashboard,
@@ -619,9 +619,15 @@ describe("Slice 2: clustering fail-closed diagnostics from _meta", () => {
 describe("fetchDashboardPayload — identity header propagation", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
-  it("sends Authorization Bearer when Supabase session is present (bearer takes precedence)", async () => {
+  it("DEFAULT mode: Bearer wins over recognized-email when both exist (production-safe)", async () => {
+    // No VITE_E2E_IDENTITY_PRECEDENCE override → a valid Bearer session beats the
+    // prototype recognized-email header. This is the High-finding fix.
     const { supabase } = await import("@/lib/supabase");
     const { getProtoSession } = await import("@/lib/auth");
     vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
@@ -639,6 +645,27 @@ describe("fetchDashboardPayload — identity header propagation", () => {
 
     expect(capturedHeaders["Authorization"]).toBe("Bearer test-bearer-token");
     expect(capturedHeaders["x-recognized-email"]).toBeUndefined();
+  });
+
+  it("E2E override mode: prefers x-recognized-email over Bearer when both exist", async () => {
+    vi.stubEnv("VITE_E2E_IDENTITY_PRECEDENCE", "recognized_email");
+    const { supabase } = await import("@/lib/supabase");
+    const { getProtoSession } = await import("@/lib/auth");
+    vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
+      data: { session: { access_token: "test-bearer-token", user: { id: "u1" } } },
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
+    vi.mocked(getProtoSession).mockReturnValue({ email: "user@example.com", userId: "u1" });
+
+    let capturedHeaders: Record<string, string> = {};
+    const fetcher = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      capturedHeaders = { ...(init.headers as Record<string, string>) };
+      return { ok: true, status: 200, json: async () => ({ contractVersion: CONTRACT_VERSION, stories: STORIES }) } as Response;
+    });
+
+    await fetchDashboardPayload({ fetcher, retries: 0 }).catch(() => undefined);
+
+    expect(capturedHeaders["x-recognized-email"]).toBe("user@example.com");
+    expect(capturedHeaders["Authorization"]).toBeUndefined();
   });
 
   it("sends x-recognized-email when no bearer but proto session exists", async () => {

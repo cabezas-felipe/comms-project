@@ -1,19 +1,43 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import {
   EVIDENCE_TRANSLATION_VERSION,
   TRANSLATION_COVERAGE_THRESHOLD,
   TRANSLATION_MAX_CHARS,
+  TRANSLATION_MODE,
   buildEvidenceSegments,
   computeStoryCoverage,
+  computeTranslationActivation,
   isNonEnglishItem,
   readBody,
   readBodyText,
   readHeadline,
   resolveTranslationConfig,
+  resolveTranslationMode,
   translateEvidenceItems,
 } from "./evidence-translator.mjs";
+
+test("evidence-translator.mjs source is plain text — contains no NUL byte", () => {
+  const path = fileURLToPath(new URL("./evidence-translator.mjs", import.meta.url));
+  const buf = readFileSync(path);
+  assert.equal(buf.includes(0x00), false, "module source must not embed a raw NUL byte (binary-diff regression)");
+});
+
+test("translateEvidenceItems: cache still distinguishes segment boundaries (hash separator intact)", async () => {
+  let calls = 0;
+  const translateFn = async (segs) => {
+    calls++;
+    return segs.map((s) => s.toUpperCase());
+  };
+  const cache = new Map();
+  const mk = (id, headline, body) => ({ sourceId: id, lang: "es", headline, body, outlet: "X", kind: "traditional",weight: 50, url: "u", minutesAgo: 1 });
+  await translateEvidenceItems({ items: [mk("a", "a b", ["c"])], translateFn, config: { enabled: true, concurrency:1, timeoutMs: 1000, maxChars: 700, maxSnippets: 2 }, cache });
+  await translateEvidenceItems({ items: [mk("a", "a", ["b c"])], translateFn, config: { enabled: true, concurrency:1, timeoutMs: 1000, maxChars: 700, maxSnippets: 2 }, cache });
+  assert.equal(calls, 2, "different segment boundaries must not share a cache entry");
+});
 
 // ── language signal ───────────────────────────────────────────────────────────
 
@@ -103,6 +127,125 @@ test("resolveTranslationConfig: TEMPO_TRANSLATION_ENABLED=true turns the stage o
     if (prev !== undefined) process.env.TEMPO_TRANSLATION_ENABLED = prev;
     else delete process.env.TEMPO_TRANSLATION_ENABLED;
   }
+});
+
+function withTranslationEnv(vars, fn) {
+  const keys = ["TEMPO_TRANSLATION_ENABLED", "TEMPO_TRANSLATION_MODE"];
+  const prev = {};
+  for (const k of keys) prev[k] = process.env[k];
+  try {
+    for (const k of keys) delete process.env[k];
+    for (const [k, v] of Object.entries(vars)) process.env[k] = v;
+    return fn();
+  } finally {
+    for (const k of keys) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+}
+
+test("resolveTranslationMode: default is auto when nothing is set", () => {
+  withTranslationEnv({}, () => {
+    assert.equal(resolveTranslationMode(), TRANSLATION_MODE.AUTO);
+    assert.equal(resolveTranslationMode(), "auto");
+  });
+});
+
+test("resolveTranslationMode: TEMPO_TRANSLATION_MODE selects auto/on/off (case-insensitive)", () => {
+  withTranslationEnv({ TEMPO_TRANSLATION_MODE: "on" }, () => assert.equal(resolveTranslationMode(), "on"));
+  withTranslationEnv({ TEMPO_TRANSLATION_MODE: "OFF" }, () => assert.equal(resolveTranslationMode(), "off"));
+  withTranslationEnv({ TEMPO_TRANSLATION_MODE: " Auto " }, () => assert.equal(resolveTranslationMode(), "auto"));
+});
+
+test("resolveTranslationMode: unrecognized mode falls through to the auto default", () => {
+  withTranslationEnv({ TEMPO_TRANSLATION_MODE: "spanish" }, () =>
+    assert.equal(resolveTranslationMode(), "auto")
+  );
+});
+
+test("resolveTranslationMode: legacy TEMPO_TRANSLATION_ENABLED overrides mode (precedence)", () => {
+  withTranslationEnv({ TEMPO_TRANSLATION_ENABLED: "true", TEMPO_TRANSLATION_MODE: "off" }, () =>
+    assert.equal(resolveTranslationMode(), "on")
+  );
+  withTranslationEnv({ TEMPO_TRANSLATION_ENABLED: "false", TEMPO_TRANSLATION_MODE: "on" }, () =>
+    assert.equal(resolveTranslationMode(), "off")
+  );
+  withTranslationEnv({ TEMPO_TRANSLATION_ENABLED: "1" }, () => assert.equal(resolveTranslationMode(), "on"));
+  withTranslationEnv({ TEMPO_TRANSLATION_ENABLED: "0" }, () => assert.equal(resolveTranslationMode(), "off"));
+});
+
+test("resolveTranslationConfig: carries the resolved mode; default auto → enabled false", () => {
+  withTranslationEnv({}, () => {
+    const cfg = resolveTranslationConfig();
+    assert.equal(cfg.mode, "auto");
+    assert.equal(cfg.enabled, false, "auto resolves the runtime half in the pipeline, not statically");
+  });
+  withTranslationEnv({ TEMPO_TRANSLATION_MODE: "on" }, () => {
+    const cfg = resolveTranslationConfig();
+    assert.equal(cfg.mode, "on");
+    assert.equal(cfg.enabled, true);
+  });
+});
+
+test("computeTranslationActivation: auto runs only when non-English evidence is present", () => {
+  const withEs = computeTranslationActivation({ mode: "auto", nonEnglishPresent: true, hasTranslateFn: true });
+  assert.equal(withEs.shouldRun, true);
+  assert.equal(withEs.required, true);
+  assert.equal(withEs.unavailable, false);
+  assert.equal(withEs.recallRisk, false);
+
+  const noEs = computeTranslationActivation({ mode: "auto", nonEnglishPresent: false, hasTranslateFn: true });
+  assert.equal(noEs.shouldRun, false);
+  assert.equal(noEs.required, false);
+  assert.equal(noEs.unavailable, false);
+  assert.equal(noEs.recallRisk, false);
+});
+
+test("computeTranslationActivation: off never runs; required+unavailable when ES present (mode_off)", () => {
+  const off = computeTranslationActivation({ mode: "off", nonEnglishPresent: true, hasTranslateFn: true });
+  assert.equal(off.shouldRun, false);
+  assert.equal(off.required, true);
+  assert.equal(off.unavailable, true);
+  assert.equal(off.unavailableReason, "mode_off");
+  assert.equal(off.recallRisk, true);
+});
+
+test("computeTranslationActivation: on forces a translation attempt even without ES feeds", () => {
+  const on = computeTranslationActivation({ mode: "on", nonEnglishPresent: false, hasTranslateFn: true });
+  assert.equal(on.shouldRun, true);
+  assert.equal(on.required, false);
+  assert.equal(on.unavailable, false);
+  assert.equal(on.recallRisk, false);
+});
+
+test("computeTranslationActivation: needed-but-unavailable sets recallRisk + a precise reason", () => {
+  const noFn = computeTranslationActivation({
+    mode: "auto",
+    nonEnglishPresent: true,
+    hasTranslateFn: false,
+    hasApiKey: true,
+  });
+  assert.equal(noFn.recallRisk, true);
+  assert.equal(noFn.unavailableReason, "provider_unavailable");
+
+  const mock = computeTranslationActivation({
+    mode: "on",
+    nonEnglishPresent: true,
+    hasTranslateFn: false,
+    mockOnly: true,
+  });
+  assert.equal(mock.recallRisk, true);
+  assert.equal(mock.unavailableReason, "mock_only");
+
+  const noKey = computeTranslationActivation({
+    mode: "on",
+    nonEnglishPresent: true,
+    hasTranslateFn: false,
+    hasApiKey: false,
+  });
+  assert.equal(noKey.recallRisk, true);
+  assert.equal(noKey.unavailableReason, "missing_key");
 });
 
 // ── translateEvidenceItems ─────────────────────────────────────────────────────

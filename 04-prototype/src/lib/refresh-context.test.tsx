@@ -40,8 +40,10 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@/lib/refresh-heartbeat", () => ({
   useRefreshHeartbeat: () => {},
   readLastAttemptAt: () => readLastAttemptAtSpy(),
-  writeLastAttemptAt: (...args: unknown[]) => writeLastAttemptAtSpy(...args),
+  writeLastAttemptAt: (timestamp: number) => writeLastAttemptAtSpy(timestamp),
   LAST_REFRESH_ATTEMPT_KEY: "tempo_dashboard_last_refresh_attempt_at",
+  lastRefreshAttemptKeyForUser: (userId: string | null | undefined) =>
+    userId ? `tempo_dashboard_last_refresh_attempt_at:${userId}` : "tempo_dashboard_last_refresh_attempt_at",
   REFRESH_INTERVAL_MS: 60 * 60 * 1000,
 }));
 vi.mock("@/lib/analytics", () => ({

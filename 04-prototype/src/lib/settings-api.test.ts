@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CONTRACT_VERSION } from "@tempo/contracts";
 import { fetchSettingsPayload, saveSettingsPayload, SaveSettingsError } from "@/lib/settings-api";
 
@@ -224,6 +224,10 @@ describe("settings-api — MVP recognized-identity fallback", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("uses proto session userId as localStorage key after successful API fetch", async () => {
@@ -285,6 +289,76 @@ describe("settings-api — MVP recognized-identity fallback", () => {
     // userId must NOT be sent from the client — server resolves identity from email only
     expect(capturedHeaders["x-recognized-user-id"]).toBeUndefined();
     expect(capturedHeaders["Authorization"]).toBeUndefined();
+  });
+
+  it("DEFAULT mode: Bearer wins over recognized-email + storage isolates by Supabase session id", async () => {
+    // No E2E override → production-safe precedence (High-finding fix). Auth header
+    // and storage key both follow the Bearer/Supabase session, not the proto user.
+    const { supabase } = await import("@/lib/supabase");
+    const { getProtoSession } = await import("@/lib/auth");
+    vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
+      data: { session: { access_token: "test-token", user: { id: "supa-user-1" } } },
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
+    vi.mocked(getProtoSession).mockReturnValue({ email: "user@example.com", userId: "proto-user-123" });
+
+    let capturedHeaders: Record<string, string> = {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      capturedHeaders = Object.fromEntries(
+        Object.entries((init?.headers as Record<string, string>) ?? {})
+      );
+      return { ok: true, status: 200, json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        topics: [],
+        keywords: [],
+        geographies: [],
+        traditionalSources: [],
+        socialSources: [],
+      }) } as Response;
+    });
+
+    await fetchSettingsPayload();
+
+    expect(capturedHeaders["Authorization"]).toBe("Bearer test-token");
+    expect(capturedHeaders["x-recognized-email"]).toBeUndefined();
+    // No client-side userId leakage even in default mode.
+    expect(capturedHeaders["x-recognized-user-id"]).toBeUndefined();
+    // Storage isolates by the Supabase session id, not the proto user.
+    expect(localStorage.getItem("tempo.settings.v1.supa-user-1")).not.toBeNull();
+    expect(localStorage.getItem("tempo.settings.v1.proto-user-123")).toBeNull();
+  });
+
+  it("E2E override mode: prefers recognized-email over Bearer + storage isolates by recognized identity", async () => {
+    vi.stubEnv("VITE_E2E_IDENTITY_PRECEDENCE", "recognized_email");
+    const { supabase } = await import("@/lib/supabase");
+    const { getProtoSession } = await import("@/lib/auth");
+    vi.spyOn(supabase.auth, "getSession").mockResolvedValue({
+      data: { session: { access_token: "test-token", user: { id: "supa-user-1" } } },
+    } as unknown as Awaited<ReturnType<typeof supabase.auth.getSession>>);
+    vi.mocked(getProtoSession).mockReturnValue({ email: "user@example.com", userId: "proto-user-123" });
+
+    let capturedHeaders: Record<string, string> = {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      capturedHeaders = Object.fromEntries(
+        Object.entries((init?.headers as Record<string, string>) ?? {})
+      );
+      return { ok: true, status: 200, json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        topics: [],
+        keywords: [],
+        geographies: [],
+        traditionalSources: [],
+        socialSources: [],
+      }) } as Response;
+    });
+
+    await fetchSettingsPayload();
+
+    expect(capturedHeaders["x-recognized-email"]).toBe("user@example.com");
+    expect(capturedHeaders["Authorization"]).toBeUndefined();
+    expect(capturedHeaders["x-recognized-user-id"]).toBeUndefined();
+    // Storage isolation follows recognized identity, not stale Supabase session.
+    expect(localStorage.getItem("tempo.settings.v1.proto-user-123")).not.toBeNull();
+    expect(localStorage.getItem("tempo.settings.v1.supa-user-1")).toBeNull();
   });
 
   it("per-user localStorage keys prevent cross-user data reads", async () => {

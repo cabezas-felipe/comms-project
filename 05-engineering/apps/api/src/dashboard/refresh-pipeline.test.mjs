@@ -62,6 +62,7 @@ import {
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
   compareOverflowRank,
+  topicKeywordMatchStrength,
   applyMetaStoryOverflowCap,
   MAX_META_STORIES,
   scoreReclusterCandidate,
@@ -2766,6 +2767,79 @@ test("runRefreshPipeline: priorWatermark match → short-circuit, payload null, 
   assert.equal(clusterCalls, 1, "clusterFn must NOT be invoked under short-circuit");
 });
 
+test("runRefreshPipeline: forceFullRefresh bypasses watermark short-circuit (E2E) and stamps log.e2e", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] };
+
+  // First run computes the watermark.
+  let clusterCalls = 0;
+  const first = await runRefreshPipeline({
+    settings,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  const wm = first.log.watermark;
+  assert.equal(clusterCalls, 1);
+  // Normal run reports the e2e signal as inert.
+  assert.deepEqual(first.log.e2e, { forceFirstFullRefreshApplied: false, watermarkBypassed: false });
+
+  // Same inputs + matching priorWatermark, but forceFullRefresh=true → the
+  // short-circuit is bypassed and the full pipeline runs (clusterFn invoked).
+  const forced = await runRefreshPipeline({
+    settings,
+    rawItems,
+    manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    priorWatermark: wm,
+    forceFullRefresh: true,
+  });
+  assert.notEqual(forced.payload, null, "forced run must produce a payload, not a skip");
+  assert.equal(forced.log.unchanged, false);
+  assert.equal(clusterCalls, 2, "clusterFn runs again under forceFullRefresh");
+  assert.equal(forced.log.e2e.forceFirstFullRefreshApplied, true);
+  assert.equal(forced.log.e2e.watermarkBypassed, true, "watermark matched but was bypassed");
+});
+
+test("runRefreshPipeline: forceFullRefresh=false preserves watermark short-circuit (default unchanged)", async () => {
+  const manifestFeeds = [
+    { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
+  ];
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: [] };
+
+  let clusterCalls = 0;
+  const first = await runRefreshPipeline({
+    settings, rawItems, manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  const wm = first.log.watermark;
+
+  // Explicit forceFullRefresh:false + matching watermark → still short-circuits.
+  const second = await runRefreshPipeline({
+    settings, rawItems, manifestFeeds,
+    clusterFn: async () => { clusterCalls++; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    priorWatermark: wm,
+    forceFullRefresh: false,
+  });
+  assert.equal(second.payload, null, "skip still happens when not forcing");
+  assert.equal(second.log.unchanged, true);
+  assert.equal(clusterCalls, 1, "clusterFn must NOT run under the preserved short-circuit");
+  // Skip path reports the e2e signal with shape parity (override not applied).
+  assert.deepEqual(second.log.e2e, { forceFirstFullRefreshApplied: false, watermarkBypassed: false });
+});
+
 test("runRefreshPipeline: priorWatermark mismatch → full run executes (cluster invoked)", async () => {
   const manifestFeeds = [
     { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x", weight: 88, active: true },
@@ -4949,6 +5023,170 @@ function captureClusterFn(capture, limit = null) {
     ];
   };
 }
+
+const TRANSLATION_KNOBS = { concurrency: 4, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 };
+const ELECTION_PERSONA = {
+  contractVersion: "2026-05-19-meta-story-fields",
+  topics: [],
+  keywords: ["elections"],
+  geographies: ["Colombia"],
+  traditionalSources: ["Semana"],
+  socialSources: [],
+};
+
+const electionTranslateFn = (segments) =>
+  Promise.resolve(
+    segments.map((s) =>
+      String(s ?? "").replace(
+        /elecciones|electoral|comicios|presidenciales|votación|sondeo/gi,
+        "elections"
+      )
+    )
+  );
+
+test("runRefreshPipeline (translation): mode=off drops ES recall; mode=auto recovers when lang is present", async () => {
+  const rawItems = [
+    makeItem({
+      sourceId: "es-1",
+      outlet: "Semana",
+      lang: "es",
+      topic: "",
+      geographies: [],
+      headline: "Las elecciones regionales se acercan",
+      body: ["Los candidatos cierran sus campañas antes de las elecciones."],
+    }),
+    makeItem({
+      sourceId: "es-2",
+      outlet: "Semana",
+      lang: "es",
+      topic: "",
+      geographies: [],
+      headline: "El sondeo electoral muestra un empate técnico",
+      body: ["La votación podría definirse en segunda vuelta."],
+    }),
+  ];
+
+  const offCapture = { input: null };
+  await runRefreshPipeline({
+    settings: ELECTION_PERSONA,
+    rawItems,
+    clusterFn: captureClusterFn(offCapture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAdmissionMode: "soft",
+    beatFitEnabled: false,
+    translateFn: electionTranslateFn,
+    translationConfig: { mode: "off", ...TRANSLATION_KNOBS },
+  });
+  assert.deepEqual((offCapture.input ?? []).map((i) => i.sourceId), [], "off mode drops the ES items at recall");
+
+  const autoCapture = { input: null };
+  const { log } = await runRefreshPipeline({
+    settings: ELECTION_PERSONA,
+    rawItems,
+    clusterFn: captureClusterFn(autoCapture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAdmissionMode: "soft",
+    beatFitEnabled: false,
+    translateFn: electionTranslateFn,
+    translationConfig: { mode: "auto", ...TRANSLATION_KNOBS },
+  });
+  assert.equal(log.translation.mode, "auto");
+  assert.equal(log.translation.required, true, "propagated lang made nonEnglishPresent true");
+  assert.equal(log.translation.enabled, true, "auto activated on ES feeds");
+  assert.equal(log.translation.recallRisk, false);
+  assert.equal(log.translation.translatedCount, 2);
+  assert.equal((autoCapture.input ?? []).length, 2, "both ES items clear recall and reach clustering");
+});
+
+const ES_ELECTION_RECALL = { mode: "keyword", embedTopK: 5, embedMaxItems: 100, embeddingModel: "text-embedding-3-small" };
+const ES_VARIANT_DICT = [
+  [/elecciones|electoral(es)?|comicios|presidencial(es)?|votaci[oó]n|sondeo|encuestas?/gi, "elections"],
+  [/econom[ií]a|econ[oó]mic[oa]s?|fiscal|inflaci[oó]n|crecimiento/gi, "economy"],
+];
+const variantTranslateFn = (segments) =>
+  Promise.resolve(segments.map((s) => ES_VARIANT_DICT.reduce((a, [re, en]) => a.replace(re, en), String(s ?? ""))));
+
+const SEMANA_ELECTION_PERSONA = {
+  contractVersion: "2026-05-19-meta-story-fields",
+  topics: [],
+  keywords: ["elections", "economy"],
+  geographies: ["Colombia"],
+  traditionalSources: ["Semana"],
+  socialSources: [],
+};
+
+function semanaElectionItems() {
+  const rows = [
+    ["sem-1", "Las elecciones regionales se acercan", "Los candidatos cierran sus campañas antes de las elecciones."],
+    ["sem-2", "La campaña electoral entra en su recta final", "El debate electoral domina la conversación."],
+    ["sem-3", "Los comicios presidenciales definirán el rumbo del país", "Crece la expectativa por los comicios."],
+    ["sem-4", "La economía nacional crece pese a la inflación", "Analistas revisan sus pronósticos sobre la economía."],
+    ["sem-5", "Debate económico domina la agenda legislativa", "El plan económico genera polémica."],
+    ["sem-6", "Resultados de la votación regional sorprenden", "La votación tuvo alta participación."],
+    ["sem-7", "El candidato lidera las encuestas presidenciales", "Las encuestas presidenciales se ajustan."],
+    ["sem-8", "Reforma fiscal y crecimiento económico en debate", "El crecimiento económico preocupa al gobierno."],
+    ["sem-9", "Un nuevo sondeo electoral muestra empate técnico", "El sondeo electoral cambia el panorama."],
+  ];
+  return rows.map(([sourceId, headline, body]) =>
+    makeItem({ sourceId, outlet: "Semana", url: `https://semana.example.com/${sourceId}`, weight: 70, minutesAgo: 20, lang: "es", topic: "", geographies: [], headline, body: [body] })
+  );
+}
+
+async function runSemanaRecall(mode) {
+  const capture = { input: null };
+  const { log } = await runRefreshPipeline({
+    settings: SEMANA_ELECTION_PERSONA,
+    rawItems: semanaElectionItems(),
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAdmissionMode: "soft",
+    beatFitEnabled: false,
+    recallConfig: ES_ELECTION_RECALL,
+    translateFn: variantTranslateFn,
+    translationConfig: { mode, concurrency: 4, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 },
+  });
+  return { reached: (capture.input ?? []).length, breakdown: log.recall.topicKeywordBreakdown };
+}
+
+test("runRefreshPipeline (translation): Spanish election recall — off drops, auto+translator materially recovers (>>+1)", async () => {
+  const off = await runSemanaRecall("off");
+  const auto = await runSemanaRecall("auto");
+
+  assert.equal(off.breakdown.inputCount, 9, "all nine ES items are candidates");
+  assert.equal(off.breakdown.passCount, 0, "off mode drops every ES election item at recall");
+  assert.equal(off.reached, 0);
+
+  assert.equal(auto.breakdown.passCount, 9, "auto recovers all nine via translated normalized recall");
+  assert.equal(auto.reached, 9, "all nine reach clustering input");
+  assert.equal(auto.breakdown.keywordViaTranslatedCount, 9);
+
+  const delta = auto.breakdown.passCount - off.breakdown.passCount;
+  assert.ok(delta >= 8, `expected a material recall gain, got delta=${delta}`);
+});
+
+test("runRefreshPipeline (translation): keywordViaTranslatedCount stays 0 for English-native items (additive, no false attribution)", async () => {
+  const capture = { input: null };
+  const rawItems = [
+    makeItem({ sourceId: "en-1", outlet: "Semana", topic: "", geographies: [], headline: "Colombia elections heat up", body: ["The economy dominates the campaign."] }),
+  ];
+  const { log } = await runRefreshPipeline({
+    settings: SEMANA_ELECTION_PERSONA,
+    rawItems,
+    clusterFn: captureClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    geoAdmissionMode: "soft",
+    beatFitEnabled: false,
+    recallConfig: ES_ELECTION_RECALL,
+    translateFn: variantTranslateFn,
+    translationConfig: { mode: "auto", concurrency: 4, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 },
+  });
+  assert.equal(log.recall.topicKeywordBreakdown.passCount, 1, "English item passes on its own text");
+  assert.equal(log.recall.topicKeywordBreakdown.keywordViaTranslatedCount, 0, "no translation credit for English-native recall");
+});
 
 test("cross-feed dedupe: canonical URL + exact headline + time within window collapses to one cluster input", async () => {
   // Same article surfaces from two different feeds (Washington Post —
@@ -7972,37 +8210,55 @@ test("runRefreshPipeline (A3): ambiguous un-normalized ES over-merge is preserve
 // when the post-healer survivor set exceeds 5, the deterministic Q6-C survival
 // ranking trims the overflow and surfaces it on `log.overflowCap`.
 
+test("topicKeywordMatchStrength: 2 topic+keyword, 1 either, 0 neither", () => {
+  assert.equal(topicKeywordMatchStrength({ tags: { topics: ["T"], keywords: ["K"] } }), 2);
+  assert.equal(topicKeywordMatchStrength({ tags: { topics: ["T"], keywords: [] } }), 1);
+  assert.equal(topicKeywordMatchStrength({ tags: { topics: [], keywords: ["K"] } }), 1);
+  assert.equal(topicKeywordMatchStrength({ tags: { topics: [], keywords: [] } }), 0);
+  assert.equal(topicKeywordMatchStrength({ tags: {} }), 0);
+  assert.equal(topicKeywordMatchStrength({}), 0);
+  assert.equal(topicKeywordMatchStrength(null), 0);
+});
+
 // Unit: the survival comparator honors each ranking tier in order.
-test("compareOverflowRank: multi-source > beat-fit > fresher > metaStoryId", () => {
-  // Tier 1: more sources survives (ranks ahead, i.e. negative).
+test("compareOverflowRank: topic/keyword > multi-source > beat-fit > fresher > metaStoryId", () => {
+  // Tier 1: stronger topic/keyword match survives (ranks ahead, i.e. negative).
   assert.ok(
     compareOverflowRank(
-      { sourceCount: 2, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
-      { sourceCount: 1, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
+      { topicKeywordMatchStrength: 0, sourceCount: 9, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
+    ) < 0,
+    "matched outranks unmatched regardless of other factors"
+  );
+  // Tier 2: equal match strength -> more sources survives.
+  assert.ok(
+    compareOverflowRank(
+      { topicKeywordMatchStrength: 1, sourceCount: 2, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
     ) < 0,
     "more sources outranks everything else"
   );
-  // Tier 2: equal sources → higher beat-fit survives.
+  // Tier 3: equal match strength + sources -> higher beat-fit survives.
   assert.ok(
     compareOverflowRank(
-      { sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 999, metaStoryId: "z" },
-      { sourceCount: 1, maxBeatFitScore: 0.1, minMinutesAgo: 0, metaStoryId: "a" }
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 999, metaStoryId: "z" },
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.1, minMinutesAgo: 0, metaStoryId: "a" }
     ) < 0,
     "higher beat-fit outranks freshness/id"
   );
-  // Tier 3: equal sources + beat-fit → fresher (lower minutesAgo) survives.
+  // Tier 4: equal match strength + sources + beat-fit -> fresher survives.
   assert.ok(
     compareOverflowRank(
-      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "z" },
-      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 99, metaStoryId: "a" }
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "z" },
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 99, metaStoryId: "a" }
     ) < 0,
     "fresher outranks id"
   );
-  // Tier 4: all equal → metaStoryId ascending.
+  // Tier 5: all equal -> metaStoryId ascending.
   assert.ok(
     compareOverflowRank(
-      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "a" },
-      { sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "b" }
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "a" },
+      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "b" }
     ) < 0,
     "lower metaStoryId survives the final tie-break"
   );
@@ -8193,6 +8449,52 @@ test("runRefreshPipeline (A4): overflow_cap rejection-log entries written for dr
   const overflowRecords = written.filter((r) => r.reason_code === "overflow_cap");
   assert.equal(overflowRecords.length, 1, "one overflow_cap rejection record for the dropped story");
   assert.equal(overflowRecords[0].meta_story_id, "ms-rej-5");
+  assert.equal(overflowRecords[0].debug_payload.topicKeywordMatchStrength, 1);
+});
+
+test("runRefreshPipeline (A4): matched stories survive cap over unmatched", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const matched = (i) => ({
+    meta_story_id: `b-${i}`,
+    title: `Matched story ${i}`,
+    subtitle: `Subtitle ${i}.`,
+    source_item_ids: ["src-1"],
+    summary: `Summary ${i}.`,
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+    factual_claims: [`Reuters reports verified development ${i}.`],
+    claim_evidence_map: { "0": ["src-1"] },
+  });
+  const clusterStories = [
+    {
+      meta_story_id: "a-nomatch",
+      title: "Unmatched story",
+      subtitle: "Subtitle nomatch.",
+      source_item_ids: ["src-1"],
+      summary: "Summary nomatch.",
+      tags: { topics: [], keywords: [], geographies: ["US", "Colombia"] },
+      factual_claims: ["Reuters reports a verified development."],
+      claim_evidence_map: { "0": ["src-1"] },
+    },
+    ...Array.from({ length: 5 }, (_, i) => matched(i)),
+  ];
+  const written = [];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => clusterStories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    writeRejectionsFn: async (records) => {
+      written.push(...records);
+    },
+  });
+
+  assert.equal(payload.stories.length, 5);
+  assert.equal(log.overflowCap.overflowDroppedCount, 1);
+  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, ["a-nomatch"]);
+  const overflowRecords = written.filter((r) => r.reason_code === "overflow_cap");
+  assert.equal(overflowRecords.length, 1);
+  assert.equal(overflowRecords[0].debug_payload.topicKeywordMatchStrength, 0);
 });
 
 // ─── B1: deferred re-cluster candidate queue (flagging + ranking only) ───────

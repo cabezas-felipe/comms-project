@@ -45,10 +45,14 @@ import {
 } from "../ingestion/embedding-recall.mjs";
 import {
   TRANSLATION_COVERAGE_THRESHOLD,
+  TRANSLATION_MODE,
   computeStoryCoverage,
+  computeTranslationActivation,
+  isNonEnglishItem,
   readBodyText,
   readHeadline,
   resolveTranslationConfig,
+  resolveTranslationMode,
   translateEvidenceItems,
 } from "../ingestion/evidence-translator.mjs";
 import {
@@ -456,21 +460,37 @@ export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
 // Drop ranking (Q6 C) is a SURVIVAL order (best first → top 5 survive). It is
 // deliberately distinct from the R1 *display* order: survivors keep their R1
 // order; only WHICH stories survive is decided here.
-//   1. multi-source first   — more `source_item_ids` wins (a corroborated,
+//   1. topic/keyword match strength — a story that matches configured
+//                              topics/keywords is favored to survive over an
+//                              unmatched one (2: topic+keyword, 1: either, 0: neither)
+//   2. multi-source first   — more `source_item_ids` wins (a corroborated,
 //                              multi-outlet story is higher value than a lone
 //                              single-source row)
-//   2. higher beat-fit      — best relevance score across the story's sources
-//   3. fresher              — lower `minMinutesAgo`
-//   4. metaStoryId ascending — stable, deterministic final tie-break
+//   3. higher beat-fit      — best relevance score across the story's sources
+//   4. fresher              — lower `minMinutesAgo`
+//   5. metaStoryId ascending — stable, deterministic final tie-break
 export const MAX_META_STORIES = 5;
+
+export function topicKeywordMatchStrength(story) {
+  const tags = story?.tags;
+  const hasTopics = Array.isArray(tags?.topics) && tags.topics.length > 0;
+  const hasKeywords = Array.isArray(tags?.keywords) && tags.keywords.length > 0;
+  if (hasTopics && hasKeywords) return 2;
+  if (hasTopics || hasKeywords) return 1;
+  return 0;
+}
 
 /**
  * Survival comparator for the overflow cap (see Q6 C above). Operates on the
- * per-story rank inputs `{ sourceCount, maxBeatFitScore, minMinutesAgo,
- * metaStoryId }`. Negative → `a` ranks ahead of (survives over) `b`. Pure;
+ * per-story rank inputs `{ topicKeywordMatchStrength, sourceCount,
+ * maxBeatFitScore, minMinutesAgo, metaStoryId }`. Negative → `a` ranks ahead of
+ * (survives over) `b`. Pure;
  * exported for focused unit testing of the ranking contract.
  */
 export function compareOverflowRank(a, b) {
+  const atk = Number.isFinite(a?.topicKeywordMatchStrength) ? a.topicKeywordMatchStrength : 0;
+  const btk = Number.isFinite(b?.topicKeywordMatchStrength) ? b.topicKeywordMatchStrength : 0;
+  if (atk !== btk) return btk - atk; // stronger topic/keyword match first
   const asc = Number.isFinite(a?.sourceCount) ? a.sourceCount : 0;
   const bsc = Number.isFinite(b?.sourceCount) ? b.sourceCount : 0;
   if (asc !== bsc) return bsc - asc; // more sources first
@@ -1201,6 +1221,16 @@ function joinGeoText(item) {
   return `${headline} ${subtitle} ${body} ${url}`.trim();
 }
 
+function joinOriginalText(item) {
+  const headline = typeof item?.headline === "string" ? item.headline : "";
+  const body = Array.isArray(item?.body)
+    ? item.body.map((s) => String(s ?? "")).join(" ")
+    : typeof item?.body === "string"
+      ? item.body
+      : "";
+  return `${headline} ${body}`.trim();
+}
+
 /**
  * Recall lexical gate: an item passes if it matches ANY configured lexical
  * signal (logical OR) — topic, keyword, OR a configured geography mentioned in
@@ -1298,6 +1328,7 @@ export function analyzeTopicKeywordStage(items, settings) {
     neither: 0,
     passNoConfig: 0,
     passCount: 0,
+    keywordViaTranslatedCount: 0,
     primaryDropCause: null,
   };
 
@@ -1316,6 +1347,13 @@ export function analyzeTopicKeywordStage(items, settings) {
       // evidence when present so the diagnostic breakdown matches the filter.
       const text = readHeadline(item) + " " + readBodyText(item);
       keywordMatch = keywordRegex.test(text);
+      if (
+        keywordMatch &&
+        item?._translation?.applied === true &&
+        !keywordRegex.test(joinOriginalText(item))
+      ) {
+        breakdown.keywordViaTranslatedCount++;
+      }
     }
     const geoMatch =
       hasGeographies && !!itemMentionsConfiguredGeography(joinGeoText(item), geographies);
@@ -1766,6 +1804,12 @@ export async function runRefreshPipeline({
   writeRejectionsFn = null,
   priorWatermark = null,
   priorStoryCount = null,
+  // E2E determinism: when true, the watermark short-circuit is bypassed for this
+  // run so the full clustering/grounding pipeline always executes (no skip even
+  // on an unchanged watermark). Additive — default false leaves the optimization
+  // untouched. The caller (server) decides when this applies (first load after
+  // reset for the recognized E2E user); the pipeline only honors the flag.
+  forceFullRefresh = false,
   beatFitEnabled = true,
   embedFn = null,
   recallConfig = null,
@@ -2302,15 +2346,55 @@ export async function runRefreshPipeline({
   //     production runs are no-ops until an operator wires `translateFn` and
   //     enables the stage.
   const effectiveTranslationConfig = translationConfig ?? resolveTranslationConfig();
+  const nonEnglishPresent = (geoPassedItems ?? []).some(isNonEnglishItem);
+  const VALID_MODES = new Set([TRANSLATION_MODE.AUTO, TRANSLATION_MODE.ON, TRANSLATION_MODE.OFF]);
+  let translationMode;
+  const injectedMode = effectiveTranslationConfig?.mode;
+  if (typeof injectedMode === "string") {
+    const normalized = injectedMode.trim().toLowerCase();
+    translationMode = VALID_MODES.has(normalized) ? normalized : TRANSLATION_MODE.AUTO;
+  } else if (typeof effectiveTranslationConfig?.enabled === "boolean") {
+    translationMode = effectiveTranslationConfig.enabled ? TRANSLATION_MODE.ON : TRANSLATION_MODE.OFF;
+  } else {
+    translationMode = resolveTranslationMode();
+  }
+  const translationMockOnly =
+    String(process.env.TEMPO_AI_MOCK_ONLY ?? "").trim().toLowerCase() === "true";
+  const translationHasApiKey = Boolean(
+    process.env.TEMPO_OPENAI_API_KEY || process.env.OPENAI_API_KEY
+  );
+  const translationActivation = computeTranslationActivation({
+    mode: translationMode,
+    nonEnglishPresent,
+    hasTranslateFn: typeof translateFn === "function",
+    mockOnly: translationMockOnly,
+    hasApiKey: translationHasApiKey,
+  });
+  const translationShouldRun = translationActivation.shouldRun;
   const translationStartedAt = Date.now();
-  const { items: translatedGeoItems, diagnostics: translationStageDiagnostics } =
+  const { items: translatedGeoItems, diagnostics: rawTranslationDiagnostics } =
     await translateEvidenceItems({
       items: geoPassedItems,
       translateFn,
-      config: effectiveTranslationConfig,
+      config: { ...effectiveTranslationConfig, enabled: translationShouldRun },
       cache: translationCache ?? undefined,
     });
   const translationMs = Math.max(0, Date.now() - translationStartedAt);
+  const translationStageDiagnostics = {
+    ...rawTranslationDiagnostics,
+    mode: translationActivation.mode,
+    required: translationActivation.required,
+    unavailable: translationActivation.unavailable,
+    unavailableReason: translationActivation.unavailableReason,
+    recallRisk: translationActivation.recallRisk,
+  };
+  console.log(
+    `[pipeline.translation] mode=${translationActivation.mode}` +
+      ` required=${translationActivation.required}` +
+      ` unavailable=${translationActivation.unavailable}` +
+      ` reason=${translationActivation.unavailableReason ?? "none"}` +
+      ` recall_risk=${translationActivation.recallRisk}`
+  );
   console.log(
     `[pipeline.translation] version=${translationStageDiagnostics.version}` +
       ` enabled=${translationStageDiagnostics.enabled}` +
@@ -2394,6 +2478,7 @@ export async function runRefreshPipeline({
       ` geoLexicalOnly=${topicKeywordBreakdown.geoLexicalOnly}` +
       ` neither=${topicKeywordBreakdown.neither}` +
       ` pass=${topicKeywordBreakdown.passCount}` +
+      ` keywordViaTranslated=${topicKeywordBreakdown.keywordViaTranslatedCount}` +
       ` hasTopics=${topicKeywordBreakdown.hasTopics}` +
       ` hasKeywords=${topicKeywordBreakdown.hasKeywords}` +
       (topicKeywordBreakdown.primaryDropCause
@@ -2606,9 +2691,16 @@ export async function runRefreshPipeline({
   const watermarkMatched = watermarksMatch(priorWatermark, watermarkInfo.watermark);
   const priorWasEmpty =
     typeof priorStoryCount === "number" && priorStoryCount === 0;
+  // E2E override: forcing a full refresh suppresses the short-circuit on this run
+  // regardless of watermark match, so the full pipeline always executes.
+  const watermarkBypassedForE2e = Boolean(forceFullRefresh) && watermarkMatched;
   const watermarkSuppressed =
-    watermarkMatched && priorWasEmpty && dedupedItems.length > 0;
-  if (watermarkSuppressed) {
+    watermarkMatched && (watermarkBypassedForE2e || (priorWasEmpty && dedupedItems.length > 0));
+  if (watermarkBypassedForE2e) {
+    console.log(
+      `[pipeline.watermark] match bypassed (${watermarkInfo.watermark}) — forceFullRefresh (E2E) requested; running full pipeline`
+    );
+  } else if (watermarkSuppressed) {
     console.log(
       `[pipeline.watermark] match suppressed (${watermarkInfo.watermark}) — prior snapshot was empty AND ${dedupedItems.length} candidate(s) ready; re-running clustering rather than serving stale empty`
     );
@@ -2642,6 +2734,12 @@ export async function runRefreshPipeline({
       log: {
         unchanged: true,
         refreshSkippedReason: "unchanged_watermark",
+        // E2E shape parity: on the skip path the override was not applied (a
+        // requested forceFullRefresh would have bypassed this branch entirely).
+        e2e: {
+          forceFirstFullRefreshApplied: Boolean(forceFullRefresh),
+          watermarkBypassed: false,
+        },
         watermark: watermarkInfo.watermark,
         candidateCount: watermarkInfo.candidateCount,
         selectedFeedCount: watermarkInfo.selectedFeedCount,
@@ -3111,6 +3209,7 @@ export async function runRefreshPipeline({
       // set; grounded stories have all ids resolved, so this matches the
       // published `sources.length`.
       sortKey: {
+        topicKeywordMatchStrength: topicKeywordMatchStrength(ms),
         maxBeatFitScore,
         minMinutesAgo,
         metaStoryId: ms.meta_story_id,
@@ -3143,6 +3242,7 @@ export async function runRefreshPipeline({
           : [],
         debug_payload: {
           title: story?.title ?? null,
+          topicKeywordMatchStrength: sortKey?.topicKeywordMatchStrength ?? null,
           sourceCount: sortKey?.sourceCount ?? null,
           maxBeatFitScore: sortKey?.maxBeatFitScore ?? null,
           minMinutesAgo: Number.isFinite(sortKey?.minMinutesAgo) ? sortKey.minMinutesAgo : null,
@@ -3711,6 +3811,14 @@ export async function runRefreshPipeline({
       ` geoMs=${geoMs} clusterMs=${clusterMs} stories=${stories.length}`
   );
   const log = {
+    // E2E determinism signal (surfaced on `_meta.e2e`). `forceFirstFullRefreshApplied`
+    // = the caller requested a forced full refresh for this run; `watermarkBypassed`
+    // = the watermark matched but the short-circuit was skipped because of that
+    // override. Both false on normal (non-E2E) runs.
+    e2e: {
+      forceFirstFullRefreshApplied: Boolean(forceFullRefresh),
+      watermarkBypassed: watermarkBypassedForE2e,
+    },
     totalItems: normalizedItems.length,
     poolCount: recentItems.length,
     recentCount: recentItems.length,

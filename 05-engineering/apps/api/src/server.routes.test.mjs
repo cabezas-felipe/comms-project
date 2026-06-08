@@ -786,6 +786,175 @@ test("refresh pipeline: old settings topic still matches item with the same old 
   }
 });
 
+// ─── E2E force-first-full-refresh (watermark bypass) ─────────────────────────
+//
+// `TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` makes the FIRST refresh after a
+// reset bypass the watermark short-circuit (pipeline runs the full path). These
+// route tests pin the env flag, stub the snapshot read to simulate
+// "first load (no marker)" vs "subsequent load (marker persisted)", and assert
+// the server computes/passes `forceFullRefresh` and surfaces `_meta.e2e`.
+
+// Pipeline stub that echoes the server-computed `forceFullRefresh` back through
+// `log.e2e` (mirrors the real pipeline) so the response `_meta.e2e` is asserted.
+function e2eForceRefreshPipelineStub(captured) {
+  return async (opts) => {
+    captured.runOpts = opts;
+    return {
+      payload: { contractVersion: opts.contractVersion, stories: [] },
+      log: {
+        unchanged: false,
+        poolCount: 0,
+        relevantCount: 0,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "e2e-stub-wm",
+        candidateCount: 0,
+        selectedFeedCount: 1,
+        selection: { sourceSelectionMode: "test" },
+        e2e: {
+          forceFirstFullRefreshApplied: Boolean(opts.forceFullRefresh),
+          watermarkBypassed: Boolean(opts.forceFullRefresh),
+        },
+      },
+    };
+  };
+}
+
+async function withE2eRefreshHarness({ flag, priorSnapshot }, fn) {
+  const prevEnv = process.env.TEMPO_E2E_FORCE_FIRST_FULL_REFRESH;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  if (flag === undefined) delete process.env.TEMPO_E2E_FORCE_FIRST_FULL_REFRESH;
+  else process.env.TEMPO_E2E_FORCE_FIRST_FULL_REFRESH = flag;
+  const captured = { runOpts: null, payload: null };
+  _snapshotRepo.read = async () => priorSnapshot ?? null;
+  _snapshotRepo.write = async (_uid, payload) => { captured.payload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = e2eForceRefreshPipelineStub(captured);
+  try {
+    return await fn(captured);
+  } finally {
+    if (prevEnv === undefined) delete process.env.TEMPO_E2E_FORCE_FIRST_FULL_REFRESH;
+    else process.env.TEMPO_E2E_FORCE_FIRST_FULL_REFRESH = prevEnv;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+  }
+}
+
+test("E2E force-refresh OFF (default): refresh does NOT request forceFullRefresh", async () => {
+  // Flag unset → unchanged behavior. Even with a prior snapshot lacking a
+  // marker, the override is never requested.
+  await withE2eRefreshHarness(
+    { flag: undefined, priorSnapshot: { stories: [], _watermark: "wm" } },
+    async (captured) => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(captured.runOpts?.forceFullRefresh, false, "forceFullRefresh must be false when flag is off");
+      assert.equal(res.body._meta?.e2e?.forceFirstFullRefreshApplied, false);
+      assert.equal(res.body._meta?.e2e?.watermarkBypassed, false);
+    }
+  );
+});
+
+test("E2E force-refresh ON + first load (no prior marker): forceFullRefresh requested and reflected in _meta", async () => {
+  // Post-reset: no prior snapshot at all → first load forces a full refresh.
+  await withE2eRefreshHarness(
+    { flag: "true", priorSnapshot: null },
+    async (captured) => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(captured.runOpts?.forceFullRefresh, true, "first load must request forceFullRefresh");
+      assert.equal(res.body._meta?.e2e?.forceFirstFullRefreshApplied, true);
+      assert.equal(res.body._meta?.e2e?.watermarkBypassed, true);
+      // The forced run persists the marker so the NEXT load can resume normal.
+      assert.equal(captured.payload?._lastRunMeta?.e2e?.forceFirstFullRefreshApplied, true);
+    }
+  );
+});
+
+test("E2E force-refresh ON + subsequent load (prior marker present): normal behavior resumes", async () => {
+  // The prior snapshot is shaped exactly like `readSnapshot` returns it: the e2e
+  // marker is on `_meta.e2e` (lifted from the now-STRIPPED `_lastRunMeta`). With
+  // the marker present the override is NOT requested again (watermark
+  // short-circuit can resume).
+  await withE2eRefreshHarness(
+    {
+      flag: "true",
+      priorSnapshot: {
+        stories: [],
+        _watermark: "wm",
+        // Production read shape — no `_lastRunMeta`; the marker lives on `_meta`.
+        _meta: {
+          hasSnapshot: true,
+          refreshedAt: "2026-05-08T00:00:00Z",
+          e2e: { forceFirstFullRefreshApplied: true, watermarkBypassed: true },
+        },
+      },
+    },
+    async (captured) => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(captured.runOpts?.forceFullRefresh, false, "subsequent load must NOT force again");
+      assert.equal(res.body._meta?.e2e?.forceFirstFullRefreshApplied, false);
+    }
+  );
+});
+
+test("E2E force-refresh ON: marker on stripped _lastRunMeta is IGNORED (no false-green; impl must read _meta)", async () => {
+  // Guard for HIGH-2: `readSnapshot` strips `_lastRunMeta`, so a marker that only
+  // lives there is NOT visible in real runtime. If the implementation read
+  // `_lastRunMeta.e2e` it would wrongly suppress the force here; reading the
+  // lifted `_meta.e2e` (absent below) correctly keeps forcing. This test FAILS
+  // if anyone reverts to depending on the stripped field.
+  await withE2eRefreshHarness(
+    {
+      flag: "true",
+      priorSnapshot: {
+        stories: [],
+        _watermark: "wm",
+        // Only the stripped-shape marker — production never returns this.
+        _lastRunMeta: { e2e: { forceFirstFullRefreshApplied: true, watermarkBypassed: true } },
+        _meta: { hasSnapshot: true, refreshedAt: "2026-05-08T00:00:00Z" },
+      },
+    },
+    async (captured) => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(
+        captured.runOpts?.forceFullRefresh,
+        true,
+        "marker only on stripped _lastRunMeta must NOT suppress the force"
+      );
+      assert.equal(res.body._meta?.e2e?.forceFirstFullRefreshApplied, true);
+    }
+  );
+});
+
+test("E2E force-refresh ON: persisted snapshot carries the marker on _lastRunMeta.e2e so readSnapshot can lift it to _meta", async () => {
+  // The forced run must persist the marker where `readSnapshot`/`liftSnapshotMeta`
+  // will lift it (`_lastRunMeta.e2e` → `_meta.e2e`). This closes the loop with the
+  // subsequent-load test above: write-side puts it on `_lastRunMeta`, read-side
+  // lifts it to `_meta`, executor reads `_meta`.
+  await withE2eRefreshHarness(
+    { flag: "true", priorSnapshot: null },
+    async (captured) => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(captured.runOpts?.forceFullRefresh, true);
+      assert.equal(captured.payload?._lastRunMeta?.e2e?.forceFirstFullRefreshApplied, true);
+    }
+  );
+});
+
 test("GET /api/ingestion/sources returns declared feed configuration (JSON fallback, no Supabase)", async () => {
   // SUPABASE_URL is not set in the test env — route must fall back to source-feeds.json.
   const res = await request(app).get("/api/ingestion/sources");
@@ -4643,14 +4812,14 @@ test("GET /api/dashboard does NOT include bootstrapDecision (Phase 5: bootstrap-
 // In the test environment SUPABASE_URL is unset, so Bearer and email lookups both need mocking.
 // _clearEmailCache() is called around each test to prevent cache cross-contamination.
 
-test("resolveIdentity: resolves email_recognition via server-side email lookup", async () => {
+test("resolveIdentity: resolves recognized_email via server-side email lookup", async () => {
   _clearEmailCache();
   const prevLookup = _emailLookup.resolve;
   _emailLookup.resolve = async (email) => email === "user@example.com" ? "looked-up-user-id" : null;
   try {
     const mockReq = { headers: { "x-recognized-email": "user@example.com" } };
     const identity = await resolveIdentity(mockReq);
-    assert.deepEqual(identity, { userId: "looked-up-user-id", source: "email_recognition" });
+    assert.deepEqual(identity, { userId: "looked-up-user-id", source: "recognized_email" });
   } finally {
     _emailLookup.resolve = prevLookup;
     _clearEmailCache();
@@ -4717,6 +4886,47 @@ test("resolveIdentity: returns null when Bearer present but Supabase disabled �
   } finally {
     _emailLookup.resolve = prevLookup;
     _clearEmailCache();
+  }
+});
+
+test("resolveIdentity: strict mode ON + recognized email + bearer present → recognized_email wins", async () => {
+  _clearEmailCache();
+  const prevLookup = _emailLookup.resolve;
+  const prevStrict = process.env.TEMPO_E2E_STRICT_IDENTITY;
+  process.env.TEMPO_E2E_STRICT_IDENTITY = "true";
+  let lookupCalls = 0;
+  _emailLookup.resolve = async (email) => {
+    lookupCalls++;
+    return email === "user@example.com" ? "strict-user-id" : null;
+  };
+  try {
+    const mockReq = {
+      headers: {
+        authorization: "Bearer stale-token",
+        "x-recognized-email": "user@example.com",
+      },
+    };
+    const identity = await resolveIdentity(mockReq);
+    assert.deepEqual(identity, { userId: "strict-user-id", source: "recognized_email" });
+    assert.equal(lookupCalls, 1);
+  } finally {
+    _emailLookup.resolve = prevLookup;
+    if (prevStrict === undefined) delete process.env.TEMPO_E2E_STRICT_IDENTITY;
+    else process.env.TEMPO_E2E_STRICT_IDENTITY = prevStrict;
+    _clearEmailCache();
+  }
+});
+
+test("resolveIdentity: strict mode ON + no recognized email keeps bearer path behavior", async () => {
+  const prevStrict = process.env.TEMPO_E2E_STRICT_IDENTITY;
+  process.env.TEMPO_E2E_STRICT_IDENTITY = "true";
+  try {
+    const mockReq = { headers: { authorization: "Bearer stale-token" } };
+    const identity = await resolveIdentity(mockReq);
+    assert.equal(identity, null, "with Supabase disabled in tests, bearer remains unresolved");
+  } finally {
+    if (prevStrict === undefined) delete process.env.TEMPO_E2E_STRICT_IDENTITY;
+    else process.env.TEMPO_E2E_STRICT_IDENTITY = prevStrict;
   }
 });
 
@@ -5009,8 +5219,8 @@ test("resolveIdentity cache: second call within TTL uses cached result without r
     const mockReq = { headers: { "x-recognized-email": "cached@example.com" } };
     const id1 = await resolveIdentity(mockReq);
     const id2 = await resolveIdentity(mockReq);
-    assert.deepEqual(id1, { userId: "u-cached", source: "email_recognition" });
-    assert.deepEqual(id2, { userId: "u-cached", source: "email_recognition" });
+    assert.deepEqual(id1, { userId: "u-cached", source: "recognized_email" });
+    assert.deepEqual(id2, { userId: "u-cached", source: "recognized_email" });
     assert.equal(callCount, 1, "lookup must be called exactly once; second call served from cache");
   } finally {
     _emailLookup.resolve = prevLookup;
@@ -5042,7 +5252,7 @@ test("resolveIdentity cache: different emails use independent cache entries", as
   }
 });
 
-// ─── Identity resolution — HTTP integration via email_recognition ─────────────
+// ─── Identity resolution — HTTP integration via recognized_email ──────────────
 
 test("GET /api/settings returns 200 when resolved via x-recognized-email header", async () => {
   _clearEmailCache();
@@ -5059,6 +5269,45 @@ test("GET /api/settings returns 200 when resolved via x-recognized-email header"
     _auth.resolver = prevResolver;
     _emailLookup.resolve = prevLookup;
     _clearEmailCache();
+  }
+});
+
+test("GET /api/debug/identity returns resolved identity diagnostics in dev/test", async () => {
+  _clearEmailCache();
+  const prevResolver = _auth.resolver;
+  const prevLookup = _emailLookup.resolve;
+  const prevStrict = process.env.TEMPO_E2E_STRICT_IDENTITY;
+  process.env.TEMPO_E2E_STRICT_IDENTITY = "true";
+  _auth.resolver = resolveIdentity;
+  _emailLookup.resolve = async (email) => email === "test@example.com" ? TEST_USER_ID : null;
+  try {
+    const res = await request(app)
+      .get("/api/debug/identity")
+      .set("x-recognized-email", "test@example.com");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.userId, TEST_USER_ID);
+    assert.equal(res.body.identitySource, "recognized_email");
+    assert.equal(res.body.resolvedEmail, "test@example.com");
+    assert.equal(res.body.strictIdentityEnabled, true);
+    assert.equal(res.headers["x-tempo-identity-source"], "recognized_email");
+  } finally {
+    _auth.resolver = prevResolver;
+    _emailLookup.resolve = prevLookup;
+    if (prevStrict === undefined) delete process.env.TEMPO_E2E_STRICT_IDENTITY;
+    else process.env.TEMPO_E2E_STRICT_IDENTITY = prevStrict;
+    _clearEmailCache();
+  }
+});
+
+test("GET /api/debug/identity returns 404 when NODE_ENV=production", async () => {
+  const prevNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    const res = await request(app).get("/api/debug/identity");
+    assert.equal(res.status, 404);
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prevNodeEnv;
   }
 });
 

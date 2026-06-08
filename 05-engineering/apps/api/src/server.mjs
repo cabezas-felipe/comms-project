@@ -226,11 +226,24 @@ export function _clearEmailCache() {
 }
 
 /**
+ * E2E strict identity flag.
+ * When true, and `x-recognized-email` is present, the resolver MUST use
+ * recognized-email and ignore Bearer entirely.
+ */
+export function resolveE2eStrictIdentityMode() {
+  const raw = (process.env.TEMPO_E2E_STRICT_IDENTITY ?? "").trim().toLowerCase();
+  return raw === "true" || raw === "1";
+}
+
+/**
  * Resolves caller identity from the request. Returns { userId, source } or null.
  *
  * Precedence:
- *   1. Bearer token → Supabase JWT verification (production path; source: "bearer")
- *   2. x-recognized-email header → server-side email lookup (prototype path; source: "email_recognition")
+ *   - Strict E2E mode ON + x-recognized-email present:
+ *       recognized-email ONLY (source: "recognized_email"), Bearer ignored.
+ *   - Otherwise (default):
+ *       1. Bearer token → Supabase JWT verification (source: "bearer")
+ *       2. x-recognized-email header → server-side email lookup (source: "recognized_email")
  *
  * Path 2 does NOT trust client-supplied userId — email is resolved server-side to the
  * canonical userId. If a Bearer token is present but unresolvable, returns null without
@@ -242,7 +255,27 @@ export function _clearEmailCache() {
  * Exported so tests can exercise the resolver directly without HTTP overhead.
  */
 export async function resolveIdentity(req) {
-  // 1. Bearer token — Supabase-verified identity (production path)
+  const recognizedEmailHeader = req.headers["x-recognized-email"];
+  const recognizedEmail =
+    typeof recognizedEmailHeader === "string" && recognizedEmailHeader.trim()
+      ? recognizedEmailHeader.trim().toLowerCase()
+      : null;
+
+  // E2E strict mode: if recognized-email is present, force that path and ignore
+  // Bearer entirely to prevent stale browser bearer sessions from hijacking the
+  // test identity.
+  if (resolveE2eStrictIdentityMode() && recognizedEmail) {
+    const cachedId = emailCacheGet(recognizedEmail);
+    if (cachedId !== undefined) return { userId: cachedId, source: "recognized_email" };
+    const userId = await _emailLookup.resolve(recognizedEmail);
+    if (userId) {
+      emailCacheSet(recognizedEmail, userId);
+      return { userId, source: "recognized_email" };
+    }
+    return null;
+  }
+
+  // 1. Bearer token — Supabase-verified identity (default production path)
   const authHeader = req.headers["authorization"];
   if (authHeader?.startsWith("Bearer ")) {
     if (isSupabaseEnabled()) {
@@ -259,15 +292,13 @@ export async function resolveIdentity(req) {
   }
 
   // 2. Prototype recognized-identity: resolve email server-side (no client userId trust)
-  const recognizedEmail = req.headers["x-recognized-email"];
-  if (recognizedEmail && typeof recognizedEmail === "string" && recognizedEmail.trim()) {
-    const email = recognizedEmail.trim().toLowerCase();
-    const cachedId = emailCacheGet(email);
-    if (cachedId !== undefined) return { userId: cachedId, source: "email_recognition" };
-    const userId = await _emailLookup.resolve(email);
+  if (recognizedEmail) {
+    const cachedId = emailCacheGet(recognizedEmail);
+    if (cachedId !== undefined) return { userId: cachedId, source: "recognized_email" };
+    const userId = await _emailLookup.resolve(recognizedEmail);
     if (userId) {
-      emailCacheSet(email, userId);
-      return { userId, source: "email_recognition" };
+      emailCacheSet(recognizedEmail, userId);
+      return { userId, source: "recognized_email" };
     }
   }
 
@@ -485,6 +516,7 @@ async function requireIdentity(req, res) {
     res.status(401).json({ message: "Authentication required. Provide a valid Bearer token or recognized-identity headers." });
     return null;
   }
+  res.set("x-tempo-identity-source", identity.source);
   return identity;
 }
 
@@ -1024,6 +1056,18 @@ function emitRefreshObservability({ userId, log, ingestionSource }) {
  * (`dashboard_refreshed`, `dashboard_refresh_skipped`, `api_error`).  Bootstrap
  * adds its own `dashboard_bootstrap` event on top.
  */
+/**
+ * E2E determinism flag. When `TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true`, the
+ * FIRST dashboard refresh for a user after a data reset bypasses the watermark
+ * short-circuit so the full pipeline always runs (no repeated-snapshot skip).
+ * Default false → production/default behavior is unchanged. Read at call time so
+ * the E2E harness can toggle it per process without a rebuild. Exported for tests.
+ */
+export function resolveE2eForceFirstFullRefresh() {
+  const raw = (process.env.TEMPO_E2E_FORCE_FIRST_FULL_REFRESH ?? "").trim().toLowerCase();
+  return raw === "true" || raw === "1";
+}
+
 async function executeRefreshFlow(identity, { refreshProfile = null, interactive = false } = {}) {
   const startedAt = Date.now();
   // Slice 4: a refresh requests a latency-shaping profile via `refreshProfile`
@@ -1275,6 +1319,19 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         ? { ...settings, onboardingNarrative: narrative.trim() }
         : settings;
 
+    // E2E determinism: force a full refresh (bypass the watermark short-circuit)
+    // on the FIRST refresh after a reset. "First load" is reset-aware and
+    // user-scoped: the marker is read off `_meta.e2e` — which `readSnapshot`
+    // LIFTS from the persisted `_lastRunMeta.e2e` (the raw `_lastRunMeta` is
+    // stripped at the read boundary, so we must NOT read it here). A prior
+    // snapshot whose `_meta.e2e.forceFirstFullRefreshApplied` is true means the
+    // forced run happened; a reset deletes the snapshot (and that marker), so the
+    // next load forces again. No-op unless the flag is on.
+    const e2eForceEnabled = resolveE2eForceFirstFullRefresh();
+    const e2eAlreadyForced =
+      priorSnapshot?._meta?.e2e?.forceFirstFullRefreshApplied === true;
+    const forceFullRefresh = e2eForceEnabled && !e2eAlreadyForced;
+
     const clusterModel = getAiCapabilityMap().clustering;
     // M3 / L1a: surface model identity on refresh _meta so DC demo debugging
     // and incident replay don't depend on log scrapes.  Both ids are env-derived
@@ -1291,6 +1348,8 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
       priorWatermark,
       priorStoryCount,
+      // E2E first-load override (default false): bypass the watermark short-circuit.
+      forceFullRefresh,
       everSeenMetaStoryIds: priorEverSeenMetaStoryIds,
       priorStoriesById,
       // Slice 4: effective latency-shaping profile for this run (after cold-start
@@ -1354,6 +1413,9 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       if (log.funnel) skipMeta.funnel = log.funnel;
       if (log.beatFit) skipMeta.beatFit = log.beatFit;
       if (log.timings) skipMeta.timings = log.timings;
+      // E2E diagnostics on the watermark-skip branch too, so `_meta.e2e` is
+      // present/consistent across skip and non-skip responses.
+      if (log.e2e) skipMeta.e2e = log.e2e;
       // Phase 2 lightweight decision trace.  Optional — older pipeline mocks
       // and partial returns may omit it; consumers ignore unknown _meta keys.
       if (log.decisionTrace) skipMeta.decisionTrace = log.decisionTrace;
@@ -1621,6 +1683,11 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     if (log.reclusterQueue !== undefined) lastRunMeta.reclusterQueue = log.reclusterQueue;
     if (log.reclusterQueueCount !== undefined) lastRunMeta.reclusterQueueCount = log.reclusterQueueCount;
     lastRunMeta.ingestionSource = ingestionSource;
+    // E2E: persist the forced-full-refresh marker so the NEXT load knows the
+    // first forced run already happened (and resumes normal watermark behavior).
+    // A data reset clears the snapshot — and this marker — so the post-reset
+    // first load forces again. Additive; absent/false on normal runs.
+    if (log.e2e !== undefined) lastRunMeta.e2e = log.e2e;
     finalPayload._lastRunMeta = lastRunMeta;
 
     await _snapshotRepo.write(identity.userId, finalPayload);
@@ -1745,6 +1812,10 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
           // clients ignore unknown _meta keys.
           outcomes: log.outcomes,
           ingestionSource,
+          // E2E determinism signal: whether this run's first-full-refresh override
+          // was applied and whether it bypassed a matching watermark. Additive;
+          // both false on normal (non-E2E) runs. Default-off behavior unchanged.
+          e2e: log.e2e,
           // D1: windowed ingestion-cache benefit advisory (measurement only).
           // Additive; consumers ignore unknown _meta keys. Reflects the rolling
           // 5-run-per-mode window as of this run — never gates the response.
@@ -2362,6 +2433,33 @@ app.get("/api/ai/models", (_req, res) => {
 app.get("/api/ai/metrics", (_req, res) => {
   res.json({
     metrics: getAiMetrics(),
+  });
+});
+
+/**
+ * Dev-only identity introspection endpoint for E2E readiness checks.
+ * Disabled in production unconditionally.
+ */
+function isDebugIdentityEnabled(env = process.env) {
+  return env.NODE_ENV !== "production";
+}
+
+app.get("/api/debug/identity", async (req, res) => {
+  if (!isDebugIdentityEnabled()) {
+    return res.status(404).json({ message: "Not found" });
+  }
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  const recognizedEmailHeader = req.headers["x-recognized-email"];
+  const recognizedEmail =
+    typeof recognizedEmailHeader === "string" && recognizedEmailHeader.trim()
+      ? recognizedEmailHeader.trim().toLowerCase()
+      : null;
+  return res.json({
+    userId: identity.userId,
+    resolvedEmail: identity.source === "recognized_email" ? recognizedEmail : null,
+    identitySource: identity.source,
+    strictIdentityEnabled: resolveE2eStrictIdentityMode(),
   });
 });
 

@@ -15,6 +15,17 @@ deferred re-cluster, **C** = diagnostics + tests.
 
 ## 1. Pre-flight checklist
 
+0. **Preferred: one-command E2E prep (strict identity + reset + gates)**:
+   ```bash
+   cd 05-engineering
+   npm run e2e:prepare-user -- --user-id <userId> --email <email>
+   ```
+   This runs `dev:api:clean` (with `TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` and
+   `TEMPO_E2E_STRICT_IDENTITY=true`), then `e2e:reset-user`,
+   `e2e:assert-clean`, and `e2e:preflight` (`--require-web`,
+   `--require-strict-identity`, `--require-web-identity-override`,
+   `--identity-email <email>`). If any gate fails, stop and fix before testing.
+
 1. **Start both servers** from `05-engineering/`:
    ```bash
    npm run dev          # build:packages, then concurrently dev:api + dev:web
@@ -58,18 +69,22 @@ deferred re-cluster, **C** = diagnostics + tests.
      .filter((k) => k.startsWith("tempo.settings.v1"))
      .forEach((k) => localStorage.removeItem(k));     // settings cache (global + per-user)
    ```
+   For E2E identity routing, run the web app with:
+   `VITE_E2E_IDENTITY_PRECEDENCE=recognized_email`.
 5. **Local English E2E** — for a landing → dashboard run that turns the Spanish
    feeds into **English** stories, the translation stage must be live (it is a
    fail-open no-op otherwise — see [`.env.example`](../apps/api/.env.example)
    "Local E2E: Spanish feeds → English stories" and the
    [translation runbook](runbook-translation-activation.md)):
-   - `TEMPO_TRANSLATION_ENABLED=true`
+   - Activation is mode-driven: `TEMPO_TRANSLATION_MODE=auto` (the default)
+     auto-activates the stage for Spanish feeds. Use `on` to force it; the
+     legacy `TEMPO_TRANSLATION_ENABLED` still overrides if set.
    - `TEMPO_OPENAI_API_KEY=<key>` set **and** `TEMPO_AI_MOCK_ONLY` unset (a real
      `translateFn` is wired only on a non-mock box with a key).
    - **Restart the API after changing env** — these are read at process start,
      not per-request (`npm run dev:api`, or restart `npm run dev`).
    - **Verify in the API logs** on the next refresh:
-     - `[pipeline.translation] enabled=true …` (the stage is on), and
+     - `[pipeline.translation] mode=auto … enabled=true …` (the stage is on), and
      - when the candidate pool has Spanish items: `needed>0` **and** `translated>0`.
    - Mock-only / no-key → translation is a no-op; ES stories stay Spanish. This is
      **expected — not a clustering or split-healer regression** (the items simply
@@ -140,7 +155,7 @@ curl -s localhost:8787/api/dashboard -H "Authorization: Bearer <token>" \
 |---|---|---|---|
 | **Split-healer off** | `TEMPO_CLUSTER_SPLIT_HEALER_ENABLED=false` | `true` | Over-merges are NOT split — a multi-topic cluster ships as one story; no defer flags, so the re-cluster queue stays empty. Instant rollback for any split/defer regression. |
 | **Split sensitivity** | `TEMPO_CLUSTER_SPLIT_JACCARD_THRESHOLD` | `0.15` | Higher → splits less (more tolerant of overlap); lower → splits more aggressively. Tune before disabling outright. |
-| **Translation off** | `TEMPO_TRANSLATION_ENABLED=false` | code-default off; **on in preview+prod (Sprint B1)** | ES evidence is no longer normalized → split-healer/cluster English output reverts to original-language for ES sources, and recall narrows to English-keyword matches. English-only behavior is unchanged. See the [translation runbook](runbook-translation-activation.md). |
+| **Translation mode** | `TEMPO_TRANSLATION_MODE=auto\|on\|off` | `auto` (legacy `TEMPO_TRANSLATION_ENABLED` overrides) | `off` disables ES normalization and can narrow recall for English keywords; `auto` activates only when non-English evidence is present; `on` forces translation attempts always. See the [translation runbook](runbook-translation-activation.md). |
 | **Force mocks** | `TEMPO_AI_MOCK_ONLY=true` | unset | All live LLM calls (incl. the production `translateFn`) become deterministic mocks/no-ops; the deferred re-cluster uses the mock cluster path. Use for local/CI determinism. |
 
 The deferred re-cluster executor has **no kill-switch of its own** — it only acts when
@@ -173,7 +188,7 @@ npm run test --workspace=@tempo/api
 ## One clean E2E pass (Spanish reset scenario)
 
 1. Reset user `<userId>` files + browser storage (§1.3–§1.4).
-2. Ensure Spanish E2E env is live (§1.5): `TEMPO_TRANSLATION_ENABLED=true`,
+2. Ensure Spanish E2E env is live (§1.5): `TEMPO_TRANSLATION_MODE=auto`,
    `TEMPO_OPENAI_API_KEY` set, `TEMPO_AI_MOCK_ONLY` unset. Start `npm run dev`.
 3. Onboard the user with a bilateral (ES/EN) beat, land on the dashboard, then open
    it with `?debug=1`.
@@ -195,8 +210,8 @@ A landing → onboarding → dashboard pass is **green** when all of the followi
 - [ ] **1–5 stories visible** on the dashboard (never 0 for a populated beat; never >5).
 - [ ] **Story titles and subtitles are in English**, even when the underlying
       sources are Spanish.
-- [ ] API logs show `[pipeline.translation] enabled=true` and, when ES items were in
-      the pool, `needed>0 translated>0` (per §1.5).
+- [ ] API logs show `[pipeline.translation] mode=auto … enabled=true` and, when ES
+      items were in the pool, `needed>0 translated>0` (per §1.5).
 - [ ] **No** `[dashboard.get] … failed schema validation … returning empty` line in
       the API logs (that line means the snapshot fail-closed on read — investigate the
       persisted payload, e.g. an invalid `sources[].kind`).

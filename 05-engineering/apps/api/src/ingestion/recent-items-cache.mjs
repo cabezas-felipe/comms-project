@@ -193,7 +193,7 @@ export function cacheRowsToRawItems(rows, manifestFeeds = [], { now = Date.now()
     const derived = derivePublisherFromFeedName(typeof manifest?.name === "string" ? manifest.name : "");
     const outlet = publisher ?? derived ?? (typeof manifest?.name === "string" ? manifest.name : "") ?? "";
 
-    out.push({
+    const item = {
       sourceId: row.source_id,
       feedId: row.feed_id,
       url: typeof row.url === "string" ? row.url : "",
@@ -206,7 +206,14 @@ export function cacheRowsToRawItems(rows, manifestFeeds = [], { now = Date.now()
       // safe default so cache-origin items never carry a schema-invalid kind.
       kind: mapIngestionKindToContractKind(manifest?.kind),
       weight: typeof manifest?.weight === "number" ? manifest.weight : DEFAULT_WEIGHT,
-    });
+    };
+    // Carry the manifest language tag through so cache-hit refreshes keep the
+    // non-English signal that drives TEMPO_TRANSLATION_MODE=auto (mirrors
+    // mapEntry). Only set when present — never fabricate a language.
+    if (typeof manifest?.lang === "string" && manifest.lang.trim().length > 0) {
+      item.lang = manifest.lang.trim();
+    }
+    out.push(item);
   }
   return out;
 }

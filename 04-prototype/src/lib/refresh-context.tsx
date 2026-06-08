@@ -10,7 +10,7 @@ import {
 } from "react";
 import { useAuth } from "./auth";
 import {
-  LAST_REFRESH_ATTEMPT_KEY,
+  lastRefreshAttemptKeyForUser,
   readLastAttemptAt,
   useRefreshHeartbeat,
   writeLastAttemptAt,
@@ -180,11 +180,17 @@ type InFlightSlot = {
 
 export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) {
   const { recognizedIdentity } = useAuth();
+  const storageKey = useMemo(
+    () => lastRefreshAttemptKeyForUser(recognizedIdentity?.userId),
+    [recognizedIdentity?.userId]
+  );
   const [heartbeatResult, setHeartbeatResult] = useState<DashboardFetchResult | null>(null);
   // Single anchor for both header + footer.  Seeded from localStorage so a
   // remount / cross-tab return keeps the visible badge stable while the
   // heartbeat re-evaluates due-ness in the background.
-  const [lastAttemptAt, setLastAttemptAt] = useState<number | null>(() => readLastAttemptAt());
+  const [lastAttemptAt, setLastAttemptAt] = useState<number | null>(() =>
+    readLastAttemptAt(undefined, storageKey)
+  );
   // Live mirror of `lastAttemptAt` for gates that need a synchronous read
   // (e.g. seedAnchorIfMissing's "already seeded?" check fired from a Promise
   // .then() callback).  Reading React state from a closure inside a callback
@@ -206,6 +212,20 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
   useEffect(() => {
     lastAttemptAtRef.current = lastAttemptAt;
   }, [lastAttemptAt]);
+
+  // Rehydrate the anchor when identity changes so each recognized user reads a
+  // user-scoped "last refresh" clock instead of inheriting another user's key.
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    const seeded = readLastAttemptAt(undefined, storageKey);
+    setLastAttemptAt(seeded);
+    lastAttemptAtRef.current = seeded;
+    setInFlight([]);
+  }, [storageKey]);
 
   // Anchor never moves backward — that would let an out-of-order callback
   // (e.g. a stale storage event after a fresh local settlement) regress the
@@ -254,6 +274,7 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
 
   useRefreshHeartbeat({
     enabled: !!recognizedIdentity,
+    storageKey,
     onAttemptStart: () => {
       // Anchor advances on settlement, not on start — keeps the header from
       // racing ahead of the user while a long fetch is still in flight.
@@ -290,13 +311,13 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
   useEffect(() => {
     if (typeof window === "undefined") return;
     const handler = (e: StorageEvent) => {
-      if (e.key !== LAST_REFRESH_ATTEMPT_KEY) return;
-      const t = readLastAttemptAt();
+      if (e.key !== storageKey) return;
+      const t = readLastAttemptAt(undefined, storageKey);
       if (t !== null) advanceAnchor(t);
     };
     window.addEventListener("storage", handler);
     return () => window.removeEventListener("storage", handler);
-  }, [advanceAnchor]);
+  }, [advanceAnchor, storageKey]);
 
   // Watchdog — guarantees the footer never stays stuck on "Refreshing now…".
   // Schedules at the oldest slot's deadline and, when it fires, expires only
@@ -373,11 +394,11 @@ export function RefreshHeartbeatProvider({ children }: { children: ReactNode }) 
     // `serverMs`.  The storage event handler will subsequently advance
     // React state / the ref to the newer value via `advanceAnchor`'s
     // monotonic guard, so the temporary state lag closes on the next tick.
-    const persistedMs = readLastAttemptAt();
+    const persistedMs = readLastAttemptAt(undefined, storageKey);
     if (persistedMs === null || persistedMs < serverMs) {
-      writeLastAttemptAt(serverMs);
+      writeLastAttemptAt(serverMs, undefined, storageKey);
     }
-  }, []);
+  }, [storageKey]);
 
   const recordAttemptStart = useCallback((): AttemptToken => {
     // Mirrors the heartbeat semantics: in-flight flag goes up, anchor only

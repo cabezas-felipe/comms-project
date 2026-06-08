@@ -16,8 +16,8 @@ import { RefreshHeartbeatProvider, useRefreshContext } from "./lib/refresh-conte
 const queryClient = new QueryClient();
 
 function HeaderWithRefreshState() {
-  const { lastRefreshedAt } = useRefreshContext();
-  return <AppHeader lastRefreshedAt={lastRefreshedAt} />;
+  const { lastRefreshedAt, isRefreshing } = useRefreshContext();
+  return <AppHeader lastRefreshedAt={lastRefreshedAt} isRefreshing={isRefreshing} />;
 }
 
 const App = () => {

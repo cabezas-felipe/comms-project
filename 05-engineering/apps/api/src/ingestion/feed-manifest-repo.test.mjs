@@ -242,6 +242,99 @@ test("listIngestionFeeds: derives publisher from canonical_name when DB field nu
   assert.equal(feed.publisher, "The Washington Post");
 });
 
+test("listIngestionFeeds: known Spanish feed ids carry lang='es' (DB-manifest language propagation)", async () => {
+  const spanishIds = [
+    "semana-politica",
+    "semana-nacion",
+    "semana-estados-unidos",
+    "infobae-colombia",
+    "infobae-estados-unidos",
+    "silla-nacional",
+  ];
+  const rows = spanishIds.map((id, i) => ({
+    manifest_feed_id: id,
+    rss_url: `https://example.com/${id}.xml`,
+    social_profile_url: null,
+    ingestion_weight: 70 - i,
+    active: true,
+    status: "mapped",
+    source_entities: { canonical_name: `${id} section`, kind: "traditional", publisher_display_name: "Pub" },
+  }));
+
+  const feeds = await listIngestionFeeds({ supabase: makeMockSupabase(rows) });
+
+  assert.equal(feeds.length, spanishIds.length);
+  for (const id of spanishIds) {
+    const feed = feeds.find((f) => f.id === id);
+    assert.ok(feed, `feed ${id} present`);
+    assert.equal(feed.lang, "es", `feed ${id} must carry lang='es'`);
+  }
+});
+
+test("listIngestionFeeds: non-Spanish feeds do not get a lang key (no fabricated language)", async () => {
+  const rows = [
+    {
+      manifest_feed_id: "reuters-world",
+      rss_url: "https://feeds.reuters.com/reuters/worldNews",
+      social_profile_url: null,
+      ingestion_weight: 88,
+      active: true,
+      status: "mapped",
+      source_entities: { canonical_name: "Reuters — World News", kind: "traditional" },
+    },
+    {
+      manifest_feed_id: "semana-internacional",
+      rss_url: "https://example.com/semana-intl.xml",
+      social_profile_url: null,
+      ingestion_weight: 60,
+      active: true,
+      status: "mapped",
+      source_entities: { canonical_name: "Semana — Internacional", kind: "traditional", publisher_display_name: "Semana" },
+    },
+  ];
+
+  const feeds = await listIngestionFeeds({ supabase: makeMockSupabase(rows) });
+
+  for (const feed of feeds) {
+    assert.equal("lang" in feed, false, `feed ${feed.id} must not carry a lang key`);
+    assert.equal(feed.lang, undefined);
+  }
+});
+
+test("listIngestionFeeds: Spanish lang tag does not disturb sorting, publisher, or active mapping", async () => {
+  const rows = [
+    {
+      manifest_feed_id: "semana-nacion",
+      rss_url: "https://example.com/semana-nacion.xml",
+      social_profile_url: null,
+      ingestion_weight: 70,
+      active: false,
+      status: "verified",
+      source_entities: { canonical_name: "Semana — Nación", kind: "traditional", publisher_display_name: "Semana" },
+    },
+    {
+      manifest_feed_id: "reuters-world",
+      rss_url: "https://feeds.reuters.com/reuters/worldNews",
+      social_profile_url: null,
+      ingestion_weight: 95,
+      active: true,
+      status: "mapped",
+      source_entities: { canonical_name: "Reuters — World News", kind: "traditional", publisher_display_name: "Reuters" },
+    },
+  ];
+
+  const feeds = await listIngestionFeeds({ supabase: makeMockSupabase(rows) });
+
+  assert.equal(feeds[0].id, "reuters-world");
+  assert.equal(feeds[1].id, "semana-nacion");
+  const semana = feeds[1];
+  assert.equal(semana.publisher, "Semana");
+  assert.equal(semana.active, false);
+  assert.equal(semana.lang, "es");
+  assert.equal(feeds[0].publisher, "Reuters");
+  assert.equal("lang" in feeds[0], false);
+});
+
 test("listIngestionFeeds: social rows omit publisher (F1)", async () => {
   const rows = [
     {

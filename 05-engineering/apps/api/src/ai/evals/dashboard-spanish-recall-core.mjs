@@ -34,7 +34,7 @@ const KEYWORD_RECALL = Object.freeze({
 });
 
 const TRANSLATION_ENABLED = Object.freeze({
-  enabled: true,
+  mode: "auto",
   concurrency: 4,
   timeoutMs: 8000,
   maxChars: 700,
@@ -42,7 +42,7 @@ const TRANSLATION_ENABLED = Object.freeze({
 });
 
 const TRANSLATION_DISABLED = Object.freeze({
-  enabled: false,
+  mode: "off",
   concurrency: 4,
   timeoutMs: 8000,
   maxChars: 700,
@@ -222,8 +222,8 @@ async function scenarioBaselineNoTranslation() {
   if ((log?.recall?.finalRelevant ?? -1) !== 0) {
     reasons.push(`expected recall.finalRelevant=0 without translation, got ${log?.recall?.finalRelevant}`);
   }
-  if (log?.translation?.enabled !== false) {
-    reasons.push(`expected translation.enabled=false, got ${log?.translation?.enabled}`);
+  if (log?.translation?.mode !== "off") {
+    reasons.push(`expected translation.mode=off, got ${log?.translation?.mode}`);
   }
   return { ok: reasons.length === 0, reasons, diagnostics: { reached, finalRelevant: log?.recall?.finalRelevant } };
 }

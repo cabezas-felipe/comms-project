@@ -32,7 +32,9 @@
     "eval:relevance-precision": "NODE_ENV=test node --test src/dashboard/relevance-precision-eval.test.mjs",
     "eval:why-this-matters": "node src/ai/evals/run-why-this-matters-eval.mjs",
     "source-catalog:generate": "node src/ops/source-registry-catalog-generate.mjs",
-    "cluster:probe": "node scripts/cluster-reliability-probe.mjs"
+    "cluster:probe": "node scripts/cluster-reliability-probe.mjs",
+    "e2e:reset-user": "node scripts/e2e-reset-user.mjs",
+    "e2e:assert-clean": "node scripts/e2e-assert-clean.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.0",
