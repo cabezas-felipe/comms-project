@@ -409,6 +409,57 @@ export function resolveClusterEnvelopeBudgetMs({
 // DB, or model calls — every signal is an item-level proxy.
 export const CLUSTER_INPUT_CAP = 15;
 
+// Step 1.4 diagnostics bounds.  `clusterDropped` carries explainable per-item
+// drop reasons for `?debug=1`; both caps keep the payload bounded (no full
+// bodies, no unbounded lists) so the diagnostic can ride in `_meta` cheaply.
+export const CLUSTER_DROPPED_DETAIL_MAX = 10; // at most N explained drops
+export const CLUSTER_DROPPED_HEADLINE_MAX_LEN = 160; // truncate headlines
+
+// Deterministic, payload-safe number: finite → itself, otherwise null (so the
+// JSON stays clean rather than emitting NaN/Infinity).
+function safeNum(n) {
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+
+// Build one bounded `clusterDropped` entry from a scored record + its absolute
+// 1-based rank in the full ranked list.  All fields come off the pre-cluster
+// score key (already computed for sorting) — no recompute, no I/O.
+function buildClusterDropEntry(scored, rank) {
+  const { item, key } = scored;
+  const rawHeadline =
+    typeof item?.headline === "string" && item.headline
+      ? item.headline
+      : typeof item?.normalizedHeadline === "string"
+        ? item.normalizedHeadline
+        : "";
+  const headline =
+    rawHeadline.length > CLUSTER_DROPPED_HEADLINE_MAX_LEN
+      ? `${rawHeadline.slice(0, CLUSTER_DROPPED_HEADLINE_MAX_LEN - 1)}…`
+      : rawHeadline;
+  const c = key?.components ?? {};
+  return {
+    sourceId: typeof item?.sourceId === "string" ? item.sourceId : null,
+    headline,
+    rank,
+    preClusterScore: safeNum(key?.preClusterScore),
+    components: {
+      topicFit: safeNum(c.topicFit),
+      keywordFit: safeNum(c.keywordFit),
+      geoFit: safeNum(c.geoFit),
+      entityFit: safeNum(c.entityFit),
+      corroboration: safeNum(c.corroboration),
+      beatFit: safeNum(c.beatFit),
+      freshness: safeNum(c.freshness),
+      electionGeoBoost: safeNum(c.electionGeoBoost),
+    },
+    electionGeoClass: key?.electionGeoClass ?? null,
+    hardFail: typeof key?.hardFail === "boolean" ? key.hardFail : null,
+    geoReason: key?.geoReason ?? null,
+    geoCategory: key?.geoCategory ?? null,
+    headlineFamilyKey: typeof key?.headlineFamilyKey === "string" ? key.headlineFamilyKey : null,
+  };
+}
+
 /**
  * Rank `dedupedItems` by pre-cluster relevance and slice to `cap`.  Returns the
  * capped `clusterInputItems` (what `clusterFn` actually sees) plus deterministic
@@ -416,6 +467,11 @@ export const CLUSTER_INPUT_CAP = 15;
  *
  * Flow: build the pool index once (single O(n) scan), score each item against it
  * (O(1) lookups), sort by `comparePreClusterRank`, slice the top `cap`.
+ *
+ * Diagnostics (Step 1.4): in addition to the counts + dropped IDs, an additive
+ * `clusterDropped` array carries the top `CLUSTER_DROPPED_DETAIL_MAX` dropped
+ * candidates (in drop-rank order) with their score + component breakdown so
+ * `?debug=1` can explain WHY each was cut.
  *
  * @param {Array}  dedupedItems — post-beat-fit, post-dedupe candidate set
  * @param {Object} [settings]   — user settings (topics/keywords/geographies)
@@ -443,6 +499,11 @@ export function applyClusterInputCap(dedupedItems, settings = {}, cap = CLUSTER_
       clusterDroppedSourceIds: dropped
         .map((s) => s.item?.sourceId)
         .filter((id) => typeof id === "string"),
+      // Explainable, bounded drop detail (drop-rank order; absolute 1-based
+      // `rank` = cap + offset).  Same order as `clusterDroppedSourceIds`.
+      clusterDropped: dropped
+        .slice(0, CLUSTER_DROPPED_DETAIL_MAX)
+        .map((s, i) => buildClusterDropEntry(s, cap + i + 1)),
     },
   };
 }

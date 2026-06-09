@@ -9642,6 +9642,94 @@ test("C1 cap (Decision 5C): cross-country election still survives a thin pool", 
   assert.ok(ids.indexOf("br") < ids.indexOf("noise"));
 });
 
+// ─── Step 1.4: explainable cap-drop diagnostics ──────────────────────────────
+
+test("C1 diagnostics: clusterDropped enriches drops and matches dropped IDs order", () => {
+  // 20 otherwise-identical items, fresher = lower minutesAgo → src-00 ranks
+  // first, src-19 last; cap 15 drops src-15…src-19 in that order.
+  const items = Array.from({ length: 20 }, (_, i) => ({
+    sourceId: `src-${String(i).padStart(2, "0")}`,
+    headline: `Headline ${i}`,
+    minutesAgo: i,
+  }));
+  const { diagnostics } = applyClusterInputCap(items, {});
+
+  // Enrichment exists, length = min(droppedCount, detail cap).
+  assert.ok(Array.isArray(diagnostics.clusterDropped));
+  assert.equal(diagnostics.clusterDropped.length, Math.min(5, 10));
+
+  // Drop-order consistency: clusterDropped sourceIds prefix == clusterDroppedSourceIds.
+  assert.deepEqual(
+    diagnostics.clusterDropped.map((x) => x.sourceId),
+    diagnostics.clusterDroppedSourceIds.slice(0, diagnostics.clusterDropped.length)
+  );
+
+  // Ranks are absolute + 1-based: first drop is rank cap+1 = 16.
+  assert.deepEqual(
+    diagnostics.clusterDropped.map((x) => x.rank),
+    [16, 17, 18, 19, 20]
+  );
+
+  // Component presence + numeric score on the first dropped entry.
+  const first = diagnostics.clusterDropped[0];
+  assert.equal(first.sourceId, "src-15");
+  assert.equal(typeof first.preClusterScore, "number");
+  for (const k of [
+    "topicFit", "keywordFit", "geoFit", "entityFit",
+    "corroboration", "beatFit", "freshness", "electionGeoBoost",
+  ]) {
+    assert.ok(k in first.components, `component ${k} present`);
+  }
+  assert.equal(first.components.entityFit, 0, "entityFit is 0 pre-cluster");
+});
+
+test("C1 diagnostics: clusterDropped is bounded to 10 entries and truncates headlines", () => {
+  const longHeadline = "X".repeat(400);
+  // 30 items over a cap of 15 → 15 dropped, but detail is capped at 10.
+  const items = Array.from({ length: 30 }, (_, i) => ({
+    sourceId: `src-${String(i).padStart(2, "0")}`,
+    headline: longHeadline,
+    minutesAgo: i,
+  }));
+  const { diagnostics } = applyClusterInputCap(items, {});
+  assert.equal(diagnostics.clusterDroppedCount, 15);
+  assert.equal(diagnostics.clusterDropped.length, 10, "detail list bounded at 10");
+  // Headline truncated to <= 160 chars (with ellipsis).
+  for (const entry of diagnostics.clusterDropped) {
+    assert.ok(entry.headline.length <= 160, "headline truncated to safe length");
+    assert.ok(entry.headline.endsWith("…"), "oversized headline gets an ellipsis");
+  }
+});
+
+test("C1 diagnostics: clusterDropped is empty when nothing is dropped", () => {
+  const items = Array.from({ length: 5 }, (_, i) => ({ sourceId: `src-${i}`, minutesAgo: i }));
+  const { diagnostics } = applyClusterInputCap(items, {});
+  assert.equal(diagnostics.clusterDroppedCount, 0);
+  assert.deepEqual(diagnostics.clusterDropped, []);
+});
+
+test("C1 diagnostics: clusterDropped surfaces election-geo + geo-conflict reasons", () => {
+  // A cross-country election (Peru) and an off-geo conflict get dropped behind a
+  // configured-geo election (Colombia) when cap=1.
+  const colombia = makeItem({
+    sourceId: "co", headline: "Colombia election results", topic: "election",
+    geographies: ["Colombia"], minutesAgo: 60,
+  });
+  const peru = makeItem({
+    sourceId: "pe", headline: "Peru election results", topic: "election",
+    geographies: ["Peru"], minutesAgo: 60,
+  });
+  const { diagnostics } = applyClusterInputCap([colombia, peru], C1_SETTINGS, 1);
+  assert.equal(diagnostics.clusterDropped.length, 1);
+  const dropped = diagnostics.clusterDropped[0];
+  assert.equal(dropped.sourceId, "pe");
+  assert.equal(dropped.electionGeoClass, "crossCountryElection");
+  assert.ok(dropped.components.electionGeoBoost < 0, "cross-country penalty surfaced");
+  assert.equal(dropped.hardFail, true, "explicit geo conflict surfaced");
+  assert.equal(dropped.geoReason, "explicit_conflict");
+  assert.equal(typeof dropped.headlineFamilyKey, "string");
+});
+
 test("C1 integration: exactly 15 items reach clusterFn when dedupedItems > 15", async () => {
   // 20 relevant items identical except age (fresher = smaller minutesAgo). Their
   // topic/keyword/geo/corroboration signals all tie, so the pre-cluster relevance
