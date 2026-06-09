@@ -11,8 +11,9 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Dashboard dual-beat (recall-widening)** | Hermetic regression: one profile (Colombia elections + Kenya Ebola) surfaces BOTH beats as distinct meta-stories in one refresh; geo lexical gate admits geo-only items | `npm run eval:dashboard-dual-beat` | Smoke gate (non-zero on any assertion failure) |
 | **Dashboard intra-beat split (cluster-split healer)** | Hermetic regression: same-country UNRELATED events (Colombia election + mine attack) merged by clustering get split into separate meta-stories, while a same-event pair stays merged; asserts `log.clusterSplit` diagnostics | `npm run eval:dashboard-intra-beat-split` | Smoke gate (non-zero on any assertion failure) |
 | **Dashboard Spanish recall (Slice 14)** | Hermetic regression: Spanish RSS-shaped items + English settings reach the clustering pool via translation-first normalized English evidence (and do NOT without it); plus a degraded partial-translation-failure path where the refresh still completes and affected stories are marked low-confidence in `_meta.translation` | `npm run eval:dashboard-spanish-recall` | Smoke gate (non-zero on any scenario failure) |
+| **Dashboard elections-Colombia (Q6B)** | Hermetic acceptance test for the relevance strategy: a 14-item Colombia-presidential-election mix (Spanish + English) surfaces the election beat over wrong-geo / wrong-beat noise — all 14 reach candidacy, explicit wrong-geo controls hard-fail, the dashboard ships ≤5 meta-stories, the overflow cap drops the generic geo-noise story, and ≥1 election meta-story is multi-source | `npm run eval:dashboard-elections-colombia` | Smoke gate (non-zero on any assertion failure); **wired into `eval:dashboard-quality-gate`** |
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
-| **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR calibration guardrails regress |
+| **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + elections-colombia + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR elections-colombia fails OR calibration guardrails regress |
 | **Dashboard embassy beat (Sprint C3)** | Hermetic golden: synthetic mixed EN/ES, multi-geo (Colombia/LatAm + Kenya/Africa style) embassy beat still produces usable output after the Sprint C cluster-reliability changes (C1 input cap + C2 JSON safe-trim repair). Minimum-presence only: `stories.length >= 1` AND `usedFallbackClustering === false`. Diagnostics retained but not gated. | `npm run eval:dashboard-embassy-beat` | Standalone smoke (non-zero on unmet criteria); **not** wired into `eval:dashboard-quality-gate` |
 | **Cache-benefit advisory (Sprint D1)** | Hermetic, deterministic check of the ingestion-cache benefit window logic (`dashboard/cache-benefit-window.mjs`): cache_hit p50 >= 20% faster than live_scoped p50, cache-hit rate >= 60%, >= 5 samples/mode in a 5-run window. Synthetic run windows; **measurement + guardrails only, no runtime behavior**. | `npm run eval:cache-benefit-advisory` | **Advisory** — standalone, non-zero only if the window logic regresses; **not** wired into any blocking gate |
 | **D2 narrative stability (Sprint D2)** | Hermetic failure-injection over the real pipeline: fail-closed-per-story for what-changed + why-it-matters (one retry per failing stage, then drop the story; never fail the global refresh). Asserts per-story drop, single-retry recovery, per-stage retry/drop tallies, and the >=50% retention guardrail. | `npm run eval:d2-narrative-stability` | **Advisory** — standalone, non-zero only if the D2 stability logic regresses; **not** wired into any blocking gate |
@@ -251,6 +252,59 @@ Exit `0` when all assertions pass; `1` on any failure. Standalone (not part of
 When to run: after touching the geo lexical matcher (`geo-lexical-match.mjs`),
 the recall lexical gate (`applyTopicKeywordFilter` / `analyzeTopicKeywordStage`
 in `refresh-pipeline.mjs`), or anything affecting multi-beat recall.
+
+---
+
+## Dashboard Elections — Colombia (Q6B)
+
+### Why this exists
+
+The **primary acceptance test for the relevance strategy**. A single hermetic
+refresh over a realistic Colombia-presidential-election news mix proves the whole
+pipeline does the right thing end-to-end: it surfaces the **election beat** over
+**wrong-geography** and **wrong-beat** noise, respects the fixed 5-story cap, and
+keeps the election stories when the cap fires.
+
+### How it works (hermetic)
+
+In-code RSS-shaped fixtures (`dashboard-elections-colombia-core.mjs`) — no live
+RSS / Anthropic / embedding provider. 14 fixtures: **8** Colombia
+presidential-election positives (Spanish + English, multiple outlets) and **6**
+negatives — a Senegal election and an Argentina film story (explicit wrong-geo),
+three right-geo/wrong-beat Colombia items (tremor / traffic / coffee), and one
+no-geo markets decoy. Recall runs in `keyword` (lexical) mode and beat-fit is
+disabled; a deterministic injected `clusterFn` emits grounded election
+meta-stories (with `tags` + `associated_entities`) plus one geo-only noise story,
+forcing the overflow cap to fire.
+
+### What it gates (maps to the locked decisions)
+
+- **Q2 (recall / translation-first):** all 14 fixtures reach the candidate stage;
+  Spanish election coverage is admitted via the configured-geo lexical gate and
+  ships.
+- **Geo precision (hard-fail):** the two explicit wrong-geography controls are
+  dropped before clustering (`geoHardFailDroppedCount === 2`), no LLM.
+- **Q3 / Q3A (cap + relevance survival):** the dashboard ships **≤5**
+  meta-stories; when the clustered set overflows, the overflow cap drops the
+  generic same-geography noise story and the election stories survive.
+- **Q3B (corroboration / bundling):** at least one shipped election meta-story is
+  multi-source.
+- **Q1 / B1 (grounded tags + entities):** the injected clusters carry
+  `associated_entities` + tags that feed the relevance score deciding survival.
+- All wrong-region / wrong-beat controls are absent from shipped stories.
+
+### Run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-elections-colombia
+```
+
+Exit `0` when all assertions pass; `1` on any failure. Also runs in-process as
+step **(3/4)** of `eval:dashboard-quality-gate` (fails the gate on regression).
+
+When to run: after touching geo admission (`geo-filter.mjs` / `relevance-policy.mjs`),
+the recall gate, the overflow/survival ranking, or the split healer.
 
 ---
 
