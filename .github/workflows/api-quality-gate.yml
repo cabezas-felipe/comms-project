@@ -17,6 +17,9 @@ jobs:
   api-quality-gate:
     name: Test API + critical eval gate
     runs-on: ubuntu-latest
+    # Guardrail ceiling — a healthy run is well under this; the bound only
+    # exists so a hung install/test/eval can't pin a runner indefinitely.
+    timeout-minutes: 30
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 

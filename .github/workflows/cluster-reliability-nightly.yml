@@ -56,6 +56,10 @@ jobs:
   cluster-reliability:
     name: Live clustering reliability probe
     runs-on: ubuntu-latest
+    # Guardrail ceiling sized for the default 20 live refreshes plus cooldowns
+    # (and headroom for higher dispatch `runs`). Bounds a hung probe without
+    # cutting a normal nightly run; the probe still owns the pass/fail gate.
+    timeout-minutes: 45
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       # Resolve dispatch inputs to the probe's own defaults on the scheduled

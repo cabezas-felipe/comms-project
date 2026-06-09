@@ -39,6 +39,10 @@ jobs:
   live-cluster-advisory:
     name: Live cluster drift advisory (non-blocking)
     runs-on: ubuntu-latest
+    # Guardrail ceiling for the single live provider call — bounds a hung
+    # request without affecting a normal advisory run. Still non-blocking:
+    # a timeout fails this advisory job only, never a PR.
+    timeout-minutes: 20
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 

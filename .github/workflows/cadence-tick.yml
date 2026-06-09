@@ -28,10 +28,20 @@ on:
     - cron: "5 * * * *"
   workflow_dispatch:
 
+# Serialize ticks — never let a slow run overlap the next hourly fire (or a
+# manual dispatch), since both drive shared per-user Supabase refresh writes.
+# cancel-in-progress: false → a mid-flight tick always finishes; the next is queued.
+concurrency:
+  group: cadence-tick
+  cancel-in-progress: false
+
 jobs:
   cadence-tick:
     name: Run due-user orchestrator tick
     runs-on: ubuntu-latest
+    # Guardrail ceiling — bounds a hung orchestrator run; a healthy tick is far
+    # under, and the next hourly tick re-refreshes any user this one missed.
+    timeout-minutes: 20
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 

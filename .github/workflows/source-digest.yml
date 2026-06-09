@@ -9,6 +9,8 @@ jobs:
   source-digest:
     name: Run source delta digest
     runs-on: ubuntu-latest
+    # Guardrail ceiling — bounds a hung digest run; a healthy run is far under.
+    timeout-minutes: 15
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
