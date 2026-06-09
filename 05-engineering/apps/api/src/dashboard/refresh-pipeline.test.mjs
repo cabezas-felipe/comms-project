@@ -8552,6 +8552,157 @@ test("runRefreshPipeline (A4): matched stories survive cap over unmatched", asyn
   assert.equal(overflowRecords[0].debug_payload.topicKeywordMatchStrength, 0);
 });
 
+// ─── Q3A: relevance-score overflow survival ranking ──────────────────────────
+//
+// Prompt 2 replaces the coarse topic/keyword-strength survival order with a
+// deterministic relevance score (topic / keyword / grounded entity fit > geo >
+// corroboration > beat-fit > freshness). These guard that a story matching the
+// user's configured beat survives the cap over generic same-geography noise, and
+// that the survival order stays deterministic across runs.
+
+// One election profile: Colombia + elections vocabulary. Sources match BASE so
+// the single seed item clears source selection; topic "Elections" clears recall.
+const ELECTION_OVERFLOW_SETTINGS = {
+  contractVersion: "2026-05-19-meta-story-fields",
+  topics: ["Elections"],
+  keywords: ["election"],
+  geographies: ["Colombia"],
+  traditionalSources: ["Reuters", "El Tiempo"],
+  socialSources: [],
+};
+
+// 6 grounded stories on one seed item: 1 election-beat story + 5 generic
+// Colombia geo-noise rows (geography tag only, no topic/keyword/entity match).
+function electionOverflowStories() {
+  const election = {
+    meta_story_id: "beat-election",
+    title: "Colombia presidential election race tightens before the vote",
+    subtitle: "Subtitle election.",
+    source_item_ids: ["src-1"],
+    summary: "Summary election.",
+    tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+    associated_entities: ["Colombia presidential election", "electoral authority"],
+    factual_claims: ["Reuters reports the Colombia election race tightened."],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const noise = Array.from({ length: 5 }, (_, i) => ({
+    meta_story_id: `noise-${i}`,
+    title: `Colombia general update ${i}`,
+    subtitle: `Subtitle noise ${i}.`,
+    source_item_ids: ["src-1"],
+    summary: `Summary noise ${i}.`,
+    tags: { topics: [], keywords: [], geographies: ["Colombia"] },
+    associated_entities: [],
+    factual_claims: [`Reuters reports a Colombia development ${i}.`],
+    claim_evidence_map: { "0": ["src-1"] },
+  }));
+  return [election, ...noise];
+}
+
+test("runRefreshPipeline (Q3A): election-matching story survives cap over generic Colombia geo noise", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "src-1", outlet: "Reuters", topic: "Elections", geographies: ["Colombia"], minutesAgo: 30 }),
+  ];
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: ELECTION_OVERFLOW_SETTINGS,
+    rawItems,
+    clusterFn: async () => electionOverflowStories(),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false, // neutralize beat-fit so relevance fit decides survival
+  });
+
+  assert.equal(payload.stories.length, 5, "dashboard ships at most 5");
+  assert.equal(log.overflowCap.overflowCapApplied, true);
+  assert.equal(log.overflowCap.overflowDroppedCount, 1);
+  // The election beat survives; the drop is a generic geo-noise row.
+  assert.ok(
+    payload.stories.some((s) => s.metaStoryId === "beat-election"),
+    "the configured-beat election story must survive the overflow cap"
+  );
+  // Among 5 identical noise rows the highest metaStoryId loses the stable
+  // tie-break, so "noise-4" is the deterministic drop (never the election beat).
+  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, ["noise-4"]);
+});
+
+test("runRefreshPipeline (Q3A): survival drop is deterministic across runs", async () => {
+  const run = () =>
+    runRefreshPipeline({
+      settings: ELECTION_OVERFLOW_SETTINGS,
+      rawItems: [makeItem({ sourceId: "src-1", outlet: "Reuters", topic: "Elections", geographies: ["Colombia"], minutesAgo: 30 })],
+      clusterFn: async () => electionOverflowStories(),
+      clusterModel: "mock-anthropic-haiku",
+      contractVersion: "2026-05-19-meta-story-fields",
+      beatFitEnabled: false,
+    });
+
+  const a = await run();
+  const b = await run();
+  assert.deepEqual(
+    a.log.overflowCap.overflowDroppedMetaStoryIds,
+    b.log.overflowCap.overflowDroppedMetaStoryIds,
+    "same inputs → identical overflow drop set"
+  );
+  assert.deepEqual(
+    a.payload.stories.map((s) => s.metaStoryId),
+    b.payload.stories.map((s) => s.metaStoryId),
+    "same inputs → identical shipped order"
+  );
+});
+
+test("runRefreshPipeline (Q3A / Prompt 2.1): R1 display order is relevance-first — beat story leads geo noise", async () => {
+  // Two stories, no overflow cap (≤5). Beat-fit is neutralized so the ONLY
+  // differentiator is the relevance score: the election-beat story must DISPLAY
+  // ahead of the generic Colombia geo-noise story in payload.stories order.
+  const rawItems = [
+    makeItem({ sourceId: "src-1", outlet: "Reuters", topic: "Elections", geographies: ["Colombia"], minutesAgo: 30 }),
+  ];
+  const stories = [
+    // Listed noise-first so a legacy beat-fit/id sort (both tie here) would NOT
+    // reorder it ahead — only relevance-first puts the election story on top.
+    {
+      meta_story_id: "noise-geo",
+      title: "Colombia general update",
+      subtitle: "Subtitle noise.",
+      source_item_ids: ["src-1"],
+      summary: "Summary noise.",
+      tags: { topics: [], keywords: [], geographies: ["Colombia"] },
+      associated_entities: [],
+      factual_claims: ["Reuters reports a Colombia development."],
+      claim_evidence_map: { "0": ["src-1"] },
+    },
+    {
+      meta_story_id: "beat-election",
+      title: "Colombia presidential election race tightens before the vote",
+      subtitle: "Subtitle election.",
+      source_item_ids: ["src-1"],
+      summary: "Summary election.",
+      tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+      associated_entities: ["Colombia presidential election", "electoral authority"],
+      factual_claims: ["Reuters reports the Colombia election race tightened."],
+      claim_evidence_map: { "0": ["src-1"] },
+    },
+  ];
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: ELECTION_OVERFLOW_SETTINGS,
+    rawItems,
+    clusterFn: async () => stories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false, // isolate relevance as the sole ordering signal
+  });
+
+  // No cap (2 ≤ 5); both ship, election displayed first by relevance.
+  assert.equal(log.overflowCap.overflowCapApplied, false);
+  assert.deepEqual(
+    payload.stories.map((s) => s.metaStoryId),
+    ["beat-election", "noise-geo"],
+    "relevance-first R1: the configured-beat story must lead the generic geo-noise story"
+  );
+});
+
 // ─── B1: deferred re-cluster candidate queue (flagging + ranking only) ───────
 //
 // B1 turns A3's `_reclusterCandidate` defer flags into a deterministic, ranked,

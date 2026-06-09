@@ -16,6 +16,9 @@ import {
   topicMatchesSettings,
   expandTopicLabels,
   scoreGeoFit,
+  scoreEntityFit,
+  computeRelevanceScore,
+  compareSurvivalRank,
 } from "./relevance-policy.mjs";
 
 function makeItem(overrides = {}) {
@@ -209,4 +212,120 @@ test("scoreGeoFit: implicit geo (no tags, no mention) is ambiguous, not a hard-f
   assert.equal(r.hardFail, false);
   assert.equal(r.score, 0.5);
   assert.equal(r.category, "implicit_geo");
+});
+
+// ── scoreEntityFit (Q1 B1) ────────────────────────────────────────────────────
+
+const BEAT_SETTINGS = { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] };
+
+test("scoreEntityFit: grounded entities corroborating the beat score above geo-only noise", () => {
+  const beat = {
+    tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+    associated_entities: ["Colombia presidential election", "electoral authority"],
+  };
+  const noise = {
+    tags: { topics: [], keywords: [], geographies: ["Colombia"] },
+    associated_entities: [],
+  };
+  assert.ok(scoreEntityFit(beat, BEAT_SETTINGS) > scoreEntityFit(noise, BEAT_SETTINGS));
+  // Beat corroborates all three configured dimensions via its entities.
+  assert.equal(scoreEntityFit(beat, BEAT_SETTINGS), 1);
+  // Noise corroborates only geography (1 of 3 configured dimensions).
+  assert.ok(Math.abs(scoreEntityFit(noise, BEAT_SETTINGS) - 1 / 3) < 1e-9);
+});
+
+test("scoreEntityFit: falls back to tags when associated_entities omitted (pre-v4)", () => {
+  const story = { tags: { topics: ["Elections"], keywords: [], geographies: ["Colombia"] } };
+  assert.ok(scoreEntityFit(story, BEAT_SETTINGS) > 0);
+});
+
+test("scoreEntityFit: no configured signals → 0", () => {
+  assert.equal(scoreEntityFit({ tags: { topics: ["X"], keywords: [], geographies: [] } }, {}), 0);
+});
+
+// ── computeRelevanceScore (Q3A) ───────────────────────────────────────────────
+
+test("computeRelevanceScore: beat-matching story outscores generic geo noise", () => {
+  const beat = {
+    tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+    associated_entities: ["Colombia presidential election"],
+    source_item_ids: ["s1"],
+  };
+  const noise = {
+    tags: { topics: [], keywords: [], geographies: ["Colombia"] },
+    associated_entities: [],
+    source_item_ids: ["s2"],
+  };
+  const common = { settings: BEAT_SETTINGS, sourceCount: 1, maxBeatFitScore: 0, minMinutesAgo: 30 };
+  assert.ok(
+    computeRelevanceScore({ story: beat, ...common }) >
+      computeRelevanceScore({ story: noise, ...common }),
+    "election beat must outscore generic Colombia noise"
+  );
+});
+
+test("computeRelevanceScore: corroboration lifts a multi-source story over a single-source peer", () => {
+  const story = {
+    tags: { topics: ["Elections"], keywords: [], geographies: ["Colombia"] },
+    associated_entities: [],
+  };
+  const multi = computeRelevanceScore({ story, settings: BEAT_SETTINGS, sourceCount: 3, maxBeatFitScore: 0, minMinutesAgo: 30 });
+  const single = computeRelevanceScore({ story, settings: BEAT_SETTINGS, sourceCount: 1, maxBeatFitScore: 0, minMinutesAgo: 30 });
+  assert.ok(multi > single);
+});
+
+test("computeRelevanceScore: accepts pre-computed fit values", () => {
+  const score = computeRelevanceScore({
+    topicFit: 1,
+    keywordFit: 0,
+    geoFit: 1,
+    entityFit: 0.5,
+    sourceCount: 1,
+    maxBeatFitScore: 0,
+    minMinutesAgo: 30,
+  });
+  assert.ok(Number.isFinite(score) && score > 0);
+});
+
+// ── compareSurvivalRank (Q3A) ─────────────────────────────────────────────────
+
+test("compareSurvivalRank: relevance score dominates, then deterministic tie-breaks", () => {
+  // Higher relevance survives regardless of weaker secondary signals.
+  assert.ok(
+    compareSurvivalRank(
+      { relevanceScore: 5, sourceCount: 1, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
+      { relevanceScore: 4, sourceCount: 9, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
+    ) < 0
+  );
+  // Tie on relevance → more sources first.
+  assert.ok(
+    compareSurvivalRank(
+      { relevanceScore: 4, sourceCount: 2, minMinutesAgo: 999, metaStoryId: "z" },
+      { relevanceScore: 4, sourceCount: 1, minMinutesAgo: 0, metaStoryId: "a" }
+    ) < 0
+  );
+  // Tie on relevance + sources → fresher first.
+  assert.ok(
+    compareSurvivalRank(
+      { relevanceScore: 4, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "z" },
+      { relevanceScore: 4, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 99, metaStoryId: "a" }
+    ) < 0
+  );
+  // Full tie → metaStoryId ascending (stable final tie-break).
+  assert.ok(
+    compareSurvivalRank(
+      { relevanceScore: 4, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "a" },
+      { relevanceScore: 4, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "b" }
+    ) < 0
+  );
+});
+
+test("compareSurvivalRank: absent relevanceScore defaults to 0 (stable on bare sort keys)", () => {
+  // Mirrors the legacy comparator when relevance is not present: more sources first.
+  assert.ok(
+    compareSurvivalRank(
+      { sourceCount: 3, maxBeatFitScore: 0.1, minMinutesAgo: 99, metaStoryId: "z" },
+      { sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 0, metaStoryId: "a" }
+    ) < 0
+  );
 });

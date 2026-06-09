@@ -473,6 +473,36 @@ test("M8 shape lock: mock clusterItems output passes metaStoryOutputSchema", asy
   }
 });
 
+test("metaStoryOutputSchema: associated_entities is optional (backward compatible)", () => {
+  const base = {
+    title: "T",
+    subtitle: "S",
+    source_item_ids: ["src-1"],
+    summary: "Sm",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+    factual_claims: ["A grounded claim."],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  // Omitted → still valid (existing fixtures predate cluster-v4).
+  assert.ok(metaStoryOutputSchema.safeParse(base).success, "omitting associated_entities must validate");
+  // Present as a string array → valid.
+  assert.ok(
+    metaStoryOutputSchema.safeParse({ ...base, associated_entities: ["Gustavo Petro", "Registraduría"] }).success,
+    "string-array associated_entities must validate"
+  );
+  // Empty array → valid.
+  assert.ok(
+    metaStoryOutputSchema.safeParse({ ...base, associated_entities: [] }).success,
+    "empty associated_entities must validate"
+  );
+  // Wrong element type → invalid (entities are strings).
+  assert.equal(
+    metaStoryOutputSchema.safeParse({ ...base, associated_entities: [123] }).success,
+    false,
+    "non-string associated_entities must be rejected"
+  );
+});
+
 test("M8 shape lock: validateSmokeOutput passes on mock clusterItems output", async () => {
   const items = [
     makeItem({ sourceId: "vs-a", topic: "Diplomatic relations" }),
@@ -629,8 +659,16 @@ test("M8 architecture: importing run-cluster-smoke.mjs does not invoke main()", 
 
 // ─── Clustering prompt (Slice 3: cluster-v2 anti-over-merge guidance) ─────────
 
-test("CLUSTERING_PROMPT_VERSION is cluster-v3", () => {
-  assert.equal(CLUSTERING_PROMPT_VERSION, "cluster-v3");
+test("CLUSTERING_PROMPT_VERSION is cluster-v4", () => {
+  assert.equal(CLUSTERING_PROMPT_VERSION, "cluster-v4");
+});
+
+test("buildClusteringPrompt: instructs grounded associated_entities (cluster-v4)", () => {
+  const prompt = buildClusteringPrompt([makeItem({ sourceId: "src-1" })], BASE_SETTINGS);
+  assert.match(prompt, /associated_entities/);
+  // Entities must be grounded in the provided source evidence (no invention).
+  assert.match(prompt, /grounded in the provided source evidence/i);
+  assert.match(prompt, /do NOT invent/i);
 });
 
 // ─── Slice 15: English-output guardrail for non-English sources ───────────────

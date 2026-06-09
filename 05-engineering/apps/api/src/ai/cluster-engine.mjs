@@ -22,6 +22,13 @@ export const metaStoryOutputSchema = z.object({
     keywords: z.array(z.string()),
     geographies: z.array(z.string()),
   }),
+  // cluster-v4 (Q1 B1): grounded named entities the meta-story is about
+  // (people, organizations, contests, places). OPTIONAL for backward
+  // compatibility — fixtures and the mock/fallback paths that predate cluster-v4
+  // omit it, and downstream relevance scoring falls back to `tags`. When present,
+  // entities MUST be grounded in the referenced source evidence (no invention);
+  // the prompt enforces this and grounding still gates the published claims.
+  associated_entities: z.array(z.string()).optional(),
   factual_claims: z.array(z.string()).min(1),
   claim_evidence_map: z.record(z.string(), z.array(z.string())),
 });

@@ -4,7 +4,10 @@ export const SUMMARY_PROMPT_VERSION = "summary-v1";
 // Slice 15: bumped cluster-v2 → cluster-v3 — the prompt now reads normalized
 // English evidence for non-English items and requires English meta-story output
 // (title / subtitle / summary / factual_claims) even when sources are Spanish.
-export const CLUSTERING_PROMPT_VERSION = "cluster-v3";
+// Q1 B1: bumped cluster-v3 → cluster-v4 — each meta-story now also emits
+// `associated_entities` (grounded named entities from the source evidence) so
+// downstream relevance scoring can weigh entity fit, not only post-hoc tags.
+export const CLUSTERING_PROMPT_VERSION = "cluster-v4";
 
 export function buildClusteringPrompt(items, settings) {
   // Slice 15: feed normalized English evidence (`normalizedHeadline` /
@@ -27,6 +30,7 @@ export function buildClusteringPrompt(items, settings) {
           source_item_ids: ["sourceId1", "sourceId2"],
           summary: "2-3 sentences describing the narrative using only the referenced articles.",
           tags: { topics: ["relevant topic"], keywords: ["key term"], geographies: ["country"] },
+          associated_entities: ["named person, organization, contest, or place from the sources"],
           factual_claims: [
             "First discrete factual claim from the summary.",
             "Second discrete factual claim from the summary.",
@@ -56,6 +60,7 @@ export function buildClusteringPrompt(items, settings) {
     "- Prefer separate meta-stories when events are distinct, even if they occur in the same country or geography",
     "- The summary must only describe what is stated in the referenced articles — no speculation",
     "- Write ALL output in English. Even when an article's headline or body is in another language (e.g. Spanish), the meta-story title, subtitle, summary, and factual_claims MUST be written in English — the dashboard audience reads English.",
+    "- associated_entities: list the specific named entities the meta-story is about — people, organizations, government bodies, contests/events, and places — taken VERBATIM from the referenced articles. Every entity MUST be grounded in the provided source evidence; do NOT invent or infer entities that the articles do not mention. Omit the field (or use an empty array) when no concrete named entity is present.",
     "- factual_claims: list each discrete factual claim made in the summary as a separate string",
     "- claim_evidence_map: map each claim index (\"0\", \"1\", ...) to the sourceId(s) that directly support it",
     "- Every claim MUST be backed by at least one sourceId that appears in source_item_ids",

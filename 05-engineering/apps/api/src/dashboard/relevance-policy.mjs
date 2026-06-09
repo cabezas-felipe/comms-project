@@ -337,3 +337,187 @@ export function scoreGeoFit(item, settings) {
   // IMPLICIT_GEO with no textual geo evidence — ambiguous, keep it.
   return { hardFail: false, score: 0.5, category, reason: "implicit_geo" };
 }
+
+// ── Story relevance + overflow survival ranking (Q1 B1 / Q3A) ─────────────────
+//
+// Deterministic, pure scoring over a clustering meta-story's grounded output
+// (tags + `associated_entities`) and its source-set stats. Feeds the overflow
+// survival cap so a story that genuinely matches the user's configured beat
+// survives over generic geography-only noise — WITHOUT any new hot-path LLM
+// call. All inputs are the existing cluster output + settings; the entity signal
+// is the grounded `associated_entities` array (no static curated roster).
+
+function clamp01(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+// Read a meta-story (or a bare tags object) into normalized tag + entity arrays.
+// Accepts either `{ tags: {topics,keywords,geographies}, associated_entities }`
+// or a bare `{ topics, keywords, geographies }` so callers can pass a story or
+// just its tags.
+function readStoryTagsEntities(storyOrTags) {
+  const src = storyOrTags ?? {};
+  const tags =
+    src.tags && typeof src.tags === "object"
+      ? src.tags
+      : src.topics || src.keywords || src.geographies
+        ? src
+        : {};
+  const entities = Array.isArray(src.associated_entities) ? src.associated_entities : [];
+  return {
+    topics: Array.isArray(tags.topics) ? tags.topics.map((s) => String(s ?? "")) : [],
+    keywords: Array.isArray(tags.keywords) ? tags.keywords.map((s) => String(s ?? "")) : [],
+    geographies: Array.isArray(tags.geographies) ? tags.geographies.map((s) => String(s ?? "")) : [],
+    entities: entities.map((s) => String(s ?? "")),
+  };
+}
+
+// 1 when any configured topic is corroborated by the story's topic tags (exact
+// canonical or lexicon sibling) OR by its entity evidence; else 0.
+function tagTopicFit(topics, entities, settings) {
+  if ((settings?.topics ?? []).length === 0) return 0;
+  if (topics.some((t) => topicMatchesSettings(t, settings))) return 1;
+  return scoreTopicFit(entities.join(" "), settings).hits > 0 ? 1 : 0;
+}
+
+// 1 when any configured keyword (lexicon-aware) appears in the story's keyword
+// tags or entity evidence; else 0.
+function tagKeywordFit(keywords, entities, settings) {
+  if ((settings?.keywords ?? []).length === 0) return 0;
+  const text = [...keywords, ...entities].join(" ");
+  return scoreKeywordFit(text, settings).hits > 0 ? 1 : 0;
+}
+
+// 1 when the story's geography tags overlap the configured set, or its
+// geography/entity evidence names a configured geography; else 0.
+function tagGeoFit(geographies, entities, settings) {
+  const configured = settings?.geographies ?? [];
+  if (configured.length === 0) return 0;
+  const set = new Set(configured.map((g) => String(g).trim().toLowerCase()));
+  if (geographies.some((g) => set.has(String(g).trim().toLowerCase()))) return 1;
+  const text = [...geographies, ...entities].join(" ");
+  return itemMentionsConfiguredGeography(text, configured) ? 1 : 0;
+}
+
+/**
+ * Entity fit (Q1 B1): how well the story's GROUNDED entity evidence aligns with
+ * the configured beat. The evidence surface is the cluster's `associated_entities`
+ * (falling back to the tag values when a pre-cluster-v4 story omitted them, so
+ * the signal degrades gracefully rather than collapsing to 0). Score is the
+ * fraction of the configured dimensions (topics / keywords / geographies that are
+ * actually set) which the entity evidence corroborates, in [0, 1]. Deterministic
+ * and pure. Accepts a meta-story or a bare tags object.
+ */
+export function scoreEntityFit(storyOrTags, settings) {
+  const { topics, keywords, geographies, entities } = readStoryTagsEntities(storyOrTags);
+  const evidence = entities.length > 0 ? entities : [...topics, ...keywords, ...geographies];
+  if (evidence.length === 0) return 0;
+  const text = evidence.join(" ");
+
+  const dims = [];
+  if ((settings?.topics ?? []).length > 0) dims.push(scoreTopicFit(text, settings).hits > 0);
+  if ((settings?.keywords ?? []).length > 0) dims.push(scoreKeywordFit(text, settings).hits > 0);
+  if ((settings?.geographies ?? []).length > 0) {
+    dims.push(!!itemMentionsConfiguredGeography(text, settings.geographies));
+  }
+  if (dims.length === 0) return 0;
+  return dims.filter(Boolean).length / dims.length;
+}
+
+// Source corroboration: more distinct sources → higher value, saturating at 5
+// (the per-story source cap). 0..1.
+function corroborationScore(sourceCount) {
+  const n = Number.isFinite(sourceCount) ? sourceCount : 0;
+  return Math.min(Math.max(n, 0), 5) / 5;
+}
+
+// Freshness: gentle monotonic decay in minutesAgo, bounded (0, 1]. A 12h-ish
+// scale keeps it a soft tie-shaper rather than a dominant term.
+function freshnessScore(minMinutesAgo) {
+  const m = Number.isFinite(minMinutesAgo) ? minMinutesAgo : Number.POSITIVE_INFINITY;
+  if (m < 0 || !Number.isFinite(m)) return 0;
+  return 1 / (1 + m / 720);
+}
+
+// Relevance weights. Ordered so configured-beat match (topic/keyword/entity)
+// dominates geography, which dominates corroboration, beat-fit, and finally a
+// small freshness shaper. This keeps a beat-matching story ahead of generic
+// same-geography noise while staying deterministic.
+export const RELEVANCE_WEIGHTS = Object.freeze({
+  topic: 3,
+  keyword: 3,
+  entity: 2,
+  geo: 1,
+  corroboration: 1.5,
+  beatFit: 1,
+  freshness: 0.25,
+});
+
+/**
+ * Combine the relevance signals into a single deterministic score (higher =
+ * more relevant, survives the overflow cap first). Accepts either pre-computed
+ * fit values OR a `{ story, settings }` pair from which the four fits are
+ * derived (tags + grounded `associated_entities`). Remaining inputs:
+ *   - sourceCount     — distinct grounded sources (corroboration)
+ *   - maxBeatFitScore — best beat-fit across the story's sources (0..1)
+ *   - minMinutesAgo   — freshest source age (lower = fresher)
+ * Pure; no I/O, no LLM.
+ */
+export function computeRelevanceScore(input = {}) {
+  const { story, settings } = input;
+  const tags = readStoryTagsEntities(story ?? {});
+  const topicFit =
+    input.topicFit != null ? clamp01(input.topicFit) : tagTopicFit(tags.topics, tags.entities, settings);
+  const keywordFit =
+    input.keywordFit != null ? clamp01(input.keywordFit) : tagKeywordFit(tags.keywords, tags.entities, settings);
+  const geoFit =
+    input.geoFit != null ? clamp01(input.geoFit) : tagGeoFit(tags.geographies, tags.entities, settings);
+  const entityFit =
+    input.entityFit != null ? clamp01(input.entityFit) : scoreEntityFit(story ?? {}, settings);
+  const corroboration = corroborationScore(input.sourceCount);
+  const beatFit = clamp01(input.maxBeatFitScore);
+  const freshness = freshnessScore(input.minMinutesAgo);
+
+  const W = RELEVANCE_WEIGHTS;
+  return (
+    W.topic * topicFit +
+    W.keyword * keywordFit +
+    W.entity * entityFit +
+    W.geo * geoFit +
+    W.corroboration * corroboration +
+    W.beatFit * beatFit +
+    W.freshness * freshness
+  );
+}
+
+/**
+ * Survival comparator for the overflow cap (Q3A). Operates on per-story sort
+ * keys carrying `{ relevanceScore, sourceCount, maxBeatFitScore, minMinutesAgo,
+ * metaStoryId }`. Negative → `a` survives ahead of `b`. Primary key is the
+ * relevance score (descending); the remaining keys are the SAME deterministic
+ * tie-breaks the legacy `compareOverflowRank` used, so when relevance ties (or
+ * is absent on a bare sort key) behavior is byte-stable: more sources → higher
+ * beat-fit → fresher → metaStoryId ascending. Pure; exported for unit testing.
+ */
+export function compareSurvivalRank(a, b) {
+  const ar = Number.isFinite(a?.relevanceScore) ? a.relevanceScore : 0;
+  const br = Number.isFinite(b?.relevanceScore) ? b.relevanceScore : 0;
+  if (ar !== br) return br - ar; // higher relevance survives
+  const asc = Number.isFinite(a?.sourceCount) ? a.sourceCount : 0;
+  const bsc = Number.isFinite(b?.sourceCount) ? b.sourceCount : 0;
+  if (asc !== bsc) return bsc - asc; // more sources first
+  const abf = Number.isFinite(a?.maxBeatFitScore) ? a.maxBeatFitScore : 0;
+  const bbf = Number.isFinite(b?.maxBeatFitScore) ? b.maxBeatFitScore : 0;
+  if (abf !== bbf) return bbf - abf; // higher beat-fit first
+  const am = Number.isFinite(a?.minMinutesAgo) ? a.minMinutesAgo : Number.POSITIVE_INFINITY;
+  const bm = Number.isFinite(b?.minMinutesAgo) ? b.minMinutesAgo : Number.POSITIVE_INFINITY;
+  if (am !== bm) return am - bm; // fresher first
+  const aid = a?.metaStoryId ?? "";
+  const bid = b?.metaStoryId ?? "";
+  if (aid < bid) return -1;
+  if (aid > bid) return 1;
+  return 0;
+}

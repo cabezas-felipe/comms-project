@@ -39,6 +39,8 @@ import {
   buildKeywordMatchRegex,
   topicMatchesSettings,
   scoreGeoFit,
+  computeRelevanceScore,
+  compareSurvivalRank,
 } from "./relevance-policy.mjs";
 import {
   resolveGeoAdmissionMode,
@@ -462,18 +464,21 @@ export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
 // the published survivor set, and it maximizes what ships (post-grounding count,
 // not pre-grounding) — grounding drops happen first, then this caps to 5.
 //
-// Drop ranking (Q6 C) is a SURVIVAL order (best first → top 5 survive). It is
+// Drop ranking is a SURVIVAL order (best first → top 5 survive). It is
 // deliberately distinct from the R1 *display* order: survivors keep their R1
 // order; only WHICH stories survive is decided here.
-//   1. topic/keyword match strength — a story that matches configured
-//                              topics/keywords is favored to survive over an
-//                              unmatched one (2: topic+keyword, 1: either, 0: neither)
-//   2. multi-source first   — more `source_item_ids` wins (a corroborated,
-//                              multi-outlet story is higher value than a lone
-//                              single-source row)
-//   3. higher beat-fit      — best relevance score across the story's sources
-//   4. fresher              — lower `minMinutesAgo`
-//   5. metaStoryId ascending — stable, deterministic final tie-break
+//
+// Q3A (Prompt 2): survival is now ordered by a deterministic RELEVANCE SCORE
+// (`computeRelevanceScore`) rather than the coarse `topicKeywordMatchStrength`
+// alone. The score combines, in weight order, configured-beat match
+// (topic / keyword / grounded `associated_entities` entity fit) > geography fit
+// > source corroboration > beat-fit > a small freshness shaper — so a story that
+// genuinely matches the user's beat survives over generic same-geography noise.
+// `compareSurvivalRank` then breaks exact ties with the SAME stable keys the
+// legacy comparator used (more sources → higher beat-fit → fresher →
+// metaStoryId ascending), so behavior stays byte-deterministic. The legacy
+// `topicKeywordMatchStrength` is retained on the sort key for rejection-log
+// observability. No new LLM call: every input is existing cluster output.
 export const MAX_META_STORIES = 5;
 
 export function topicKeywordMatchStrength(story) {
@@ -542,7 +547,7 @@ export function applyMetaStoryOverflowCap(entries, cap = MAX_META_STORIES) {
   const ranked = list
     .map((entry, idx) => ({ entry, idx }))
     .sort((x, y) => {
-      const c = compareOverflowRank(x.entry?.sortKey, y.entry?.sortKey);
+      const c = compareSurvivalRank(x.entry?.sortKey, y.entry?.sortKey);
       return c !== 0 ? c : x.idx - y.idx;
     });
   const keepIdx = new Set(ranked.slice(0, cap).map((r) => r.idx));
@@ -1436,14 +1441,31 @@ export function compareSourcesT1(a, b) {
 }
 
 /**
- * R1 (M6b): comparator for top-level `stories[]` ordering at the payload
+ * R1 (M6b): comparator for top-level `stories[]` display ordering at the payload
  * boundary.  Accepts pre-computed sort keys (so the comparator stays a pure
  * function over plain values, not the story object).
- *   1. `maxBeatFitScore` DESC  — best-fitting story first
- *   2. `minMinutesAgo` ASC     — freshest tie-breaker
- *   3. `metaStoryId` ASC       — stable tie-break
+ *
+ * Prompt 2.1: display order is now RELEVANCE-FIRST, matching the overflow
+ * survival policy (`compareSurvivalRank`) so "what shows first" and "what
+ * survives the cap" use the same priority — the most beat-relevant story leads
+ * the dashboard rather than merely the highest raw beat-fit:
+ *   1. `relevanceScore` DESC   — most beat-relevant story first (new primary)
+ *   2. `sourceCount` DESC      — more corroborated story first
+ *   3. `maxBeatFitScore` DESC  — best raw beat-fit
+ *   4. `minMinutesAgo` ASC     — freshest tie-breaker
+ *   5. `metaStoryId` ASC       — stable, deterministic final tie-break
+ *
+ * Sort keys that predate Prompt 2.1 (no `relevanceScore` / `sourceCount`) read
+ * those as 0 and tie through to the legacy beat-fit/freshness/id order, so the
+ * comparator stays backward-compatible for callers passing bare keys.
  */
 export function compareStoriesR1(a, b) {
+  const ar = typeof a?.relevanceScore === "number" && Number.isFinite(a.relevanceScore) ? a.relevanceScore : 0;
+  const br = typeof b?.relevanceScore === "number" && Number.isFinite(b.relevanceScore) ? b.relevanceScore : 0;
+  if (ar !== br) return br - ar;
+  const asc = typeof a?.sourceCount === "number" && Number.isFinite(a.sourceCount) ? a.sourceCount : 0;
+  const bsc = typeof b?.sourceCount === "number" && Number.isFinite(b.sourceCount) ? b.sourceCount : 0;
+  if (asc !== bsc) return bsc - asc;
   const ab = typeof a?.maxBeatFitScore === "number" ? a.maxBeatFitScore : 0;
   const bb = typeof b?.maxBeatFitScore === "number" ? b.maxBeatFitScore : 0;
   if (ab !== bb) return bb - ab;
@@ -3264,17 +3286,30 @@ export async function runRefreshPipeline({
             Math.min(acc, typeof item?.minutesAgo === "number" ? item.minutesAgo : Number.POSITIVE_INFINITY),
           Number.POSITIVE_INFINITY
         );
+    // `sourceCount` (overflow rank input) is the meta-story's full source set;
+    // grounded stories have all ids resolved, so this matches the published
+    // `sources.length`.
+    const sourceCount = Array.isArray(ms.source_item_ids) ? ms.source_item_ids.length : 0;
+    // Q3A: relevance score over the grounded cluster output (tags +
+    // `associated_entities`) + source-set stats. Drives overflow survival;
+    // deterministic and LLM-free.
+    const relevanceScore = computeRelevanceScore({
+      story: ms,
+      settings,
+      sourceCount,
+      maxBeatFitScore,
+      minMinutesAgo,
+    });
     return {
       story: buildStory(ms, sourceItems, settings),
-      // `sourceCount` (A4 overflow rank input) is the meta-story's full source
-      // set; grounded stories have all ids resolved, so this matches the
-      // published `sources.length`.
       sortKey: {
+        relevanceScore,
+        // Retained for rejection-log observability (legacy coarse signal).
         topicKeywordMatchStrength: topicKeywordMatchStrength(ms),
         maxBeatFitScore,
         minMinutesAgo,
         metaStoryId: ms.meta_story_id,
-        sourceCount: Array.isArray(ms.source_item_ids) ? ms.source_item_ids.length : 0,
+        sourceCount,
       },
     };
   });
@@ -3303,6 +3338,7 @@ export async function runRefreshPipeline({
           : [],
         debug_payload: {
           title: story?.title ?? null,
+          relevanceScore: Number.isFinite(sortKey?.relevanceScore) ? sortKey.relevanceScore : null,
           topicKeywordMatchStrength: sortKey?.topicKeywordMatchStrength ?? null,
           sourceCount: sortKey?.sourceCount ?? null,
           maxBeatFitScore: sortKey?.maxBeatFitScore ?? null,
