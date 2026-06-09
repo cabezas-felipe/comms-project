@@ -42,10 +42,21 @@ on:
     - cron: "35 * * * *"
   workflow_dispatch:
 
+# Serialize warms — never let a slow run overlap the next hourly fire (or a
+# manual dispatch), since both upsert the same shared ingestion_recent_items
+# cache. cancel-in-progress: false → a mid-flight warm always finishes; the
+# next is queued.
+concurrency:
+  group: ingestion-warm
+  cancel-in-progress: false
+
 jobs:
   ingestion-warm:
     name: Warm ingestion_recent_items cache
     runs-on: ubuntu-latest
+    # Guardrail ceiling — bounds a hung warm; a healthy run is far under, and
+    # the next hourly warm repopulates the cache regardless.
+    timeout-minutes: 20
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 

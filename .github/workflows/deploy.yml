@@ -15,6 +15,9 @@ jobs:
   deploy-frontend:
     name: Build & deploy frontend
     runs-on: ubuntu-latest
+    # Guardrail ceiling — bounds a hung build / Vercel CLI step without
+    # affecting a normal deploy.
+    timeout-minutes: 20
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
