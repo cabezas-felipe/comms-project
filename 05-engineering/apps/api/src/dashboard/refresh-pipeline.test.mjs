@@ -61,7 +61,6 @@ import {
   compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
-  compareOverflowRank,
   topicKeywordMatchStrength,
   applyMetaStoryOverflowCap,
   MAX_META_STORIES,
@@ -8273,50 +8272,6 @@ test("topicKeywordMatchStrength: 2 topic+keyword, 1 either, 0 neither", () => {
   assert.equal(topicKeywordMatchStrength({ tags: {} }), 0);
   assert.equal(topicKeywordMatchStrength({}), 0);
   assert.equal(topicKeywordMatchStrength(null), 0);
-});
-
-// Unit: the survival comparator honors each ranking tier in order.
-test("compareOverflowRank: topic/keyword > multi-source > beat-fit > fresher > metaStoryId", () => {
-  // Tier 1: stronger topic/keyword match survives (ranks ahead, i.e. negative).
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
-      { topicKeywordMatchStrength: 0, sourceCount: 9, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
-    ) < 0,
-    "matched outranks unmatched regardless of other factors"
-  );
-  // Tier 2: equal match strength -> more sources survives.
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 2, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
-    ) < 0,
-    "more sources outranks everything else"
-  );
-  // Tier 3: equal match strength + sources -> higher beat-fit survives.
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 999, metaStoryId: "z" },
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.1, minMinutesAgo: 0, metaStoryId: "a" }
-    ) < 0,
-    "higher beat-fit outranks freshness/id"
-  );
-  // Tier 4: equal match strength + sources + beat-fit -> fresher survives.
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "z" },
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 99, metaStoryId: "a" }
-    ) < 0,
-    "fresher outranks id"
-  );
-  // Tier 5: all equal -> metaStoryId ascending.
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "a" },
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "b" }
-    ) < 0,
-    "lower metaStoryId survives the final tie-break"
-  );
 });
 
 // Unit: the cap keeps the top-5 survivors in their original (R1) order and drops

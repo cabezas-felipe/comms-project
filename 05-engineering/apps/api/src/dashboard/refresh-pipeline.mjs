@@ -491,37 +491,10 @@ export function topicKeywordMatchStrength(story) {
 }
 
 /**
- * Survival comparator for the overflow cap (see Q6 C above). Operates on the
- * per-story rank inputs `{ topicKeywordMatchStrength, sourceCount,
- * maxBeatFitScore, minMinutesAgo, metaStoryId }`. Negative → `a` ranks ahead of
- * (survives over) `b`. Pure;
- * exported for focused unit testing of the ranking contract.
- */
-export function compareOverflowRank(a, b) {
-  const atk = Number.isFinite(a?.topicKeywordMatchStrength) ? a.topicKeywordMatchStrength : 0;
-  const btk = Number.isFinite(b?.topicKeywordMatchStrength) ? b.topicKeywordMatchStrength : 0;
-  if (atk !== btk) return btk - atk; // stronger topic/keyword match first
-  const asc = Number.isFinite(a?.sourceCount) ? a.sourceCount : 0;
-  const bsc = Number.isFinite(b?.sourceCount) ? b.sourceCount : 0;
-  if (asc !== bsc) return bsc - asc; // more sources first
-  const abf = Number.isFinite(a?.maxBeatFitScore) ? a.maxBeatFitScore : 0;
-  const bbf = Number.isFinite(b?.maxBeatFitScore) ? b.maxBeatFitScore : 0;
-  if (abf !== bbf) return bbf - abf; // higher beat-fit first
-  const am = Number.isFinite(a?.minMinutesAgo) ? a.minMinutesAgo : Number.POSITIVE_INFINITY;
-  const bm = Number.isFinite(b?.minMinutesAgo) ? b.minMinutesAgo : Number.POSITIVE_INFINITY;
-  if (am !== bm) return am - bm; // fresher first
-  const aid = a?.metaStoryId ?? "";
-  const bid = b?.metaStoryId ?? "";
-  if (aid < bid) return -1;
-  if (aid > bid) return 1;
-  return 0;
-}
-
-/**
  * Cap a list of `{ story, sortKey }` entries to `cap` meta-stories. Entries are
  * assumed to already be in R1 display order; survivors are returned in that same
  * order (only the bottom-ranked overflow is removed). `sortKey` must carry the
- * rank inputs consumed by `compareOverflowRank` (plus `metaStoryId`).
+ * rank inputs consumed by `compareSurvivalRank` (plus `metaStoryId`).
  *
  * Returns the kept entries, the dropped entries (for rejection logging), and the
  * additive overflow diagnostics. A no-op (≤ cap) reports `overflowCapApplied:
