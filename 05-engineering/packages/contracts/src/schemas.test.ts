@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONTRACT_VERSION,
   dashboardPayloadSchema,
+  dashboardClusterCapMetaSchema,
   settingsPayloadSchema,
   sourceSchema,
   storySchema,
@@ -117,6 +118,113 @@ describe("dashboardPayloadSchema", () => {
         stories: [],
       })
     ).toThrow();
+  });
+});
+
+describe("dashboardClusterCapMetaSchema", () => {
+  // The four count/id fields are the stable surface existing clients read.
+  const legacyClusterCap = {
+    dedupedCount: 20,
+    clusterInputCount: 15,
+    clusterDroppedCount: 5,
+    clusterDroppedSourceIds: ["src-15", "src-16", "src-17", "src-18", "src-19"],
+  };
+
+  const droppedEntry = {
+    sourceId: "pe",
+    headline: "Peru election results announced",
+    rank: 16,
+    preClusterScore: 6.13,
+    components: {
+      topicFit: 1,
+      keywordFit: 1,
+      geoFit: 0,
+      entityFit: 0,
+      corroboration: 0,
+      beatFit: 0.64,
+      freshness: 0.92,
+      electionGeoBoost: -0.75,
+    },
+    electionGeoClass: "crossCountryElection" as const,
+    hardFail: true,
+    geoReason: "explicit_conflict",
+    geoCategory: "explicit_conflict",
+    headlineFamilyKey: "announced election peru results",
+  };
+
+  it("back-compat: validates a legacy payload with only the four old fields", () => {
+    const parsed = dashboardClusterCapMetaSchema.parse(legacyClusterCap);
+    expect(parsed.clusterDropped).toBeUndefined();
+    expect(parsed.clusterDroppedSourceIds).toHaveLength(5);
+  });
+
+  it("validates an enriched payload with clusterDropped + clusterInputCapEffective", () => {
+    const parsed = dashboardClusterCapMetaSchema.parse({
+      ...legacyClusterCap,
+      clusterInputCapEffective: 15,
+      clusterDropped: [droppedEntry],
+    });
+    expect(parsed.clusterDropped).toHaveLength(1);
+    expect(parsed.clusterDropped?.[0].electionGeoClass).toBe("crossCountryElection");
+  });
+
+  it("accepts null component values and null nullable fields", () => {
+    const parsed = dashboardClusterCapMetaSchema.parse({
+      ...legacyClusterCap,
+      clusterDropped: [
+        {
+          ...droppedEntry,
+          sourceId: null,
+          preClusterScore: null,
+          electionGeoClass: null,
+          hardFail: null,
+          geoReason: null,
+          geoCategory: null,
+          headlineFamilyKey: null,
+          components: {
+            topicFit: null,
+            keywordFit: null,
+            geoFit: null,
+            entityFit: null,
+            corroboration: null,
+            beatFit: null,
+            freshness: null,
+            electionGeoBoost: null,
+          },
+        },
+      ],
+    });
+    expect(parsed.clusterDropped?.[0].sourceId).toBeNull();
+    expect(parsed.clusterDropped?.[0].components.topicFit).toBeNull();
+  });
+
+  it("accepts each known electionGeoClass enum value (and null)", () => {
+    for (const cls of [
+      "configuredGeoElection",
+      "crossCountryElection",
+      "nonElection",
+      null,
+    ] as const) {
+      const parsed = dashboardClusterCapMetaSchema.parse({
+        ...legacyClusterCap,
+        clusterDropped: [{ ...droppedEntry, electionGeoClass: cls }],
+      });
+      expect(parsed.clusterDropped?.[0].electionGeoClass).toBe(cls);
+    }
+  });
+
+  it("rejects an unknown electionGeoClass value", () => {
+    expect(() =>
+      dashboardClusterCapMetaSchema.parse({
+        ...legacyClusterCap,
+        clusterDropped: [{ ...droppedEntry, electionGeoClass: "someOtherClass" }],
+      })
+    ).toThrow();
+  });
+
+  it("rejects a payload missing a required count field", () => {
+    const { dedupedCount: _omit, ...missing } = legacyClusterCap;
+    expect(() => dashboardClusterCapMetaSchema.parse(missing)).toThrow();
   });
 });
 

@@ -10,6 +10,9 @@ export {
   storySchema,
   dashboardPayloadSchema,
   dashboardSelectionMetaSchema,
+  dashboardClusterDroppedComponentsSchema,
+  dashboardClusterDroppedEntrySchema,
+  dashboardClusterCapMetaSchema,
   settingsPayloadSchema,
 } from "./schemas.js";
 export type {
@@ -23,6 +26,9 @@ export type {
   StoryDto,
   DashboardPayload,
   DashboardSelectionMeta,
+  DashboardClusterDroppedComponents,
+  DashboardClusterDroppedEntry,
+  DashboardClusterCapMeta,
   SettingsPayload,
 } from "./schemas.js";
 export { classifySources } from "./source-classification.js";

@@ -88,6 +88,62 @@ export const dashboardSelectionMetaSchema = z.object({
   relevantItemCount: z.number().int().nonnegative().optional(),
 });
 
+/**
+ * Per-dropped-candidate scoring breakdown for `_meta.clusterCap.clusterDropped`
+ * (Phase 1 Step 1.4 diagnostics). Each numeric component is `number | null` —
+ * null only when a non-finite value was coerced for clean JSON, so debug tooling
+ * can render the component grid without guarding every cell.
+ */
+export const dashboardClusterDroppedComponentsSchema = z.object({
+  topicFit: z.number().nullable(),
+  keywordFit: z.number().nullable(),
+  geoFit: z.number().nullable(),
+  entityFit: z.number().nullable(),
+  corroboration: z.number().nullable(),
+  beatFit: z.number().nullable(),
+  freshness: z.number().nullable(),
+  electionGeoBoost: z.number().nullable(),
+});
+
+/**
+ * One explained cluster-input-cap drop. Carries the source identity, a
+ * (truncated) headline, its absolute 1-based rank in the full ranked list, the
+ * composite `preClusterScore`, the component breakdown, and the Decision-5C
+ * election-geo classification plus geo-fit reasons. Nullable fields degrade
+ * gracefully when a signal was unavailable for that item.
+ */
+export const dashboardClusterDroppedEntrySchema = z.object({
+  sourceId: z.string().nullable(),
+  headline: z.string(),
+  rank: z.number(),
+  preClusterScore: z.number().nullable(),
+  components: dashboardClusterDroppedComponentsSchema,
+  electionGeoClass: z
+    .enum(["configuredGeoElection", "crossCountryElection", "nonElection"])
+    .nullable(),
+  hardFail: z.boolean().nullable(),
+  geoReason: z.string().nullable(),
+  geoCategory: z.string().nullable(),
+  headlineFamilyKey: z.string().nullable(),
+});
+
+/**
+ * Cluster-input-cap diagnostics surfaced through `_meta.clusterCap` on dashboard
+ * responses (C1). The four count/id fields are the stable, required surface that
+ * existing clients already read; `clusterDropped` (Step 1.4) and
+ * `clusterInputCapEffective` (Slice 3) are ADDITIVE optionals — older snapshots
+ * that predate them still validate. `clusterDropped` is a bounded list (≤10) of
+ * explained drops in drop-rank order, matching `clusterDroppedSourceIds`.
+ */
+export const dashboardClusterCapMetaSchema = z.object({
+  dedupedCount: z.number().int().nonnegative(),
+  clusterInputCount: z.number().int().nonnegative(),
+  clusterDroppedCount: z.number().int().nonnegative(),
+  clusterDroppedSourceIds: z.array(z.string()),
+  clusterDropped: z.array(dashboardClusterDroppedEntrySchema).optional(),
+  clusterInputCapEffective: z.number().int().positive().optional(),
+});
+
 export const settingsPayloadSchema = z.object({
   contractVersion: z.literal(CONTRACT_VERSION),
   topics: z.array(z.string().min(1)),
@@ -107,4 +163,9 @@ export type StoryTagsDto = z.infer<typeof storyTagsSchema>;
 export type StoryDto = z.infer<typeof storySchema>;
 export type DashboardPayload = z.infer<typeof dashboardPayloadSchema>;
 export type DashboardSelectionMeta = z.infer<typeof dashboardSelectionMetaSchema>;
+export type DashboardClusterDroppedComponents = z.infer<
+  typeof dashboardClusterDroppedComponentsSchema
+>;
+export type DashboardClusterDroppedEntry = z.infer<typeof dashboardClusterDroppedEntrySchema>;
+export type DashboardClusterCapMeta = z.infer<typeof dashboardClusterCapMetaSchema>;
 export type SettingsPayload = z.infer<typeof settingsPayloadSchema>;
