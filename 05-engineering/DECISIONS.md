@@ -2,6 +2,35 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-06-08 - D-069 - Dashboard relevance strategy: locked Q1–Q6 implementation posture
+
+#### Context
+
+- The dashboard relevance work (Prompts 1–6) tuned recall, geo precision, cluster output, survival ranking, onboarding extraction, and acceptance testing for the Colombia-elections beat. The individual mechanisms landed across `relevance-policy.mjs`, `geo-filter.mjs`, `cluster-split-healer.mjs`, `refresh-pipeline.mjs`, `onboarding-extractor.mjs`, the cluster prompt (`cluster-v4`), and the eval suite. This entry records the LOCKED posture so the pieces are read as one strategy, not six unrelated slices.
+
+#### Decision
+
+- **Fixed cap of 5 (Q3).** The dashboard ships **AT MOST 5** meta-stories (`MAX_META_STORIES = 5`, unchanged). Overflow is decided by a deterministic **relevance-first survival rank** (`compareSurvivalRank`): `relevanceScore` DESC → `sourceCount` (corroboration) → beat-fit → freshness → `metaStoryId`. The same relevance order now also drives R1 **display** order (Prompt 2.1), so "what shows first" and "what survives the cap" agree.
+- **B1 entity fit via grounded cluster tags (Q1).** The clustering schema/prompt emit `associated_entities` (`cluster-v4`, optional for back-compat). `computeRelevanceScore` weighs topic / keyword / **grounded-entity** / geo fit + corroboration + beat-fit + a small freshness term — entity fit comes from the cluster's own grounded output, **no static curated entity rosters**.
+- **Soft lexical widen + tiered geo (Q2 + geo precision).** Recall widens via a bilingual lexicon (`relevance-policy.mjs`): English morphological forms widen the recall regex; EN↔ES pairs score fit but never enter the recall regex (the translation-first boundary stays intact). Geo is **tiered**: soft admission no longer gates relevance, but a deterministic `scoreGeoFit` **hard-fail** drops unambiguous explicit wrong-geography items before clustering (no LLM call).
+- **Election-cycle bundling, unrelated-event split preserved (Q3B).** The split-healer bundles same-election-cycle pieces (shared election-cycle lexicon tokens) instead of atomizing them, while same-country UNRELATED events (election + mine attack) still split. Ambiguity/defer behavior is unchanged.
+- **Conservative onboarding extraction (Q5).** Extraction stays single-pass and conservative (`extract-v8`): one bounded canonicalization (`election`/`elections` → topic `Elections`) plus deterministic recall hints and noise suppression; no second LLM pass.
+- **Quality gate now includes elections-colombia (Q6B).** The Colombia-elections hermetic acceptance test is a required step of `eval:dashboard-quality-gate` (golden + spanish-recall + **elections-colombia** + calibration). It gates merges.
+- **Live cluster monitor is ADVISORY / non-blocking (Q6D).** `eval:dashboard-live-cluster-advisory` makes the only live, provider-backed clustering call to detect prompt/model drift (B1 tags + entities present, sane merge). It is **not** in the quality gate and **not** a PR check; it SKIPs (exit 0) without a provider key, and exits 1 only so a scheduled nightly workflow can alert owners. It never blocks a merge.
+
+#### Why
+
+- Relevance-first ranking + a fixed cap keeps the dashboard focused on the user's beat (elections over generic same-geography noise) without unbounded growth.
+- Grounding entity fit in the cluster's own output (not a curated roster) keeps the signal evidence-based and language-agnostic.
+- Tiering geo (soft admission + deterministic hard-fail) preserves recall while cheaply removing confident wrong-geography items, with no added LLM cost.
+- Splitting the acceptance test (hermetic, in the gate) from the drift monitor (live, advisory) keeps merges deterministic and key-free while still catching real prompt/model drift out-of-band.
+
+#### Consequences
+
+- **Blocking after this work:** `eval:dashboard-quality-gate` (golden + spanish-recall + elections-colombia + calibration) and the hermetic `npm test` suite — both run on PRs via `api-quality-gate.yml`, no provider keys.
+- **Non-blocking:** `eval:dashboard-live-cluster-advisory` (live, advisory) and its nightly workflow; the standalone dual-beat / intra-beat / embassy-beat smokes; and the D3 quality advisory.
+- The advisory's only live dependency is `TEMPO_ANTHROPIC_API_KEY` + a live `TEMPO_AI_CLUSTER_MODEL`; absent either, it self-skips green.
+
 ### 2026-05-30 - D-068 - English meta-story output + translated-evidence writer inputs (Slice 15)
 
 #### Context

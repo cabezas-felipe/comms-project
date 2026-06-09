@@ -36,6 +36,13 @@ import {
 } from "./beat-fit-scorer.mjs";
 import { itemMentionsConfiguredGeography } from "./geo-lexical-match.mjs";
 import {
+  buildKeywordMatchRegex,
+  topicMatchesSettings,
+  scoreGeoFit,
+  computeRelevanceScore,
+  compareSurvivalRank,
+} from "./relevance-policy.mjs";
+import {
   resolveGeoAdmissionMode,
   geoAdmissionDiagnostics,
 } from "./geo-admission-config.mjs";
@@ -457,18 +464,21 @@ export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
 // the published survivor set, and it maximizes what ships (post-grounding count,
 // not pre-grounding) — grounding drops happen first, then this caps to 5.
 //
-// Drop ranking (Q6 C) is a SURVIVAL order (best first → top 5 survive). It is
+// Drop ranking is a SURVIVAL order (best first → top 5 survive). It is
 // deliberately distinct from the R1 *display* order: survivors keep their R1
 // order; only WHICH stories survive is decided here.
-//   1. topic/keyword match strength — a story that matches configured
-//                              topics/keywords is favored to survive over an
-//                              unmatched one (2: topic+keyword, 1: either, 0: neither)
-//   2. multi-source first   — more `source_item_ids` wins (a corroborated,
-//                              multi-outlet story is higher value than a lone
-//                              single-source row)
-//   3. higher beat-fit      — best relevance score across the story's sources
-//   4. fresher              — lower `minMinutesAgo`
-//   5. metaStoryId ascending — stable, deterministic final tie-break
+//
+// Q3A (Prompt 2): survival is now ordered by a deterministic RELEVANCE SCORE
+// (`computeRelevanceScore`) rather than the coarse `topicKeywordMatchStrength`
+// alone. The score combines, in weight order, configured-beat match
+// (topic / keyword / grounded `associated_entities` entity fit) > geography fit
+// > source corroboration > beat-fit > a small freshness shaper — so a story that
+// genuinely matches the user's beat survives over generic same-geography noise.
+// `compareSurvivalRank` then breaks exact ties with the SAME stable keys the
+// legacy comparator used (more sources → higher beat-fit → fresher →
+// metaStoryId ascending), so behavior stays byte-deterministic. The legacy
+// `topicKeywordMatchStrength` is retained on the sort key for rejection-log
+// observability. No new LLM call: every input is existing cluster output.
 export const MAX_META_STORIES = 5;
 
 export function topicKeywordMatchStrength(story) {
@@ -481,37 +491,10 @@ export function topicKeywordMatchStrength(story) {
 }
 
 /**
- * Survival comparator for the overflow cap (see Q6 C above). Operates on the
- * per-story rank inputs `{ topicKeywordMatchStrength, sourceCount,
- * maxBeatFitScore, minMinutesAgo, metaStoryId }`. Negative → `a` ranks ahead of
- * (survives over) `b`. Pure;
- * exported for focused unit testing of the ranking contract.
- */
-export function compareOverflowRank(a, b) {
-  const atk = Number.isFinite(a?.topicKeywordMatchStrength) ? a.topicKeywordMatchStrength : 0;
-  const btk = Number.isFinite(b?.topicKeywordMatchStrength) ? b.topicKeywordMatchStrength : 0;
-  if (atk !== btk) return btk - atk; // stronger topic/keyword match first
-  const asc = Number.isFinite(a?.sourceCount) ? a.sourceCount : 0;
-  const bsc = Number.isFinite(b?.sourceCount) ? b.sourceCount : 0;
-  if (asc !== bsc) return bsc - asc; // more sources first
-  const abf = Number.isFinite(a?.maxBeatFitScore) ? a.maxBeatFitScore : 0;
-  const bbf = Number.isFinite(b?.maxBeatFitScore) ? b.maxBeatFitScore : 0;
-  if (abf !== bbf) return bbf - abf; // higher beat-fit first
-  const am = Number.isFinite(a?.minMinutesAgo) ? a.minMinutesAgo : Number.POSITIVE_INFINITY;
-  const bm = Number.isFinite(b?.minMinutesAgo) ? b.minMinutesAgo : Number.POSITIVE_INFINITY;
-  if (am !== bm) return am - bm; // fresher first
-  const aid = a?.metaStoryId ?? "";
-  const bid = b?.metaStoryId ?? "";
-  if (aid < bid) return -1;
-  if (aid > bid) return 1;
-  return 0;
-}
-
-/**
  * Cap a list of `{ story, sortKey }` entries to `cap` meta-stories. Entries are
  * assumed to already be in R1 display order; survivors are returned in that same
  * order (only the bottom-ranked overflow is removed). `sortKey` must carry the
- * rank inputs consumed by `compareOverflowRank` (plus `metaStoryId`).
+ * rank inputs consumed by `compareSurvivalRank` (plus `metaStoryId`).
  *
  * Returns the kept entries, the dropped entries (for rejection logging), and the
  * additive overflow diagnostics. A no-op (≤ cap) reports `overflowCapApplied:
@@ -537,7 +520,7 @@ export function applyMetaStoryOverflowCap(entries, cap = MAX_META_STORIES) {
   const ranked = list
     .map((entry, idx) => ({ entry, idx }))
     .sort((x, y) => {
-      const c = compareOverflowRank(x.entry?.sortKey, y.entry?.sortKey);
+      const c = compareSurvivalRank(x.entry?.sortKey, y.entry?.sortKey);
       return c !== 0 ? c : x.idx - y.idx;
     });
   const keepIdx = new Set(ranked.slice(0, cap).map((r) => r.idx));
@@ -1251,15 +1234,22 @@ function joinOriginalText(item) {
  *     in text to pass — geographies no longer wave items through.
  */
 export function applyTopicKeywordFilter(items, settings) {
-  const topics = new Set((settings.topics ?? []).map((t) => normalizeTopicLabel(t)));
-  const keywordRegex = buildKeywordTokenRegex(settings.keywords);
+  const hasTopics = (settings.topics ?? []).length > 0;
+  // Soft widen (relevance-policy): the keyword regex now also matches the
+  // English morphological lexicon variants of each configured keyword (e.g.
+  // "election" admits "elections"/"electoral"). It stays ENGLISH-only on purpose
+  // — the recall surface is normalized-English evidence, so folding in the
+  // lexicon's Spanish forms would let an untranslated Spanish item bypass the
+  // translation gate (see `relevance-policy.mjs` header). Topic matching widens
+  // the same way via `topicMatchesSettings` (exact canonical OR lexicon sibling).
+  const keywordRegex = buildKeywordMatchRegex(settings);
   const geographies = settings.geographies ?? [];
   const hasGeographies = geographies.length > 0;
 
-  if (topics.size === 0 && !keywordRegex && !hasGeographies) return items;
+  if (!hasTopics && !keywordRegex && !hasGeographies) return items;
 
   return items.filter((item) => {
-    if (topics.size > 0 && topics.has(normalizeTopicLabel(item.topic))) return true;
+    if (hasTopics && topicMatchesSettings(item.topic, settings)) return true;
     if (keywordRegex) {
       // Slice 14: keyword recall reads normalized English evidence when present
       // so a Spanish item whose translation contains "migration" matches the
@@ -1309,10 +1299,14 @@ export function applyTopicKeywordFilter(items, settings) {
  */
 export function analyzeTopicKeywordStage(items, settings) {
   const inputCount = items?.length ?? 0;
-  const topics = new Set((settings?.topics ?? []).map((t) => normalizeTopicLabel(t)));
-  const keywordRegex = buildKeywordTokenRegex(settings?.keywords);
+  const hasTopics = (settings?.topics ?? []).length > 0;
+  // Mirror applyTopicKeywordFilter's soft widen. `exactKeywordRegex` keeps the
+  // pre-lexicon (verbatim-keyword) matcher around purely so the diagnostic can
+  // attribute soft-match hits: an item that matches the widened regex but NOT
+  // the exact one was admitted by the lexicon, counted in `keywordViaLexiconCount`.
+  const keywordRegex = buildKeywordMatchRegex(settings ?? {});
+  const exactKeywordRegex = buildKeywordTokenRegex(settings?.keywords);
   const geographies = settings?.geographies ?? [];
-  const hasTopics = topics.size > 0;
   const hasKeywords = !!keywordRegex;
   const hasGeographies = geographies.length > 0;
 
@@ -1329,6 +1323,10 @@ export function analyzeTopicKeywordStage(items, settings) {
     passNoConfig: 0,
     passCount: 0,
     keywordViaTranslatedCount: 0,
+    // Soft-widen funnel diagnostics (relevance-policy): items admitted by a
+    // lexicon variant rather than a verbatim keyword/topic match.
+    keywordViaLexiconCount: 0,
+    topicViaLexiconCount: 0,
     primaryDropCause: null,
   };
 
@@ -1340,7 +1338,15 @@ export function analyzeTopicKeywordStage(items, settings) {
   }
 
   for (const item of items ?? []) {
-    const topicMatch = hasTopics && topics.has(normalizeTopicLabel(item?.topic ?? ""));
+    const topicMatch = hasTopics && topicMatchesSettings(item?.topic ?? "", settings);
+    if (
+      topicMatch &&
+      !(settings?.topics ?? []).some(
+        (t) => normalizeTopicLabel(t) === normalizeTopicLabel(item?.topic ?? "")
+      )
+    ) {
+      breakdown.topicViaLexiconCount++;
+    }
     let keywordMatch = false;
     if (hasKeywords) {
       // Slice 14: mirror applyTopicKeywordFilter — read normalized English
@@ -1353,6 +1359,9 @@ export function analyzeTopicKeywordStage(items, settings) {
         !keywordRegex.test(joinOriginalText(item))
       ) {
         breakdown.keywordViaTranslatedCount++;
+      }
+      if (keywordMatch && !(exactKeywordRegex && exactKeywordRegex.test(text))) {
+        breakdown.keywordViaLexiconCount++;
       }
     }
     const geoMatch =
@@ -1405,14 +1414,31 @@ export function compareSourcesT1(a, b) {
 }
 
 /**
- * R1 (M6b): comparator for top-level `stories[]` ordering at the payload
+ * R1 (M6b): comparator for top-level `stories[]` display ordering at the payload
  * boundary.  Accepts pre-computed sort keys (so the comparator stays a pure
  * function over plain values, not the story object).
- *   1. `maxBeatFitScore` DESC  — best-fitting story first
- *   2. `minMinutesAgo` ASC     — freshest tie-breaker
- *   3. `metaStoryId` ASC       — stable tie-break
+ *
+ * Prompt 2.1: display order is now RELEVANCE-FIRST, matching the overflow
+ * survival policy (`compareSurvivalRank`) so "what shows first" and "what
+ * survives the cap" use the same priority — the most beat-relevant story leads
+ * the dashboard rather than merely the highest raw beat-fit:
+ *   1. `relevanceScore` DESC   — most beat-relevant story first (new primary)
+ *   2. `sourceCount` DESC      — more corroborated story first
+ *   3. `maxBeatFitScore` DESC  — best raw beat-fit
+ *   4. `minMinutesAgo` ASC     — freshest tie-breaker
+ *   5. `metaStoryId` ASC       — stable, deterministic final tie-break
+ *
+ * Sort keys that predate Prompt 2.1 (no `relevanceScore` / `sourceCount`) read
+ * those as 0 and tie through to the legacy beat-fit/freshness/id order, so the
+ * comparator stays backward-compatible for callers passing bare keys.
  */
 export function compareStoriesR1(a, b) {
+  const ar = typeof a?.relevanceScore === "number" && Number.isFinite(a.relevanceScore) ? a.relevanceScore : 0;
+  const br = typeof b?.relevanceScore === "number" && Number.isFinite(b.relevanceScore) ? b.relevanceScore : 0;
+  if (ar !== br) return br - ar;
+  const asc = typeof a?.sourceCount === "number" && Number.isFinite(a.sourceCount) ? a.sourceCount : 0;
+  const bsc = typeof b?.sourceCount === "number" && Number.isFinite(b.sourceCount) ? b.sourceCount : 0;
+  if (asc !== bsc) return bsc - asc;
   const ab = typeof a?.maxBeatFitScore === "number" ? a.maxBeatFitScore : 0;
   const bb = typeof b?.maxBeatFitScore === "number" ? b.maxBeatFitScore : 0;
   if (ab !== bb) return bb - ab;
@@ -2096,6 +2122,32 @@ export async function runRefreshPipeline({
   //         is exhausted the remainder is deferred to the hold path so it is
   //         re-evaluated next refresh (never dropped).
   const configuredGeos = settings.geographies ?? [];
+  // Deterministic explicit-geo hard-fail drop (relevance-policy). Runs at the
+  // geo stage, before the lane split / embedding / clustering, and adds NO LLM
+  // calls: `scoreGeoFit` flags an item only when it carries explicit
+  // geographies, NONE overlap the configured set, AND its text names (or
+  // demonyms) none of them — an unambiguous off-geography signal. Soft geo
+  // admission stopped *gating* relevance, but dropping a confident explicit
+  // conflict here is a pure-precision win (keeps clearly-foreign stories out of
+  // the cluster pool). Gated on a configured geo set so geo-agnostic profiles
+  // are untouched; ambiguous/implicit items never hard-fail.
+  const geoHardFailDropped = [];
+  const geoAdmissibleItems =
+    configuredGeos.length === 0
+      ? candidateItems
+      : candidateItems.filter((item) => {
+          if (scoreGeoFit(item, settings).hardFail) {
+            geoHardFailDropped.push(item);
+            return false;
+          }
+          return true;
+        });
+  if (geoHardFailDropped.length > 0) {
+    console.log(
+      `[pipeline.geo] explicit-conflict hard-fail dropped ${geoHardFailDropped.length} item(s) ` +
+        `before embedding/clustering (deterministic, no LLM)`
+    );
+  }
   // Precedence: explicit test override (`geoStageBudgetMs`) > active profile's
   // budget (Slice 4 interactive fast-path tightens this) > env/default.
   const effectiveGeoBudgetMs =
@@ -2127,7 +2179,7 @@ export async function runRefreshPipeline({
   };
   const lane1Items = [];
   const lane2Items = [];
-  for (const item of candidateItems) {
+  for (const item of geoAdmissibleItems) {
     if (selectedSourceIds.has(item.sourceId) && hasGeoSignal(item)) lane1Items.push(item);
     else lane2Items.push(item);
   }
@@ -2164,8 +2216,9 @@ export async function runRefreshPipeline({
   let geoBudgetHit;
   let geoLane2DeferredReason;
   if (geoAdmissionBypassed) {
-    // SOFT — admit the full candidate set; geo gates nothing.
-    geoPassedItems = [...candidateItems];
+    // SOFT — admit the full candidate set (minus the deterministic explicit-
+    // conflict hard-fails already removed above); geo otherwise gates nothing.
+    geoPassedItems = [...geoAdmissibleItems];
     geoHeldItems = [];
     geoLane2DeferredItems = [];
     geoBudgetHit = false;
@@ -2256,6 +2309,9 @@ export async function runRefreshPipeline({
     geoBudgetHit,
     geoAssessedCount,
     geoLexicalBypassCount,
+    // relevance-policy: deterministic explicit-conflict drops removed before the
+    // lane split (no LLM). Distinct from `geoHeldCount` (assessor hold bucket).
+    geoHardFailDroppedCount: geoHardFailDropped.length,
     geoHeldCount: geoHeldItems.length,
     geoRateLimitedCount,
     geoRetryCount,
@@ -3203,17 +3259,30 @@ export async function runRefreshPipeline({
             Math.min(acc, typeof item?.minutesAgo === "number" ? item.minutesAgo : Number.POSITIVE_INFINITY),
           Number.POSITIVE_INFINITY
         );
+    // `sourceCount` (overflow rank input) is the meta-story's full source set;
+    // grounded stories have all ids resolved, so this matches the published
+    // `sources.length`.
+    const sourceCount = Array.isArray(ms.source_item_ids) ? ms.source_item_ids.length : 0;
+    // Q3A: relevance score over the grounded cluster output (tags +
+    // `associated_entities`) + source-set stats. Drives overflow survival;
+    // deterministic and LLM-free.
+    const relevanceScore = computeRelevanceScore({
+      story: ms,
+      settings,
+      sourceCount,
+      maxBeatFitScore,
+      minMinutesAgo,
+    });
     return {
       story: buildStory(ms, sourceItems, settings),
-      // `sourceCount` (A4 overflow rank input) is the meta-story's full source
-      // set; grounded stories have all ids resolved, so this matches the
-      // published `sources.length`.
       sortKey: {
+        relevanceScore,
+        // Retained for rejection-log observability (legacy coarse signal).
         topicKeywordMatchStrength: topicKeywordMatchStrength(ms),
         maxBeatFitScore,
         minMinutesAgo,
         metaStoryId: ms.meta_story_id,
-        sourceCount: Array.isArray(ms.source_item_ids) ? ms.source_item_ids.length : 0,
+        sourceCount,
       },
     };
   });
@@ -3242,6 +3311,7 @@ export async function runRefreshPipeline({
           : [],
         debug_payload: {
           title: story?.title ?? null,
+          relevanceScore: Number.isFinite(sortKey?.relevanceScore) ? sortKey.relevanceScore : null,
           topicKeywordMatchStrength: sortKey?.topicKeywordMatchStrength ?? null,
           sourceCount: sortKey?.sourceCount ?? null,
           maxBeatFitScore: sortKey?.maxBeatFitScore ?? null,

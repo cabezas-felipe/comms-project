@@ -476,6 +476,175 @@ test("sanitizeExtraction canonicalizes bare 'Trade' to 'Trade policy'", () => {
   assert.deepEqual(result.topics, ["Trade policy"]);
 });
 
+test("sanitizeExtraction canonicalizes bare 'elections'/'election' to 'Elections' (Q5)", () => {
+  for (const variant of ["elections", "election", "Elections", "ELECTIONS"]) {
+    const result = sanitizeExtraction(
+      { topics: [variant], keywords: [], geographies: [], traditionalSources: [], socialSources: [] },
+      ""
+    );
+    assert.deepEqual(result.topics, ["Elections"], `topic "${variant}" must canonicalize to "Elections"`);
+  }
+});
+
+test("sanitizeExtraction adds 'Elections' topic hint when English text mentions elections (Q5)", () => {
+  // Mirrors the canonical example: "presidential elections in Colombia" → Elections.
+  const result = sanitizeExtraction(
+    { topics: [], keywords: [], geographies: ["Colombia"], traditionalSources: [], socialSources: [] },
+    "Tracking the presidential elections in Colombia."
+  );
+  assert.ok(result.topics.includes("Elections"), "elections text must surface the Elections topic");
+});
+
+test("sanitizeExtraction does NOT add an Elections topic when no election text is present (Q5 conservatism)", () => {
+  const result = sanitizeExtraction(
+    { topics: [], keywords: [], geographies: ["Colombia"], traditionalSources: [], socialSources: [] },
+    "Tracking migration between the US and Colombia."
+  );
+  assert.ok(!result.topics.includes("Elections"), "no election text → no Elections topic");
+});
+
+test("sanitizeExtraction suppresses noisy topic expansions but keeps the canonical subject (Q5 guard)", () => {
+  // "compliance" / "shipping risk" are noise qualifiers and must be dropped from
+  // topics; the canonical subject the user actually tracks ("Sanctions
+  // enforcement" for sanctions text) is kept. Even if the model emits the noise
+  // labels, sanitize must strip them.
+  const result = sanitizeExtraction(
+    {
+      topics: ["Compliance", "Shipping risk", "Labor disputes"],
+      keywords: [],
+      geographies: ["Colombia", "Venezuela"],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    "I track sanctions, compliance, and shipping risk tied to Venezuela and Colombia."
+  );
+  for (const noise of ["Compliance", "Compliance risk", "Shipping risk", "Shipping", "Labor disputes"]) {
+    assert.ok(
+      !result.topics.includes(noise),
+      `noisy topic "${noise}" must be suppressed — got ${JSON.stringify(result.topics)}`
+    );
+  }
+  // The real subject area survives (sanctions is the user's stated focus here).
+  assert.ok(result.topics.includes("Sanctions enforcement"), "canonical sanctions subject must survive");
+});
+
+test("sanitizeExtraction drops 'Sanctions enforcement' as a sub-theme when a primary domain topic is present", () => {
+  // Energy domain with a sanctions sub-mention → Energy policy only (gold ex-13).
+  const energy = sanitizeExtraction(
+    { topics: ["Sanctions enforcement"], keywords: [], geographies: ["Venezuela"], traditionalSources: [], socialSources: [] },
+    "I handle strategic comms in energy, tracking sanctions and compliance tied to Venezuela."
+  );
+  assert.deepEqual(energy.topics, ["Energy policy"]);
+});
+
+test("sanitizeExtraction merges model 'election' + hint into a single 'Elections' topic (dedupe, Q5)", () => {
+  // Model emits lowercase "election"; the deterministic hint emits "Elections".
+  // Case-insensitive dedupe must collapse them to ONE canonical "Elections".
+  const result = sanitizeExtraction(
+    { topics: ["election"], keywords: [], geographies: [], traditionalSources: [], socialSources: [] },
+    "Colombia and Peru elections."
+  );
+  assert.deepEqual(result.topics, ["Elections"]);
+});
+
+// ── Q5 remediation: deterministic recall hints + noise suppression ───────────
+
+test("Q5: diplomacy text yields the 'diplomacy' keyword even when the model misses it", () => {
+  // "diplomatic" (adjective) must surface the canonical 'diplomacy' keyword.
+  const result = sanitizeExtraction(
+    { topics: [], keywords: [], geographies: [], traditionalSources: [], socialSources: [] },
+    "I follow bilateral storylines and diplomatic tone shifts between capitals."
+  );
+  assert.ok(result.keywords.includes("diplomacy"), `expected 'diplomacy' keyword, got ${JSON.stringify(result.keywords)}`);
+});
+
+test("Q5: a bare WHO mention in text retains the WHO keyword", () => {
+  const result = sanitizeExtraction(
+    { topics: [], keywords: [], geographies: [], traditionalSources: [], socialSources: [] },
+    "I read WHO bulletins and follow @WHO."
+  );
+  assert.ok(result.keywords.includes("WHO"), "bare 'WHO' in text retains the keyword");
+});
+
+test("Q5: high-signal acronyms ICE / DHS survive from text", () => {
+  const ice = sanitizeExtraction(
+    { topics: [], keywords: ["ICE"], geographies: [], traditionalSources: [], socialSources: [] },
+    "deportation flights tracked via ICE"
+  );
+  assert.ok(ice.keywords.includes("ICE"));
+  const dhs = sanitizeExtraction(
+    { topics: [], keywords: ["DHS"], geographies: [], traditionalSources: [], socialSources: [] },
+    "DHS coordination on the border"
+  );
+  assert.ok(dhs.keywords.includes("DHS"));
+});
+
+test("Q5: migration keyword is retained for Spanish source text (ex-23 case)", () => {
+  const result = sanitizeExtraction(
+    { topics: [], keywords: [], geographies: ["Colombia"], traditionalSources: [], socialSources: [] },
+    "Para el contexto migratorio en Colombia confío en Semana e Infobae."
+  );
+  assert.ok(result.keywords.includes("migration"), `expected 'migration', got ${JSON.stringify(result.keywords)}`);
+  assert.ok(result.topics.includes("Migration policy"), "Spanish migration text yields Migration policy topic");
+});
+
+test("Q5: noisy qualifier keywords (compliance, shipping, shelter, '<x> cooperation'/'<x> updates') are filtered", () => {
+  const result = sanitizeExtraction(
+    {
+      topics: [],
+      keywords: ["compliance", "shipping", "shelter", "rollout", "security cooperation", "vaccine updates", "customs delays"],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    ""
+  );
+  for (const noise of ["compliance", "shipping", "shelter", "rollout", "security cooperation", "vaccine updates", "customs delays"]) {
+    assert.ok(!result.keywords.includes(noise), `noisy keyword "${noise}" must be filtered`);
+  }
+});
+
+test("Q5: legitimate multi-word keywords (organized crime, United Nations, public health) survive the qualifier filter", () => {
+  const result = sanitizeExtraction(
+    {
+      topics: [],
+      keywords: ["organized crime", "United Nations", "public health"],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+    },
+    ""
+  );
+  assert.ok(result.keywords.includes("organized crime"));
+  assert.ok(result.keywords.includes("United Nations"));
+  assert.ok(result.keywords.includes("public health"));
+});
+
+test("Q5: deterministic topic hints for energy / customs / humanitarian / asylum", () => {
+  const cases = [
+    ["energy association tracking sanctions", "Energy policy"],
+    ["a trade group focused on customs policy", "Customs policy"],
+    ["migration and humanitarian operations", "Humanitarian aid"],
+    ["deportation flights and asylum court changes", "Border policy"],
+  ];
+  for (const [text, topic] of cases) {
+    const r = sanitizeExtraction(
+      { topics: [], keywords: [], geographies: [], traditionalSources: [], socialSources: [] },
+      text
+    );
+    assert.ok(r.topics.includes(topic), `text "${text}" must yield topic "${topic}" — got ${JSON.stringify(r.topics)}`);
+  }
+});
+
+test("Q5: 'organized crime' is a keyword, not a topic", () => {
+  const result = sanitizeExtraction(
+    { topics: ["Organized crime"], keywords: ["organized crime"], geographies: [], traditionalSources: [], socialSources: [] },
+    "security cooperation and organized crime framing"
+  );
+  assert.ok(!result.topics.includes("Organized crime"), "organized crime must not be a topic");
+  assert.ok(result.keywords.includes("organized crime"), "organized crime stays a keyword");
+});
+
 test("sanitizeExtraction collapses keyword plurals via synonym map ('outbreaks' → 'outbreak')", () => {
   const result = sanitizeExtraction(
     {

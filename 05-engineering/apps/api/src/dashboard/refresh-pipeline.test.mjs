@@ -61,7 +61,6 @@ import {
   compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
-  compareOverflowRank,
   topicKeywordMatchStrength,
   applyMetaStoryOverflowCap,
   MAX_META_STORIES,
@@ -1553,6 +1552,61 @@ test("runRefreshPipeline (Prompt 3): soft mode admits Semana-like election items
   assert.equal(log.geo.geoAdmissionBypassed, true);
   assert.equal(log.outcomes.geoAdmissionMode, "soft");
   assert.equal(log.outcomes.geoAdmissionBypassed, true);
+});
+
+test("runRefreshPipeline: explicit geo conflicts hard-fail pre-cluster even in soft mode", async () => {
+  // Soft admission stops geography from *gating* relevance, but the deterministic
+  // relevance-policy `scoreGeoFit` hard-fail still drops an unambiguous explicit
+  // geo conflict (explicit geographies, none configured, no Colombia mention or
+  // demonym in text) before the cluster pool. This proves soft mode does NOT
+  // "rescue" such items and that the drop is independent of recall: the conflict
+  // item carries a recall-matching topic, so its absence from clustering can
+  // only be the geo hard-fail.
+  const settings = { ...BASE_SETTINGS, geographies: ["Colombia"] };
+  const rawItems = [
+    // Conflict: tagged Peru only, no Colombia/demonym anywhere in text or url.
+    // Recall-matching topic ("Diplomatic relations" is in settings.topics) so a
+    // missing-from-clustering result isolates the geo hard-fail as the cause.
+    makeItem({
+      sourceId: "conflict-peru",
+      outlet: "Reuters",
+      geographies: ["Peru"],
+      topic: "Diplomatic relations",
+      headline: "Lima transit strike enters a second week",
+      body: ["A local dispute with no other geography named."],
+      url: "https://example.com/conflict-peru",
+    }),
+    // Control: explicit match for the configured geography → survives hard-fail
+    // and clears recall via its topic.
+    makeItem({
+      sourceId: "control-colombia",
+      outlet: "Reuters",
+      geographies: ["Colombia"],
+      topic: "Diplomatic relations",
+    }),
+  ];
+
+  const seen = [];
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    geoAdmissionMode: "soft",
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // Assessor must NOT run in soft mode — throw to fail loudly if consulted.
+    geoAssessFn: async () => { throw new Error("geo assessor must not run in soft mode"); },
+    clusterFn: async (items) => { seen.push(...items.map((i) => i.sourceId)); return []; },
+    beatFitEnabled: false,
+  });
+
+  // The explicit conflict never reaches clustering; the control does.
+  assert.ok(!seen.includes("conflict-peru"), "explicit geo conflict must be hard-failed before clustering");
+  assert.ok(seen.includes("control-colombia"), "the configured-geo control survives to clustering");
+  // Exactly one deterministic hard-fail drop this run.
+  assert.equal(log.geo.geoHardFailDroppedCount, 1);
+  // …and it happened under soft admission (bypass on), proving soft does not rescue it.
+  assert.equal(log.geo.geoAdmissionMode, "soft");
+  assert.equal(log.geo.geoAdmissionBypassed, true);
 });
 
 test("runRefreshPipeline (Prompt 4): rollback contract — explicit hard restores the gate and carries the geo admission fields on outcomes", async () => {
@@ -8220,50 +8274,6 @@ test("topicKeywordMatchStrength: 2 topic+keyword, 1 either, 0 neither", () => {
   assert.equal(topicKeywordMatchStrength(null), 0);
 });
 
-// Unit: the survival comparator honors each ranking tier in order.
-test("compareOverflowRank: topic/keyword > multi-source > beat-fit > fresher > metaStoryId", () => {
-  // Tier 1: stronger topic/keyword match survives (ranks ahead, i.e. negative).
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
-      { topicKeywordMatchStrength: 0, sourceCount: 9, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
-    ) < 0,
-    "matched outranks unmatched regardless of other factors"
-  );
-  // Tier 2: equal match strength -> more sources survives.
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 2, maxBeatFitScore: 0, minMinutesAgo: 999, metaStoryId: "z" },
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 9, minMinutesAgo: 0, metaStoryId: "a" }
-    ) < 0,
-    "more sources outranks everything else"
-  );
-  // Tier 3: equal match strength + sources -> higher beat-fit survives.
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 999, metaStoryId: "z" },
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.1, minMinutesAgo: 0, metaStoryId: "a" }
-    ) < 0,
-    "higher beat-fit outranks freshness/id"
-  );
-  // Tier 4: equal match strength + sources + beat-fit -> fresher survives.
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "z" },
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 99, metaStoryId: "a" }
-    ) < 0,
-    "fresher outranks id"
-  );
-  // Tier 5: all equal -> metaStoryId ascending.
-  assert.ok(
-    compareOverflowRank(
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "a" },
-      { topicKeywordMatchStrength: 1, sourceCount: 1, maxBeatFitScore: 0.5, minMinutesAgo: 10, metaStoryId: "b" }
-    ) < 0,
-    "lower metaStoryId survives the final tie-break"
-  );
-});
-
 // Unit: the cap keeps the top-5 survivors in their original (R1) order and drops
 // the deterministic loser.
 test("applyMetaStoryOverflowCap: drops the lowest-ranked, preserves survivor order", () => {
@@ -8495,6 +8505,157 @@ test("runRefreshPipeline (A4): matched stories survive cap over unmatched", asyn
   const overflowRecords = written.filter((r) => r.reason_code === "overflow_cap");
   assert.equal(overflowRecords.length, 1);
   assert.equal(overflowRecords[0].debug_payload.topicKeywordMatchStrength, 0);
+});
+
+// ─── Q3A: relevance-score overflow survival ranking ──────────────────────────
+//
+// Prompt 2 replaces the coarse topic/keyword-strength survival order with a
+// deterministic relevance score (topic / keyword / grounded entity fit > geo >
+// corroboration > beat-fit > freshness). These guard that a story matching the
+// user's configured beat survives the cap over generic same-geography noise, and
+// that the survival order stays deterministic across runs.
+
+// One election profile: Colombia + elections vocabulary. Sources match BASE so
+// the single seed item clears source selection; topic "Elections" clears recall.
+const ELECTION_OVERFLOW_SETTINGS = {
+  contractVersion: "2026-05-19-meta-story-fields",
+  topics: ["Elections"],
+  keywords: ["election"],
+  geographies: ["Colombia"],
+  traditionalSources: ["Reuters", "El Tiempo"],
+  socialSources: [],
+};
+
+// 6 grounded stories on one seed item: 1 election-beat story + 5 generic
+// Colombia geo-noise rows (geography tag only, no topic/keyword/entity match).
+function electionOverflowStories() {
+  const election = {
+    meta_story_id: "beat-election",
+    title: "Colombia presidential election race tightens before the vote",
+    subtitle: "Subtitle election.",
+    source_item_ids: ["src-1"],
+    summary: "Summary election.",
+    tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+    associated_entities: ["Colombia presidential election", "electoral authority"],
+    factual_claims: ["Reuters reports the Colombia election race tightened."],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const noise = Array.from({ length: 5 }, (_, i) => ({
+    meta_story_id: `noise-${i}`,
+    title: `Colombia general update ${i}`,
+    subtitle: `Subtitle noise ${i}.`,
+    source_item_ids: ["src-1"],
+    summary: `Summary noise ${i}.`,
+    tags: { topics: [], keywords: [], geographies: ["Colombia"] },
+    associated_entities: [],
+    factual_claims: [`Reuters reports a Colombia development ${i}.`],
+    claim_evidence_map: { "0": ["src-1"] },
+  }));
+  return [election, ...noise];
+}
+
+test("runRefreshPipeline (Q3A): election-matching story survives cap over generic Colombia geo noise", async () => {
+  const rawItems = [
+    makeItem({ sourceId: "src-1", outlet: "Reuters", topic: "Elections", geographies: ["Colombia"], minutesAgo: 30 }),
+  ];
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: ELECTION_OVERFLOW_SETTINGS,
+    rawItems,
+    clusterFn: async () => electionOverflowStories(),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false, // neutralize beat-fit so relevance fit decides survival
+  });
+
+  assert.equal(payload.stories.length, 5, "dashboard ships at most 5");
+  assert.equal(log.overflowCap.overflowCapApplied, true);
+  assert.equal(log.overflowCap.overflowDroppedCount, 1);
+  // The election beat survives; the drop is a generic geo-noise row.
+  assert.ok(
+    payload.stories.some((s) => s.metaStoryId === "beat-election"),
+    "the configured-beat election story must survive the overflow cap"
+  );
+  // Among 5 identical noise rows the highest metaStoryId loses the stable
+  // tie-break, so "noise-4" is the deterministic drop (never the election beat).
+  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, ["noise-4"]);
+});
+
+test("runRefreshPipeline (Q3A): survival drop is deterministic across runs", async () => {
+  const run = () =>
+    runRefreshPipeline({
+      settings: ELECTION_OVERFLOW_SETTINGS,
+      rawItems: [makeItem({ sourceId: "src-1", outlet: "Reuters", topic: "Elections", geographies: ["Colombia"], minutesAgo: 30 })],
+      clusterFn: async () => electionOverflowStories(),
+      clusterModel: "mock-anthropic-haiku",
+      contractVersion: "2026-05-19-meta-story-fields",
+      beatFitEnabled: false,
+    });
+
+  const a = await run();
+  const b = await run();
+  assert.deepEqual(
+    a.log.overflowCap.overflowDroppedMetaStoryIds,
+    b.log.overflowCap.overflowDroppedMetaStoryIds,
+    "same inputs → identical overflow drop set"
+  );
+  assert.deepEqual(
+    a.payload.stories.map((s) => s.metaStoryId),
+    b.payload.stories.map((s) => s.metaStoryId),
+    "same inputs → identical shipped order"
+  );
+});
+
+test("runRefreshPipeline (Q3A / Prompt 2.1): R1 display order is relevance-first — beat story leads geo noise", async () => {
+  // Two stories, no overflow cap (≤5). Beat-fit is neutralized so the ONLY
+  // differentiator is the relevance score: the election-beat story must DISPLAY
+  // ahead of the generic Colombia geo-noise story in payload.stories order.
+  const rawItems = [
+    makeItem({ sourceId: "src-1", outlet: "Reuters", topic: "Elections", geographies: ["Colombia"], minutesAgo: 30 }),
+  ];
+  const stories = [
+    // Listed noise-first so a legacy beat-fit/id sort (both tie here) would NOT
+    // reorder it ahead — only relevance-first puts the election story on top.
+    {
+      meta_story_id: "noise-geo",
+      title: "Colombia general update",
+      subtitle: "Subtitle noise.",
+      source_item_ids: ["src-1"],
+      summary: "Summary noise.",
+      tags: { topics: [], keywords: [], geographies: ["Colombia"] },
+      associated_entities: [],
+      factual_claims: ["Reuters reports a Colombia development."],
+      claim_evidence_map: { "0": ["src-1"] },
+    },
+    {
+      meta_story_id: "beat-election",
+      title: "Colombia presidential election race tightens before the vote",
+      subtitle: "Subtitle election.",
+      source_item_ids: ["src-1"],
+      summary: "Summary election.",
+      tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+      associated_entities: ["Colombia presidential election", "electoral authority"],
+      factual_claims: ["Reuters reports the Colombia election race tightened."],
+      claim_evidence_map: { "0": ["src-1"] },
+    },
+  ];
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: ELECTION_OVERFLOW_SETTINGS,
+    rawItems,
+    clusterFn: async () => stories,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false, // isolate relevance as the sole ordering signal
+  });
+
+  // No cap (2 ≤ 5); both ship, election displayed first by relevance.
+  assert.equal(log.overflowCap.overflowCapApplied, false);
+  assert.deepEqual(
+    payload.stories.map((s) => s.metaStoryId),
+    ["beat-election", "noise-geo"],
+    "relevance-first R1: the configured-beat story must lead the generic geo-noise story"
+  );
 });
 
 // ─── B1: deferred re-cluster candidate queue (flagging + ranking only) ───────
@@ -9022,12 +9183,33 @@ test("runRefreshPipeline Phase 5: parallel why respects concurrency and beats se
     assert.equal(log.whyItMatters.whyConcurrency, 4, "whyConcurrency surfaced on log.whyItMatters");
     assert.equal(typeof log.whyItMatters.whyMs, "number", "whyMs surfaced on log.whyItMatters");
 
-    // Wall-clock proof: serial would be 6 * 100 = ~600ms; parallel with cap 4
-    // is two waves (4 then 2) ~ 200ms.  Generous threshold well under serial.
-    assert.ok(
-      log.whyItMatters.whyMs < STORY_COUNT * PER_STORY_DELAY_MS * 0.85, // 0.85 margin absorbs GHA runner jitter while staying clearly under serial
-      `parallel why wall-clock (${log.whyItMatters.whyMs}ms) must beat serial ~${STORY_COUNT * PER_STORY_DELAY_MS}ms`
-    );
+    // Wall-clock is only a SECONDARY signal here. The deterministic proof of
+    // parallelism is `maxInFlight === 4` above: we directly observed four why
+    // writers running at once, which a serial loop can never produce — and that
+    // invariant holds regardless of how fast or slow the machine is.
+    //
+    // Absolute elapsed-time, by contrast, is flaky across CI/machines. A loaded
+    // runner (e.g. a contended GHA box) can stall a setTimeout wave long enough
+    // that even correctly-parallel work drifts past a tight fraction of the
+    // serial sum, so the old `whyMs < serial * 0.85` gate failed intermittently
+    // for purely environmental reasons unrelated to the code. We keep a
+    // wall-clock check only to honor the stage's intent (work ran in parallel
+    // WAVES, not the serial sum), but make it robust:
+    //   • skip it when the measured duration is below a noise floor (too small to
+    //     compare meaningfully — the structural invariants above carry the test);
+    //   • otherwise assert only the LOOSE bound that still separates parallel
+    //     from serial: with cap 4 over 5 stories the work is 2 waves (~2·delay)
+    //     vs serial's 5 waves (~5·delay), so staying under the full serial sum
+    //     confirms it did not silently degrade to a serial loop.
+    const serialMs = STORY_COUNT * PER_STORY_DELAY_MS; // ~500ms if fully serial
+    const NOISE_FLOOR_MS = PER_STORY_DELAY_MS;          // < one wave → not a usable timing signal
+    if (log.whyItMatters.whyMs >= NOISE_FLOOR_MS) {
+      assert.ok(
+        log.whyItMatters.whyMs < serialMs,
+        `parallel why wall-clock (${log.whyItMatters.whyMs}ms) must stay under the serial sum ~${serialMs}ms ` +
+          `(cap-4 over ${STORY_COUNT} stories runs in 2 waves, not ${STORY_COUNT}); deterministic proof is maxInFlight=${maxInFlight}`
+      );
+    }
   } finally {
     if (prevConc === undefined) delete process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY;
     else process.env.TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY = prevConc;

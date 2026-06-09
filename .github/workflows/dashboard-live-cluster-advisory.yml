@@ -1,0 +1,73 @@
+name: Dashboard live-cluster advisory
+
+# Q6D — ADVISORY / NON-BLOCKING live cluster drift monitor.
+#
+# Runs `npm run eval:dashboard-live-cluster-advisory` (a real, provider-backed
+# clustering call over a stable Colombia-election fixture subset) to detect
+# prompt/model drift in the cluster output shape — most importantly that the B1
+# grounded `tags.geographies` + `associated_entities` keep showing up.
+#
+# This is BACKGROUND MONITORING, deliberately NOT a PR gate:
+#   • It runs ONLY on a schedule / manual dispatch — never on `pull_request` — so
+#     it can never block a merge (the PR gate is `api-quality-gate.yml`, which is
+#     untouched and does NOT include this advisory).
+#   • When the Anthropic key secret is absent the advisory SKIPS and exits 0
+#     (green) — a missing key is never a failure.
+#   • A non-zero exit means the advisory checks failed (possible drift) — the job
+#     goes red to ALERT OWNERS, but no PR depends on it.
+#
+# Required repo secret (optional — absent ⇒ the run SKIPs green):
+#   - TEMPO_ANTHROPIC_API_KEY   Anthropic key (or ANTHROPIC_API_KEY fallback)
+
+on:
+  schedule:
+    # 05:25 UTC daily — clear of cadence-tick (:05), cluster-reliability (:15),
+    # ingestion-warm (:35), and the 09:00 source-digest run.
+    - cron: "25 5 * * *"
+  workflow_dispatch:
+    inputs:
+      cluster_model:
+        description: "Cluster model to drift-check (live anthropic:/openai: model)"
+        required: false
+        default: "anthropic:claude-sonnet-4-6"
+
+concurrency:
+  group: dashboard-live-cluster-advisory
+  cancel-in-progress: false
+
+jobs:
+  live-cluster-advisory:
+    name: Live cluster drift advisory (non-blocking)
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: 05-engineering/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: 05-engineering
+
+      - name: Build shared packages
+        run: npm run build:packages
+        working-directory: 05-engineering
+
+      - name: Run live-cluster advisory
+        working-directory: 05-engineering
+        env:
+          # Live model + key. If the key secret is unset the runner self-SKIPs
+          # (exit 0) — no "verify secrets" gate needed for an advisory job.
+          TEMPO_AI_MOCK_ONLY: "false"
+          TEMPO_AI_CLUSTER_MODEL: ${{ github.event.inputs.cluster_model || 'anthropic:claude-sonnet-4-6' }}
+          TEMPO_ANTHROPIC_API_KEY: ${{ secrets.TEMPO_ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: npm run eval:dashboard-live-cluster-advisory --workspace=@tempo/api

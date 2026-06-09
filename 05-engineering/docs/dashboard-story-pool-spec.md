@@ -35,10 +35,12 @@ Order in [`refresh-pipeline.mjs`](../apps/api/src/dashboard/refresh-pipeline.mjs
 |------|------|
 | **Sources (C2)** | Zero traditional **and** zero social sources → **no items** (not “all outlets”) |
 | **Geo (F)** | Non-empty geo list → filter + holds; assessor **Haiku** when wired (**F3b**) |
-| **Lexical (D)** | Whole-word match (`\b<token>\b`), case-insensitive; topics/keywords **OR** when both configured; **noop** if both empty. Breadth comes from the embedding union, not from substring matching. |
+| **Lexical (D)** | Whole-word match (`\b<token>\b`), case-insensitive; topics/keywords **OR** when both configured; **noop** if both empty. Breadth comes from the embedding union and the lexicon soft-widen (below), not from substring matching. |
 | **Embedding (E)** | `hybrid_strict`: union semantic top-K with lexical recall. **Empty profile** → **E3b** lexical-only pass-through (`degraded_reason: "empty_profile_text_lexical_only"`); **provider failure with lexical hits** → lexical fallback flagged `keywordFallbackAfterEmbeddingFailure: true`; **provider failure with no lexical hits** → strict-empty. |
 | **Beat-fit (G)** | Threshold **`0.20`** (MVP recall-first, [D-063](../DECISIONS.md)); env `TEMPO_BEAT_FIT_THRESHOLD` (set `0.40` to roll back). Strict-empty when no item passes |
 | **Dedupe (H)** | Cross-feed; survivors only become candidates |
+
+**Chunk D soft-widen (lexicon).** The Lexical (D) gate matches a configured topic/keyword *or* one of its lexicon variants ([`relevance-policy.mjs`](../apps/api/src/dashboard/relevance-policy.mjs)). The keyword recall regex (`buildKeywordMatchRegex`) widens only with **English morphological forms** (e.g. `election` → `elections`); it deliberately excludes the lexicon's Spanish surface forms **and** EN↔ES homographs (e.g. `electoral`) so an untranslated Spanish item can never bypass the translation-first gate — recall still reads normalized-English evidence. The Spanish pairs (`elecciones`, `campaña`, `segunda vuelta`, …) are recall **wideners, not entity names**, and feed the language-agnostic `scoreKeywordFit`/`scoreTopicFit` scores only. Soft-match hits are observable via the `keywordViaLexiconCount`/`topicViaLexiconCount` funnel diagnostics. Separately, the same module's deterministic `scoreGeoFit` hard-fails an item at the geo stage (no LLM) when it carries explicit geographies that all conflict with the configured set and names none of them in text — surfaced as `geoHardFailDroppedCount`.
 
 ---
 
