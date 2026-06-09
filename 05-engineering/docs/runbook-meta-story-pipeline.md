@@ -240,6 +240,88 @@ clustering or split-healer regression.
 
 ---
 
+## First-time / Colombia-election manual E2E
+
+The canonical manual pass for validating a **clean first-time journey** end to end:
+prepared user → onboarding (not dashboard) → on-beat Colombia-election stories. Run
+the steps in order; do not skip the pre-run `assert-clean` baseline — it is what
+makes the run trustworthy.
+
+1. **Prepare clean user + local stack**
+   ```bash
+   cd 05-engineering
+   npm run e2e:prepare-user -- --user-id <uuid> --email <email>
+   ```
+
+2. **Assert baseline is clean** — must **PASS before any browser step**:
+   ```bash
+   npm run e2e:assert-clean --workspace=@tempo/api -- --user-id <uuid>
+   ```
+   If it fails, the user is not clean; fix state and re-run before continuing.
+   > **`e2e:assert-clean` is pre-run only** — it is a zero-footprint baseline check.
+   > After onboarding writes rows it is *expected* to fail, so never use it as a
+   > post-run success criterion (see step 6).
+
+3. **Browser hygiene**
+   - Use a **single browser tab/session** for the whole run — no concurrent tabs.
+   - If you are **not** on the `prepare-user` clean profile, clear the per-user
+     refresh timestamp from local storage (DevTools console on the app origin):
+     ```js
+     localStorage.removeItem("tempo_dashboard_last_refresh_attempt_at:<userId>");
+     ```
+   - **Stale `localStorage` invalidates the first-time checks** — a lingering
+     refresh timestamp makes a clean user look like a returning one.
+
+4. **First-time journey validation**
+   - Open `http://localhost:8080/`.
+   - Enter the email for the prepared user.
+   - **Expected route: `/onboarding`** (NOT `/dashboard`) for a clean user. Landing
+     straight on the dashboard means the user was not actually first-time — go back
+     to step 2.
+   - Submit an onboarding narrative mentioning **Colombia elections + Semana**.
+
+5. **Dashboard validation**
+   - Open the dashboard with `?debug=1`.
+   - Verify the diagnostics rows render and are **meaningful** —
+     selection / funnel / overflow / cap where present (see §4 for how to read
+     `split/defer:`, `overflow_cap:`, `recluster:`).
+   - Confirm stories are **on-beat (Colombia election)** and not weather / volcano
+     noise.
+
+6. **Post-run state capture**
+   - Do **not** re-run `e2e:assert-clean` here — a valid run writes rows, so the
+     baseline check is *expected* to fail and is not a success signal.
+   - Instead, confirm the run wrote the expected artifacts for `<userId>`:
+     - `user_onboarding_narratives >= 1` (onboarding persisted)
+     - `settings >= 1` (user settings written)
+     - `dashboard_snapshots >= 1` (after the refresh completes)
+   - This is a sanity check that the journey produced its expected state — not a
+     cleanliness check.
+
+### Invalid run conditions
+
+A run does **not** count if any of these were true during it:
+
+- **Partial DB reset *before* the run** — only some tables cleared at baseline,
+  especially a lingering `public.settings` row, so step 2's `assert-clean` never
+  truly passed. (This is about the pre-run baseline; rows written *during* a valid
+  run are expected — see step 6.)
+- **Multiple tabs or concurrent sessions** open against the same user mid-run.
+- **Stale `localStorage`** refresh timestamp
+  (`tempo_dashboard_last_refresh_attempt_at:<userId>`) left over from a prior run.
+
+### Required companion checks
+
+- **Dashboard quality gate** — run alongside the manual pass to confirm story
+  quality programmatically:
+  ```bash
+  npm run eval:dashboard-quality-gate --workspace=@tempo/api
+  ```
+- **Clustering MVP gate** — see [`clustering-mvp-gate.md`](clustering-mvp-gate.md)
+  for the clustering-side acceptance bar referenced by the broader pipeline gates.
+
+---
+
 _Canonical behavior sources live in the modules linked above; this runbook is the
 operational index, not the spec. Related: [cold-start spec](cold-start-v1.md),
 [refresh SLO runbook](runbook-refresh-slo.md), [translation runbook](runbook-translation-activation.md)._
