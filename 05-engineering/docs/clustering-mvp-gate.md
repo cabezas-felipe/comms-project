@@ -17,7 +17,7 @@ This is a **live** gate: it exercises the real API + Supabase + provider path, n
 
 - `apps/api/.env` populated: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and an Anthropic key (`TEMPO_ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY`).
 - An invited test user with onboarding settings saved (think-tank blurb: topics economy / elections / Trump / Iran / inflation / gas; sources Washington Post + Reuters; geographies US / Iran).
-- Optional clean slate: `npm run reset:golden-user -- --email <your-invited-email>` (see the [Manual golden re-test](../README.md#manual-golden-re-test) section).
+- Optional clean slate: `npm run e2e:reset-user -- --email <your-invited-email>` (see the [Manual golden re-test](../README.md#manual-golden-re-test) section).
 
 ## Checklist
 
@@ -125,7 +125,7 @@ Notes / risks:
 
 **`medianStories < 2` (thin output)**
 - Likely upstream of clustering: check the invited user's settings actually saved (sources/topics present) and that ingestion has warm items. Confirm `_meta.selection` shows matched sources and a non-trivial `relevantItemCount`.
-- Re-run `npm run reset:golden-user` and re-seed onboarding if settings look empty, then re-probe.
+- Re-run `npm run e2e:reset-user` and re-seed onboarding if settings look empty, then re-probe.
 
 **`p95PipelineMs` high (advisory)**
 - Not blocking for PR A, but note it in signoff. Read `[pipeline.timings]` for the slow refresh to see which stage dominates (`clusterMs` → provider; `geoMs`/`recallMs` → upstream). See the [refresh SLO runbook](runbook-refresh-slo.md).
