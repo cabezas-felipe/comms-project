@@ -9730,6 +9730,161 @@ test("C1 diagnostics: clusterDropped surfaces election-geo + geo-conflict reason
   assert.equal(typeof dropped.headlineFamilyKey, "string");
 });
 
+// ─── Step 1.7: cap-overflow election survival fixture ────────────────────────
+//
+// A deterministic 20-item mixed pool that stress-tests C1 ranking under both the
+// baseline cap (15) and the cold-start cap (10). Labelled groups (by sourceId
+// prefix) so assertions read as counts/presence/ordering bands rather than
+// brittle exact orderings:
+//   - co-elec-01..08 : configured-geo (Colombia) election — should dominate
+//   - xelec-01..04   : cross-country election (Peru/Brazil/Mexico) — deprioritized
+//   - noise-01..06   : geo-noise (weather/volcano/disaster), some IN Colombia
+//   - off-01..02     : neutral off-beat — deliberately the FRESHEST, to prove
+//                      relevance beats recency under the cap
+function buildCapOverflowPool() {
+  const co = Array.from({ length: 8 }, (_, i) =>
+    makeItem({
+      sourceId: `co-elec-${String(i + 1).padStart(2, "0")}`,
+      headline: `Colombia election update number ${i + 1}`,
+      topic: "election",
+      geographies: ["Colombia"],
+      minutesAgo: 10 + i * 10, // 10..80
+    })
+  );
+  const crossCountries = ["Peru", "Brazil", "Mexico", "Peru"];
+  const xelec = crossCountries.map((country, i) =>
+    makeItem({
+      sourceId: `xelec-${String(i + 1).padStart(2, "0")}`,
+      headline: `${country} election results announced`,
+      topic: "election",
+      geographies: [country],
+      minutesAgo: 15 + i * 10, // 15..45
+    })
+  );
+  const noiseSpecs = [
+    { headline: "Colombia volcano eruption alert issued", geographies: ["Colombia"], topic: "natural disaster" },
+    { headline: "Colombia weekend weather forecast", geographies: ["Colombia"], topic: "weather" },
+    { headline: "Colombia flooding disaster in coastal towns", geographies: ["Colombia"], topic: "natural disaster" },
+    { headline: "Japan typhoon warning for the region", geographies: ["Japan"], topic: "weather" },
+    { headline: "Chile earthquake damage assessment", geographies: ["Chile"], topic: "natural disaster" },
+    { headline: "Tokyo heatwave grips the city", geographies: ["Japan"], topic: "weather" },
+  ];
+  const noise = noiseSpecs.map((spec, i) =>
+    makeItem({
+      sourceId: `noise-${String(i + 1).padStart(2, "0")}`,
+      minutesAgo: 5 + i * 3, // some fresher than the elections
+      ...spec,
+    })
+  );
+  const off = [
+    makeItem({ sourceId: "off-01", headline: "Global stock markets edge higher", geographies: ["Japan"], topic: "markets", minutesAgo: 1 }),
+    makeItem({ sourceId: "off-02", headline: "New smartphone model unveiled", geographies: ["Japan"], topic: "technology", minutesAgo: 2 }),
+  ];
+  // Interleave so input order can't accidentally satisfy assertions.
+  const pool = [];
+  for (let i = 0; i < 8; i++) {
+    if (co[i]) pool.push(co[i]);
+    if (noise[i]) pool.push(noise[i]);
+    if (xelec[i]) pool.push(xelec[i]);
+    if (off[i]) pool.push(off[i]);
+  }
+  return pool;
+}
+
+const prefixCount = (ids, prefix) => ids.filter((id) => id.startsWith(prefix)).length;
+
+test("Step 1.7 cap=15: Colombia-election items survive over geo-noise", () => {
+  const pool = buildCapOverflowPool();
+  assert.equal(pool.length, 20, "fixture is the expected 20-item pool");
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(pool, C1_SETTINGS, 15);
+  const survivors = clusterInputItems.map((i) => i.sourceId);
+
+  // At least 7/8 configured-geo elections survive (target: all 8).
+  assert.ok(prefixCount(survivors, "co-elec") >= 7, "≥7/8 Colombia elections survive");
+
+  // Dropped items are dominated by noise/off — no Colombia election is dropped.
+  const dropped = diagnostics.clusterDroppedSourceIds;
+  assert.equal(prefixCount(dropped, "co-elec"), 0, "no Colombia election is cut at cap=15");
+  assert.ok(
+    prefixCount(dropped, "noise") + prefixCount(dropped, "off") >= dropped.length - 1,
+    "dropped set is (almost) entirely noise/off"
+  );
+
+  // No weather/volcano dominance: the top 5 ranks carry no geo-noise/off item
+  // (elections fill them).
+  const top5 = survivors.slice(0, 5);
+  assert.equal(prefixCount(top5, "noise"), 0, "no noise in the top 5");
+  assert.equal(prefixCount(top5, "off"), 0, "no off-beat in the top 5");
+});
+
+test("Step 1.7 cold-start cap=10: election coverage stays meaningful", () => {
+  const pool = buildCapOverflowPool();
+  const { clusterInputItems } = applyClusterInputCap(pool, C1_SETTINGS, 10);
+  const survivors = clusterInputItems.map((i) => i.sourceId);
+  assert.equal(survivors.length, 10);
+
+  // At least 5 Colombia elections survive; elections outnumber noise survivors.
+  assert.ok(prefixCount(survivors, "co-elec") >= 5, "≥5 Colombia elections survive cap=10");
+  assert.ok(
+    prefixCount(survivors, "co-elec") > prefixCount(survivors, "noise"),
+    "Colombia elections outnumber geo-noise among survivors"
+  );
+
+  // With ≥10 election items available, the freshest off-beat items must NOT
+  // crowd into the top 5 — relevance beats recency.
+  const top5 = survivors.slice(0, 5);
+  assert.equal(prefixCount(top5, "off"), 0, "no off-beat item in the top 5");
+  assert.equal(prefixCount(top5, "noise"), 0, "no geo-noise item in the top 5");
+});
+
+test("Step 1.7 Decision 5C: configured-geo elections rank above cross-country in the mixed pool", () => {
+  const pool = buildCapOverflowPool();
+  const { clusterInputItems } = applyClusterInputCap(pool, C1_SETTINGS, 15);
+  const survivors = clusterInputItems.map((i) => i.sourceId);
+
+  // Every configured-geo election ranks ahead of every surviving cross-country
+  // election (head-to-head, deterministic).
+  const lastCo = Math.max(...survivors.map((id, idx) => (id.startsWith("co-elec") ? idx : -1)));
+  const firstX = survivors.findIndex((id) => id.startsWith("xelec"));
+  if (firstX !== -1) {
+    assert.ok(lastCo < firstX, "all Colombia elections outrank cross-country elections");
+  }
+  // Cross-country elections are deprioritized but still relevant enough to
+  // survive at cap=15 in this pool.
+  assert.ok(prefixCount(survivors, "xelec") >= 1, "≥1 cross-country election still survives");
+});
+
+test("Step 1.7 diagnostics: dropped detail aligns and carries components/election class", () => {
+  const pool = buildCapOverflowPool();
+  const { diagnostics } = applyClusterInputCap(pool, C1_SETTINGS, 10);
+
+  // Drop-order: clusterDropped is the bounded prefix of clusterDroppedSourceIds.
+  assert.ok(diagnostics.clusterDropped.length > 0);
+  assert.deepEqual(
+    diagnostics.clusterDropped.map((x) => x.sourceId),
+    diagnostics.clusterDroppedSourceIds.slice(0, diagnostics.clusterDropped.length)
+  );
+
+  // Each dropped entry carries the full component breakdown + a numeric score.
+  for (const entry of diagnostics.clusterDropped) {
+    assert.equal(typeof entry.preClusterScore, "number");
+    for (const k of [
+      "topicFit", "keywordFit", "geoFit", "entityFit",
+      "corroboration", "beatFit", "freshness", "electionGeoBoost",
+    ]) {
+      assert.ok(k in entry.components, `component ${k} present on ${entry.sourceId}`);
+    }
+  }
+  // A dropped cross-country election (if any) surfaces its 5C class; the fixture
+  // drops at least the lower-ranked noise/off — confirm class is always present.
+  for (const entry of diagnostics.clusterDropped) {
+    assert.ok(
+      ["configuredGeoElection", "crossCountryElection", "nonElection"].includes(entry.electionGeoClass),
+      "electionGeoClass is one of the known labels"
+    );
+  }
+});
+
 test("C1 integration: exactly 15 items reach clusterFn when dedupedItems > 15", async () => {
   // 20 relevant items identical except age (fresher = smaller minutesAgo). Their
   // topic/keyword/geo/corroboration signals all tie, so the pre-cluster relevance
