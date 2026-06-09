@@ -22,6 +22,7 @@
     "eval:dashboard-dual-beat": "NODE_ENV=test node --test src/ai/evals/dashboard-dual-beat.test.mjs",
     "eval:dashboard-intra-beat-split": "NODE_ENV=test node --test src/ai/evals/dashboard-intra-beat-split.test.mjs",
     "eval:dashboard-elections-colombia": "NODE_ENV=test node --test src/ai/evals/dashboard-elections-colombia.test.mjs",
+    "eval:dashboard-live-cluster-advisory": "node src/ai/evals/run-dashboard-live-cluster-advisory.mjs",
     "eval:dashboard-calibration": "node src/ai/evals/run-dashboard-calibration.mjs",
     "eval:dashboard-calibration:verbose": "node src/ai/evals/run-dashboard-calibration.mjs --verbose",
     "eval:dashboard-calibration:json": "node src/ai/evals/run-dashboard-calibration.mjs --json-out tmp/dashboard-calibration.json",

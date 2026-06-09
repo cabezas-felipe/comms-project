@@ -12,6 +12,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Dashboard intra-beat split (cluster-split healer)** | Hermetic regression: same-country UNRELATED events (Colombia election + mine attack) merged by clustering get split into separate meta-stories, while a same-event pair stays merged; asserts `log.clusterSplit` diagnostics | `npm run eval:dashboard-intra-beat-split` | Smoke gate (non-zero on any assertion failure) |
 | **Dashboard Spanish recall (Slice 14)** | Hermetic regression: Spanish RSS-shaped items + English settings reach the clustering pool via translation-first normalized English evidence (and do NOT without it); plus a degraded partial-translation-failure path where the refresh still completes and affected stories are marked low-confidence in `_meta.translation` | `npm run eval:dashboard-spanish-recall` | Smoke gate (non-zero on any scenario failure) |
 | **Dashboard elections-Colombia (Q6B)** | Hermetic acceptance test for the relevance strategy: a 14-item Colombia-presidential-election mix (Spanish + English) surfaces the election beat over wrong-geo / wrong-beat noise — all 14 reach candidacy, explicit wrong-geo controls hard-fail, the dashboard ships ≤5 meta-stories, the overflow cap drops the generic geo-noise story, and ≥1 election meta-story is multi-source | `npm run eval:dashboard-elections-colombia` | Smoke gate (non-zero on any assertion failure); **wired into `eval:dashboard-quality-gate`** |
+| **Dashboard live-cluster advisory (Q6D)** | **Live, provider-backed** clustering call over the election fixture subset to detect prompt/model drift in cluster output (B1 `tags.geographies` + `associated_entities` present, sane merge count). SKIPS (exit 0) when no provider key/config | `npm run eval:dashboard-live-cluster-advisory` | **Advisory / non-blocking** — NOT in the quality gate, NOT a PR check; exits 1 only so a scheduled job can alert owners |
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
 | **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + elections-colombia + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR elections-colombia fails OR calibration guardrails regress |
 | **Dashboard embassy beat (Sprint C3)** | Hermetic golden: synthetic mixed EN/ES, multi-geo (Colombia/LatAm + Kenya/Africa style) embassy beat still produces usable output after the Sprint C cluster-reliability changes (C1 input cap + C2 JSON safe-trim repair). Minimum-presence only: `stories.length >= 1` AND `usedFallbackClustering === false`. Diagnostics retained but not gated. | `npm run eval:dashboard-embassy-beat` | Standalone smoke (non-zero on unmet criteria); **not** wired into `eval:dashboard-quality-gate` |
@@ -305,6 +306,57 @@ step **(3/4)** of `eval:dashboard-quality-gate` (fails the gate on regression).
 
 When to run: after touching geo admission (`geo-filter.mjs` / `relevance-policy.mjs`),
 the recall gate, the overflow/survival ranking, or the split healer.
+
+---
+
+## Dashboard Live-Cluster Advisory (Q6D)
+
+### Why this exists
+
+Every other dashboard eval is **hermetic** (injected `clusterFn`, no provider).
+This one is the **opposite on purpose**: it makes a single **real,
+provider-backed** clustering call to detect **prompt / model drift** in the live
+cluster output — most importantly that the B1 grounded entity tags
+(`tags.geographies` + `associated_entities` from `cluster-v4`) keep showing up.
+It is **advisory and non-blocking**: it is NOT wired into
+`eval:dashboard-quality-gate`, NOT a PR check, and never gates a merge. A
+scheduled job runs it so owners get alerted when live output drifts.
+
+### How it works
+
+Clusters the 8 Colombia-election positives from the elections-colombia fixtures
+(`dashboard-elections-colombia-core.mjs`) through the real `clusterItems` path
+using `TEMPO_AI_CLUSTER_MODEL`, then asserts SOFT (advisory) expectations:
+
+- story count in a sane range (1–5, the locked cap);
+- merging happened (≥1 meta-story with ≥2 sources — not atomized chaos);
+- `tags.geographies` present on ≥50% of stories;
+- `associated_entities` present on ≥50% of stories (the B1 drift signal).
+
+### Skip behavior (no keys ⇒ green)
+
+When the cluster model routes to a mock provider, `TEMPO_AI_MOCK_ONLY=true`, or
+the required provider key is missing, the runner prints a clear `SKIPPED` reason
+and **exits 0**. A missing local key is never a failure.
+
+### Run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-live-cluster-advisory
+```
+
+Exit codes: `0` = SKIPPED (no live provider) **or** ran and advisory checks held;
+`1` = ran and an advisory check failed (or the live call errored) — a scheduled
+job treats this as "alert owners", not "block merge".
+
+### Scheduling
+
+A nightly non-blocking workflow runs it:
+[`.github/workflows/dashboard-live-cluster-advisory.yml`](../../../../../../.github/workflows/dashboard-live-cluster-advisory.yml)
+(05:25 UTC + manual dispatch). It runs only on `schedule` / `workflow_dispatch`
+(never on `pull_request`), so it cannot block a merge; provide the
+`TEMPO_ANTHROPIC_API_KEY` repo secret to enable live runs (absent ⇒ SKIP green).
 
 ---
 
