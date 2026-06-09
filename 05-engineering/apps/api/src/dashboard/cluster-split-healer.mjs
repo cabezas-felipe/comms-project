@@ -54,6 +54,7 @@ import {
 } from "../contracts-runtime/index.mjs";
 import { generateMetaStoryId } from "../ai/cluster-engine.mjs";
 import { readHeadline, readBody, isNonEnglishItem } from "../ingestion/evidence-translator.mjs";
+import { RELEVANCE_LEXICON } from "./relevance-policy.mjs";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -178,6 +179,85 @@ function jaccard(a, b) {
   const union = a.size + b.size - inter;
   if (union === 0) return 0;
   return inter / union;
+}
+
+// ─── Q3B: election-cycle theme bundling ───────────────────────────────────────
+//
+// Same-country UNRELATED events (election + mine attack) must still split — that
+// safety behavior is unchanged. But an over-merge of multiple pieces from the
+// SAME election cycle (a presidential race: debate, ballot, runoff, candidates,
+// campaign) should be BUNDLED into one meta-story rather than atomized into
+// single-source rows. To do that deterministically, two over-merged sources that
+// SHARE an election-cycle concept token are treated as connected during bundling
+// (an extra edge in `overlapComponents`), in addition to the existing token-
+// Jaccard edge. A source that carries NO election token (e.g. a mine attack)
+// never gains a theme edge, so it still splits out — the unrelated-event contract
+// is preserved.
+//
+// The token set is seeded from the shared relevance lexicon (the election cycle:
+// election / vote / ballot / presidential / candidate / campaign / runoff, in
+// English AND Spanish surface forms) so it can't drift from the recall/scoring
+// vocabulary, plus a few strongly-electoral extras. Generic tokens that only
+// appear inside multi-word phrases ("second round") are excluded so they cannot
+// create a false theme edge.
+const ELECTION_CYCLE_LEXICON_KEYS = new Set([
+  "election",
+  "vote",
+  "ballot",
+  "presidential",
+  "candidate",
+  "campaign",
+  "runoff",
+]);
+
+// Tokens to drop even though they appear in an election-cycle lexicon phrase —
+// too generic to signal the theme on their own (e.g. "second"/"round" from
+// "second round").
+const ELECTION_TOKEN_DENYLIST = new Set(["second", "round"]);
+
+// Strongly-electoral terms not represented as their own lexicon cluster.
+const ELECTION_CYCLE_EXTRA_TOKENS = [
+  "debate", "debates", "electorate", "incumbent",
+  "comicios", "sondeo", "sondeos", "encuesta", "encuestas",
+];
+
+// Build the curated election-cycle token set once at module load. Each lexicon
+// surface form is tokenized the SAME way evidence is (so multi-word ES forms
+// like "segunda vuelta" contribute "segunda"/"vuelta"), then filtered by the
+// minimum length and the generic denylist.
+function buildElectionCycleTokens() {
+  const set = new Set();
+  const add = (surface) => {
+    for (const tok of rawTokenize(surface)) {
+      if (tok.length < MIN_TOKEN_LEN) continue;
+      if (ELECTION_TOKEN_DENYLIST.has(tok)) continue;
+      set.add(tok);
+    }
+  };
+  for (const cluster of RELEVANCE_LEXICON) {
+    if (!ELECTION_CYCLE_LEXICON_KEYS.has(cluster.key)) continue;
+    for (const w of cluster.en) add(w);
+    for (const w of cluster.es) add(w);
+  }
+  for (const t of ELECTION_CYCLE_EXTRA_TOKENS) add(t);
+  return set;
+}
+
+const ELECTION_CYCLE_TOKENS = buildElectionCycleTokens();
+
+// The subset of an item's evidence tokens that are election-cycle concepts.
+function electionCycleTokensOf(tokenSet) {
+  const e = new Set();
+  for (const t of tokenSet) if (ELECTION_CYCLE_TOKENS.has(t)) e.add(t);
+  return e;
+}
+
+// Two over-merged sources belong to the same election theme when they SHARE at
+// least one election-cycle concept token. Deterministic; symmetric.
+function sharesElectionCycle(a, b) {
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  for (const t of small) if (large.has(t)) return true;
+  return false;
 }
 
 // ─── Evidence extraction (deterministic, no model calls) ──────────────────────
@@ -320,6 +400,10 @@ function allPairwiseBelowThreshold(items, geoStopTokens, threshold, useEnglish) 
 function overlapComponents(items, geoStopTokens, threshold, useEnglish) {
   const n = items.length;
   const tokenSets = evidenceTokenSets(items, geoStopTokens, useEnglish);
+  // Q3B: per-item election-cycle concept tokens, used to add a theme edge so
+  // same-cycle election pieces bundle even when their literal token overlap is
+  // below threshold. Non-election sources have an empty set → never theme-linked.
+  const electionTokens = tokenSets.map(electionCycleTokensOf);
   const parent = Array.from({ length: n }, (_, i) => i);
   const find = (x) => {
     let r = x;
@@ -333,7 +417,14 @@ function overlapComponents(items, geoStopTokens, threshold, useEnglish) {
   };
   for (let i = 0; i < n; i += 1) {
     for (let j = i + 1; j < n; j += 1) {
-      if (jaccard(tokenSets[i], tokenSets[j]) >= threshold) {
+      // Edge when literal token overlap clears the threshold OR the two sources
+      // share an election-cycle concept (same-theme bundling). The theme edge
+      // only ADDS connectivity — it can merge components, never split them, so
+      // an unrelated event (no election token) is never pulled into a bundle.
+      const linked =
+        jaccard(tokenSets[i], tokenSets[j]) >= threshold ||
+        sharesElectionCycle(electionTokens[i], electionTokens[j]);
+      if (linked) {
         const ri = find(i);
         const rj = find(j);
         if (ri !== rj) parent[ri] = rj;

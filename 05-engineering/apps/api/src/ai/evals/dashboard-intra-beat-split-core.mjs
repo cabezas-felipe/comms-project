@@ -107,6 +107,35 @@ export const COLOMBIA_SAME_EVENT_ITEMS = Object.freeze([
   }),
 ]);
 
+// Scenario D — same-election-cycle BUNDLING (Q3B). An over-merge of two
+// same-cycle presidential-election pieces (LOW literal overlap — they share only
+// the election-cycle vocabulary) PLUS one unrelated mine attack. The healer must
+// bundle the two election pieces into ONE story (shared election-cycle signal)
+// while still splitting the unrelated mine attack out — i.e. 2 stories, not 3
+// atomized singles, and not 1 over-merge.
+export const COLOMBIA_ELECTION_BUNDLE_ITEMS = Object.freeze([
+  makeItem({
+    sourceId: "co-elect-poll",
+    outlet: "Reuters",
+    headline: "Colombia presidential election poll shows a tight national margin",
+    body: ["Analysts weigh shifting sentiment among undecided districts."],
+  }),
+  makeItem({
+    sourceId: "co-elect-debate",
+    outlet: "The Washington Post",
+    headline: "Colombia presidential election debate centers on tax reform",
+    body: ["Moderators pressed contenders over foreign policy questions."],
+  }),
+  makeItem({
+    sourceId: "co-mine-attack",
+    outlet: "Reuters",
+    // No election vocabulary → admitted via the configured-geo lexical gate and
+    // never gains an election-cycle theme edge, so it still splits out.
+    headline: "Armed group attacks Colombia gold mine, killing several workers",
+    body: ["Authorities blame an illegal armed faction for the deadly assault."],
+  }),
+]);
+
 // ── Cluster stub ────────────────────────────────────────────────────────────
 //
 // Intentionally OVER-MERGES: collapses every survivor into a SINGLE meta-story.
@@ -195,6 +224,30 @@ export async function runIntraBeatControl() {
       id: "intra-merged-same-event",
       title: "Colombia presidential election debate",
       corroborated: true,
+    }),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: CONTRACT_VERSION,
+    recallConfig: KEYWORD_RECALL,
+    beatFitEnabled: false,
+  });
+  return { payload, log, clusterInput: capture.input ?? [] };
+}
+
+/**
+ * Scenario D (Q3B): two same-cycle election pieces (low literal overlap) + one
+ * unrelated mine attack, all over-merged under a disjoint single-source claim
+ * map. The healer must bundle the election cycle into one story and split the
+ * mine attack out → exactly 2 stories (one a 2-source election bundle).
+ */
+export async function runIntraBeatElectionBundle() {
+  const capture = { input: null };
+  const { payload, log } = await runRefreshPipeline({
+    settings: INTRA_BEAT_PERSONA,
+    rawItems: COLOMBIA_ELECTION_BUNDLE_ITEMS.map((i) => ({ ...i })),
+    clusterFn: overMergeClusterFn(capture, {
+      id: "intra-merged-election-bundle",
+      title: "Colombia developments",
+      corroborated: false,
     }),
     clusterModel: "mock-anthropic-haiku",
     contractVersion: CONTRACT_VERSION,

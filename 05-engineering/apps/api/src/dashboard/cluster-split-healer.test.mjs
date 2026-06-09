@@ -321,6 +321,115 @@ test("A3: disjoint_claim_evidence still splits (high-confidence trigger, English
   assert.deepEqual(bundle.source_item_ids, ["a", "b"]);
 });
 
+// ─── Q3B: election-cycle theme bundling ──────────────────────────────────────
+
+test("Q3B: same-cycle election pieces bundle while an unrelated event splits out", () => {
+  // Three sources over-merged under a disjoint single-source claim map:
+  //  - two SAME-CYCLE election pieces with LOW literal overlap (they share only
+  //    the election-cycle tokens "presidential"/"election", everything else is
+  //    distinct), and
+  //  - one unrelated mine attack (no election token at all).
+  // Without theme bundling this atomizes into THREE singles. With Q3B the two
+  // election pieces bundle into ONE story (shared election-cycle signal) and the
+  // mine attack still splits out → 2 stories, one of them a 2-source bundle.
+  const electA = item("ea", "Colombia presidential election poll shows a tight national margin", [
+    "Analysts weigh shifting sentiment among undecided districts.",
+  ]);
+  const electB = item("eb", "Colombia presidential election debate centers on tax reform", [
+    "Moderators pressed contenders over foreign policy questions.",
+  ]);
+  const mineC = item("mc", "Armed group attacks Colombia gold mine, killing several workers", [
+    "Authorities blame an illegal armed faction for the deadly assault.",
+  ]);
+  const story = metaStory({
+    source_item_ids: ["ea", "eb", "mc"],
+    factual_claims: ["claim ea", "claim eb", "claim mc"],
+    claim_evidence_map: { "0": ["ea"], "1": ["eb"], "2": ["mc"] },
+  });
+
+  const { stories, diagnostics } = splitOverMergedClusters(
+    [story],
+    mapOf(electA, electB, mineC),
+    SETTINGS,
+    ON
+  );
+
+  // Two stories, not three: the election cycle is bundled, the mine split out.
+  assert.equal(stories.length, 2, "election pieces must bundle, not atomize");
+  assert.equal(diagnostics.splitCount, 1);
+  assert.equal(diagnostics.bundledStoryCount, 1, "exactly one multi-source bundle emitted");
+  assert.equal(diagnostics.deferredCount, 0);
+
+  const bundle = stories.find((s) => s.source_item_ids.length > 1);
+  const single = stories.find((s) => s.source_item_ids.length === 1);
+  assert.ok(bundle, "the election cycle must surface as one bundled story");
+  assert.deepEqual(bundle.source_item_ids.slice().sort(), ["ea", "eb"], "both election pieces in the bundle");
+  assert.deepEqual(single.source_item_ids, ["mc"], "the unrelated mine attack splits out alone");
+});
+
+test("Q3B: multi-item same-cycle election coverage is not atomized into singles", () => {
+  // Three low-overlap presidential-election pieces (share only the election-cycle
+  // tokens). They reunify into a single election component, so they are NOT
+  // atomized into three single-source rows — the cluster stays one meta-story
+  // (kept intact and flagged for deferred re-cluster, the existing conflict path
+  // for a one-component reunification).
+  const a = item("ea", "Colombia presidential election poll shows a tight national margin", [
+    "Analysts weigh shifting sentiment among undecided districts.",
+  ]);
+  const b = item("eb", "Colombia presidential election debate centers on tax reform", [
+    "Moderators pressed contenders over foreign policy questions.",
+  ]);
+  const c = item("ec", "Colombia presidential election ballot logistics finalized today", [
+    "Officials prepared thousands of voting stations nationwide.",
+  ]);
+  const story = withId(
+    metaStory({
+      source_item_ids: ["ea", "eb", "ec"],
+      factual_claims: ["claim ea", "claim eb", "claim ec"],
+      claim_evidence_map: { "0": ["ea"], "1": ["eb"], "2": ["ec"] },
+    }),
+    "ms-election-cycle"
+  );
+
+  const { stories, diagnostics } = splitOverMergedClusters(
+    [story],
+    mapOf(a, b, c),
+    SETTINGS,
+    ON
+  );
+
+  assert.equal(stories.length, 1, "same-cycle election coverage must not atomize into singles");
+  assert.equal(diagnostics.splitCount, 0);
+  assert.equal(diagnostics.deferredCount, 1);
+  assert.equal(diagnostics.deferReasons.ambiguous_overlap_conflict, 1);
+  assert.deepEqual(stories[0].source_item_ids, ["ea", "eb", "ec"], "the one story owns all three election pieces");
+});
+
+test("Q3B: unrelated same-country events still split (no false theme edge)", () => {
+  // Regression guard for the existing contract: an election piece and a mine
+  // attack share only the country (stripped) and NO election-cycle token on the
+  // mine side, so the theme edge must NOT fire — they still split into two.
+  const elect = item("e1", "Colombia presidential election race tightens before the vote", [
+    "Candidates crisscross the country ahead of the ballot.",
+  ]);
+  const mine = item("m1", "Armed group attacks Colombia gold mine, killing several workers", [
+    "Authorities blame an illegal armed faction for the deadly assault.",
+  ]);
+  const story = metaStory({ source_item_ids: ["e1", "m1"] });
+
+  const { stories, diagnostics } = splitOverMergedClusters(
+    [story],
+    mapOf(elect, mine),
+    SETTINGS,
+    ON
+  );
+
+  assert.equal(stories.length, 2, "unrelated events still split");
+  assert.equal(diagnostics.splitCount, 1);
+  assert.equal(diagnostics.bundledStoryCount, 0, "no bundle — the events are unrelated");
+  assert.deepEqual(stories.map((s) => s.source_item_ids), [["e1"], ["m1"]]);
+});
+
 test("A3: low_token_overlap splits when computed from NORMALIZED ENGLISH evidence", () => {
   // Two translated ES items whose ENGLISH evidence is genuinely unrelated.
   // The overlap is scored on normalized English (not raw Spanish), so the

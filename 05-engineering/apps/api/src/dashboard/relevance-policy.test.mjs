@@ -329,3 +329,16 @@ test("compareSurvivalRank: absent relevanceScore defaults to 0 (stable on bare s
     ) < 0
   );
 });
+
+test("compareSurvivalRank (Q3B): corroboration is the first tie-break after equal relevance", () => {
+  // Equal relevance → the more-corroborated (higher sourceCount) story survives,
+  // even when the single-source peer is fresher and has higher beat-fit.
+  const multi = { relevanceScore: 4, sourceCount: 3, maxBeatFitScore: 0.1, minMinutesAgo: 500, metaStoryId: "z" };
+  const single = { relevanceScore: 4, sourceCount: 1, maxBeatFitScore: 0.9, minMinutesAgo: 1, metaStoryId: "a" };
+  assert.ok(compareSurvivalRank(multi, single) < 0, "corroborated story survives the tie-break");
+  assert.ok(compareSurvivalRank(single, multi) > 0, "comparator is antisymmetric");
+  // But corroboration never overrides a genuine relevance gap.
+  const lessRelevantButCorroborated = { relevanceScore: 3, sourceCount: 5, metaStoryId: "z" };
+  const moreRelevant = { relevanceScore: 4, sourceCount: 1, metaStoryId: "a" };
+  assert.ok(compareSurvivalRank(moreRelevant, lessRelevantButCorroborated) < 0, "relevance still dominates corroboration");
+});

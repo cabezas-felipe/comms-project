@@ -499,8 +499,15 @@ export function computeRelevanceScore(input = {}) {
  * metaStoryId }`. Negative → `a` survives ahead of `b`. Primary key is the
  * relevance score (descending); the remaining keys are the SAME deterministic
  * tie-breaks the legacy `compareOverflowRank` used, so when relevance ties (or
- * is absent on a bare sort key) behavior is byte-stable: more sources → higher
- * beat-fit → fresher → metaStoryId ascending. Pure; exported for unit testing.
+ * is absent on a bare sort key) behavior is byte-stable.
+ *
+ * Corroboration (Q3B): `sourceCount` is the FIRST tie-break after relevance, so
+ * a multi-source (corroborated) story always survives over a single-source peer
+ * of equal relevance. Corroboration is also folded into `relevanceScore` itself
+ * (see `computeRelevanceScore`), so it is rewarded twice over — as a continuous
+ * value signal in the score AND as a deterministic tie-break here. Full order:
+ * relevance → more sources → higher beat-fit → fresher → metaStoryId ascending.
+ * Pure; exported for unit testing.
  */
 export function compareSurvivalRank(a, b) {
   const ar = Number.isFinite(a?.relevanceScore) ? a.relevanceScore : 0;
@@ -508,7 +515,7 @@ export function compareSurvivalRank(a, b) {
   if (ar !== br) return br - ar; // higher relevance survives
   const asc = Number.isFinite(a?.sourceCount) ? a.sourceCount : 0;
   const bsc = Number.isFinite(b?.sourceCount) ? b.sourceCount : 0;
-  if (asc !== bsc) return bsc - asc; // more sources first
+  if (asc !== bsc) return bsc - asc; // corroboration: more sources survive first
   const abf = Number.isFinite(a?.maxBeatFitScore) ? a.maxBeatFitScore : 0;
   const bbf = Number.isFinite(b?.maxBeatFitScore) ? b.maxBeatFitScore : 0;
   if (abf !== bbf) return bbf - abf; // higher beat-fit first

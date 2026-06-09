@@ -13,12 +13,15 @@ import assert from "node:assert/strict";
 import {
   COLOMBIA_UNRELATED_ITEMS,
   COLOMBIA_SAME_EVENT_ITEMS,
+  COLOMBIA_ELECTION_BUNDLE_ITEMS,
   runIntraBeatSplit,
   runIntraBeatControl,
+  runIntraBeatElectionBundle,
 } from "./dashboard-intra-beat-split-core.mjs";
 
 const UNRELATED_IDS = COLOMBIA_UNRELATED_ITEMS.map((i) => i.sourceId);
 const SAME_EVENT_IDS = COLOMBIA_SAME_EVENT_ITEMS.map((i) => i.sourceId);
+const BUNDLE_IDS = COLOMBIA_ELECTION_BUNDLE_ITEMS.map((i) => i.sourceId);
 
 // ── Scenario A: unrelated same-country events get split ──────────────────────
 
@@ -64,6 +67,41 @@ test("Scenario B: same-event election pair stays a single story (no over-split)"
   const merged = stories[0];
   const mergedSrcIds = merged.sources.map((s) => s.id).sort();
   assert.deepEqual(mergedSrcIds, [...SAME_EVENT_IDS].sort(), "the merged story owns both source items");
+});
+
+// ── Scenario D: same-cycle election coverage bundles, mine attack splits ─────
+
+test("Scenario D: same-cycle election pieces bundle into one story; mine attack splits out (Q3B)", async () => {
+  const { payload, log, clusterInput } = await runIntraBeatElectionBundle();
+  const stories = payload?.stories ?? [];
+
+  // All three items reached clustering (so the stub really over-merged three).
+  const inputIds = clusterInput.map((i) => i.sourceId).sort();
+  assert.deepEqual(inputIds, [...BUNDLE_IDS].sort(), "all three items must reach clustering");
+
+  // 2 stories, NOT 3: the two election pieces bundle, the mine attack splits out.
+  assert.equal(stories.length, 2, `expected 2 stories (election bundle + mine), got ${stories.length}`);
+
+  const bySize = stories.slice().sort((a, b) => b.sources.length - a.sources.length);
+  const bundle = bySize[0];
+  const single = bySize[1];
+
+  // The election bundle owns BOTH election pieces (not atomized into singles).
+  assert.equal(bundle.sources.length, 2, "election cycle must surface as one 2-source bundle");
+  assert.deepEqual(
+    bundle.sources.map((s) => s.id).sort(),
+    ["co-elect-debate", "co-elect-poll"],
+    "both election pieces are in the bundle"
+  );
+  assert.match(bundle.title, /election/i, "the bundle reads as the election story");
+
+  // The unrelated mine attack stayed its own single-source story.
+  assert.deepEqual(single.sources.map((s) => s.id), ["co-mine-attack"], "the mine attack splits out alone");
+  assert.match(single.title, /mine/i, "the mine-attack story surfaces separately");
+
+  // Diagnostics credit a real split with one multi-source bundle.
+  assert.ok(log.clusterSplit.splitCount >= 1, "a split fired");
+  assert.ok(log.clusterSplit.bundledStoryCount >= 1, "one bundled (multi-source) story emitted");
 });
 
 // ── Scenario C: split diagnostics are present and counted correctly ──────────
