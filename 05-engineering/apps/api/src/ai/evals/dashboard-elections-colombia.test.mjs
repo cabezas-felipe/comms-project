@@ -18,7 +18,12 @@ import {
   HARD_FAIL_IDS,
   NEGATIVE_IDS,
   TOTAL_FIXTURES,
+  CAP_PRESSURE_RAW_ITEMS,
+  CROSS_COUNTRY_ELECTION_IDS,
+  CAP_PRESSURE_NOISE_IDS,
+  CAP_PRESSURE_SURVIVING_COUNT,
   runElectionsColombiaPipeline,
+  runElectionsColombiaCapPressure,
   runDashboardElectionsColombia,
 } from "./dashboard-elections-colombia-core.mjs";
 
@@ -107,4 +112,74 @@ test("Q2 translation-first: Spanish-language election coverage is admitted and s
     spanishShipped.length >= 1,
     `Spanish election coverage must reach the dashboard via the geo lexical gate; shipped ${JSON.stringify(spanishShipped)}`
   );
+});
+
+// ─── Step 1.8: cap-pressure — election survival INTO cluster input ───────────
+
+test("cap-pressure fixture: surviving candidate pool exceeds the C1 cap (15)", () => {
+  // 8 Colombia elections + 3 cross-country + 9 noise + 2 hard-fail controls.
+  assert.equal(CAP_PRESSURE_RAW_ITEMS.length, 22, "22 raw fixtures");
+  assert.equal(CAP_PRESSURE_SURVIVING_COUNT, 20, "20 survive hard-fail → over the 15 cap");
+  assert.equal(CROSS_COUNTRY_ELECTION_IDS.length, 3);
+  assert.equal(CAP_PRESSURE_NOISE_IDS.length, 9);
+});
+
+test("cap-pressure: C1 cap bites and clusterInput holds exactly 15 candidates", async () => {
+  const { log, clusterInput } = await runElectionsColombiaCapPressure();
+  assert.ok(log.clusterCap.dedupedCount > 15, `pool exceeds cap (got ${log.clusterCap.dedupedCount})`);
+  assert.equal(clusterInput.length, 15, "clusterInput is capped at 15");
+  assert.equal(log.clusterCap.clusterInputCount, 15);
+});
+
+test("cap-pressure: Colombia election positives survive into cluster input, noise does not dominate", async () => {
+  const { clusterInput } = await runElectionsColombiaCapPressure();
+  const ids = new Set(clusterInput.map((i) => i.sourceId));
+  const electionIn = ELECTION_IDS.filter((id) => ids.has(id)).length;
+  const noiseIn = CAP_PRESSURE_NOISE_IDS.filter((id) => ids.has(id)).length;
+  assert.ok(electionIn >= 6, `>=6 Colombia elections in clusterInput (got ${electionIn})`);
+  assert.ok(electionIn > noiseIn, `elections (${electionIn}) must outnumber noise (${noiseIn}) in clusterInput`);
+});
+
+test("cap-pressure (Decision 5C): configured-geo elections outrank cross-country in clusterInput", async () => {
+  const { clusterInput } = await runElectionsColombiaCapPressure();
+  const ids = clusterInput.map((i) => i.sourceId);
+  const crossIn = CROSS_COUNTRY_ELECTION_IDS.filter((id) => ids.includes(id)).length;
+  const colombiaIn = ELECTION_IDS.filter((id) => ids.includes(id)).length;
+  assert.ok(crossIn >= 1, "at least one cross-country election still survives the cap");
+  // Configured-geo presence stays stronger than cross-country.
+  assert.ok(colombiaIn > crossIn, `configured-geo (${colombiaIn}) > cross-country (${crossIn})`);
+  // Configured-geo elections outrank cross-country peers ON AVERAGE (mean rank;
+  // robust to a weak-signal Colombia item legitimately sitting below an
+  // explicit "Mexico election ballot" cross-country item).
+  const meanRank = (groupIds) => {
+    const ranks = groupIds.map((id) => ids.indexOf(id)).filter((r) => r >= 0);
+    return ranks.reduce((a, b) => a + b, 0) / ranks.length;
+  };
+  assert.ok(
+    meanRank(ELECTION_IDS) < meanRank(CROSS_COUNTRY_ELECTION_IDS),
+    `Colombia mean rank ${meanRank(ELECTION_IDS).toFixed(2)} < cross-country ${meanRank(CROSS_COUNTRY_ELECTION_IDS).toFixed(2)}`
+  );
+});
+
+test("cap-pressure diagnostics: dropped detail aligns with IDs and is noise-dominated", async () => {
+  const { log } = await runElectionsColombiaCapPressure();
+  const cap = log.clusterCap;
+  const droppedIds = cap.clusterDroppedSourceIds;
+  assert.ok(droppedIds.length === cap.dedupedCount - 15, "drop count = pool - cap");
+
+  // No election (Colombia or cross-country) is among the dropped IDs.
+  const droppedElections = droppedIds.filter(
+    (id) => ELECTION_IDS.includes(id) || CROSS_COUNTRY_ELECTION_IDS.includes(id)
+  );
+  assert.deepEqual(droppedElections, [], "no election item is dropped at the cap");
+
+  // clusterDropped prefix aligns with clusterDroppedSourceIds and carries scoring.
+  assert.deepEqual(
+    cap.clusterDropped.map((d) => d.sourceId),
+    droppedIds.slice(0, cap.clusterDropped.length)
+  );
+  const first = cap.clusterDropped[0];
+  assert.equal(typeof first.preClusterScore, "number");
+  assert.ok("electionGeoBoost" in first.components);
+  assert.ok(["nonElection", "crossCountryElection", "configuredGeoElection"].includes(first.electionGeoClass));
 });
