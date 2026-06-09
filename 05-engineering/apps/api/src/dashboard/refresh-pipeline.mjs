@@ -43,6 +43,11 @@ import {
   compareSurvivalRank,
 } from "./relevance-policy.mjs";
 import {
+  buildPreClusterPoolIndex,
+  computePreClusterRelevanceScore,
+  comparePreClusterRank,
+} from "./pre-cluster-relevance.mjs";
+import {
   resolveGeoAdmissionMode,
   geoAdmissionDiagnostics,
 } from "./geo-admission-config.mjs";
@@ -389,58 +394,45 @@ export function resolveClusterEnvelopeBudgetMs({
 // behavior is identical everywhere.  Story output max is unchanged: the
 // clustering contract still emits up to 5 meta-stories.
 //
-// Ranking (deterministic, total order over the deduped set):
-//   1. beatFitScore descending      — best-fitting candidates survive the cap
-//   2. minutesAgo ascending          — fresher item wins ties
-//   3. sourceId ascending            — stable final tie-break
-// Items missing a numeric beatFitScore (e.g. when beat-fit is disabled in a
-// test) sort as score 0; missing minutesAgo sorts last (oldest).
+// Ranking (Phase 1.3): deterministic PRE-CLUSTER RELEVANCE order over the deduped
+// set, replacing the legacy beat-fit-first order.  Each surviving item is scored
+// by `computePreClusterRelevanceScore` (topic/keyword/geo fit + corroboration
+// proxy + beat-fit/freshness shapers + Decision 5C election-geo shaping) against
+// a single O(n) pool index, then sorted by `comparePreClusterRank`:
+//   1. preClusterScore descending    — most relevant candidates survive the cap
+//   2. corroboration descending       — more same-family sources wins ties
+//   3. beatFitScore descending        — better beat fit next
+//   4. minutesAgo ascending           — fresher item next
+//   5. sourceId ascending             — stable final tie-break
+// All keys come from the score object; missing numerics degrade to neutral
+// (score 0 / oldest) exactly as the pre-cluster module specifies.  No new I/O,
+// DB, or model calls — every signal is an item-level proxy.
 export const CLUSTER_INPUT_CAP = 15;
 
 /**
- * Total-order comparator for cluster-input ranking (see C1 note above).
- * Pure; callers sort a copy so the input array stays untouched.  Exported for
- * unit testing of the ranking contract.
- */
-export function compareClusterInputItems(a, b) {
-  const as =
-    typeof a?.beatFitScore === "number" && Number.isFinite(a.beatFitScore)
-      ? a.beatFitScore
-      : 0;
-  const bs =
-    typeof b?.beatFitScore === "number" && Number.isFinite(b.beatFitScore)
-      ? b.beatFitScore
-      : 0;
-  if (as !== bs) return bs - as;
-  const am =
-    typeof a?.minutesAgo === "number" && Number.isFinite(a.minutesAgo)
-      ? a.minutesAgo
-      : Number.POSITIVE_INFINITY;
-  const bm =
-    typeof b?.minutesAgo === "number" && Number.isFinite(b.minutesAgo)
-      ? b.minutesAgo
-      : Number.POSITIVE_INFINITY;
-  if (am !== bm) return am - bm;
-  const aid = a?.sourceId ?? "";
-  const bid = b?.sourceId ?? "";
-  if (aid < bid) return -1;
-  if (aid > bid) return 1;
-  return 0;
-}
-
-/**
- * Rank `dedupedItems` per the C1 contract and slice to `cap`.  Returns the
+ * Rank `dedupedItems` by pre-cluster relevance and slice to `cap`.  Returns the
  * capped `clusterInputItems` (what `clusterFn` actually sees) plus deterministic
  * diagnostics consistent with that slice.  Never mutates the input array.
  *
+ * Flow: build the pool index once (single O(n) scan), score each item against it
+ * (O(1) lookups), sort by `comparePreClusterRank`, slice the top `cap`.
+ *
  * @param {Array}  dedupedItems — post-beat-fit, post-dedupe candidate set
+ * @param {Object} [settings]   — user settings (topics/keywords/geographies)
  * @param {number} [cap]        — max items to keep (default CLUSTER_INPUT_CAP)
  */
-export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
+export function applyClusterInputCap(dedupedItems, settings = {}, cap = CLUSTER_INPUT_CAP) {
   const items = Array.isArray(dedupedItems) ? dedupedItems : [];
-  const ranked = items.slice().sort(compareClusterInputItems);
-  const clusterInputItems = ranked.slice(0, cap);
-  const dropped = ranked.slice(cap);
+  const poolIndex = buildPreClusterPoolIndex(items, settings);
+  // Carry the original item alongside its sort key so the cap slices real items
+  // while ranking on the relevance score.
+  const scored = items.map((item) => ({
+    item,
+    key: computePreClusterRelevanceScore(item, settings, poolIndex),
+  }));
+  scored.sort((a, b) => comparePreClusterRank(a.key, b.key));
+  const clusterInputItems = scored.slice(0, cap).map((s) => s.item);
+  const dropped = scored.slice(cap);
   return {
     clusterInputItems,
     diagnostics: {
@@ -449,7 +441,7 @@ export function applyClusterInputCap(dedupedItems, cap = CLUSTER_INPUT_CAP) {
       clusterDroppedCount: dropped.length,
       // IDs of the candidates ranked beyond the cap, in drop (rank) order.
       clusterDroppedSourceIds: dropped
-        .map((it) => it?.sourceId)
+        .map((s) => s.item?.sourceId)
         .filter((id) => typeof id === "string"),
     },
   };
@@ -2691,7 +2683,7 @@ export async function runRefreshPipeline({
     Number.isInteger(profile.clusterInputCap) && profile.clusterInputCap > 0
       ? profile.clusterInputCap
       : CLUSTER_INPUT_CAP;
-  const clusterCapResult = applyClusterInputCap(dedupedItems, clusterInputCapEffective);
+  const clusterCapResult = applyClusterInputCap(dedupedItems, settings, clusterInputCapEffective);
   const clusterInputItems = clusterCapResult.clusterInputItems;
   // Additive: surface the cap actually used this run so profile-on (cold_start
   // 10) vs baseline (15) is auditable from `_meta.clusterCap` without re-deriving.

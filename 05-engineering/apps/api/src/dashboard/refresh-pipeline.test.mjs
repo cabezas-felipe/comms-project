@@ -58,7 +58,6 @@ import {
   COLD_START_CLUSTER_MIN_ENVELOPE_MS,
   resolveClusterCallTimeoutMs,
   resolveClusterEnvelopeBudgetMs,
-  compareClusterInputItems,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
   topicKeywordMatchStrength,
@@ -9482,47 +9481,75 @@ test("Slice 3: log.outcomes rolls up stories, clustering, and geo-assess counts 
 
 // ─── C1: deterministic cluster input cap ─────────────────────────────────────
 
-test("C1 ranking: compareClusterInputItems orders by beatFitScore desc, then minutesAgo asc, then sourceId asc", () => {
-  // beatFitScore dominates regardless of recency / id.
-  const byScore = [
-    { sourceId: "low", beatFitScore: 0.1, minutesAgo: 5 },
-    { sourceId: "high", beatFitScore: 0.9, minutesAgo: 500 },
-    { sourceId: "mid", beatFitScore: 0.5, minutesAgo: 1 },
-  ].slice().sort(compareClusterInputItems);
-  assert.deepEqual(byScore.map((i) => i.sourceId), ["high", "mid", "low"]);
+const C1_SETTINGS = {
+  topics: ["election"],
+  keywords: ["election"],
+  geographies: ["Colombia"],
+};
 
-  // Equal score → fresher (smaller minutesAgo) wins.
-  const byRecency = [
-    { sourceId: "older", beatFitScore: 0.5, minutesAgo: 50 },
-    { sourceId: "fresher", beatFitScore: 0.5, minutesAgo: 10 },
-  ].slice().sort(compareClusterInputItems);
-  assert.deepEqual(byRecency.map((i) => i.sourceId), ["fresher", "older"]);
+test("C1 ranking: applyClusterInputCap ranks by pre-cluster relevance, not beat-fit alone", () => {
+  // On-beat (topic+keyword+geo) is the OLDEST yet outranks fresher off-beat /
+  // geo-only peers — relevance dominates recency under the new C1 order.
+  const onBeat = makeItem({
+    sourceId: "onbeat",
+    headline: "Colombia election results announced",
+    topic: "election",
+    geographies: ["Colombia"],
+    minutesAgo: 600,
+  });
+  const geoOnly = makeItem({
+    sourceId: "geoonly",
+    headline: "Colombia coffee harvest forecast improves",
+    topic: "agriculture",
+    geographies: ["Colombia"],
+    minutesAgo: 1,
+  });
+  const offBeat = makeItem({
+    sourceId: "offbeat",
+    headline: "Tokyo weekend weather outlook",
+    topic: "weather",
+    geographies: ["Japan"],
+    minutesAgo: 1,
+  });
+  const { clusterInputItems } = applyClusterInputCap(
+    [geoOnly, offBeat, onBeat],
+    C1_SETTINGS
+  );
+  assert.deepEqual(
+    clusterInputItems.map((i) => i.sourceId),
+    ["onbeat", "geoonly", "offbeat"],
+    "relevance order: on-beat > geo-only > off-beat"
+  );
+});
 
-  // Equal score AND recency → sourceId ascending is the stable final tie-break.
-  const byId = [
-    { sourceId: "zeta", beatFitScore: 0.5, minutesAgo: 10 },
-    { sourceId: "alpha", beatFitScore: 0.5, minutesAgo: 10 },
-  ].slice().sort(compareClusterInputItems);
-  assert.deepEqual(byId.map((i) => i.sourceId), ["alpha", "zeta"]);
-
-  // Missing beatFitScore sorts as 0 (below any positive-scored item).
-  const missingScore = [
-    { sourceId: "scored", beatFitScore: 0.01, minutesAgo: 100 },
-    { sourceId: "unscored", minutesAgo: 1 },
-  ].slice().sort(compareClusterInputItems);
-  assert.deepEqual(missingScore.map((i) => i.sourceId), ["scored", "unscored"]);
+test("C1 ranking: exact relevance ties fall back to sourceId ascending", () => {
+  // Two items identical in every relevance signal except sourceId.
+  const base = {
+    headline: "Colombia election results announced",
+    topic: "election",
+    geographies: ["Colombia"],
+    minutesAgo: 30,
+  };
+  const zeta = makeItem({ ...base, sourceId: "zeta", url: "https://example.com/z" });
+  const alpha = makeItem({ ...base, sourceId: "alpha", url: "https://example.com/a" });
+  const { clusterInputItems } = applyClusterInputCap([zeta, alpha], C1_SETTINGS);
+  assert.deepEqual(
+    clusterInputItems.map((i) => i.sourceId),
+    ["alpha", "zeta"],
+    "stable final tie-break is sourceId ascending"
+  );
 });
 
 test("C1 cap: applyClusterInputCap slices to 15 and reports dropped IDs beyond the cap", () => {
   assert.equal(CLUSTER_INPUT_CAP, 15);
-  // 20 items, beatFitScore descending with sourceId so the rank order is
-  // unambiguous: src-00 (highest score) … src-19 (lowest).
+  // 20 otherwise-identical items, fresher = lower minutesAgo. With no relevance
+  // signal differing, the pre-cluster score decreases monotonically with age, so
+  // rank order is unambiguous: src-00 (freshest) … src-19 (oldest).
   const items = Array.from({ length: 20 }, (_, i) => ({
     sourceId: `src-${String(i).padStart(2, "0")}`,
-    beatFitScore: (20 - i) / 20,
-    minutesAgo: 30,
+    minutesAgo: i,
   }));
-  const { clusterInputItems, diagnostics } = applyClusterInputCap(items);
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(items, {});
   assert.equal(clusterInputItems.length, 15);
   assert.deepEqual(
     clusterInputItems.map((i) => i.sourceId),
@@ -9543,10 +9570,9 @@ test("C1 cap: applyClusterInputCap slices to 15 and reports dropped IDs beyond t
 test("C1 cap: applyClusterInputCap is a no-op when input is at/under the cap", () => {
   const items = Array.from({ length: 10 }, (_, i) => ({
     sourceId: `src-${i}`,
-    beatFitScore: 0.5,
     minutesAgo: i,
   }));
-  const { clusterInputItems, diagnostics } = applyClusterInputCap(items);
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(items, {});
   assert.equal(clusterInputItems.length, 10);
   assert.equal(diagnostics.dedupedCount, 10);
   assert.equal(diagnostics.clusterInputCount, 10);
@@ -9554,10 +9580,73 @@ test("C1 cap: applyClusterInputCap is a no-op when input is at/under the cap", (
   assert.deepEqual(diagnostics.clusterDroppedSourceIds, []);
 });
 
+test("C1 cap (Decision 5C): configured-geo election outranks cross-country at the cap", () => {
+  // Colombia (configured) vs Peru (cross-country) election, otherwise similar.
+  const colombia = makeItem({
+    sourceId: "co",
+    headline: "Colombia election results announced",
+    topic: "election",
+    geographies: ["Colombia"],
+    minutesAgo: 60,
+  });
+  const peru = makeItem({
+    sourceId: "pe",
+    headline: "Peru election results announced",
+    topic: "election",
+    geographies: ["Peru"],
+    minutesAgo: 60,
+  });
+  // cap=1 forces the head-to-head: only the higher-ranked survives.
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(
+    [peru, colombia],
+    C1_SETTINGS,
+    1
+  );
+  assert.deepEqual(clusterInputItems.map((i) => i.sourceId), ["co"]);
+  assert.deepEqual(diagnostics.clusterDroppedSourceIds, ["pe"]);
+});
+
+test("C1 cap (Decision 5C): cross-country election still survives a thin pool", () => {
+  // Pool is only cross-country elections + one clear non-election item. The
+  // cross-country elections are deprioritized, NOT excluded — they still rank
+  // and (being on-topic) outrank the off-beat item.
+  const peru = makeItem({
+    sourceId: "pe",
+    headline: "Peru election results announced",
+    topic: "election",
+    geographies: ["Peru"],
+    minutesAgo: 30,
+  });
+  const brazil = makeItem({
+    sourceId: "br",
+    headline: "Brazil presidential election runoff",
+    topic: "election",
+    geographies: ["Brazil"],
+    minutesAgo: 90,
+  });
+  const noise = makeItem({
+    sourceId: "noise",
+    headline: "Tokyo weekend weather outlook",
+    topic: "weather",
+    geographies: ["Japan"],
+    minutesAgo: 1,
+  });
+  const { clusterInputItems } = applyClusterInputCap(
+    [noise, brazil, peru],
+    C1_SETTINGS
+  );
+  const ids = clusterInputItems.map((i) => i.sourceId);
+  assert.ok(ids.includes("pe") && ids.includes("br"), "cross-country elections survive");
+  // Both elections rank ahead of the off-beat noise despite the 5C penalty.
+  assert.ok(ids.indexOf("pe") < ids.indexOf("noise"));
+  assert.ok(ids.indexOf("br") < ids.indexOf("noise"));
+});
+
 test("C1 integration: exactly 15 items reach clusterFn when dedupedItems > 15", async () => {
-  // 20 relevant items, fresher = smaller minutesAgo. With beat-fit bypassed all
-  // scores tie at 0, so the cap ranking falls to minutesAgo asc — the 15
-  // freshest survive and the 5 oldest are dropped.
+  // 20 relevant items identical except age (fresher = smaller minutesAgo). Their
+  // topic/keyword/geo/corroboration signals all tie, so the pre-cluster relevance
+  // score differs only by the freshness shaper — the 15 freshest survive the cap
+  // and the 5 oldest are dropped.
   const rawItems = Array.from({ length: 20 }, (_, i) =>
     makeItem({ sourceId: `src-${String(i).padStart(2, "0")}`, minutesAgo: i * 10 })
   );
