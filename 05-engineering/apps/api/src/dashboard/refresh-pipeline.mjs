@@ -36,6 +36,11 @@ import {
 } from "./beat-fit-scorer.mjs";
 import { itemMentionsConfiguredGeography } from "./geo-lexical-match.mjs";
 import {
+  buildKeywordMatchRegex,
+  topicMatchesSettings,
+  scoreGeoFit,
+} from "./relevance-policy.mjs";
+import {
   resolveGeoAdmissionMode,
   geoAdmissionDiagnostics,
 } from "./geo-admission-config.mjs";
@@ -1251,15 +1256,22 @@ function joinOriginalText(item) {
  *     in text to pass — geographies no longer wave items through.
  */
 export function applyTopicKeywordFilter(items, settings) {
-  const topics = new Set((settings.topics ?? []).map((t) => normalizeTopicLabel(t)));
-  const keywordRegex = buildKeywordTokenRegex(settings.keywords);
+  const hasTopics = (settings.topics ?? []).length > 0;
+  // Soft widen (relevance-policy): the keyword regex now also matches the
+  // English morphological lexicon variants of each configured keyword (e.g.
+  // "election" admits "elections"/"electoral"). It stays ENGLISH-only on purpose
+  // — the recall surface is normalized-English evidence, so folding in the
+  // lexicon's Spanish forms would let an untranslated Spanish item bypass the
+  // translation gate (see `relevance-policy.mjs` header). Topic matching widens
+  // the same way via `topicMatchesSettings` (exact canonical OR lexicon sibling).
+  const keywordRegex = buildKeywordMatchRegex(settings);
   const geographies = settings.geographies ?? [];
   const hasGeographies = geographies.length > 0;
 
-  if (topics.size === 0 && !keywordRegex && !hasGeographies) return items;
+  if (!hasTopics && !keywordRegex && !hasGeographies) return items;
 
   return items.filter((item) => {
-    if (topics.size > 0 && topics.has(normalizeTopicLabel(item.topic))) return true;
+    if (hasTopics && topicMatchesSettings(item.topic, settings)) return true;
     if (keywordRegex) {
       // Slice 14: keyword recall reads normalized English evidence when present
       // so a Spanish item whose translation contains "migration" matches the
@@ -1309,10 +1321,14 @@ export function applyTopicKeywordFilter(items, settings) {
  */
 export function analyzeTopicKeywordStage(items, settings) {
   const inputCount = items?.length ?? 0;
-  const topics = new Set((settings?.topics ?? []).map((t) => normalizeTopicLabel(t)));
-  const keywordRegex = buildKeywordTokenRegex(settings?.keywords);
+  const hasTopics = (settings?.topics ?? []).length > 0;
+  // Mirror applyTopicKeywordFilter's soft widen. `exactKeywordRegex` keeps the
+  // pre-lexicon (verbatim-keyword) matcher around purely so the diagnostic can
+  // attribute soft-match hits: an item that matches the widened regex but NOT
+  // the exact one was admitted by the lexicon, counted in `keywordViaLexiconCount`.
+  const keywordRegex = buildKeywordMatchRegex(settings ?? {});
+  const exactKeywordRegex = buildKeywordTokenRegex(settings?.keywords);
   const geographies = settings?.geographies ?? [];
-  const hasTopics = topics.size > 0;
   const hasKeywords = !!keywordRegex;
   const hasGeographies = geographies.length > 0;
 
@@ -1329,6 +1345,10 @@ export function analyzeTopicKeywordStage(items, settings) {
     passNoConfig: 0,
     passCount: 0,
     keywordViaTranslatedCount: 0,
+    // Soft-widen funnel diagnostics (relevance-policy): items admitted by a
+    // lexicon variant rather than a verbatim keyword/topic match.
+    keywordViaLexiconCount: 0,
+    topicViaLexiconCount: 0,
     primaryDropCause: null,
   };
 
@@ -1340,7 +1360,15 @@ export function analyzeTopicKeywordStage(items, settings) {
   }
 
   for (const item of items ?? []) {
-    const topicMatch = hasTopics && topics.has(normalizeTopicLabel(item?.topic ?? ""));
+    const topicMatch = hasTopics && topicMatchesSettings(item?.topic ?? "", settings);
+    if (
+      topicMatch &&
+      !(settings?.topics ?? []).some(
+        (t) => normalizeTopicLabel(t) === normalizeTopicLabel(item?.topic ?? "")
+      )
+    ) {
+      breakdown.topicViaLexiconCount++;
+    }
     let keywordMatch = false;
     if (hasKeywords) {
       // Slice 14: mirror applyTopicKeywordFilter — read normalized English
@@ -1353,6 +1381,9 @@ export function analyzeTopicKeywordStage(items, settings) {
         !keywordRegex.test(joinOriginalText(item))
       ) {
         breakdown.keywordViaTranslatedCount++;
+      }
+      if (keywordMatch && !(exactKeywordRegex && exactKeywordRegex.test(text))) {
+        breakdown.keywordViaLexiconCount++;
       }
     }
     const geoMatch =
@@ -2096,6 +2127,32 @@ export async function runRefreshPipeline({
   //         is exhausted the remainder is deferred to the hold path so it is
   //         re-evaluated next refresh (never dropped).
   const configuredGeos = settings.geographies ?? [];
+  // Deterministic explicit-geo hard-fail drop (relevance-policy). Runs at the
+  // geo stage, before the lane split / embedding / clustering, and adds NO LLM
+  // calls: `scoreGeoFit` flags an item only when it carries explicit
+  // geographies, NONE overlap the configured set, AND its text names (or
+  // demonyms) none of them — an unambiguous off-geography signal. Soft geo
+  // admission stopped *gating* relevance, but dropping a confident explicit
+  // conflict here is a pure-precision win (keeps clearly-foreign stories out of
+  // the cluster pool). Gated on a configured geo set so geo-agnostic profiles
+  // are untouched; ambiguous/implicit items never hard-fail.
+  const geoHardFailDropped = [];
+  const geoAdmissibleItems =
+    configuredGeos.length === 0
+      ? candidateItems
+      : candidateItems.filter((item) => {
+          if (scoreGeoFit(item, settings).hardFail) {
+            geoHardFailDropped.push(item);
+            return false;
+          }
+          return true;
+        });
+  if (geoHardFailDropped.length > 0) {
+    console.log(
+      `[pipeline.geo] explicit-conflict hard-fail dropped ${geoHardFailDropped.length} item(s) ` +
+        `before embedding/clustering (deterministic, no LLM)`
+    );
+  }
   // Precedence: explicit test override (`geoStageBudgetMs`) > active profile's
   // budget (Slice 4 interactive fast-path tightens this) > env/default.
   const effectiveGeoBudgetMs =
@@ -2127,7 +2184,7 @@ export async function runRefreshPipeline({
   };
   const lane1Items = [];
   const lane2Items = [];
-  for (const item of candidateItems) {
+  for (const item of geoAdmissibleItems) {
     if (selectedSourceIds.has(item.sourceId) && hasGeoSignal(item)) lane1Items.push(item);
     else lane2Items.push(item);
   }
@@ -2164,8 +2221,9 @@ export async function runRefreshPipeline({
   let geoBudgetHit;
   let geoLane2DeferredReason;
   if (geoAdmissionBypassed) {
-    // SOFT — admit the full candidate set; geo gates nothing.
-    geoPassedItems = [...candidateItems];
+    // SOFT — admit the full candidate set (minus the deterministic explicit-
+    // conflict hard-fails already removed above); geo otherwise gates nothing.
+    geoPassedItems = [...geoAdmissibleItems];
     geoHeldItems = [];
     geoLane2DeferredItems = [];
     geoBudgetHit = false;
@@ -2256,6 +2314,9 @@ export async function runRefreshPipeline({
     geoBudgetHit,
     geoAssessedCount,
     geoLexicalBypassCount,
+    // relevance-policy: deterministic explicit-conflict drops removed before the
+    // lane split (no LLM). Distinct from `geoHeldCount` (assessor hold bucket).
+    geoHardFailDroppedCount: geoHardFailDropped.length,
     geoHeldCount: geoHeldItems.length,
     geoRateLimitedCount,
     geoRetryCount,

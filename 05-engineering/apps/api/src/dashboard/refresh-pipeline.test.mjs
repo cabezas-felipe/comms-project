@@ -1555,6 +1555,61 @@ test("runRefreshPipeline (Prompt 3): soft mode admits Semana-like election items
   assert.equal(log.outcomes.geoAdmissionBypassed, true);
 });
 
+test("runRefreshPipeline: explicit geo conflicts hard-fail pre-cluster even in soft mode", async () => {
+  // Soft admission stops geography from *gating* relevance, but the deterministic
+  // relevance-policy `scoreGeoFit` hard-fail still drops an unambiguous explicit
+  // geo conflict (explicit geographies, none configured, no Colombia mention or
+  // demonym in text) before the cluster pool. This proves soft mode does NOT
+  // "rescue" such items and that the drop is independent of recall: the conflict
+  // item carries a recall-matching topic, so its absence from clustering can
+  // only be the geo hard-fail.
+  const settings = { ...BASE_SETTINGS, geographies: ["Colombia"] };
+  const rawItems = [
+    // Conflict: tagged Peru only, no Colombia/demonym anywhere in text or url.
+    // Recall-matching topic ("Diplomatic relations" is in settings.topics) so a
+    // missing-from-clustering result isolates the geo hard-fail as the cause.
+    makeItem({
+      sourceId: "conflict-peru",
+      outlet: "Reuters",
+      geographies: ["Peru"],
+      topic: "Diplomatic relations",
+      headline: "Lima transit strike enters a second week",
+      body: ["A local dispute with no other geography named."],
+      url: "https://example.com/conflict-peru",
+    }),
+    // Control: explicit match for the configured geography → survives hard-fail
+    // and clears recall via its topic.
+    makeItem({
+      sourceId: "control-colombia",
+      outlet: "Reuters",
+      geographies: ["Colombia"],
+      topic: "Diplomatic relations",
+    }),
+  ];
+
+  const seen = [];
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    geoAdmissionMode: "soft",
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // Assessor must NOT run in soft mode — throw to fail loudly if consulted.
+    geoAssessFn: async () => { throw new Error("geo assessor must not run in soft mode"); },
+    clusterFn: async (items) => { seen.push(...items.map((i) => i.sourceId)); return []; },
+    beatFitEnabled: false,
+  });
+
+  // The explicit conflict never reaches clustering; the control does.
+  assert.ok(!seen.includes("conflict-peru"), "explicit geo conflict must be hard-failed before clustering");
+  assert.ok(seen.includes("control-colombia"), "the configured-geo control survives to clustering");
+  // Exactly one deterministic hard-fail drop this run.
+  assert.equal(log.geo.geoHardFailDroppedCount, 1);
+  // …and it happened under soft admission (bypass on), proving soft does not rescue it.
+  assert.equal(log.geo.geoAdmissionMode, "soft");
+  assert.equal(log.geo.geoAdmissionBypassed, true);
+});
+
 test("runRefreshPipeline (Prompt 4): rollback contract — explicit hard restores the gate and carries the geo admission fields on outcomes", async () => {
   // Now that soft is the default, this guards the ROLLBACK path: an explicit
   // `hard` (here via the override seam; production sets TEMPO_GEO_ADMISSION_MODE=hard)
