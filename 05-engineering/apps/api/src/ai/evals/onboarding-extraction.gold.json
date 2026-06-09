@@ -220,7 +220,7 @@
     "bucket": "edge_negative",
     "inputText": "I monitor 'El Tiempo' and @ELTIEMPO for updates on Colombia and Peru elections.",
     "expected": {
-      "topics": [],
+      "topics": ["Elections"],
       "keywords": ["elections"],
       "geographies": ["Colombia", "Peru"],
       "traditionalSources": ["El Tiempo"],
