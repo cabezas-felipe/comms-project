@@ -2,6 +2,42 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-06-09 - D-070 - Dashboard relevance phase 2: thin on-beat overflow + diagnostics contract
+
+#### Context
+
+- Phase 1 (D-069) aligned the dashboard on a **relevance-first** order: pre-cluster ranking ([`pre-cluster-relevance.mjs`](apps/api/src/dashboard/pre-cluster-relevance.mjs) via [`applyClusterInputCap`](apps/api/src/dashboard/refresh-pipeline.mjs)) and the post-cluster survival/display rank (`computeRelevanceScore` / `compareSurvivalRank`) both put the user's beat ahead of generic same-geography noise. But the survival cap still ranked **all** survivors purely by score: when the post-healer set overflowed `MAX_META_STORIES`, a generic Colombia weather/volcano row could still **backfill** a top slot behind one or two on-beat election stories. The cap removed *excess*, not *off-beat noise* — so under overflow the dashboard could ship geo-noise where the user expected only their beat.
+- Phase 2 exists to close that backfill gap on top of the Phase 1 ranking, without disturbing the locked cap value, the deterministic ordering, or the latency posture.
+
+#### Decision
+
+- **Overflow guard (Decision 8C).** In the post-healer, pre-publish overflow stage ([`applyMetaStoryOverflowCap`](apps/api/src/dashboard/refresh-pipeline.mjs)), when the survivor set exceeds the cap **and at least one on-beat story exists**, geo-only / off-beat stories are removed from the **eligible** survivor set *before* final cap selection. "**Thin on-beat only**" is an allowed outcome — if only two of six overflow candidates are on-beat, just those two ship.
+- **No on-beat fallback.** When **no** on-beat story exists (e.g. an all-geo overflow set), every story stays eligible and the prior pure-survival cap behavior is preserved. The guard **never forces an empty result** and is gated strictly on overflow (`> cap`) — the at-or-below-cap path is byte-identical to Phase 1.
+- **On-beat definition.** A story is on-beat iff it corroborates the configured **topic or keyword** beat ([`isStoryOnBeat`](apps/api/src/dashboard/relevance-policy.mjs)), where grounded `associated_entities` may corroborate a topic/keyword concept. **Geography is deliberately excluded** — `scoreEntityFit` is *not* used for this classification because it folds geo into its evidence and would mis-rescue a geo-only row. With no topics and no keywords configured, the beat is undefined and every story counts as on-beat (the guard cannot suppress against an empty beat).
+- **Diagnostics additions.** `_meta.overflowCap` carries additive guard indicators — `thinOnBeatGuardApplied` (true only when ≥1 geo-noise row was suppressed) and `thinOnBeatFilteredCount` — alongside the existing `overflowCapApplied` / `overflowInputCount` / `overflowOutputCount` / `overflowDroppedCount` / `overflowDroppedMetaStoryIds`. Suppressed rows still flow into the rejection log (`reason_code: "overflow_cap"`). `_meta.clusterCap` remains the Phase 1-enriched surface (`clusterDropped` explained drops + `clusterInputCapEffective`).
+- **Contract typing.** [`dashboardClusterCapMetaSchema`](packages/contracts/src/schemas.ts) and its exported `DashboardClusterCapMeta` type cover the enriched cluster-cap drop diagnostics with `clusterDropped` / `clusterInputCapEffective` as **additive optionals**, so snapshots that predate them still validate (backward-compatible).
+
+#### Why
+
+- **Narrative trust:** under overflow the dashboard must not seat weather/volcano backfill over an election story the user actually follows; suppressing off-beat noise from survival is the direct fix.
+- **Determinism + latency preserved:** the guard is a pure filter over already-computed signals — no new LLM/I/O call, the `MAX_META_STORIES` value and `compareSurvivalRank` tie-breaks are unchanged, and eligible survivors keep their R1 display order.
+- **Backward compatibility:** every diagnostic/contract addition is additive-optional, so older payload readers and pre-existing snapshots keep validating.
+
+#### Consequences
+
+- A **sub-cap story count is acceptable** when only a few on-beat stories exist under overflow — that is the intended "thin on-beat only" outcome, not a regression.
+- During manual validation, operators should inspect the debug rows — `cluster_cap` and `overflow_cap` — surfaced in the dashboard debug panel ([`DashboardRunDiagnostics.tsx`](../04-prototype/src/components/DashboardRunDiagnostics.tsx)) to see what was dropped and whether the thin on-beat guard fired.
+- **Behavior is pinned by tests/evals:** the overflow-guard + `isStoryOnBeat` unit cases and the updated Q3A pipeline case in [`refresh-pipeline.test.mjs`](apps/api/src/dashboard/refresh-pipeline.test.mjs) (the geo-noise-only overflow now ships the lone election story), plus the cluster-cap-pressure scenario in the hermetic [`dashboard-elections-colombia.test.mjs`](apps/api/src/ai/evals/dashboard-elections-colombia.test.mjs) / [`dashboard-elections-colombia-core.mjs`](apps/api/src/ai/evals/dashboard-elections-colombia-core.mjs). The elections-colombia eval remains a required step of `eval:dashboard-quality-gate` (D-069), so this posture gates merges.
+
+#### References
+
+- [`apps/api/src/dashboard/refresh-pipeline.mjs`](apps/api/src/dashboard/refresh-pipeline.mjs) — `applyMetaStoryOverflowCap` thin on-beat guard + `_meta.overflowCap` diagnostics.
+- [`apps/api/src/dashboard/relevance-policy.mjs`](apps/api/src/dashboard/relevance-policy.mjs) — `isStoryOnBeat` (topic/keyword-only on-beat classifier).
+- [`apps/api/src/dashboard/refresh-pipeline.test.mjs`](apps/api/src/dashboard/refresh-pipeline.test.mjs) — guard unit + Q3A pipeline coverage.
+- [`packages/contracts/src/schemas.ts`](packages/contracts/src/schemas.ts) — `dashboardClusterCapMetaSchema` + `DashboardClusterCapMeta`.
+- [`04-prototype/src/components/DashboardRunDiagnostics.tsx`](../04-prototype/src/components/DashboardRunDiagnostics.tsx) — `cluster_cap` / `overflow_cap` debug rows.
+- [`apps/api/src/ai/evals/dashboard-elections-colombia.test.mjs`](apps/api/src/ai/evals/dashboard-elections-colombia.test.mjs) + [`dashboard-elections-colombia-core.mjs`](apps/api/src/ai/evals/dashboard-elections-colombia-core.mjs) — cap-pressure assertions.
+
 ### 2026-06-08 - D-069 - Dashboard relevance strategy: locked Q1–Q6 implementation posture
 
 #### Context
