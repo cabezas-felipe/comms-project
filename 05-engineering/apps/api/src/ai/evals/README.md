@@ -14,7 +14,8 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Dashboard elections-Colombia (Q6B)** | Hermetic acceptance test for the relevance strategy: a 14-item Colombia-presidential-election mix (Spanish + English) surfaces the election beat over wrong-geo / wrong-beat noise — all 14 reach candidacy, explicit wrong-geo controls hard-fail, the dashboard ships ≤5 meta-stories, the overflow cap drops the generic geo-noise story, and ≥1 election meta-story is multi-source | `npm run eval:dashboard-elections-colombia` | Smoke gate (non-zero on any assertion failure); **wired into `eval:dashboard-quality-gate`** |
 | **Dashboard live-cluster advisory (Q6D)** | **Live, provider-backed** clustering call over the election fixture subset to detect prompt/model drift in cluster output (B1 `tags.geographies` + `associated_entities` present, sane merge count). SKIPS (exit 0) when no provider key/config | `npm run eval:dashboard-live-cluster-advisory` | **Advisory / non-blocking** — NOT in the quality gate, NOT a PR check; exits 1 only so a scheduled job can alert owners |
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
-| **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + elections-colombia + calibration in one command, writes a calibration JSON artifact | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR elections-colombia fails OR calibration guardrails regress |
+| **Pre-cluster weight calibration (Decision 10D)** | Sweeps candidate pre-cluster WEIGHT PRESETS (baseline = production `RELEVANCE_WEIGHTS`, plus beat-dominant / geo-heavy / freshness-heavy / flat) against a fixed synthetic fixture and reports decision-quality metrics (election survival at cap, geo-noise suppression, configured-vs-cross-country ordering, tie stability). Re-implements the composite with injectable weights — **no production weight change**. Writes a JSON artifact. | `npm run eval:dashboard-precluster-calibration` | Guardrail gate only (non-zero ONLY if the baseline preset diverges from the production scorer or violates a hard invariant; a degenerate variant failing is advisory, never a gate failure); **wired into `eval:dashboard-quality-gate`** |
+| **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + elections-colombia + embed-floor calibration + pre-cluster weight calibration in one command, writes calibration JSON artifacts | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR elections-colombia fails OR embed-floor calibration guardrails regress OR the pre-cluster weight baseline regresses |
 | **Dashboard embassy beat (Sprint C3)** | Hermetic golden: synthetic mixed EN/ES, multi-geo (Colombia/LatAm + Kenya/Africa style) embassy beat still produces usable output after the Sprint C cluster-reliability changes (C1 input cap + C2 JSON safe-trim repair). Minimum-presence only: `stories.length >= 1` AND `usedFallbackClustering === false`. Diagnostics retained but not gated. | `npm run eval:dashboard-embassy-beat` | Standalone smoke (non-zero on unmet criteria); **not** wired into `eval:dashboard-quality-gate` |
 | **Cache-benefit advisory (Sprint D1)** | Hermetic, deterministic check of the ingestion-cache benefit window logic (`dashboard/cache-benefit-window.mjs`): cache_hit p50 >= 20% faster than live_scoped p50, cache-hit rate >= 60%, >= 5 samples/mode in a 5-run window. Synthetic run windows; **measurement + guardrails only, no runtime behavior**. | `npm run eval:cache-benefit-advisory` | **Advisory** — standalone, non-zero only if the window logic regresses; **not** wired into any blocking gate |
 | **D2 narrative stability (Sprint D2)** | Hermetic failure-injection over the real pipeline: fail-closed-per-story for what-changed + why-it-matters (one retry per failing stage, then drop the story; never fail the global refresh). Asserts per-story drop, single-retry recovery, per-stage retry/drop tallies, and the >=50% retention guardrail. | `npm run eval:d2-narrative-stability` | **Advisory** — standalone, non-zero only if the D2 stability logic regresses; **not** wired into any blocking gate |
@@ -490,17 +491,24 @@ Order + behavior:
 
 1. **dashboard-refresh-golden** — the E2E regression scenarios (Slice 2).
 2. **dashboard-spanish-recall** — the translation-first recall scenarios (Slice 14).
-3. **dashboard-calibration** — the embed-floor guardrail sweep (Slice 5); also
+3. **dashboard-elections-colombia** — the Q6B relevance-strategy acceptance test.
+4. **dashboard-calibration** — the embed-floor guardrail sweep (Slice 5); also
    writes a JSON artifact (default `.artifacts/dashboard-calibration.json`,
    override with `--json-out <path>`).
+5. **dashboard-precluster-calibration** — the pre-cluster WEIGHT guardrail sweep
+   (Decision 10D); gates only on the baseline preset (= production
+   `RELEVANCE_WEIGHTS`) staying faithful to the production scorer and holding
+   every hard invariant. Writes `.artifacts/dashboard-precluster-calibration.json`.
 
-Hermetic (no provider keys / network — both cores run in-process with stubs).
-Streams a `✓`/`✗` line per scenario/floor, then a SUMMARY (golden pass/fail,
-calibration pass/fail, artifact path).
+Hermetic (no provider keys / network — every core runs in-process with stubs or
+fixed fixtures). Streams a `✓`/`✗` line per scenario/floor/preset, then a SUMMARY
+(per-harness pass/fail + artifact paths).
 
 ### Exit codes
 
-- `0` — golden passed AND spanish-recall passed AND calibration guardrails held at every floor.
+- `0` — golden passed AND spanish-recall passed AND elections-colombia passed AND
+  embed-floor calibration guardrails held at every floor AND the pre-cluster
+  weight baseline is faithful + holds every hard invariant.
 - `1` — any harness failed (or a runner error); failing reasons print inline.
 
 ### Ship / no-ship policy for a floor change
@@ -519,6 +527,41 @@ calibration pass/fail, artifact path).
    tying `similarityRejected` movement to the manual review.
 
 Absent all three, keep 0.35.
+
+---
+
+## Pre-cluster Weight Calibration (Decision 10D)
+
+Evidence harness for tuning the **pre-cluster** relevance weights
+(`RELEVANCE_WEIGHTS`, applied by `computePreClusterRelevanceScore`). It sweeps
+candidate weight PRESETS against a fixed synthetic fixture and reports
+decision-quality metrics per preset — so a future weight change is backed by data
+rather than intuition. It changes **no runtime default**: the harness
+re-implements the production composite with an injectable weights object and
+reuses the production fit primitives, so only the weighting differs.
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-precluster-calibration             # table + artifact
+npm run eval:dashboard-precluster-calibration:json        # writes tmp/dashboard-precluster-calibration.json
+node src/ai/evals/run-dashboard-precluster-calibration.mjs --json-out .artifacts/precluster.json
+```
+
+**Presets:** `baseline` (production weights + Decision-5C election-geo shaping),
+`beat_dominant`, `geo_heavy`, `freshness_heavy`, `flat`.
+
+**Metrics per preset:** election survival at the cap, geo-noise suppression
+(leakage above the configured-geo and cross-country elections), configured-geo vs
+cross-country ordering (Decision 5C), deterministic tie stability, and whether the
+preset's ranking matches the production scorer.
+
+**Guardrail semantics:** exits non-zero **only** when the `baseline` preset
+diverges from the production scorer (`baselineFaithful === false`) or violates a
+hard invariant — i.e. a real regression in the shipped weights. A degenerate
+variant (e.g. `geo_heavy`, `freshness_heavy`) failing an invariant is the expected
+signal: it is reported as `recommended: false` but never fails the run. Wired into
+`eval:dashboard-quality-gate` as step 5; the artifact
+(`.artifacts/dashboard-precluster-calibration.json`) is uploaded by CI.
 
 ---
 
