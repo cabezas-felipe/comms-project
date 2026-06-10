@@ -494,6 +494,38 @@ export function computeRelevanceScore(input = {}) {
 }
 
 /**
+ * Decision 8C / Phase 2 · Step 2.1: is this meta-story ON-BEAT?
+ *
+ * A story is on-beat when it corroborates the user's configured editorial BEAT
+ * through at least one of the TOPIC or KEYWORD dimensions (the same fits
+ * `computeRelevanceScore` rewards), where the grounded `associated_entities` may
+ * corroborate a topic/keyword concept:
+ *   - `tagTopicFit`   — a topic tag (exact/lexicon) OR a topic concept in entities
+ *   - `tagKeywordFit` — a configured keyword (lexicon-aware) in keyword tags/entities
+ *
+ * GEOGRAPHY is deliberately EXCLUDED from this classification: a story whose only
+ * relevance comes from naming a configured geography (e.g. a Colombia weather or
+ * volcano item under an elections beat) is GEO-ONLY / off-beat noise and returns
+ * false. This is why `scoreEntityFit` is NOT used here — it folds the geo
+ * dimension into its evidence and would mis-classify geo-only stories as on-beat.
+ *
+ * When NO topics AND NO keywords are configured the beat is undefined; there is
+ * nothing to be "off" from, so every story is treated as on-beat (the guard must
+ * never suppress against an empty beat). Pure; deterministic; no I/O. Exported so
+ * the overflow guard and its tests can classify a story without re-deriving the
+ * fit primitives.
+ */
+export function isStoryOnBeat(storyOrTags, settings) {
+  const hasTopicBeat = (settings?.topics ?? []).length > 0;
+  const hasKeywordBeat = (settings?.keywords ?? []).length > 0;
+  if (!hasTopicBeat && !hasKeywordBeat) return true; // no beat configured
+  const { topics, keywords, entities } = readStoryTagsEntities(storyOrTags);
+  if (hasTopicBeat && tagTopicFit(topics, entities, settings) > 0) return true;
+  if (hasKeywordBeat && tagKeywordFit(keywords, entities, settings) > 0) return true;
+  return false;
+}
+
+/**
  * Survival comparator for the overflow cap (Q3A). Operates on per-story sort
  * keys carrying `{ relevanceScore, sourceCount, maxBeatFitScore, minMinutesAgo,
  * metaStoryId }`. Negative → `a` survives ahead of `b`. Primary key is the
