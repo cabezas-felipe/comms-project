@@ -25,6 +25,7 @@ import {
   runElectionsColombiaPipeline,
   runElectionsColombiaCapPressure,
   runDashboardElectionsColombia,
+  runElectionsColombiaSameEventBundle,
 } from "./dashboard-elections-colombia-core.mjs";
 
 test("fixture set: 14 items — 8 Colombia election positives + 6 negatives, mixed ES/EN", () => {
@@ -46,6 +47,25 @@ test("all acceptance checks pass (aggregate runner used by the quality gate)", a
   );
   assert.equal(summary.hardFail, false);
   assert.ok(summary.total >= 8, "covers the full acceptance matrix");
+});
+
+test("Phase 4.1: same-event election coverage fragmented across clusters bundles into one story", async () => {
+  const { payload, log } = await runElectionsColombiaSameEventBundle();
+
+  // The two same-event debate clusters (EN + ES) merge; the distinct vote-count
+  // story stays separate → 2 published stories, one of them a 2-source bundle.
+  assert.equal(log.electionBundle.enabled, true);
+  assert.equal(log.electionBundle.mergedGroupCount, 1, "exactly one same-event bundle formed");
+  assert.equal(log.electionBundle.mergedStoryCount, 2, "two clusters absorbed into the bundle");
+  assert.equal(payload.stories.length, 2, "debate bundle + distinct vote-count story");
+
+  const bundle = payload.stories.find((s) => (s.sources ?? []).length === 2);
+  assert.ok(bundle, "the same-event debate coverage is one 2-source story");
+  assert.deepEqual(
+    bundle.sources.map((s) => s.id).sort(),
+    ["se-debate-en", "se-debate-es"],
+    "both debate wires share one meta-story"
+  );
 });
 
 test("Q2 recall: all 14 fixtures reach the candidate stage", async () => {

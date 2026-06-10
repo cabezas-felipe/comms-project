@@ -425,6 +425,76 @@ export async function runElectionsColombiaCapPressure() {
   return { payload, log, clusterInput: capture.input ?? [] };
 }
 
+// ── Phase 4.1: same-event bundling scenario ───────────────────────────────────
+//
+// Pins the cross-cluster election bundle-merge end to end: clustering FRAGMENTS
+// the SAME event (a presidential debate covered by two wires, EN + ES) into two
+// separate single-source meta-stories; the deterministic merge must reunify them
+// into ONE published story. A third, DIFFERENT-event election cluster (a vote
+// count) must stay separate — proving the merge is same-event, not same-cycle.
+export const SAME_EVENT_BUNDLE_ITEMS = Object.freeze([
+  makeItem({
+    sourceId: "se-debate-en",
+    outlet: "Reuters",
+    geographies: ["Colombia"],
+    headline: "Colombia presidential debate: Petro and Gutierrez clash over tax reform",
+    body: ["The two contenders sparred over the proposed tax reform plan in the election."],
+  }),
+  makeItem({
+    sourceId: "se-debate-es",
+    outlet: "El Tiempo",
+    lang: "es",
+    geographies: ["Colombia"],
+    headline: "Petro, Gutierrez spar on tax reform in Colombia presidential debate",
+    body: ["Tax reform dominated the election debate between the candidates."],
+  }),
+  makeItem({
+    sourceId: "se-count",
+    outlet: "El Espectador",
+    geographies: ["Colombia"],
+    headline: "Colombia electoral authority certifies the first-round vote count",
+    body: ["Officials finalized the ballot tally across the country in the election."],
+  }),
+]);
+
+// ClusterFn that FRAGMENTS the same debate into two separate stories (the failure
+// mode), plus a distinct vote-count story.
+function sameEventFragmentingClusterFn() {
+  const grounded = (id, ids) => ({
+    meta_story_id: id,
+    title: id,
+    subtitle: "",
+    source_item_ids: [...ids],
+    summary: id,
+    tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+    associated_entities: ["Colombia", "presidential election"],
+    factual_claims: ids.map((sid) => `claim ${sid}`),
+    claim_evidence_map: Object.fromEntries(ids.map((sid, i) => [String(i), [sid]])),
+  });
+  return (items) => {
+    const present = new Set(items.map((i) => i.sourceId));
+    const clusters = [];
+    if (present.has("se-debate-en")) clusters.push(grounded("ms-se-debate-en", ["se-debate-en"]));
+    if (present.has("se-debate-es")) clusters.push(grounded("ms-se-debate-es", ["se-debate-es"]));
+    if (present.has("se-count")) clusters.push(grounded("ms-se-count", ["se-count"]));
+    return Promise.resolve(clusters);
+  };
+}
+
+/** Run the same-event bundling scenario once. Pure: no console, no exits. */
+export async function runElectionsColombiaSameEventBundle() {
+  const { payload, log } = await runRefreshPipeline({
+    settings: ELECTIONS_COLOMBIA_PERSONA,
+    rawItems: SAME_EVENT_BUNDLE_ITEMS.map((i) => ({ ...i })),
+    clusterFn: sameEventFragmentingClusterFn(),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: CONTRACT_VERSION,
+    recallConfig: KEYWORD_RECALL,
+    beatFitEnabled: false,
+  });
+  return { payload, log };
+}
+
 // ── Acceptance checks (shared by the .test.mjs and the quality gate) ──────────
 
 function shippedSourceIds(payload) {

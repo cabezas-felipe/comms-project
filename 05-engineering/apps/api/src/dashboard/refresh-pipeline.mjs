@@ -103,6 +103,8 @@ import { retrieveDoctrineSnippetsForStory } from "./why-doctrine-retrieval.mjs";
 import {
   splitOverMergedClusters,
   resolveClusterSplitConfig,
+  mergeElectionEventBundles,
+  resolveElectionBundleConfig,
 } from "./cluster-split-healer.mjs";
 import { pMap } from "../util/p-map.mjs";
 import {
@@ -2008,6 +2010,11 @@ export async function runRefreshPipeline({
   // healer without env mutation, mirroring the other stage-config injection
   // points above.
   clusterSplitConfig = null,
+  // Phase 4.1 — election same-event cross-cluster bundle merge config. When
+  // omitted, `resolveElectionBundleConfig()` reads env (default ENABLED). Tests
+  // inject an override (e.g. `{ enabled: false }` or a custom threshold) to
+  // exercise the merge without env mutation, mirroring `clusterSplitConfig`.
+  electionBundleConfig = null,
   // Slice 4 — latency-shaping profile for this run.  `"interactive"` activates
   // the onboarding fast-path (bounded geo Lane-2 budget + tighter clustering
   // envelope); null / anything else keeps the default scheduled/background
@@ -3252,6 +3259,33 @@ export async function runRefreshPipeline({
       ` recluster_candidates=${(clusterSplitDiagnostics.reclusterCandidateIds ?? []).length}`
   );
 
+  // 6c. Phase 4.1 — election same-event bundle merge: the split healer only
+  //     splits WITHIN a cluster, so same-event election coverage that clustering
+  //     emitted as SEPARATE meta-stories (bilingual/wording variants, weak entity
+  //     overlap) stays fragmented. This deterministic pass reunifies only
+  //     genuinely-same-event configured-geo election stories (both election-cycle,
+  //     both name a configured geography, high specific-token overlap) — it can't
+  //     merge cross-country/wrong-beat/different-facet stories. Runs over the same
+  //     `sourceItemsById` universe, before ID lineage so a bundle gets a fresh
+  //     evidence-derived id. `TEMPO_ELECTION_BUNDLE_ENABLED=false` is the rollback.
+  const effectiveElectionBundleConfig = electionBundleConfig ?? resolveElectionBundleConfig();
+  const electionBundleResult = mergeElectionEventBundles(
+    rawMetaStories,
+    sourceItemsById,
+    settings,
+    effectiveElectionBundleConfig
+  );
+  rawMetaStories = electionBundleResult.stories;
+  const electionBundleDiagnostics = electionBundleResult.diagnostics;
+  console.log(
+    `[pipeline.election-bundle] enabled=${electionBundleDiagnostics.enabled}` +
+      ` input=${electionBundleDiagnostics.inputCount}` +
+      ` output=${electionBundleDiagnostics.outputCount}` +
+      ` merged_groups=${electionBundleDiagnostics.mergedGroupCount}` +
+      ` absorbed=${electionBundleDiagnostics.mergedStoryCount}` +
+      ` threshold=${electionBundleDiagnostics.threshold}`
+  );
+
   // 7. Resolve stable meta_story_id with lineage continuity:
   //    Read prior snapshot, attempt to match each new cluster against a prior
   //    story (same primary topic + Jaccard ≥ 0.5 on source IDs).  Exactly-one
@@ -4116,6 +4150,20 @@ export async function runRefreshPipeline({
       deferReasons: clusterSplitDiagnostics.deferReasons ?? {},
       bundledStoryCount: clusterSplitDiagnostics.bundledStoryCount ?? 0,
       reclusterCandidateIds: clusterSplitDiagnostics.reclusterCandidateIds ?? [],
+    },
+    // Phase 4.1 — election same-event bundle merge diagnostics (additive,
+    // bounded). `mergedGroupCount` = how many cross-cluster same-event election
+    // bundles were formed this run; `mergedStoryCount` = input stories absorbed
+    // into them; `mergedBundleIds` is a capped sample of the resulting ids.
+    // All-zero on the common path (no fragmentation to reunify).
+    electionBundle: {
+      enabled: electionBundleDiagnostics.enabled,
+      inputCount: electionBundleDiagnostics.inputCount,
+      outputCount: electionBundleDiagnostics.outputCount,
+      mergedGroupCount: electionBundleDiagnostics.mergedGroupCount,
+      mergedStoryCount: electionBundleDiagnostics.mergedStoryCount,
+      threshold: electionBundleDiagnostics.threshold,
+      mergedBundleIds: electionBundleDiagnostics.mergedBundleIds,
     },
     // A4 — post-healer max-5 overflow cap. `overflowCapApplied` is false on the
     // common path (≤5 stories); when true, `overflowDropped*` records which

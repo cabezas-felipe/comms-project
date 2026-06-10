@@ -2253,6 +2253,105 @@ test("runRefreshPipeline: ≥2 grounded factual_claims → subtitle ≠ summary 
   );
 });
 
+// ─── Phase 4.1: election same-event bundle merge (integration) ───────────────
+//
+// Clustering sometimes emits SAME-EVENT election coverage as separate
+// meta-stories (bilingual/wording variants). The deterministic post-healer merge
+// reunifies only genuinely-same-event configured-geo election stories. These
+// pin the behavior end-to-end through the real pipeline (no network).
+const ELECTION_SETTINGS = {
+  ...BASE_SETTINGS,
+  topics: ["Elections"],
+  keywords: ["election"],
+  geographies: ["Colombia"],
+  traditionalSources: ["Reuters", "El Tiempo"],
+};
+
+function electionCluster(id, sourceId) {
+  return {
+    meta_story_id: id,
+    title: `cluster ${id}`,
+    subtitle: "",
+    source_item_ids: [sourceId],
+    summary: `summary ${id}`,
+    tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+    factual_claims: [`claim ${sourceId}`],
+    claim_evidence_map: { "0": [sourceId] },
+  };
+}
+
+test("runRefreshPipeline: same-event election coverage fragmented into 2 clusters is bundled into 1 story", async () => {
+  const rawItems = [
+    makeItem({
+      sourceId: "deb-en",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      geographies: ["Colombia"],
+      headline: "Colombia presidential debate: Petro and Gutierrez clash over tax reform",
+      body: ["The two contenders sparred over the proposed tax reform plan in the election."],
+    }),
+    makeItem({
+      sourceId: "deb-es",
+      outlet: "El Tiempo",
+      minutesAgo: 31,
+      geographies: ["Colombia"],
+      headline: "Petro, Gutierrez spar on tax reform in Colombia presidential debate",
+      body: ["Tax reform dominated the election debate between the candidates."],
+    }),
+  ];
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: ELECTION_SETTINGS,
+    rawItems,
+    // Clustering FRAGMENTS the same event into two separate single-source stories.
+    clusterFn: async () => [electionCluster("ms-deb-en", "deb-en"), electionCluster("ms-deb-es", "deb-es")],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+
+  assert.equal(log.electionBundle.enabled, true);
+  assert.equal(log.electionBundle.mergedGroupCount, 1, "the two same-event clusters bundle into one");
+  assert.equal(log.electionBundle.mergedStoryCount, 2);
+  assert.equal(payload.stories.length, 1, "one published story after the merge");
+  assert.equal(payload.stories[0].sources.length, 2, "the bundled story carries both sources");
+  const srcIds = payload.stories[0].sources.map((s) => s.id).sort();
+  assert.deepEqual(srcIds, ["deb-en", "deb-es"]);
+});
+
+test("runRefreshPipeline: DIFFERENT-event election clusters stay separate (no over-merge)", async () => {
+  const rawItems = [
+    makeItem({
+      sourceId: "evt-debate",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      geographies: ["Colombia"],
+      headline: "Colombia presidential debate: Petro and Gutierrez clash over tax reform",
+      body: ["The contenders sparred over tax reform in the election."],
+    }),
+    makeItem({
+      sourceId: "evt-count",
+      outlet: "El Tiempo",
+      minutesAgo: 31,
+      geographies: ["Colombia"],
+      headline: "Colombia electoral authority certifies the first-round vote count",
+      body: ["Officials finalized the ballot tally across the country in the election."],
+    }),
+  ];
+
+  const { payload, log } = await runRefreshPipeline({
+    settings: ELECTION_SETTINGS,
+    rawItems,
+    clusterFn: async () => [electionCluster("ms-debate", "evt-debate"), electionCluster("ms-count", "evt-count")],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+
+  assert.equal(log.electionBundle.mergedGroupCount, 0, "different events must not merge");
+  assert.equal(payload.stories.length, 2, "both distinct election stories stay separate");
+});
+
 // ─── A2: translation-first → split-healer English output (integration) ───────
 //
 // End-to-end proof that translation runs POST-GEO / PRE-RECALL so the

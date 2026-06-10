@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 import {
   resolveClusterSplitConfig,
   splitOverMergedClusters,
+  mergeElectionEventBundles,
+  resolveElectionBundleConfig,
 } from "./cluster-split-healer.mjs";
 
 const SETTINGS = { geographies: ["Colombia"] };
@@ -614,5 +616,203 @@ test("resolveClusterSplitConfig honors env defaults and overrides", () => {
   assert.equal(
     resolveClusterSplitConfig({ TEMPO_CLUSTER_SPLIT_JACCARD_THRESHOLD: "abc" }).jaccardThreshold,
     0.15
+  );
+});
+
+// ─── Phase 4.1: election same-event cross-cluster bundle merge ─────────────────
+
+const BUNDLE_ON = { enabled: true, jaccardThreshold: 0.5 };
+
+// A clustered election meta-story (one source per claim), shaped like the
+// SEPARATE rows clustering emits when it fragments same-event coverage.
+function electionStory(id, sourceIds) {
+  return withId(
+    metaStory({
+      source_item_ids: sourceIds,
+      tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Colombia"] },
+    }),
+    id
+  );
+}
+
+test("Phase 4.1 POSITIVE: same-event election coverage fragmented across clusters bundles into one", () => {
+  // Two SEPARATE meta-stories about the SAME event (the presidential debate on
+  // tax reform), as two wires would land them: high specific overlap once geo +
+  // generic election tokens are stripped ({tax, reform, debate-specifics}).
+  const a = item("d-en", "Colombia presidential debate: Petro and Gutierrez clash over tax reform", [
+    "The two contenders sparred over the proposed tax reform plan.",
+  ]);
+  const b = item("d-es", "Petro, Gutierrez spar on tax reform in Colombia presidential debate", [
+    "Tax reform dominated the sharpest exchanges between the candidates.",
+  ]);
+  const storyA = electionStory("ms-debate-a", ["d-en"]);
+  const storyB = electionStory("ms-debate-b", ["d-es"]);
+
+  const { stories, diagnostics } = mergeElectionEventBundles(
+    [storyA, storyB],
+    mapOf(a, b),
+    SETTINGS,
+    BUNDLE_ON
+  );
+
+  assert.equal(stories.length, 1, "the two same-event rows must bundle into one");
+  assert.equal(diagnostics.mergedGroupCount, 1);
+  assert.equal(diagnostics.mergedStoryCount, 2);
+  assert.deepEqual(stories[0].source_item_ids.slice().sort(), ["d-en", "d-es"]);
+  // Merged story stays grounded: every claim cites only merged sources.
+  for (const ids of Object.values(stories[0].claim_evidence_map)) {
+    for (const id of ids) assert.ok(["d-en", "d-es"].includes(id));
+  }
+});
+
+test("Phase 4.1 NEGATIVE (facets): different facets of the same cycle stay separate", () => {
+  // Same cycle, DIFFERENT events — they share only generic election vocabulary
+  // (stripped), so specific overlap is low and they must NOT merge.
+  const debate = item("f-debate", "Colombia presidential debate centers on tax reform", [
+    "Candidates clashed over the proposed tax reform.",
+  ]);
+  const turnout = item("f-turnout", "Colombia election turnout expected to break records", [
+    "Analysts watch participation across rural districts closely.",
+  ]);
+  const storyA = electionStory("ms-debate", ["f-debate"]);
+  const storyB = electionStory("ms-turnout", ["f-turnout"]);
+
+  const { stories, diagnostics } = mergeElectionEventBundles(
+    [storyA, storyB],
+    mapOf(debate, turnout),
+    SETTINGS,
+    BUNDLE_ON
+  );
+
+  assert.equal(stories.length, 2, "different facets of one cycle must not merge");
+  assert.equal(diagnostics.mergedGroupCount, 0);
+});
+
+test("Phase 4.1 NEGATIVE (wrong-beat): a non-election story is never merged", () => {
+  // Even with high token overlap, a non-election story is ineligible (no election
+  // token). Guards against wrong-beat over-merge.
+  const electN = item("e-n", "Colombia presidential election ballot rules updated for tax filings", [
+    "The electoral authority revised ballot guidance on tax matters.",
+  ]);
+  const mineN = item("m-n", "Colombia tax authority updates corporate filing rules", [
+    "The tax agency revised guidance on corporate tax filings.",
+  ]);
+  const storyA = electionStory("ms-elec", ["e-n"]);
+  const storyB = withId(
+    metaStory({ source_item_ids: ["m-n"], tags: { topics: ["Business"], keywords: [], geographies: ["Colombia"] } }),
+    "ms-tax"
+  );
+
+  const { stories, diagnostics } = mergeElectionEventBundles(
+    [storyA, storyB],
+    mapOf(electN, mineN),
+    SETTINGS,
+    BUNDLE_ON
+  );
+
+  assert.equal(stories.length, 2, "non-election story is ineligible — no merge");
+  assert.equal(diagnostics.mergedGroupCount, 0);
+});
+
+test("Phase 4.1 NEGATIVE (wrong-geo): a cross-country election is never merged into the configured-geo bundle", () => {
+  // Two election stories with high specific overlap, but one names Colombia and
+  // the other names Peru (no configured-geo token) → the cross-country one is
+  // ineligible, so they stay separate (wrong-geo protection).
+  const colombia = item("c-elec", "Colombia presidential debate centers on tax reform showdown", [
+    "Candidates clashed over the tax reform showdown.",
+  ]);
+  const peru = item("p-elec", "Peru presidential debate centers on tax reform showdown", [
+    "Contenders clashed over the tax reform showdown.",
+  ], );
+  // Peru item must NOT carry a Colombia geography signal.
+  peru.geographies = ["Peru"];
+  const storyA = electionStory("ms-co", ["c-elec"]);
+  const storyB = withId(
+    metaStory({ source_item_ids: ["p-elec"], tags: { topics: ["Elections"], keywords: ["election"], geographies: ["Peru"] } }),
+    "ms-pe"
+  );
+
+  const { stories, diagnostics } = mergeElectionEventBundles(
+    [storyA, storyB],
+    mapOf(colombia, peru),
+    SETTINGS,
+    BUNDLE_ON
+  );
+
+  assert.equal(stories.length, 2, "cross-country election must not merge with configured-geo");
+  assert.equal(diagnostics.mergedGroupCount, 0);
+});
+
+test("Phase 4.1 STABILITY: merge is deterministic and order-independent", () => {
+  const a = item("s-a", "Colombia presidential debate: Petro and Gutierrez clash over tax reform", [
+    "The two contenders sparred over the proposed tax reform plan.",
+  ]);
+  const b = item("s-b", "Petro, Gutierrez spar on tax reform in Colombia presidential debate", [
+    "Tax reform dominated the sharpest exchanges between the candidates.",
+  ]);
+  const c = item("s-c", "Colombia election turnout expected to break records this cycle", [
+    "Analysts watch participation across rural districts closely.",
+  ]);
+  const sA = electionStory("ms-a", ["s-a"]);
+  const sB = electionStory("ms-b", ["s-b"]);
+  const sC = electionStory("ms-c", ["s-c"]);
+
+  const r1 = mergeElectionEventBundles([sA, sB, sC], mapOf(a, b, c), SETTINGS, BUNDLE_ON);
+  const r2 = mergeElectionEventBundles([sB, sA, sC], mapOf(a, b, c), SETTINGS, BUNDLE_ON);
+
+  // a+b bundle (same event), c stays alone → 2 stories both runs.
+  assert.equal(r1.stories.length, 2);
+  assert.equal(r2.stories.length, 2);
+  const bundle1 = r1.stories.find((s) => s.source_item_ids.length === 2);
+  const bundle2 = r2.stories.find((s) => s.source_item_ids.length === 2);
+  // Same merged id and same source membership regardless of input order.
+  assert.equal(bundle1.meta_story_id, bundle2.meta_story_id, "merged id is order-independent");
+  assert.deepEqual(bundle1.source_item_ids.slice().sort(), ["s-a", "s-b"]);
+  assert.deepEqual(bundle2.source_item_ids.slice().sort(), ["s-a", "s-b"]);
+});
+
+test("Phase 4.1: _reclusterCandidate stories pass through untouched (never merged)", () => {
+  const a = item("r-a", "Colombia presidential debate centers on tax reform", ["Tax reform clash."]);
+  const b = item("r-b", "Colombia presidential debate dominated by tax reform", ["Tax reform fight."]);
+  const sA = { ...electionStory("ms-ra", ["r-a"]), _reclusterCandidate: true, _reclusterReason: "ambiguous_overlap_conflict" };
+  const sB = electionStory("ms-rb", ["r-b"]);
+
+  const { stories, diagnostics } = mergeElectionEventBundles([sA, sB], mapOf(a, b), SETTINGS, BUNDLE_ON);
+  assert.equal(stories.length, 2, "a deferred candidate is never merged");
+  assert.equal(diagnostics.mergedGroupCount, 0);
+  assert.equal(stories[0]._reclusterCandidate, true, "flag preserved");
+});
+
+test("Phase 4.1: disabled config is a passthrough", () => {
+  const a = item("x-a", "Colombia presidential debate centers on tax reform", ["Tax reform clash."]);
+  const b = item("x-b", "Colombia presidential debate dominated by tax reform", ["Tax reform fight."]);
+  const { stories, diagnostics } = mergeElectionEventBundles(
+    [electionStory("ms-xa", ["x-a"]), electionStory("ms-xb", ["x-b"])],
+    mapOf(a, b),
+    SETTINGS,
+    { enabled: false }
+  );
+  assert.equal(diagnostics.enabled, false);
+  assert.equal(stories.length, 2);
+  assert.equal(diagnostics.mergedGroupCount, 0);
+});
+
+test("resolveElectionBundleConfig honors env defaults and overrides", () => {
+  const def = resolveElectionBundleConfig({});
+  assert.equal(def.enabled, true);
+  assert.equal(def.jaccardThreshold, 0.34);
+
+  assert.equal(resolveElectionBundleConfig({ TEMPO_ELECTION_BUNDLE_ENABLED: "off" }).enabled, false);
+  assert.equal(
+    resolveElectionBundleConfig({ TEMPO_ELECTION_BUNDLE_JACCARD_THRESHOLD: "0.7" }).jaccardThreshold,
+    0.7
+  );
+  const ov = resolveElectionBundleConfig({}, { enabled: false, jaccardThreshold: 0.6 });
+  assert.equal(ov.enabled, false);
+  assert.equal(ov.jaccardThreshold, 0.6);
+  // Malformed threshold → default.
+  assert.equal(
+    resolveElectionBundleConfig({ TEMPO_ELECTION_BUNDLE_JACCARD_THRESHOLD: "xyz" }).jaccardThreshold,
+    0.34
   );
 });

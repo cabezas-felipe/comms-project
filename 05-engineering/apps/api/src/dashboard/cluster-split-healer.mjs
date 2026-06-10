@@ -634,3 +634,328 @@ export function splitOverMergedClusters(metaStories, sourceItemsById, settings, 
   diagnostics.outputCount = out.length;
   return { stories: out, diagnostics };
 }
+
+// ─── Phase 4.1: election same-event cross-cluster bundle merge ─────────────────
+//
+// The split-healer above only ever SPLITS a single over-merged cluster; it never
+// reunifies meta-stories that clustering emitted SEPARATELY. So same-event
+// election coverage that the clusterer fragmented across clusters (bilingual
+// headline variation, weak entity overlap, wording drift between wires) stays
+// fragmented — two rows for one event.
+//
+// This pass closes that gap deterministically, with PRECISION-FIRST guards so it
+// can only ever bundle genuinely-same-event configured-geo election coverage and
+// can never resurrect a wrong-geo / wrong-beat / different-facet over-merge:
+//
+//   1. ELECTION-CYCLE ONLY — both stories must carry an election-cycle concept
+//      token (same ELECTION_CYCLE_TOKENS set the within-split bundler uses). A
+//      non-election story has no election token → never an edge. (wrong-beat)
+//   2. CONFIGURED-GEO ONLY — both stories must name a configured geography
+//      (a geoStopToken appears in their raw evidence). A cross-country election
+//      ("Peru election", no Colombia mention) never matches → cross-country and
+//      wrong-geo coverage is never merged. (wrong-geo; also inert when settings
+//      configure no geographies → empty stop set → no merges.)
+//   3. SAME EVENT, NOT SAME CYCLE — the merge edge requires HIGH Jaccard on the
+//      SPECIFIC token set (evidence tokens with geography AND generic
+//      election-cycle tokens removed). Same-event coverage shares its specifics
+//      (candidate names, "tax reform", the venue); different FACETS of one cycle
+//      (debate vs ballot-count vs turnout) share only the generic election
+//      vocabulary, which is stripped, so they stay separate.
+//
+// `_reclusterCandidate`-flagged stories (ambiguous, awaiting the deferred pass)
+// are passed through untouched — never merged. Pure + deterministic; the only
+// new signal is a higher Jaccard threshold reusing the existing primitives.
+
+const DEFAULT_ELECTION_BUNDLE_ENABLED = true;
+// Deliberately high (vs the split threshold 0.15): this gate decides SAME EVENT,
+// so it must clear specific-token overlap, not mere topical relatedness. Scored
+// on SOURCE HEADLINES (not bodies), where the distinctive event signal — the
+// candidate names + topic phrase — concentrates and wording noise is minimal.
+const DEFAULT_ELECTION_BUNDLE_JACCARD_THRESHOLD = 0.34;
+// A same-event pair must ALSO share at least this many distinctive (non-geo,
+// non-generic-election) tokens. Different facets of one cycle share ~0 — they
+// only have the generic election vocabulary in common, which is stripped — so
+// this count is the precision backstop behind the Jaccard floor.
+const ELECTION_BUNDLE_MIN_SHARED_SPECIFIC = 2;
+const ELECTION_BUNDLE_DIAG_SAMPLE = 10;
+
+/**
+ * Resolve the election same-event bundle config from env (with test overrides),
+ * mirroring `resolveClusterSplitConfig`.
+ *
+ *   TEMPO_ELECTION_BUNDLE_ENABLED            (default true)
+ *   TEMPO_ELECTION_BUNDLE_JACCARD_THRESHOLD  (default 0.34)
+ *
+ * @param {Record<string,string|undefined>} [env]
+ * @param {{ enabled?: boolean, jaccardThreshold?: number }} [overrides]
+ * @returns {{ enabled: boolean, jaccardThreshold: number }}
+ */
+export function resolveElectionBundleConfig(env = process.env, overrides = {}) {
+  const enabled =
+    typeof overrides.enabled === "boolean"
+      ? overrides.enabled
+      : parseEnvBool(env?.TEMPO_ELECTION_BUNDLE_ENABLED, DEFAULT_ELECTION_BUNDLE_ENABLED);
+  const jaccardThreshold =
+    typeof overrides.jaccardThreshold === "number" && Number.isFinite(overrides.jaccardThreshold)
+      ? Math.max(0, overrides.jaccardThreshold)
+      : parseEnvFloat(
+          env?.TEMPO_ELECTION_BUNDLE_JACCARD_THRESHOLD,
+          DEFAULT_ELECTION_BUNDLE_JACCARD_THRESHOLD
+        );
+  return { enabled, jaccardThreshold };
+}
+
+// True when any source item's RAW evidence names a configured geography (one of
+// the geography stop tokens appears). Distinguishes configured-geo election
+// coverage (mentions "Colombia"/"Bogotá") from cross-country ("Peru election").
+function storyMentionsConfiguredGeo(items, geoStopTokens) {
+  if (geoStopTokens.size === 0) return false;
+  for (const it of items) {
+    if (!it) continue;
+    for (const tok of rawTokenize(evidenceText(it))) {
+      if (geoStopTokens.has(tok)) return true;
+    }
+  }
+  return false;
+}
+
+// Per-story signals used by the merge gate. `specific` is the SOURCE HEADLINE
+// token set with geography AND generic election-cycle tokens removed — the event
+// fingerprint (candidate names + topic phrase). `isElection` is derived from the
+// full evidence (headline + body) so an election story whose headline is terse
+// still qualifies; `mentionsGeo` is the configured-geo gate.
+function electionBundleSignals(items, geoStopTokens) {
+  const headlineText = items.map((it) => readHeadline(it)).filter(Boolean).join(" ");
+  const headlineTokens = evidenceTokenSet(headlineText, geoStopTokens); // geo + stopwords stripped
+  const specific = new Set();
+  for (const t of headlineTokens) if (!ELECTION_CYCLE_TOKENS.has(t)) specific.add(t);
+
+  // Election-cycle membership uses the broader evidence (headline + 2 body lines)
+  // so a headline that omits the literal election word still classifies.
+  const fullText = items.map((it) => englishEvidenceText(it)).filter(Boolean).join(" ");
+  const isElection = electionCycleTokensOf(evidenceTokenSet(fullText, geoStopTokens)).size > 0;
+
+  return {
+    specific,
+    isElection,
+    mentionsGeo: storyMentionsConfiguredGeo(items, geoStopTokens),
+  };
+}
+
+// Count of distinct specific tokens two stories share.
+function sharedSpecificCount(a, b) {
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  let n = 0;
+  for (const t of small) if (large.has(t)) n += 1;
+  return n;
+}
+
+function unionDedup(...arrays) {
+  const seen = new Set();
+  const out = [];
+  for (const arr of arrays) {
+    if (!Array.isArray(arr)) continue;
+    for (const v of arr) {
+      if (typeof v !== "string" || !v) continue;
+      if (seen.has(v)) continue;
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+// Merge a connected component of same-event meta-stories into one. Deterministic:
+// the "primary" (most sources, ties broken by smallest meta_story_id) supplies
+// the headline/subtitle; claims/evidence are concatenated and re-indexed so the
+// merged story stays grounded (every claim still cites only its own sources).
+function buildMergedElectionStory(componentStories) {
+  const primary = componentStories
+    .slice()
+    .sort((a, b) => {
+      const sa = Array.isArray(a.source_item_ids) ? a.source_item_ids.length : 0;
+      const sb = Array.isArray(b.source_item_ids) ? b.source_item_ids.length : 0;
+      if (sb !== sa) return sb - sa;
+      return String(a.meta_story_id ?? "").localeCompare(String(b.meta_story_id ?? ""));
+    })[0];
+
+  const source_item_ids = unionDedup(
+    ...componentStories.map((s) => (Array.isArray(s.source_item_ids) ? s.source_item_ids : []))
+  );
+
+  const idSet = new Set(source_item_ids);
+  const factual_claims = [];
+  const claim_evidence_map = {};
+  let k = 0;
+  for (const s of componentStories) {
+    const claims = Array.isArray(s.factual_claims) ? s.factual_claims : [];
+    const cem = s.claim_evidence_map && typeof s.claim_evidence_map === "object" ? s.claim_evidence_map : {};
+    claims.forEach((claim, i) => {
+      const evidence = Array.isArray(cem[String(i)])
+        ? cem[String(i)].filter((id) => typeof id === "string" && idSet.has(id))
+        : [];
+      // Skip a claim whose evidence didn't survive into the merged source set
+      // (defensive — should not happen since we union every source).
+      if (evidence.length === 0) return;
+      factual_claims.push(typeof claim === "string" ? claim : String(claim));
+      claim_evidence_map[String(k)] = evidence;
+      k += 1;
+    });
+  }
+
+  const tags = cloneParentTags({
+    topics: unionDedup(...componentStories.map((s) => s?.tags?.topics)),
+    keywords: unionDedup(...componentStories.map((s) => s?.tags?.keywords)),
+    geographies: unionDedup(...componentStories.map((s) => s?.tags?.geographies)),
+  });
+
+  const associated_entities = unionDedup(
+    ...componentStories.map((s) => (Array.isArray(s.associated_entities) ? s.associated_entities : []))
+  );
+
+  const story = {
+    title: typeof primary.title === "string" && primary.title.trim() ? primary.title : String(source_item_ids[0]),
+    subtitle: typeof primary.subtitle === "string" ? primary.subtitle : "",
+    source_item_ids,
+    summary: typeof primary.summary === "string" && primary.summary.trim()
+      ? primary.summary
+      : factual_claims.join(". "),
+    tags,
+    factual_claims,
+    claim_evidence_map,
+  };
+  if (associated_entities.length > 0) story.associated_entities = associated_entities;
+  return { meta_story_id: generateMetaStoryId(story), ...story };
+}
+
+/**
+ * Bundle same-event configured-geo election meta-stories that clustering emitted
+ * separately. Pure and deterministic. Runs AFTER `splitOverMergedClusters`.
+ *
+ * @param {Array<object>} metaStories
+ * @param {Map<string,object>|Record<string,object>} sourceItemsById
+ * @param {{ geographies?: string[] }} settings
+ * @param {{ enabled?: boolean, jaccardThreshold?: number }} [config]
+ * @returns {{ stories: object[], diagnostics: object }}
+ */
+export function mergeElectionEventBundles(metaStories, sourceItemsById, settings, config) {
+  const cfg = config && typeof config === "object" ? config : resolveElectionBundleConfig();
+  const enabled = cfg.enabled !== false;
+  const threshold = Number.isFinite(cfg.jaccardThreshold)
+    ? Math.max(0, cfg.jaccardThreshold)
+    : DEFAULT_ELECTION_BUNDLE_JACCARD_THRESHOLD;
+
+  const input = Array.isArray(metaStories) ? metaStories : [];
+  const diagnostics = {
+    enabled,
+    inputCount: input.length,
+    outputCount: input.length,
+    mergedGroupCount: 0, // number of multi-story bundles formed
+    mergedStoryCount: 0, // number of input stories absorbed into a bundle
+    threshold,
+    mergedBundleIds: [], // resulting bundle meta_story_ids (bounded sample)
+  };
+
+  if (!enabled || input.length < 2) {
+    return { stories: input, diagnostics };
+  }
+
+  const getItem =
+    sourceItemsById instanceof Map
+      ? (id) => sourceItemsById.get(id)
+      : (id) => (sourceItemsById && typeof sourceItemsById === "object" ? sourceItemsById[id] : undefined);
+
+  const geoStopTokens = buildGeographyStopTokens(settings);
+
+  // Index of stories ELIGIBLE to merge (clean, configured-geo, election-cycle).
+  // Everything else passes through verbatim, in original position.
+  const eligibleIdx = [];
+  const signals = new Array(input.length).fill(null);
+  input.forEach((story, idx) => {
+    if (story?._reclusterCandidate) return; // ambiguous → never merge
+    const ids = Array.isArray(story?.source_item_ids)
+      ? story.source_item_ids.filter((id) => typeof id === "string" && id)
+      : [];
+    if (ids.length === 0) return;
+    const items = ids.map((id) => getItem(id)).filter(Boolean);
+    if (items.length === 0) return;
+    const sig = electionBundleSignals(items, geoStopTokens);
+    if (!sig.isElection || !sig.mentionsGeo || sig.specific.size === 0) return;
+    signals[idx] = sig;
+    eligibleIdx.push(idx);
+  });
+
+  if (eligibleIdx.length < 2) {
+    return { stories: input, diagnostics };
+  }
+
+  // Union-find over eligible stories; edge iff specific-token Jaccard ≥ threshold.
+  const parent = new Map(eligibleIdx.map((i) => [i, i]));
+  const find = (x) => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r);
+    while (parent.get(x) !== r) {
+      const next = parent.get(x);
+      parent.set(x, r);
+      x = next;
+    }
+    return r;
+  };
+  for (let a = 0; a < eligibleIdx.length; a += 1) {
+    for (let b = a + 1; b < eligibleIdx.length; b += 1) {
+      const i = eligibleIdx[a];
+      const j = eligibleIdx[b];
+      // Same-event edge: enough shared distinctive tokens AND a Jaccard floor.
+      // Both gates protect precision — a couple of incidentally-shared tokens in
+      // long headlines won't clear the ratio, and high-ratio-but-thin overlaps
+      // (1 shared token) won't clear the count.
+      const shared = sharedSpecificCount(signals[i].specific, signals[j].specific);
+      const linked =
+        shared >= ELECTION_BUNDLE_MIN_SHARED_SPECIFIC &&
+        jaccard(signals[i].specific, signals[j].specific) >= threshold;
+      if (linked) {
+        const ri = find(i);
+        const rj = find(j);
+        if (ri !== rj) parent.set(Math.max(ri, rj), Math.min(ri, rj));
+      }
+    }
+  }
+
+  // Group eligible stories by component root, preserving first-appearance order.
+  const groups = new Map();
+  for (const idx of eligibleIdx) {
+    const r = find(idx);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(idx);
+  }
+
+  // Build output in original order: at each component's FIRST index emit the
+  // merged story (or the lone passthrough); skip the absorbed members.
+  const absorbed = new Set();
+  for (const members of groups.values()) {
+    if (members.length >= 2) {
+      for (const m of members.slice(1)) absorbed.add(m);
+    }
+  }
+
+  const out = [];
+  for (let idx = 0; idx < input.length; idx += 1) {
+    if (absorbed.has(idx)) continue;
+    const root = parent.has(idx) ? find(idx) : null;
+    const members = root !== null ? groups.get(root) : null;
+    if (members && members.length >= 2 && members[0] === idx) {
+      const merged = buildMergedElectionStory(members.map((m) => input[m]));
+      out.push(merged);
+      diagnostics.mergedGroupCount += 1;
+      diagnostics.mergedStoryCount += members.length;
+      if (diagnostics.mergedBundleIds.length < ELECTION_BUNDLE_DIAG_SAMPLE) {
+        diagnostics.mergedBundleIds.push(merged.meta_story_id);
+      }
+    } else {
+      out.push(input[idx]);
+    }
+  }
+
+  diagnostics.outputCount = out.length;
+  return { stories: out, diagnostics };
+}
