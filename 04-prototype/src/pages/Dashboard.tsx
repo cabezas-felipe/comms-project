@@ -26,6 +26,7 @@ import {
   type DashboardWhyEnrichmentMeta,
   type DashboardClusterSplitMeta,
   type DashboardOverflowCapMeta,
+  type DashboardClusterCapMeta,
   type DashboardReclusterExecutionMeta,
 } from "@/lib/api";
 import { DashboardRunDiagnostics } from "@/components/DashboardRunDiagnostics";
@@ -203,6 +204,7 @@ export default function Dashboard() {
     // C1 — split/overflow/re-cluster diagnostics (debug panel only).
     clusterSplit: DashboardClusterSplitMeta | null;
     overflowCap: DashboardOverflowCapMeta | null;
+    clusterCap: DashboardClusterCapMeta | null;
     reclusterExecution: DashboardReclusterExecutionMeta | null;
     reclusterQueueCount: number | null;
   } | null>(null);
@@ -333,6 +335,7 @@ export default function Dashboard() {
         recall: result.recall,
         clusterSplit: result.clusterSplit,
         overflowCap: result.overflowCap,
+        clusterCap: result.clusterCap,
         reclusterExecution: result.reclusterExecution,
         reclusterQueueCount: result.reclusterQueueCount,
       });
@@ -531,6 +534,7 @@ export default function Dashboard() {
       recall: heartbeatResult.recall,
       clusterSplit: heartbeatResult.clusterSplit,
       overflowCap: heartbeatResult.overflowCap,
+      clusterCap: heartbeatResult.clusterCap,
       reclusterExecution: heartbeatResult.reclusterExecution,
       reclusterQueueCount: heartbeatResult.reclusterQueueCount,
     });
@@ -774,6 +778,7 @@ export default function Dashboard() {
               selection={runDiagnostics?.selection ?? null}
               clusterSplit={runDiagnostics?.clusterSplit ?? null}
               overflowCap={runDiagnostics?.overflowCap ?? null}
+              clusterCap={runDiagnostics?.clusterCap ?? null}
               reclusterExecution={runDiagnostics?.reclusterExecution ?? null}
               reclusterQueueCount={runDiagnostics?.reclusterQueueCount ?? null}
             />

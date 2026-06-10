@@ -456,6 +456,18 @@ describe("Slice 3: debug run-diagnostics panel", () => {
       unavailableConnectorSources: [],
       matchedFeedIds: ["reuters-world-us"],
     },
+    clusterCap: {
+      dedupedCount: 20,
+      clusterInputCount: 15,
+      clusterDroppedCount: 5,
+      clusterDroppedSourceIds: ["src-15", "src-16", "src-17", "src-18", "src-19"],
+      clusterDropped: [
+        { sourceId: "src-15", preClusterScore: 6.13, rank: 16, electionGeoClass: "crossCountryElection" },
+        { sourceId: "src-16", preClusterScore: 5.91, rank: 17, electionGeoClass: "nonElection" },
+        { sourceId: "src-17", preClusterScore: 5.44, rank: 18, electionGeoClass: "nonElection" },
+      ],
+      clusterInputCapEffective: 15,
+    },
   };
 
   it("renders the panel with clustering/funnel/recall/selection when ?debug=1 and _meta carries diagnostics", async () => {
@@ -473,6 +485,15 @@ describe("Slice 3: debug run-diagnostics panel", () => {
     expect(screen.getByTestId("diag-clustering").textContent).toContain("ok");
     expect(screen.getByTestId("diag-selection").textContent).toContain("matched=2/2");
     expect(screen.getByTestId("diag-selection").textContent).toContain("reuters-world-us");
+  });
+
+  it("renders the cluster_cap row with deduped/kept/cap/dropped + scored top drops when ?debug=1", async () => {
+    fetchSpy.mockResolvedValue(DIAG_RESULT);
+    renderAtSearch("?debug=1");
+    await screen.findByTestId("dashboard-empty");
+    const row = await screen.findByTestId("diag-cluster-cap");
+    expect(row.textContent).toContain("deduped=20 kept=15 cap=15 dropped=5");
+    expect(row.textContent).toContain("top=[src-15(6.13), src-16(5.91), src-17(5.44)]");
   });
 
   it("shows clustering-failed detail in the panel when the run failed closed", async () => {
