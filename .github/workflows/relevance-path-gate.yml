@@ -1,0 +1,104 @@
+name: Relevance path gate
+
+# PR-focused, PATH-FILTERED relevance gate. Runs the relevance-focused checks
+# ONLY when a PR touches the dashboard relevance pipeline, its evals, the
+# relevance diagnostics contracts, or the prototype surfaces that render them.
+#
+# This COMPLEMENTS — it does not replace — `api-quality-gate.yml`:
+#   - api-quality-gate runs the FULL api suite + critical + hermetic quality
+#     gate, triggered on any `05-engineering/**` change.
+#   - this gate adds focused relevance coverage that ALSO fires on
+#     `04-prototype/**` relevance surfaces (which api-quality-gate does not
+#     watch), so a prototype-only change that drifts against the relevance
+#     diagnostics contract still gets caught.
+#
+# Live, network-dependent evals are intentionally NOT required here:
+# `eval:dashboard-live-colombia-election` stays advisory (run locally / on a
+# schedule), never a blocking PR check.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "05-engineering/apps/api/src/dashboard/**"
+      - "05-engineering/apps/api/src/ai/evals/**"
+      - "05-engineering/apps/api/package.json"
+      - "05-engineering/packages/contracts/src/**"
+      - "04-prototype/src/components/DashboardRunDiagnostics.tsx"
+      - "04-prototype/src/lib/api.ts"
+      - "04-prototype/src/pages/Dashboard.tsx"
+      - ".github/workflows/relevance-path-gate.yml"
+  workflow_dispatch:
+
+# Cancel an in-flight run for the same PR when a new commit lands.
+concurrency:
+  group: relevance-path-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Least privilege — this gate only reads the checked-out tree.
+permissions:
+  contents: read
+
+jobs:
+  relevance-path-gate:
+    name: Relevance pipeline + evals (path-filtered)
+    runs-on: ubuntu-latest
+    # Guardrail ceiling — a healthy run is well under this; the bound only exists
+    # so a hung install/test can't pin a runner indefinitely.
+    timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: 05-engineering/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: 05-engineering
+
+      # Relevance tests import the built @tempo/contracts types/runtime, so the
+      # shared packages must be built before the targeted suite runs.
+      - name: Build shared packages
+        run: npm run build:packages
+        working-directory: 05-engineering
+
+      # Checks are ordered fastest → most valuable. Output is tee'd to a log so a
+      # failing run is debuggable from the uploaded artifact.
+      #
+      # `test:relevance-path` runs ONLY the four relevance tests (refresh
+      # pipeline, pre-cluster relevance, elections-Colombia, live-election core)
+      # via `node --test` — targeted and fast, NOT the full api suite (that broad
+      # coverage lives in api-quality-gate.yml).
+      - name: Relevance unit + core tests
+        run: |
+          npm run test:relevance-path --workspace=@tempo/api \
+            2>&1 | tee relevance-path-gate-tests.log
+        working-directory: 05-engineering
+
+      # Hermetic acceptance eval for the relevance strategy (no provider keys, no
+      # network) — fails closed on any assertion regression.
+      - name: Dashboard elections-Colombia acceptance eval
+        run: |
+          npm run eval:dashboard-elections-colombia --workspace=@tempo/api \
+            2>&1 | tee relevance-path-gate-elections.log
+        working-directory: 05-engineering
+
+      # Lightweight, failure-only diagnosis aid. Short retention — these logs are
+      # only useful for the lifetime of the PR investigation.
+      - name: Upload check logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relevance-path-gate-logs
+          path: 05-engineering/relevance-path-gate-*.log
+          retention-days: 7
+          if-no-files-found: ignore

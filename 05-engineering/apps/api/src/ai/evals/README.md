@@ -13,6 +13,7 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | **Dashboard Spanish recall (Slice 14)** | Hermetic regression: Spanish RSS-shaped items + English settings reach the clustering pool via translation-first normalized English evidence (and do NOT without it); plus a degraded partial-translation-failure path where the refresh still completes and affected stories are marked low-confidence in `_meta.translation` | `npm run eval:dashboard-spanish-recall` | Smoke gate (non-zero on any scenario failure) |
 | **Dashboard elections-Colombia (Q6B)** | Hermetic acceptance test for the relevance strategy: a 14-item Colombia-presidential-election mix (Spanish + English) surfaces the election beat over wrong-geo / wrong-beat noise — all 14 reach candidacy, explicit wrong-geo controls hard-fail, the dashboard ships ≤5 meta-stories, the overflow cap drops the generic geo-noise story, and ≥1 election meta-story is multi-source | `npm run eval:dashboard-elections-colombia` | Smoke gate (non-zero on any assertion failure); **wired into `eval:dashboard-quality-gate`** |
 | **Dashboard live-cluster advisory (Q6D)** | **Live, provider-backed** clustering call over the election fixture subset to detect prompt/model drift in cluster output (B1 `tags.geographies` + `associated_entities` present, sane merge count). SKIPS (exit 0) when no provider key/config | `npm run eval:dashboard-live-cluster-advisory` | **Advisory / non-blocking** — NOT in the quality gate, NOT a PR check; exits 1 only so a scheduled job can alert owners |
+| **Dashboard live Colombia election smoke (Phase 3 · advisory)** | **Live feed pool, provider-free.** Pulls the same RSS pool the dashboard refresh consumes (`readFeedItems` live path) and runs it through the real relevance pipeline (lexical recall + deterministic cluster stub — no LLM/embedding spend) to confirm Phase-1/2 behavior holds on real data: feed non-empty, election signal present, C1 cap coherent, A4 overflow / thin-on-beat geo-noise guard coherent, Decision 5C configured-geo-over-cross-country ordering. Live-variable checks (no election this window, cap not exercised) degrade to failing/neutral CHECKS with detail — never a throw | `npm run eval:dashboard-live-colombia-election` (advisory) · `… --strict` (gate) · `npm run eval:dashboard-live-colombia-election:json` (artifact) | **Advisory by default** — exits 0 unless a true execution error (pipeline crash / bad config); `--strict` opts into a non-zero exit on any failed check. NOT in the quality gate, NOT a PR check |
 | **Embed-floor calibration (Slice 5)** | Sweeps `TEMPO_EMBED_MIN_SIMILARITY` (0 / 0.35 / 0.40 / 0.45) and reports `similarityRejected` / `finalStories` / Reuters / liveblog metrics per floor | `npm run eval:dashboard-calibration` | Guardrail gate only (non-zero if fail-closed / degraded title / no Reuters / liveblog regression at any floor); floor metrics are advisory |
 | **Pre-cluster weight calibration (Decision 10D)** | Sweeps candidate pre-cluster WEIGHT PRESETS (baseline = production `RELEVANCE_WEIGHTS`, plus beat-dominant / geo-heavy / freshness-heavy / flat) against a fixed synthetic fixture and reports decision-quality metrics (election survival at cap, geo-noise suppression, configured-vs-cross-country ordering, tie stability). Re-implements the composite with injectable weights — **no production weight change**. Writes a JSON artifact. | `npm run eval:dashboard-precluster-calibration` | Guardrail gate only (non-zero ONLY if the baseline preset diverges from the production scorer or violates a hard invariant; a degenerate variant failing is advisory, never a gate failure); **wired into `eval:dashboard-quality-gate`** |
 | **Dashboard quality gate (Slice 6)** | CI-grade gate: runs golden + spanish-recall + elections-colombia + embed-floor calibration + pre-cluster weight calibration in one command, writes calibration JSON artifacts | `npm run eval:dashboard-quality-gate` | **Yes** — non-zero if golden fails OR spanish-recall fails OR elections-colombia fails OR embed-floor calibration guardrails regress OR the pre-cluster weight baseline regresses |
@@ -361,6 +362,91 @@ A nightly non-blocking workflow runs it:
 
 ---
 
+## Dashboard Live Colombia Election Smoke (Phase 3 · Step 3.1)
+
+### Why this exists
+
+The hermetic elections-Colombia eval (Q6B) proves the relevance strategy on a
+**fixed fixture**. This eval asks the complementary question: does that same
+Phase-1/2 behavior still hold on the **live feed pool right now**? It pulls real
+candidate items through the production fetch path and runs them through the real
+relevance pipeline, so a regression that only shows up on live-shaped data
+(unexpected geo signal, the cap suddenly not biting, Decision 5C ordering
+inverting) is caught without waiting for a user to notice.
+
+It is **advisory and non-blocking**: NOT wired into `eval:dashboard-quality-gate`,
+NOT a PR check. Run it locally or on a schedule to watch live drift.
+
+### How it works
+
+**Only the data source is live.** Everything downstream of the fetch is
+deterministic and provider-free, so a given live pool always yields the same
+verdict and the eval costs **zero model spend**:
+
+- **Fetch** — `readFeedItems(dataDir, { mode: "live" })`, the same live RSS path
+  the dashboard refresh uses (reused verbatim, no duplicated fetch logic). The
+  persona's `traditionalSources` is auto-filled from the fetched outlets so
+  source-selection admits the pool and the smoke exercises the geo / recall / cap
+  gates rather than source matching.
+- **Pipeline** — the production `runRefreshPipeline` in lexical `keyword` recall
+  (no embeddings, no network) with beat-fit disabled (threshold-independent) and
+  an **injected deterministic cluster stub** (grounded family-keyed meta-stories,
+  no LLM). Election classification reuses `isElectionCycleItem` /
+  `classifyElectionGeo` so there is no regex/lexicon drift.
+
+### Checks (smoke-level, tolerant to live variability)
+
+1. **feed-non-empty** — live raw pool ≥ 5 (configurable floor); below that the
+   window is too thin for a meaningful smoke → fails with "insufficient live
+   volume".
+2. **election-presence** — ≥1 live item carries an election-cycle signal; absent
+   → fails as "no election signal in current window" (not a runtime error).
+3. **cap-behavior** — if the deduped pool exceeds the C1 cluster-input cap, verify
+   the cap applied and `clusterCap` diagnostics are coherent (clusterInput = cap,
+   dropped = deduped − clusterInput); otherwise **neutral** ("cap not exercised").
+4. **geo-noise-guard** — if the story set overflowed the A4 5-story cap, verify the
+   overflow / thin-on-beat guard diagnostics are coherent (no geo-only backfill
+   dominating survivors); otherwise **neutral** ("overflow not exercised").
+5. **decision-5c-ordering** — only enforced when BOTH configured-geo and
+   cross-country election candidates exist in the live pool; then configured-geo
+   must **survive the cluster-input cap at a rate ≥ cross-country** (the
+   freshness-independent signal the +boost / −penalty actually shapes — mean rank
+   is kept as informational detail only, since on live data a single fresh
+   cross-country item can invert the mean without any regression). Otherwise
+   **neutral** ("not observable in this run").
+
+A **neutral** check reports `pass: true` (it never fails the run) but is flagged
+so the report says "not observable" rather than implying a positive result.
+
+### Advisory vs strict semantics
+
+- **Advisory (default)** — exits `0` even when checks fail; failures + warnings
+  print clearly so a human / scheduled job notices. Exit `1` **only** on a true
+  execution error (the pipeline crashing, bad config). A feed-fetch failure is a
+  failing *check*, not a throw, so a CI network blip never reads as a regression.
+- **`--strict`** — opt-in gate: exit `1` when any non-neutral check fails. Use it
+  for an on-demand confidence run when election coverage is known to be live.
+
+### Run
+
+```sh
+cd 05-engineering/apps/api
+npm run eval:dashboard-live-colombia-election            # advisory (exit 0 unless execution error)
+npm run eval:dashboard-live-colombia-election -- --strict # gate on any failed check
+npm run eval:dashboard-live-colombia-election:json       # also write .artifacts/dashboard-live-colombia-election.json
+```
+
+### Expected variability
+
+Live news drives the outcome. Common, **non-regression** results: no Colombia
+election coverage in the window (election-presence fails), a small pool that
+doesn't reach the cap (cap-behavior + geo-noise-guard neutral), or only
+cross-country / only configured-geo elections present (decision-5c neutral). The
+JSON artifact's `stats` + bounded `diagnostics` (IDs / counts / ≤10-item samples,
+no raw bodies) explain each verdict.
+
+---
+
 ## Embed-floor Calibration (Slice 5)
 
 ### Why this exists
@@ -527,6 +613,24 @@ fixed fixtures). Streams a `✓`/`✗` line per scenario/floor/preset, then a SU
    tying `similarityRejected` movement to the manual review.
 
 Absent all three, keep 0.35.
+
+### CI wiring (two complementary PR gates)
+
+- [`.github/workflows/api-quality-gate.yml`](../../../../../../.github/workflows/api-quality-gate.yml)
+  — the broad gate. Triggers on any `05-engineering/**` change and runs the full
+  api suite + critical hard-fail suite + the hermetic `eval:dashboard-quality-gate`.
+- [`.github/workflows/relevance-path-gate.yml`](../../../../../../.github/workflows/relevance-path-gate.yml)
+  — a narrower, **path-filtered** relevance gate (Phase 3 · Step 3.2). Fires only
+  when a PR touches the dashboard relevance pipeline (`src/dashboard/**`), its
+  evals (`src/ai/evals/**`), the relevance diagnostics contracts
+  (`packages/contracts/src/**`), or the prototype surfaces that render them
+  (`DashboardRunDiagnostics.tsx`, `lib/api.ts`, `pages/Dashboard.tsx`). It runs
+  the targeted relevance tests + the `eval:dashboard-elections-colombia`
+  acceptance eval. It **complements, does not replace** the quality gate, and
+  notably also fires on `04-prototype/**` relevance changes that the api gate
+  doesn't watch. Live, network-dependent evals
+  (`eval:dashboard-live-colombia-election`) stay **advisory** — never wired as a
+  required check here.
 
 ---
 
