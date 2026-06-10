@@ -78,6 +78,12 @@ export interface DashboardFetchResult {
    */
   overflowCap: DashboardOverflowCapMeta | null;
   /**
+   * Phase 1: cluster-INPUT cap diagnostics lifted from `_meta.clusterCap`
+   * (deduped/kept/dropped counts, dropped IDs, and the enriched per-drop
+   * `clusterDropped` scores). `null` when absent. Defensive parse.
+   */
+  clusterCap: DashboardClusterCapMeta | null;
+  /**
    * C1: deferred re-cluster EXECUTION outcome (B2) lifted from
    * `_meta.reclusterExecution`. Present only after the deferred pass runs (a
    * subsequent GET read), so `null` on the immediate refresh response and on
@@ -158,6 +164,34 @@ export interface DashboardOverflowCapMeta {
   overflowOutputCount: number | null;
   overflowDroppedCount: number | null;
   overflowDroppedMetaStoryIds: string[];
+}
+
+/**
+ * Phase 1.4: one explained cluster-input-cap drop (subset surfaced for the debug
+ * row). Mirrors the backend `_meta.clusterCap.clusterDropped[]` entry but keeps
+ * only the fields the bounded row renders; parsed defensively (all nullable).
+ */
+export interface DashboardClusterDroppedEntry {
+  sourceId: string | null;
+  preClusterScore: number | null;
+  rank: number | null;
+  electionGeoClass: string | null;
+}
+
+/**
+ * C1 / Phase 1: cluster-INPUT cap diagnostics lifted from `_meta.clusterCap`.
+ * Counts + dropped IDs are the stable legacy surface; `clusterDropped` (enriched
+ * per-drop scores, Step 1.4) and `clusterInputCapEffective` (Slice 3) are
+ * additive and may be absent on older payloads — `clusterDropped` then parses to
+ * `[]`. Debug-panel aid only; never gates behavior, never schema-validated.
+ */
+export interface DashboardClusterCapMeta {
+  dedupedCount: number | null;
+  clusterInputCount: number | null;
+  clusterDroppedCount: number | null;
+  clusterDroppedSourceIds: string[];
+  clusterDropped: DashboardClusterDroppedEntry[];
+  clusterInputCapEffective: number | null;
 }
 
 /** C1: deferred re-cluster execution (B2) outcome for the debug panel. */
@@ -399,6 +433,36 @@ function parseOverflowCapMetaSafe(raw: unknown): DashboardOverflowCapMeta | null
   };
 }
 
+/**
+ * Lift the cluster-INPUT cap diagnostics off `_meta.clusterCap` (Phase 1).
+ * Tolerant: a missing/garbled object → `null`; a legacy payload without
+ * `clusterDropped` / `clusterInputCapEffective` parses fine (`clusterDropped`
+ * → `[]`, cap → `null`). Each enriched entry is reduced to the fields the bounded
+ * debug row needs.
+ */
+function parseClusterCapMetaSafe(raw: unknown): DashboardClusterCapMeta | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  const clusterDropped = Array.isArray(c.clusterDropped)
+    ? c.clusterDropped
+        .filter((e): e is Record<string, unknown> => !!e && typeof e === "object")
+        .map((e) => ({
+          sourceId: strOrNull(e.sourceId),
+          preClusterScore: numOrNull(e.preClusterScore),
+          rank: numOrNull(e.rank),
+          electionGeoClass: strOrNull(e.electionGeoClass),
+        }))
+    : [];
+  return {
+    dedupedCount: numOrNull(c.dedupedCount),
+    clusterInputCount: numOrNull(c.clusterInputCount),
+    clusterDroppedCount: numOrNull(c.clusterDroppedCount),
+    clusterDroppedSourceIds: strArrSafe(c.clusterDroppedSourceIds),
+    clusterDropped,
+    clusterInputCapEffective: numOrNull(c.clusterInputCapEffective),
+  };
+}
+
 /** Lift the deferred re-cluster execution (B2) outcome off `_meta.reclusterExecution` (C1). */
 function parseReclusterExecutionMetaSafe(raw: unknown): DashboardReclusterExecutionMeta | null {
   if (!raw || typeof raw !== "object") return null;
@@ -509,12 +573,13 @@ async function requestDashboard<TExtras extends object>({
       const whyEnrichment = parseWhyEnrichmentMetaSafe(meta?.whyEnrichment);
       const clusterSplit = parseClusterSplitMetaSafe(meta?.clusterSplit);
       const overflowCap = parseOverflowCapMetaSafe(meta?.overflowCap);
+      const clusterCap = parseClusterCapMetaSafe(meta?.clusterCap);
       const reclusterExecution = parseReclusterExecutionMetaSafe(meta?.reclusterExecution);
       const reclusterQueueCount = numOrNull(meta?.reclusterQueueCount);
       const extras = parseExtras ? parseExtras(raw) : ({} as TExtras);
       return {
         payload, selection, refreshedAt, lastCheckedAt, ...clustering, funnel, recall, whyEnrichment,
-        clusterSplit, overflowCap, reclusterExecution, reclusterQueueCount, ...extras,
+        clusterSplit, overflowCap, clusterCap, reclusterExecution, reclusterQueueCount, ...extras,
       };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {

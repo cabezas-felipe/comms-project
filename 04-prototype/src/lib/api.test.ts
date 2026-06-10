@@ -440,6 +440,14 @@ describe("C1: split / overflow / re-cluster diagnostics from _meta", () => {
             candidates: [{ metaStoryId: "ms-d", outcome: "split" }],
           },
           reclusterQueueCount: 1,
+          clusterCap: {
+            dedupedCount: 20, clusterInputCount: 15, clusterDroppedCount: 5,
+            clusterDroppedSourceIds: ["src-15", "src-16", "src-17", "src-18", "src-19"],
+            clusterInputCapEffective: 15,
+            clusterDropped: [
+              { sourceId: "src-15", headline: "h", rank: 16, preClusterScore: 6.13, components: {}, electionGeoClass: "crossCountryElection", hardFail: true, geoReason: "explicit_conflict", geoCategory: "explicit_conflict", headlineFamilyKey: "k" },
+            ],
+          },
         },
       }),
     });
@@ -454,6 +462,13 @@ describe("C1: split / overflow / re-cluster diagnostics from _meta", () => {
     expect(result.reclusterExecution?.succeeded).toBe(1);
     expect(result.reclusterExecution?.candidates[0]).toEqual({ metaStoryId: "ms-d", outcome: "split" });
     expect(result.reclusterQueueCount).toBe(1);
+    // Phase 1: cluster-input cap diagnostics (counts + enriched per-drop subset).
+    expect(result.clusterCap?.dedupedCount).toBe(20);
+    expect(result.clusterCap?.clusterInputCapEffective).toBe(15);
+    expect(result.clusterCap?.clusterDroppedSourceIds).toHaveLength(5);
+    expect(result.clusterCap?.clusterDropped[0]).toEqual({
+      sourceId: "src-15", preClusterScore: 6.13, rank: 16, electionGeoClass: "crossCountryElection",
+    });
   });
 
   it("returns null blocks when absent (backward compat)", async () => {
@@ -467,6 +482,28 @@ describe("C1: split / overflow / re-cluster diagnostics from _meta", () => {
     expect(result.overflowCap).toBeNull();
     expect(result.reclusterExecution).toBeNull();
     expect(result.reclusterQueueCount).toBeNull();
+    expect(result.clusterCap).toBeNull();
+  });
+
+  it("parses a legacy clusterCap (counts + ids only, no clusterDropped/cap)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: [],
+        _meta: {
+          clusterCap: {
+            dedupedCount: 18, clusterInputCount: 15, clusterDroppedCount: 3,
+            clusterDroppedSourceIds: ["src-15", "src-16", "src-17"],
+          },
+        },
+      }),
+    });
+    const result = await fetchDashboardWithMeta({ fetcher });
+    expect(result.clusterCap?.clusterDropped).toEqual([]); // absent → empty
+    expect(result.clusterCap?.clusterInputCapEffective).toBeNull();
+    expect(result.clusterCap?.clusterDroppedSourceIds).toEqual(["src-15", "src-16", "src-17"]);
   });
 
   it("parses cleanly with no _meta at all (no throw)", async () => {

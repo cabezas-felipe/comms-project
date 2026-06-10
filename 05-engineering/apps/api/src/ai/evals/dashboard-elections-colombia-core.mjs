@@ -230,6 +230,88 @@ export const NEGATIVE_IDS = [
 ];
 export const TOTAL_FIXTURES = ELECTIONS_COLOMBIA_RAW_ITEMS.length; // 14
 
+// ── Cap-pressure scenario (Step 1.8) ──────────────────────────────────────────
+//
+// A SEPARATE, larger pool whose post-hard-fail/dedupe candidate set exceeds the
+// C1 cluster-input cap (15), so the cap actually bites and we can prove election
+// relevance survives INTO cluster input (not only into final stories). Kept
+// distinct from the 14-item acceptance scenario so the existing checks stay
+// exact and unbrittle.
+//
+// Composition (all survive recall + geo): 8 Colombia election positives (reuse),
+// 3 cross-country elections (untagged geo → implicit, NOT hard-failed → they
+// reach clustering and classify as crossCountryElection), 9 Colombia geo-noise
+// distractors, plus the 2 explicit wrong-geo controls (hard-failed, never reach
+// the cap). Surviving pool = 8 + 3 + 9 = 20 > 15.
+
+// Cross-country elections: no explicit geography tag (so the explicit-conflict
+// geo hard-fail does NOT drop them) and no "Colombia" mention (so they classify
+// as cross-country, not configured-geo). They clear keyword recall via "election".
+export const CROSS_COUNTRY_ELECTION_ITEMS = Object.freeze([
+  makeItem({
+    sourceId: "xc-elec-peru",
+    outlet: "Reuters",
+    geographies: [],
+    headline: "Peru election runoff results spark protests in Lima",
+    body: ["Voters across Peru awaited the final election tally."],
+  }),
+  makeItem({
+    sourceId: "xc-elec-brazil",
+    outlet: "The Washington Post",
+    geographies: [],
+    headline: "Brazil presidential election debate heats up over the economy",
+    body: ["The Brazil election campaign entered its final stretch."],
+  }),
+  makeItem({
+    sourceId: "xc-elec-mexico",
+    outlet: "Reuters",
+    geographies: [],
+    headline: "Mexico election ballot count underway after record turnout",
+    body: ["Officials tallied the Mexico election vote overnight."],
+  }),
+]);
+
+// 9 Colombia geo-noise distractors — right geography, wrong beat. All name
+// "Colombia" so they clear recall via the geo lexical gate; none are election.
+export const CAP_PRESSURE_NOISE_ITEMS = Object.freeze(
+  [
+    { sourceId: "cap-noise-volcano", outlet: "El Tiempo", headline: "Colombia volcano alert raised near the Nevado del Ruiz" },
+    { sourceId: "cap-noise-weather", outlet: "Semana", headline: "Colombia braces for heavy rains across the Andean region" },
+    { sourceId: "cap-noise-flood", outlet: "Infobae", headline: "Colombia flooding displaces families on the Caribbean coast" },
+    { sourceId: "cap-noise-coffee", outlet: "El Espectador", headline: "Colombia coffee exports hit a seasonal high" },
+    { sourceId: "cap-noise-traffic", outlet: "El Tiempo", headline: "Bogota traffic snarls as a Colombia transit strike spreads" },
+    { sourceId: "cap-noise-power", outlet: "Semana", headline: "Colombia power outage leaves towns dark after a storm" },
+    { sourceId: "cap-noise-football", outlet: "Infobae", headline: "Colombia football side names its squad for the friendlies" },
+    { sourceId: "cap-noise-festival", outlet: "El Espectador", headline: "Colombia music festival returns to Medellin this month" },
+    { sourceId: "cap-noise-quake", outlet: "El Tiempo", headline: "Colombia earthquake tremor felt across the central region" },
+  ].map((spec, i) =>
+    makeItem({
+      ...spec,
+      geographies: ["Colombia"],
+      minutesAgo: 20 + i * 5, // varied freshness; deterministic
+      // Body deliberately carries NO election-cycle vocabulary (no
+      // election/vote/ballot/candidate/campaign/runoff/presidential) so these
+      // stay pure geo-noise and never score as election-relevant.
+      body: [`A Colombia local affairs report from ${spec.outlet}.`],
+    })
+  )
+);
+
+export const CAP_PRESSURE_RAW_ITEMS = Object.freeze([
+  ...COLOMBIA_ELECTION_ITEMS,
+  ...CROSS_COUNTRY_ELECTION_ITEMS,
+  ...CAP_PRESSURE_NOISE_ITEMS,
+  SENEGAL_ELECTION_DECOY,
+  ARGENTINA_FILM_DECOY,
+]);
+
+export const CROSS_COUNTRY_ELECTION_IDS = CROSS_COUNTRY_ELECTION_ITEMS.map((i) => i.sourceId);
+export const CAP_PRESSURE_NOISE_IDS = CAP_PRESSURE_NOISE_ITEMS.map((i) => i.sourceId);
+// Post-hard-fail candidate count: everything except the 2 explicit wrong-geo
+// controls (20), which is > CLUSTER_INPUT_CAP (15).
+export const CAP_PRESSURE_SURVIVING_COUNT =
+  ELECTION_IDS.length + CROSS_COUNTRY_ELECTION_IDS.length + CAP_PRESSURE_NOISE_IDS.length; // 20
+
 // ── Cluster stub (deterministic, grounded, no provider) ───────────────────────
 //
 // Partitions whatever survives recall into the election cycle's facets plus a
@@ -315,6 +397,25 @@ export async function runElectionsColombiaPipeline() {
   const { payload, log } = await runRefreshPipeline({
     settings: ELECTIONS_COLOMBIA_PERSONA,
     rawItems: ELECTIONS_COLOMBIA_RAW_ITEMS.map((i) => ({ ...i })),
+    clusterFn: electionsClusterFn(capture),
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: CONTRACT_VERSION,
+    recallConfig: KEYWORD_RECALL,
+    beatFitEnabled: false,
+  });
+  return { payload, log, clusterInput: capture.input ?? [] };
+}
+
+/**
+ * Run the larger cap-pressure scenario once. Same hermetic harness; the only
+ * difference is the >cap candidate pool, so the C1 cluster-input cap fires and
+ * `clusterInput` (what `clusterFn` actually saw) reflects the relevance ranking.
+ */
+export async function runElectionsColombiaCapPressure() {
+  const capture = { input: null };
+  const { payload, log } = await runRefreshPipeline({
+    settings: ELECTIONS_COLOMBIA_PERSONA,
+    rawItems: CAP_PRESSURE_RAW_ITEMS.map((i) => ({ ...i })),
     clusterFn: electionsClusterFn(capture),
     clusterModel: "mock-anthropic-haiku",
     contractVersion: CONTRACT_VERSION,
@@ -424,6 +525,91 @@ export async function runDashboardElectionsColombia() {
     spanishShipped.length >= 1,
     [`spanish election sources shipped: ${spanishShipped.join(", ") || "none"} of ${SPANISH_ELECTION_IDS.join(", ")}`]
   );
+
+  // ── Cap-pressure block (Step 1.8): election survival INTO cluster input ──────
+  //
+  // A second hermetic run over the >cap pool. These checks inspect the capped
+  // `clusterInput` (what clustering actually saw) — proving relevance survival at
+  // the C1 cap stage, not only in the final shipped stories.
+  try {
+    const cap = await runElectionsColombiaCapPressure();
+    const input = cap.clusterInput ?? [];
+    const inputIds = input.map((i) => i.sourceId);
+    const inputSet = new Set(inputIds);
+    const countIn = (ids) => ids.filter((id) => inputSet.has(id)).length;
+    const electionInInput = countIn(ELECTION_IDS);
+    const crossInInput = countIn(CROSS_COUNTRY_ELECTION_IDS);
+    const noiseInInput = countIn(CAP_PRESSURE_NOISE_IDS);
+    const capDiag = cap.log?.clusterCap ?? {};
+
+    // 1) The cap actually bit: the pool exceeded 15 and clusterInput == cap.
+    check(
+      "cap-pressure-pool-exceeds-cap",
+      capDiag.dedupedCount > 15 && input.length === 15,
+      [`dedupedCount=${capDiag.dedupedCount} (expected >15), clusterInput=${input.length} (expected 15)`]
+    );
+
+    // 2) Election positives survive into cluster input under cap pressure.
+    check(
+      "cap-pressure-colombia-elections-survive-cluster-input",
+      electionInInput >= 6,
+      [`Colombia election positives in clusterInput: ${electionInInput}/8 (expected >=6)`]
+    );
+
+    // 3) Geo-noise does not dominate the capped cluster input.
+    check(
+      "cap-pressure-noise-does-not-dominate-cluster-input",
+      electionInInput > noiseInInput,
+      [`elections=${electionInInput} vs noise=${noiseInInput} in clusterInput`]
+    );
+
+    // 4) Decision 5C: configured-geo elections outrank cross-country peers ON
+    //    AVERAGE in the ranked cluster input. (Mean rank — robust to a weak-signal
+    //    Colombia item that names only "candidates/debate" legitimately sitting
+    //    below a cross-country item that explicitly says "election ballot".)
+    const meanRank = (ids) => {
+      const ranks = ids.map((id) => inputIds.indexOf(id)).filter((r) => r >= 0);
+      return ranks.length ? ranks.reduce((a, b) => a + b, 0) / ranks.length : Infinity;
+    };
+    const colombiaMeanRank = meanRank(ELECTION_IDS);
+    const crossMeanRank = meanRank(CROSS_COUNTRY_ELECTION_IDS);
+    check(
+      "cap-pressure-configured-geo-outranks-cross-country",
+      colombiaMeanRank < crossMeanRank,
+      [`Colombia mean rank=${colombiaMeanRank.toFixed(2)} vs cross-country mean rank=${crossMeanRank.toFixed(2)} (lower = better)`]
+    );
+
+    // 5) Cross-country elections are deprioritized but can still survive when
+    //    relevant, while configured-geo presence stays stronger.
+    check(
+      "cap-pressure-cross-country-survives-but-weaker",
+      crossInInput >= 1 && electionInInput > crossInInput,
+      [`cross-country in clusterInput=${crossInInput} (expected >=1), elections=${electionInInput} (must exceed cross-country)`]
+    );
+
+    // 6) Drop diagnostics: clusterDropped aligns with clusterDroppedSourceIds and
+    //    the dropped set is dominated by noise/off-beat (no election dropped).
+    const droppedIds = capDiag.clusterDroppedSourceIds ?? [];
+    const droppedDetail = capDiag.clusterDropped ?? [];
+    const droppedElections = droppedIds.filter(
+      (id) => ELECTION_IDS.includes(id) || CROSS_COUNTRY_ELECTION_IDS.includes(id)
+    );
+    const detailAligned =
+      Array.isArray(droppedDetail) &&
+      droppedDetail.every((d, i) => d.sourceId === droppedIds[i]) &&
+      droppedDetail.every((d) => typeof d.preClusterScore === "number" && d.components && d.electionGeoClass);
+    check(
+      "cap-pressure-drop-diagnostics-noise-dominated",
+      droppedElections.length === 0 && detailAligned,
+      [`dropped elections: ${droppedElections.join(", ") || "none"}`,
+       `dropped detail aligned + scored: ${detailAligned}`,
+       `droppedIds: ${droppedIds.join(", ")}`]
+    );
+  } catch (err) {
+    check("cap-pressure-run", false, [
+      `cap-pressure pipeline threw: ${err instanceof Error ? err.message : String(err)}`,
+    ]);
+  }
 
   const passed = results.filter((r) => r.ok).length;
   return {

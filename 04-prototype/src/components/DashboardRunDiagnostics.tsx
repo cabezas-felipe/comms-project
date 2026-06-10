@@ -3,6 +3,7 @@ import type {
   DashboardRecallMeta,
   DashboardClusterSplitMeta,
   DashboardOverflowCapMeta,
+  DashboardClusterCapMeta,
   DashboardReclusterExecutionMeta,
 } from "@/lib/api";
 import type { DashboardSelectionMeta } from "@tempo/contracts";
@@ -27,6 +28,9 @@ export interface DashboardRunDiagnosticsProps {
   // B2 execution). Optional so older callers compile unchanged; absent → "n/a".
   clusterSplit?: DashboardClusterSplitMeta | null;
   overflowCap?: DashboardOverflowCapMeta | null;
+  // Phase 1: cluster-INPUT cap (pre-clustering relevance cap). Optional/additive
+  // so older callers compile unchanged; absent → "n/a".
+  clusterCap?: DashboardClusterCapMeta | null;
   reclusterExecution?: DashboardReclusterExecutionMeta | null;
   reclusterQueueCount?: number | null;
 }
@@ -96,6 +100,28 @@ function overflowLine(o: DashboardOverflowCapMeta | null): string {
   return `applied in=${num(o.overflowInputCount)} out=${num(o.overflowOutputCount)} dropped=${num(o.overflowDroppedCount)} ${dropped}`;
 }
 
+// Phase 1: cluster-INPUT cap summary — deduped candidate count, kept count + the
+// effective cap, dropped count, and a BOUNDED top-3 of dropped candidates.
+// Prefers the enriched scored drops (`src(score)`); falls back to the legacy
+// dropped-id list when no enriched entries are present.
+function clusterCapLine(c: DashboardClusterCapMeta | null): string {
+  if (!c) return NA;
+  const cap =
+    typeof c.clusterInputCapEffective === "number" ? ` cap=${c.clusterInputCapEffective}` : "";
+  const head = `deduped=${num(c.dedupedCount)} kept=${num(c.clusterInputCount)}${cap} dropped=${num(c.clusterDroppedCount)}`;
+  if (c.clusterDropped.length > 0) {
+    const top = c.clusterDropped.slice(0, 3).map((e) => {
+      const id = e.sourceId ?? "?";
+      return typeof e.preClusterScore === "number" ? `${id}(${e.preClusterScore.toFixed(2)})` : id;
+    });
+    return `${head} top=[${top.join(", ")}]`;
+  }
+  if (c.clusterDroppedSourceIds.length > 0) {
+    return `${head} ids=[${c.clusterDroppedSourceIds.slice(0, 3).join(", ")}]`;
+  }
+  return head;
+}
+
 // C1: deferred re-cluster (B2 execution; falls back to the B1 queued count when
 // the deferred pass hasn't run yet — e.g. on the immediate refresh response).
 function reclusterLine(
@@ -130,6 +156,7 @@ export function DashboardRunDiagnostics({
   selection,
   clusterSplit = null,
   overflowCap = null,
+  clusterCap = null,
   reclusterExecution = null,
   reclusterQueueCount = null,
 }: DashboardRunDiagnosticsProps) {
@@ -149,6 +176,7 @@ export function DashboardRunDiagnostics({
       <Row label="funnel:" value={funnelLine(funnel)} testId="diag-funnel" />
       <Row label="recall:" value={recallLine(recall)} testId="diag-recall" />
       <Row label="selection:" value={selectionLine(selection)} testId="diag-selection" />
+      <Row label="cluster_cap:" value={clusterCapLine(clusterCap)} testId="diag-cluster-cap" />
       <Row label="split/defer:" value={splitLine(clusterSplit)} testId="diag-cluster-split" />
       <Row label="overflow_cap:" value={overflowLine(overflowCap)} testId="diag-overflow-cap" />
       <Row label="recluster:" value={reclusterLine(reclusterExecution, reclusterQueueCount)} testId="diag-recluster" />

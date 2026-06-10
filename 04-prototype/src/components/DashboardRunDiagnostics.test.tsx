@@ -56,6 +56,78 @@ describe("DashboardRunDiagnostics — C1 split/overflow/recluster rows", () => {
     expect(screen.getByTestId("diag-recluster").textContent).toContain("n/a");
   });
 
+  it("renders the cluster_cap row with scored top drops (enriched shape)", () => {
+    render(
+      <DashboardRunDiagnostics
+        clusteringFailed={false}
+        clusteringFailureReason={null}
+        clusteringAttempts={1}
+        funnel={null}
+        recall={null}
+        selection={null}
+        clusterCap={{
+          dedupedCount: 20,
+          clusterInputCount: 15,
+          clusterDroppedCount: 5,
+          clusterDroppedSourceIds: ["src-15", "src-16", "src-17", "src-18", "src-19"],
+          clusterDropped: [
+            { sourceId: "src-15", preClusterScore: 6.13, rank: 16, electionGeoClass: "crossCountryElection" },
+            { sourceId: "src-16", preClusterScore: 5.91, rank: 17, electionGeoClass: "nonElection" },
+            { sourceId: "src-17", preClusterScore: 5.44, rank: 18, electionGeoClass: "nonElection" },
+            { sourceId: "src-18", preClusterScore: 5.1, rank: 19, electionGeoClass: "nonElection" },
+          ],
+          clusterInputCapEffective: 15,
+        }}
+      />,
+    );
+    const row = screen.getByTestId("diag-cluster-cap");
+    expect(row.textContent).toContain("deduped=20 kept=15 cap=15 dropped=5");
+    // Bounded to the first 3 scored drops, sourceId(score) form.
+    expect(row.textContent).toContain("top=[src-15(6.13), src-16(5.91), src-17(5.44)]");
+    expect(row.textContent).not.toContain("src-18");
+  });
+
+  it("falls back to the dropped-id list when clusterDropped is absent (legacy shape)", () => {
+    render(
+      <DashboardRunDiagnostics
+        clusteringFailed={false}
+        clusteringFailureReason={null}
+        clusteringAttempts={1}
+        funnel={null}
+        recall={null}
+        selection={null}
+        clusterCap={{
+          dedupedCount: 18,
+          clusterInputCount: 15,
+          clusterDroppedCount: 3,
+          clusterDroppedSourceIds: ["src-15", "src-16", "src-17"],
+          clusterDropped: [],
+          clusterInputCapEffective: null,
+        }}
+      />,
+    );
+    const row = screen.getByTestId("diag-cluster-cap");
+    // No effective cap → cap segment omitted; falls back to the id list.
+    expect(row.textContent).toContain("deduped=18 kept=15 dropped=3");
+    expect(row.textContent).not.toContain("cap=");
+    expect(row.textContent).toContain("ids=[src-15, src-16, src-17]");
+    expect(row.textContent).not.toContain("top=");
+  });
+
+  it("shows n/a for cluster_cap when absent (older snapshot)", () => {
+    render(
+      <DashboardRunDiagnostics
+        clusteringFailed={false}
+        clusteringFailureReason={null}
+        clusteringAttempts={null}
+        funnel={null}
+        recall={null}
+        selection={null}
+      />,
+    );
+    expect(screen.getByTestId("diag-cluster-cap").textContent).toContain("n/a");
+  });
+
   it("shows the queued count when execution hasn't run yet (B1 queue, no B2 outcome)", () => {
     render(
       <DashboardRunDiagnostics
