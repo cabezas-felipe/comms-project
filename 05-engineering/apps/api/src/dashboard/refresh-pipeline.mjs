@@ -41,6 +41,7 @@ import {
   scoreGeoFit,
   computeRelevanceScore,
   compareSurvivalRank,
+  isStoryOnBeat,
 } from "./relevance-policy.mjs";
 import {
   buildPreClusterPoolIndex,
@@ -547,11 +548,26 @@ export function topicKeywordMatchStrength(story) {
  * Cap a list of `{ story, sortKey }` entries to `cap` meta-stories. Entries are
  * assumed to already be in R1 display order; survivors are returned in that same
  * order (only the bottom-ranked overflow is removed). `sortKey` must carry the
- * rank inputs consumed by `compareSurvivalRank` (plus `metaStoryId`).
+ * rank inputs consumed by `compareSurvivalRank` (plus `metaStoryId`), and — for
+ * the thin-on-beat guard — an `onBeat` boolean (see `isStoryOnBeat`).
+ *
+ * ── Decision 8C / Phase 2 · Step 2.1: thin on-beat guard ──────────────────────
+ * When the survivor set OVERFLOWS the cap AND at least one on-beat story exists,
+ * geo-only / off-beat noise must NOT survive as backfill: it is removed from the
+ * eligible survivor set BEFORE the final cap selection. "Thin on-beat only" is an
+ * allowed outcome — if only 2 of 6 overflow candidates are on-beat, just those 2
+ * ship and the 4 geo-noise rows are dropped, even though that leaves fewer than
+ * `cap` survivors. When NO on-beat story exists (e.g. an all-geo overflow set),
+ * every story stays eligible and behavior is the prior pure-survival cap — the
+ * guard never forces an empty result. The guard is gated on overflow (`> cap`):
+ * the at-or-below-cap path is byte-identical to before.
  *
  * Returns the kept entries, the dropped entries (for rejection logging), and the
  * additive overflow diagnostics. A no-op (≤ cap) reports `overflowCapApplied:
- * false` and drops nothing. Never mutates the input array. Exported for testing.
+ * false` and drops nothing. Two additive diagnostic fields report the guard:
+ * `thinOnBeatGuardApplied` (true iff the guard removed ≥1 geo-noise story) and
+ * `thinOnBeatFilteredCount` (how many it removed). Never mutates the input array.
+ * Exported for testing.
  */
 export function applyMetaStoryOverflowCap(entries, cap = MAX_META_STORIES) {
   const list = Array.isArray(entries) ? entries : [];
@@ -562,22 +578,39 @@ export function applyMetaStoryOverflowCap(entries, cap = MAX_META_STORIES) {
     overflowOutputCount: inputCount,
     overflowDroppedCount: 0,
     overflowDroppedMetaStoryIds: [],
+    thinOnBeatGuardApplied: false,
+    thinOnBeatFilteredCount: 0,
   };
 
   if (inputCount <= cap) {
     return { kept: list, dropped: [], diagnostics: baseDiagnostics };
   }
 
-  // Rank by survival order, breaking final ties on the original (R1) index so
-  // the cap itself is fully deterministic. Survivors = the top `cap` by rank.
-  const ranked = list
-    .map((entry, idx) => ({ entry, idx }))
+  // Thin on-beat guard: when any on-beat story exists, only on-beat stories are
+  // eligible to survive — geo-only/off-beat noise is suppressed (and still
+  // rejection-logged via `dropped`). With no on-beat story, every story stays
+  // eligible (prior behavior). Indices are the original (R1) positions.
+  const indexed = list.map((entry, idx) => ({ entry, idx }));
+  const onBeatIndexed = indexed.filter(({ entry }) => entry?.sortKey?.onBeat === true);
+  const guardActive = onBeatIndexed.length > 0;
+  const eligible = guardActive ? onBeatIndexed : indexed;
+  const suppressed = guardActive
+    ? indexed.filter(({ entry }) => entry?.sortKey?.onBeat !== true).map((r) => r.entry)
+    : [];
+
+  // Rank the eligible set by survival order, breaking final ties on the original
+  // (R1) index so the cap itself is fully deterministic. Survivors = the top
+  // `cap` eligible entries by rank.
+  const ranked = eligible
+    .slice()
     .sort((x, y) => {
       const c = compareSurvivalRank(x.entry?.sortKey, y.entry?.sortKey);
       return c !== 0 ? c : x.idx - y.idx;
     });
   const keepIdx = new Set(ranked.slice(0, cap).map((r) => r.idx));
-  const dropped = ranked.slice(cap).map((r) => r.entry);
+  // Dropped = eligible overflow (survival drop-rank order) followed by any
+  // guard-suppressed geo-noise (R1 order). Both reach the rejection log.
+  const dropped = [...ranked.slice(cap).map((r) => r.entry), ...suppressed];
   const kept = list.filter((_, idx) => keepIdx.has(idx)); // preserves R1 order
   const overflowDroppedMetaStoryIds = dropped
     .map((e) => e?.sortKey?.metaStoryId)
@@ -592,6 +625,10 @@ export function applyMetaStoryOverflowCap(entries, cap = MAX_META_STORIES) {
       overflowOutputCount: kept.length,
       overflowDroppedCount: dropped.length,
       overflowDroppedMetaStoryIds,
+      // Guard "applied" only when it actually removed geo-noise; an all-on-beat
+      // overflow leaves this false and behaves like the prior pure-survival cap.
+      thinOnBeatGuardApplied: suppressed.length > 0,
+      thinOnBeatFilteredCount: suppressed.length,
     },
   };
 }
@@ -3332,6 +3369,10 @@ export async function runRefreshPipeline({
         relevanceScore,
         // Retained for rejection-log observability (legacy coarse signal).
         topicKeywordMatchStrength: topicKeywordMatchStrength(ms),
+        // Decision 8C / Phase 2 · Step 2.1: deterministic on-beat classification
+        // (topic/keyword fit, geography excluded) consumed by the overflow
+        // thin-on-beat guard so geo-only noise never backfills published slots.
+        onBeat: isStoryOnBeat(ms, settings),
         maxBeatFitScore,
         minMinutesAgo,
         metaStoryId: ms.meta_story_id,

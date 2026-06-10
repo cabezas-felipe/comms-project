@@ -49,3 +49,22 @@ jobs:
       - name: Run critical hard-fail suite
         run: npm run eval:critical --workspace=@tempo/api
         working-directory: 05-engineering
+
+      # Hermetic dashboard quality gate (golden + spanish-recall +
+      # elections-colombia + embed-floor calibration). No provider keys, no
+      # network — runs the cores in-process and fails closed on any regression.
+      # Also persists the calibration sweep as a JSON artifact (uploaded below).
+      - name: Run dashboard quality gate
+        run: npm run eval:dashboard-quality-gate --workspace=@tempo/api
+        working-directory: 05-engineering
+
+      # Capture the calibration sweep artifact even when an earlier step failed,
+      # so a regressed gate is debuggable from the run. The gate runner resolves
+      # its default `.artifacts/` path against the @tempo/api workspace cwd.
+      - name: Upload dashboard calibration artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-calibration
+          path: 05-engineering/apps/api/.artifacts/*.json
+          if-no-files-found: warn

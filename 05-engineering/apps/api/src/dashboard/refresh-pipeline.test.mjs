@@ -86,6 +86,8 @@ import { WHAT_CHANGED_COPY, WHAT_CHANGED_DIAGNOSTICS_SCHEMA_VERSION } from "./wh
 // Slice 3 follow-up: assert the terminal-field SLO guard directly against the
 // ops evaluator (no server/route round-trip needed for the counting semantics).
 import { evaluateRefreshSlo, _resetSloState } from "../ops/refresh-slo.mjs";
+// Phase 2 · Step 2.1: thin on-beat overflow guard — direct classification cover.
+import { isStoryOnBeat } from "./relevance-policy.mjs";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────────
 
@@ -8311,6 +8313,128 @@ test("applyMetaStoryOverflowCap: no-op at or below the cap", () => {
   assert.equal(dropped.length, 0);
   assert.equal(kept.length, 3);
   assert.equal(MAX_META_STORIES, 5);
+  // Guard diagnostics are additive and inert on the no-op path.
+  assert.equal(diagnostics.thinOnBeatGuardApplied, false);
+  assert.equal(diagnostics.thinOnBeatFilteredCount, 0);
+});
+
+// ─── Decision 8C / Phase 2 · Step 2.1: thin on-beat overflow guard ────────────
+//
+// Under overflow, geo-only / off-beat noise must not backfill published slots
+// when on-beat stories exist. These unit-pin the guard at the cap function with
+// explicit `onBeat` sort keys; the `onBeat` flag itself is classified by
+// `isStoryOnBeat` (covered separately below) at sortKey-build time.
+
+// Build a `{ story, sortKey }` overflow entry with an explicit on-beat flag.
+const overflowEntry = (id, onBeat, { sourceCount = 1, maxBeatFitScore = 0.5, minMinutesAgo = 30, relevanceScore = onBeat ? 8 : 2 } = {}) => ({
+  story: { metaStoryId: id },
+  sortKey: { metaStoryId: id, onBeat, relevanceScore, sourceCount, maxBeatFitScore, minMinutesAgo },
+});
+
+test("applyMetaStoryOverflowCap (guard): on-beat present → geo-noise excluded as backfill", () => {
+  // 6 overflow candidates: 2 clear on-beat stories + 4 geo-only noise rows.
+  // R1 order interleaves them so we also prove survivors keep display order.
+  const entries = [
+    overflowEntry("geo-0", false),
+    overflowEntry("beat-a", true),
+    overflowEntry("geo-1", false),
+    overflowEntry("geo-2", false),
+    overflowEntry("beat-b", true),
+    overflowEntry("geo-3", false),
+  ];
+  const { kept, dropped, diagnostics } = applyMetaStoryOverflowCap(entries);
+
+  assert.equal(diagnostics.overflowCapApplied, true);
+  assert.equal(diagnostics.overflowInputCount, 6);
+  // "Thin on-beat only" — fewer than the cap survive because geo-noise is sunk.
+  assert.equal(diagnostics.overflowOutputCount, 2);
+  assert.equal(diagnostics.overflowDroppedCount, 4);
+  // Survivors are exactly the on-beat stories, in R1 display order.
+  assert.deepEqual(kept.map((e) => e.sortKey.metaStoryId), ["beat-a", "beat-b"]);
+  // Every dropped row is geo-noise; no on-beat story was dropped.
+  assert.deepEqual(
+    dropped.map((e) => e.sortKey.metaStoryId).sort(),
+    ["geo-0", "geo-1", "geo-2", "geo-3"]
+  );
+  // Diagnostics report the guard firing and the suppressed count.
+  assert.equal(diagnostics.thinOnBeatGuardApplied, true);
+  assert.equal(diagnostics.thinOnBeatFilteredCount, 4);
+});
+
+test("applyMetaStoryOverflowCap (guard): all on-beat overflow behaves like the pure-survival cap", () => {
+  // 6 on-beat stories, differing only by metaStoryId → guard suppresses nothing,
+  // the cap trims the deterministic loser exactly as before.
+  const entries = ["b0", "b1", "b2", "b3", "b4", "b5"].map((id) => overflowEntry(id, true, { relevanceScore: 8 }));
+  const { kept, dropped, diagnostics } = applyMetaStoryOverflowCap(entries);
+  assert.equal(diagnostics.overflowOutputCount, 5);
+  assert.equal(diagnostics.overflowDroppedCount, 1);
+  assert.deepEqual(diagnostics.overflowDroppedMetaStoryIds, ["b5"]);
+  // Guard did not remove anything (no geo-noise to suppress).
+  assert.equal(diagnostics.thinOnBeatGuardApplied, false);
+  assert.equal(diagnostics.thinOnBeatFilteredCount, 0);
+  assert.deepEqual(kept.map((e) => e.sortKey.metaStoryId), ["b0", "b1", "b2", "b3", "b4"]);
+});
+
+test("applyMetaStoryOverflowCap (guard): no on-beat story → existing overflow behavior preserved", () => {
+  // 6 geo-only/off-beat stories, none on-beat. The guard must NOT force an empty
+  // result — it falls back to the prior pure-survival cap (drop 1, keep 5).
+  const entries = ["g0", "g1", "g2", "g3", "g4", "g5"].map((id) => overflowEntry(id, false, { relevanceScore: 2 }));
+  const { kept, dropped, diagnostics } = applyMetaStoryOverflowCap(entries);
+  assert.equal(diagnostics.overflowOutputCount, 5);
+  assert.equal(diagnostics.overflowDroppedCount, 1);
+  assert.equal(dropped.length, 1);
+  // Highest metaStoryId loses the deterministic tie-break.
+  assert.deepEqual(diagnostics.overflowDroppedMetaStoryIds, ["g5"]);
+  // Guard inactive: nothing suppressed.
+  assert.equal(diagnostics.thinOnBeatGuardApplied, false);
+  assert.equal(diagnostics.thinOnBeatFilteredCount, 0);
+  assert.deepEqual(kept.map((e) => e.sortKey.metaStoryId), ["g0", "g1", "g2", "g3", "g4"]);
+});
+
+test("applyMetaStoryOverflowCap (guard): eligible on-beat ties resolve deterministically", () => {
+  // 4 geo-noise + 6 on-beat stories that tie on EVERY survival key except
+  // metaStoryId. Guard suppresses the geo-noise; the 6 on-beat ties must resolve
+  // to the same top-5 (metaStoryId ascending) on every run.
+  const onBeat = ["c5", "c1", "c3", "c0", "c4", "c2"].map((id) =>
+    overflowEntry(id, true, { relevanceScore: 8, sourceCount: 2, maxBeatFitScore: 0.5, minMinutesAgo: 30 })
+  );
+  const geo = ["x0", "x1", "x2", "x3"].map((id) => overflowEntry(id, false, { relevanceScore: 9 }));
+  // Geo carries a HIGHER relevanceScore than the on-beat rows to prove the guard
+  // excludes on eligibility, not on score — a noisy-but-high-score geo row still
+  // loses to a thin on-beat set.
+  const entries = [...geo, ...onBeat];
+  const run = () => applyMetaStoryOverflowCap(entries);
+  const first = run();
+  const second = run();
+  assert.deepEqual(
+    first.kept.map((e) => e.sortKey.metaStoryId),
+    second.kept.map((e) => e.sortKey.metaStoryId),
+    "guarded survivor set is deterministic across runs"
+  );
+  // The 5 lowest metaStoryIds among the on-beat set survive; c5 is the loser.
+  assert.deepEqual(
+    first.kept.map((e) => e.sortKey.metaStoryId).sort(),
+    ["c0", "c1", "c2", "c3", "c4"]
+  );
+  assert.equal(first.diagnostics.thinOnBeatGuardApplied, true);
+  assert.equal(first.diagnostics.thinOnBeatFilteredCount, 4);
+});
+
+test("isStoryOnBeat: topic/keyword fit is on-beat; geo-only is off-beat", () => {
+  const settings = { topics: ["election"], keywords: ["election"], geographies: ["Colombia"] };
+  // On-beat via topic tag.
+  assert.equal(isStoryOnBeat({ tags: { topics: ["election"], keywords: [], geographies: ["Colombia"] } }, settings), true);
+  // On-beat via keyword tag.
+  assert.equal(isStoryOnBeat({ tags: { topics: ["weather"], keywords: ["election"], geographies: [] } }, settings), true);
+  // Geo-only: matches the configured geography but no topic/keyword → off-beat.
+  assert.equal(isStoryOnBeat({ tags: { topics: ["weather"], keywords: [], geographies: ["Colombia"] } }, settings), false);
+  // Geo evidence in entities must NOT rescue an off-beat story.
+  assert.equal(
+    isStoryOnBeat({ tags: { topics: ["volcano"], keywords: [], geographies: [] }, associated_entities: ["Colombia"] }, settings),
+    false
+  );
+  // No configured beat → every story is treated as on-beat (guard never fires).
+  assert.equal(isStoryOnBeat({ tags: { topics: ["weather"], keywords: [], geographies: ["Colombia"] } }, { geographies: ["Colombia"] }), true);
 });
 
 test("runRefreshPipeline (A4): post-healer >5 stories is capped to 5 with diagnostics", async () => {
@@ -8567,17 +8691,24 @@ test("runRefreshPipeline (Q3A): election-matching story survives cap over generi
     beatFitEnabled: false, // neutralize beat-fit so relevance fit decides survival
   });
 
-  assert.equal(payload.stories.length, 5, "dashboard ships at most 5");
+  // Decision 8C / Phase 2 · Step 2.1 — thin on-beat guard. With an on-beat
+  // election story present, the 5 generic Colombia geo-noise rows are suppressed
+  // from overflow survival rather than backfilling slots: only the election beat
+  // ships ("thin on-beat only" is allowed, even though it lands under the cap).
+  assert.equal(payload.stories.length, 1, "geo-noise is suppressed; only the on-beat election ships");
   assert.equal(log.overflowCap.overflowCapApplied, true);
-  assert.equal(log.overflowCap.overflowDroppedCount, 1);
-  // The election beat survives; the drop is a generic geo-noise row.
+  assert.equal(log.overflowCap.overflowDroppedCount, 5);
+  assert.equal(log.overflowCap.thinOnBeatGuardApplied, true);
+  assert.equal(log.overflowCap.thinOnBeatFilteredCount, 5);
+  // The election beat survives; every drop is a generic geo-noise row.
   assert.ok(
     payload.stories.some((s) => s.metaStoryId === "beat-election"),
     "the configured-beat election story must survive the overflow cap"
   );
-  // Among 5 identical noise rows the highest metaStoryId loses the stable
-  // tie-break, so "noise-4" is the deterministic drop (never the election beat).
-  assert.deepEqual(log.overflowCap.overflowDroppedMetaStoryIds, ["noise-4"]);
+  assert.deepEqual(
+    log.overflowCap.overflowDroppedMetaStoryIds.slice().sort(),
+    ["noise-0", "noise-1", "noise-2", "noise-3", "noise-4"]
+  );
 });
 
 test("runRefreshPipeline (Q3A): survival drop is deterministic across runs", async () => {
