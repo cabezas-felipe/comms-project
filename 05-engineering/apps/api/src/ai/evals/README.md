@@ -614,6 +614,24 @@ fixed fixtures). Streams a `✓`/`✗` line per scenario/floor/preset, then a SU
 
 Absent all three, keep 0.35.
 
+### CI wiring (two complementary PR gates)
+
+- [`.github/workflows/api-quality-gate.yml`](../../../../../../.github/workflows/api-quality-gate.yml)
+  — the broad gate. Triggers on any `05-engineering/**` change and runs the full
+  api suite + critical hard-fail suite + the hermetic `eval:dashboard-quality-gate`.
+- [`.github/workflows/relevance-path-gate.yml`](../../../../../../.github/workflows/relevance-path-gate.yml)
+  — a narrower, **path-filtered** relevance gate (Phase 3 · Step 3.2). Fires only
+  when a PR touches the dashboard relevance pipeline (`src/dashboard/**`), its
+  evals (`src/ai/evals/**`), the relevance diagnostics contracts
+  (`packages/contracts/src/**`), or the prototype surfaces that render them
+  (`DashboardRunDiagnostics.tsx`, `lib/api.ts`, `pages/Dashboard.tsx`). It runs
+  the targeted relevance tests + the `eval:dashboard-elections-colombia`
+  acceptance eval. It **complements, does not replace** the quality gate, and
+  notably also fires on `04-prototype/**` relevance changes that the api gate
+  doesn't watch. Live, network-dependent evals
+  (`eval:dashboard-live-colombia-election`) stay **advisory** — never wired as a
+  required check here.
+
 ---
 
 ## Pre-cluster Weight Calibration (Decision 10D)
