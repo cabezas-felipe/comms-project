@@ -322,6 +322,127 @@ A run does **not** count if any of these were true during it:
 
 ---
 
+## Live Colombia-election smoke (advisory)
+
+A single, trustworthy **manual confidence check** that the dashboard relevance
+behavior still holds on **live feed data**. It complements the hermetic evals:
+those prove the pipeline on fixed fixtures; this one runs the same relevance
+pipeline over the live RSS pool the dashboard refresh actually consumes.
+
+- **Purpose** — catch a relevance regression that only shows up on live-shaped
+  data (unexpected geo signal, the cap not biting, Decision 5C ordering
+  inverting) without waiting for a user to notice.
+- **Scope** — validates the live pool + relevance gates (recall, geo precision,
+  C1 cluster-input cap, A4 overflow / thin-on-beat geo-noise guard, Decision 5C
+  ordering). It is **not** a deterministic product verdict — the verdict depends
+  on whatever the feeds carry right now.
+- **Non-blocking** — **advisory**, never a required CI gate. Only the live
+  *fetch* is non-deterministic; everything downstream is deterministic and
+  provider-free (lexical recall + a deterministic cluster stub, **no LLM /
+  embedding spend**). See
+  [`dashboard-live-colombia-election-core.mjs`](../apps/api/src/ai/evals/dashboard-live-colombia-election-core.mjs)
+  and the eval [README](../apps/api/src/ai/evals/README.md).
+
+### Prerequisites
+
+```bash
+# 1. Ensure you are on the intended branch with up-to-date code
+
+# 2. Install deps in the engineering workspace
+cd 05-engineering
+npm ci          # or `npm install`
+```
+
+- Run all commands from `05-engineering` (the workspace root).
+- **No provider key required.** `eval:dashboard-live-colombia-election` runs the
+  relevance pipeline in lexical (`keyword`) recall with a deterministic cluster
+  stub — it never calls Anthropic / OpenAI / an embedding provider, so missing
+  keys / `TEMPO_AI_MOCK_ONLY` are irrelevant to it.
+- The only live dependency is **outbound network** to fetch RSS (the production
+  `readFeedItems` live path). A network blip surfaces as a failing *check*, not a
+  crash (see "Execution error" below).
+- Live data dir defaults to `apps/api/data` (override with `TEMPO_DATA_DIR`).
+
+### Commands (copy-paste runnable)
+
+```bash
+cd 05-engineering
+
+# 1. Targeted relevance tests (fast, hermetic — the four relevance suites only)
+npm run test:relevance-path --workspace=@tempo/api
+
+# 2. Hermetic acceptance eval (fixed fixture — deterministic verdict)
+npm run eval:dashboard-elections-colombia --workspace=@tempo/api
+
+# 3. Live advisory smoke (non-hermetic; exit 0 unless a true execution error)
+npm run eval:dashboard-live-colombia-election --workspace=@tempo/api
+
+# 4. Optional — same run, also writing a JSON artifact under apps/api/.artifacts/
+npm run eval:dashboard-live-colombia-election:json --workspace=@tempo/api
+```
+
+Optional **strict** mode (opt-in gate — non-zero exit on any failed check; use
+for an on-demand confidence run when election coverage is known to be live):
+
+```bash
+npm run eval:dashboard-live-colombia-election --workspace=@tempo/api -- --strict
+```
+
+### How to interpret outcomes
+
+| Outcome | What you see | Read it as |
+| --- | --- | --- |
+| **Pass / healthy** | `status: OK`, election signal present, checks pass, cap/overflow/5C diagnostics coherent | Live relevance behavior holds — done. |
+| **Neutral expected** | one or more checks marked `•`/"neutral" — "cap not exercised", "overflow not exercised", or 5C "not observable in this run" | Normal in a small or quiet window; the scenario simply isn't present. Not a failure. |
+| **Actionable fail** | election presence missing across **repeated** windows, incoherent cap diagnostics (clusterInput ≠ cap, drop math off), or a real Decision 5C inversion (configured-geo survives the cap *worse* than cross-country) | Investigate — likely a relevance regression. Follow the escalation path. |
+| **Execution error** | `EXECUTION ERROR — …` (pipeline crash / bad config) — exit 1 even in advisory mode | Treat separately from live variability — it's a code/config problem, not a feed-window artifact. |
+
+> A single advisory run printing failed checks **still exits 0** — failures are
+> printed for a human, not to gate CI. Only `--strict` (or a true execution
+> error) yields a non-zero exit.
+
+### Repeatability (reduce false alarms)
+
+- **Run it 2–3 times across a wider time window** before escalating — live
+  windows are noisy, and "no Colombia election coverage right now" is a real,
+  non-regression state.
+- **Compare against a recent known-good run / artifact** (the `:json` output) —
+  look for a *change* in cap coherence or 5C survival rate, not just an absolute
+  miss.
+- **When escalating, capture evidence**: the full console output **and** the JSON
+  artifact (`apps/api/.artifacts/dashboard-live-colombia-election.json`).
+
+### Escalation path (when live smoke looks bad)
+
+1. **Re-run the hermetic acceptance eval** —
+   `npm run eval:dashboard-elections-colombia --workspace=@tempo/api`.
+2. **Re-run the targeted relevance tests** —
+   `npm run test:relevance-path --workspace=@tempo/api`.
+3. **Hermetic PASSES but live stays suspect** → log it as a **live-drift
+   investigation** (Phase 4.1 input), attaching the captured output + JSON
+   artifact. Do **not** block merge on live variability alone.
+4. **Hermetic FAILS** → treat as a **regression**: block the merge and fix the
+   pipeline before shipping.
+
+### CI context
+
+Two complementary PR gates back this up — the live smoke is intentionally **not**
+one of them:
+
+- [`api-quality-gate.yml`](../../.github/workflows/api-quality-gate.yml) — broad
+  gate; full api suite + critical suite + hermetic `eval:dashboard-quality-gate`
+  on any `05-engineering/**` change.
+- [`relevance-path-gate.yml`](../../.github/workflows/relevance-path-gate.yml) —
+  narrow, path-filtered relevance gate (`test:relevance-path` +
+  `eval:dashboard-elections-colombia`) that also fires on `04-prototype/**`
+  relevance surfaces.
+
+The live `eval:dashboard-live-colombia-election` is **advisory by design** and is
+deliberately excluded from both required PR checks — run it manually (this
+section) or on a schedule.
+
+---
+
 _Canonical behavior sources live in the modules linked above; this runbook is the
 operational index, not the spec. Related: [cold-start spec](cold-start-v1.md),
 [refresh SLO runbook](runbook-refresh-slo.md), [translation runbook](runbook-translation-activation.md)._
