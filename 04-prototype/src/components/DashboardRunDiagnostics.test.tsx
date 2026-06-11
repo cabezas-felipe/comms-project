@@ -147,3 +147,52 @@ describe("DashboardRunDiagnostics — C1 split/overflow/recluster rows", () => {
     expect(screen.getByTestId("diag-overflow-cap").textContent).toContain("not_applied");
   });
 });
+
+describe("DashboardRunDiagnostics — Phase 4 · Step 3 refresh fail-safe row (diag-refr)", () => {
+  const base = {
+    clusteringFailed: false,
+    clusteringFailureReason: null,
+    clusteringAttempts: null,
+    funnel: null,
+    recall: null,
+    selection: null,
+  } as const;
+
+  it("renders status=failed with reason/subtype/attempts/retryable + usedPriorSnapshot", () => {
+    render(
+      <DashboardRunDiagnostics
+        {...base}
+        refreshFailsafe={{
+          refreshStatus: "failed",
+          usedPriorSnapshot: true,
+          refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 2, retryable: false, retryAfterMs: null, nextRetryAt: null },
+        }}
+      />,
+    );
+    const row = screen.getByTestId("diag-refr");
+    expect(row.textContent).toContain("status=failed");
+    expect(row.textContent).toContain("reason=clustering_failure");
+    expect(row.textContent).toContain("subtype=parse");
+    expect(row.textContent).toContain("attempts=2");
+    expect(row.textContent).toContain("retryable=false");
+    expect(row.textContent).toContain("usedPriorSnapshot=true");
+  });
+
+  it("renders status=ok (no failure detail) when refresh succeeded", () => {
+    render(
+      <DashboardRunDiagnostics
+        {...base}
+        refreshFailsafe={{ refreshStatus: "ok", usedPriorSnapshot: false, refreshFailure: null }}
+      />,
+    );
+    const row = screen.getByTestId("diag-refr");
+    expect(row.textContent).toContain("status=ok");
+    expect(row.textContent).toContain("usedPriorSnapshot=false");
+    expect(row.textContent).not.toContain("subtype=");
+  });
+
+  it("shows n/a when refreshFailsafe is absent (older payload)", () => {
+    render(<DashboardRunDiagnostics {...base} />);
+    expect(screen.getByTestId("diag-refr").textContent).toContain("n/a");
+  });
+});

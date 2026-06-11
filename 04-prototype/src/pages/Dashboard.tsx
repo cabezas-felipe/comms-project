@@ -4,7 +4,7 @@ import { Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
 import StoryCard from "@/components/StoryCard";
 import SourceReader from "@/components/SourceReader";
-import { ClusteringFailedState, EmptyState, ErrorState, LoadingState } from "@/components/StateBlocks";
+import { ClusteringFailedState, EmptyState, ErrorState, LoadingState, RefreshFailedBanner, RefreshFailedState } from "@/components/StateBlocks";
 import {
   trackDashboardViewed,
   trackSourceOpenError,
@@ -28,6 +28,7 @@ import {
   type DashboardOverflowCapMeta,
   type DashboardClusterCapMeta,
   type DashboardReclusterExecutionMeta,
+  type DashboardRefreshFailsafeMeta,
 } from "@/lib/api";
 import { DashboardRunDiagnostics } from "@/components/DashboardRunDiagnostics";
 import { formatKeywordLabel } from "@/lib/format";
@@ -193,6 +194,14 @@ export default function Dashboard() {
   const [clusteringFailureReason, setClusteringFailureReason] = useState<
     "timeout" | "error" | null
   >(null);
+  // Phase 4 · Step 3: refresh fail-safe status lifted from `_meta` (Step 2 server
+  // contract). `refreshStatus="failed"` means the refresh itself failed (parse /
+  // timeout / provider issue) — distinct from a quiet beat. When stories are
+  // present alongside it (server preserved a prior snapshot) we keep rendering
+  // them under a non-blocking warning banner; when empty we render a dedicated
+  // failure-aware empty state instead of the quiet copy.
+  const [refreshFailsafe, setRefreshFailsafe] =
+    useState<DashboardRefreshFailsafeMeta | null>(null);
   // Slice 3: extra `_meta` diagnostics from the latest successful fetch, used
   // only by the debug panel (gated below). Captured alongside stories so the
   // panel reflects whatever last updated the feed.
@@ -328,6 +337,13 @@ export default function Dashboard() {
       setHasLoadedOnce(true);
       setClusteringFailed(result.clusteringFailed);
       setClusteringFailureReason(result.clusteringFailureReason);
+      // Phase 4 · Step 3: capture the refresh fail-safe status so the render
+      // path can show a failure banner / failure-aware empty state.
+      setRefreshFailsafe({
+        refreshStatus: result.refreshStatus,
+        refreshFailure: result.refreshFailure,
+        usedPriorSnapshot: result.usedPriorSnapshot,
+      });
       setRunDiagnostics({
         clusteringAttempts: result.clusteringAttempts,
         selection: result.selection,
@@ -781,6 +797,7 @@ export default function Dashboard() {
               clusterCap={runDiagnostics?.clusterCap ?? null}
               reclusterExecution={runDiagnostics?.reclusterExecution ?? null}
               reclusterQueueCount={runDiagnostics?.reclusterQueueCount ?? null}
+              refreshFailsafe={refreshFailsafe}
             />
           )}
 
@@ -788,6 +805,21 @@ export default function Dashboard() {
           {loadError && stories.length > 0 && (
             <ErrorState variant="dense" onRetry={handleRetry} />
           )}
+
+          {/* Phase 4 · Step 3: non-blocking fail-safe banner — the refresh failed
+              (HTTP-ok but refreshStatus="failed") and the server EXPLICITLY preserved
+              a prior snapshot (usedPriorSnapshot=true), so the on-screen stories are
+              known prior-snapshot continuity. The usedPriorSnapshot guard keeps the
+              "Showing your last results" copy honest: we never show it for a
+              hypothetical failed+stories case where continuity isn't guaranteed.
+              Distinct from the fetch-error banner above (which is for a failed HTTP
+              fetch). */}
+          {!loadError &&
+            refreshFailsafe?.refreshStatus === "failed" &&
+            refreshFailsafe?.usedPriorSnapshot === true &&
+            stories.length > 0 && (
+              <RefreshFailedBanner onRetry={handleRetry} />
+            )}
 
           {/* Feed zone — distinguishes loading / fetch error / legitimate empty */}
           {(() => {
@@ -823,6 +855,20 @@ export default function Dashboard() {
                   reason={clusteringFailureReason}
                 />
               );
+            }
+            // Phase 4 · Step 3: refresh failed (Step 2 contract) with no stories
+            // to show and no prior snapshot to preserve. Failure-aware empty state
+            // — must NOT read as a quiet beat. Ordered after the clustering branch
+            // so a clustering fail-closed keeps its dedicated copy; this catches
+            // the broader failure surface (e.g. a pipeline exception).
+            if (
+              !isLoading &&
+              !loadError &&
+              stories.length === 0 &&
+              hasLoadedOnce &&
+              refreshFailsafe?.refreshStatus === "failed"
+            ) {
+              return <RefreshFailedState onRetry={handleRetry} />;
             }
             // Backend returned 0 stories (legitimately empty after a successful fetch).
             if (!isLoading && !loadError && stories.length === 0 && hasLoadedOnce) {

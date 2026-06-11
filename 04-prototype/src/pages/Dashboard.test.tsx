@@ -91,6 +91,10 @@ const OK_RESULT = {
   funnel: null,
   recall: null,
   whyEnrichment: null,
+  // Phase 4 · Step 3 fail-safe contract — default healthy.
+  refreshStatus: "ok",
+  refreshFailure: null,
+  usedPriorSnapshot: false,
 };
 
 afterEach(() => {
@@ -301,6 +305,85 @@ describe("Dashboard load states (no fake-story fallback)", () => {
     // Must NOT show the generic quiet-beat empty state.
     expect(screen.queryByTestId("dashboard-empty")).toBeNull();
     expect(screen.queryByText("No stories yet.")).toBeNull();
+  });
+
+  // ── Phase 4 · Step 3: refresh fail-safe surface ──────────────────────────
+  it("Step 3: ok + 0 stories → quiet empty state (NOT a failure surface)", async () => {
+    fetchSpy.mockResolvedValue({ ...OK_RESULT, refreshStatus: "ok", refreshFailure: null });
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
+    expect(screen.getByText("No stories yet.")).toBeInTheDocument();
+    // No failure surfaces.
+    expect(screen.queryByTestId("dashboard-refresh-failed")).toBeNull();
+    expect(screen.queryByTestId("dashboard-refresh-banner")).toBeNull();
+  });
+
+  it("Step 3: failed + 0 stories → failure-aware empty state, distinct from quiet", async () => {
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      refreshStatus: "failed",
+      usedPriorSnapshot: false,
+      refreshFailure: { reason: "pipeline_exception", subtype: "unknown", attempts: 1, retryable: true, retryAfterMs: null, nextRetryAt: null },
+    });
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-refresh-failed")).toBeInTheDocument();
+    expect(screen.getByText("Couldn't refresh stories right now")).toBeInTheDocument();
+    // Must NOT read as the quiet beat.
+    expect(screen.queryByTestId("dashboard-empty")).toBeNull();
+    expect(screen.queryByText("No stories yet.")).toBeNull();
+  });
+
+  it("Step 3: failed + stories + usedPriorSnapshot=true → renders stories WITH a non-blocking banner", async () => {
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "kept-1", title: "Kept story" })] },
+      refreshStatus: "failed",
+      usedPriorSnapshot: true,
+      refreshFailure: { reason: "clustering_failure", subtype: "timeout", attempts: 2, retryable: true, retryAfterMs: null, nextRetryAt: null },
+    });
+    renderAt(null);
+    // Stories stay on-screen…
+    expect(await screen.findByText("Kept story")).toBeInTheDocument();
+    // …under the fail-safe warning banner.
+    expect(screen.getByTestId("dashboard-refresh-banner")).toBeInTheDocument();
+    // Neither the failure-empty nor the quiet-empty surfaces show with stories present.
+    expect(screen.queryByTestId("dashboard-refresh-failed")).toBeNull();
+    expect(screen.queryByTestId("dashboard-empty")).toBeNull();
+  });
+
+  it("Step 3: failed + stories + usedPriorSnapshot=false → NO banner (continuity not guaranteed)", async () => {
+    // The "Showing your last results" copy must only appear when the server
+    // explicitly marked the stories as preserved prior-snapshot continuity.
+    // Without that guarantee we render the stories but suppress the banner.
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "kept-1", title: "Kept story" })] },
+      refreshStatus: "failed",
+      usedPriorSnapshot: false,
+      refreshFailure: { reason: "clustering_failure", subtype: "timeout", attempts: 2, retryable: true, retryAfterMs: null, nextRetryAt: null },
+    });
+    renderAt(null);
+    // Stories still render…
+    expect(await screen.findByText("Kept story")).toBeInTheDocument();
+    // …but the misleading banner is suppressed.
+    expect(screen.queryByTestId("dashboard-refresh-banner")).toBeNull();
+  });
+
+  it("Step 3: the fail-safe banner retry routes through the default-profile refresh", async () => {
+    fetchSpy.mockResolvedValueOnce({
+      ...OK_RESULT,
+      payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "kept-1", title: "Kept story" })] },
+      refreshStatus: "failed",
+      usedPriorSnapshot: true,
+      refreshFailure: { reason: "clustering_failure", subtype: "timeout", attempts: 2, retryable: true, retryAfterMs: null, nextRetryAt: null },
+    });
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-refresh-banner")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    // After a clean retry the banner clears and the quiet-beat empty returns.
+    expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
+    expect(refreshSpy).toHaveBeenCalledWith({ endpoint: "/api/dashboard/refresh?profile=default" });
   });
 
   it("Slice 10: clustering-failed Refresh action retries via the default-profile endpoint", async () => {

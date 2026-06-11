@@ -95,6 +95,44 @@ export interface DashboardFetchResult {
    * `_meta.reclusterQueueCount`. `null` when absent.
    */
   reclusterQueueCount: number | null;
+  /**
+   * Phase 4 · Step 3: refresh fail-safe status lifted from `_meta`
+   * (`refreshStatus` / `refreshFailure` / `usedPriorSnapshot` — the Step 2 server
+   * contract). Lets the UI tell a TRUE quiet/empty success apart from a refresh
+   * FAILURE that also returns zero stories. On legacy payloads that omit these
+   * fields this defaults to `refreshStatus: "ok"`, `refreshFailure: null`,
+   * `usedPriorSnapshot: false` — pre-Step-3 behavior, never a false failure.
+   * Parsed defensively off the raw `_meta`; never schema-validated.
+   */
+  refreshStatus: "ok" | "failed";
+  refreshFailure: DashboardRefreshFailure | null;
+  usedPriorSnapshot: boolean;
+}
+
+/** Phase 4 · Step 2/3 wire vocabulary for a classified refresh failure. */
+export type RefreshFailureSubtype = "parse" | "timeout" | "provider_request" | "unknown";
+
+/**
+ * Structured refresh failure lifted from `_meta.refreshFailure`. All fields are
+ * nullable except `subtype` (which falls back to `"unknown"`) so a partial or
+ * forward-compatible payload never throws. `reason` is a free string from the
+ * server (e.g. `"clustering_failure"`, `"pipeline_exception"`).
+ */
+export interface DashboardRefreshFailure {
+  reason: string | null;
+  subtype: RefreshFailureSubtype;
+  attempts: number | null;
+  retryable: boolean | null;
+  /** Optional retry-timing hints; null when the server omits them. */
+  retryAfterMs: number | null;
+  nextRetryAt: string | null;
+}
+
+/** Phase 4 · Step 3: parsed fail-safe status surface (subset spread into the result). */
+export interface DashboardRefreshFailsafeMeta {
+  refreshStatus: "ok" | "failed";
+  refreshFailure: DashboardRefreshFailure | null;
+  usedPriorSnapshot: boolean;
 }
 
 /** Subset of the server progressive-enrichment state surfaced for the client poll loop. */
@@ -320,6 +358,55 @@ function numOrNull(v: unknown): number | null {
 
 function strOrNull(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+const REFRESH_FAILSAFE_META_DEFAULT: DashboardRefreshFailsafeMeta = {
+  refreshStatus: "ok",
+  refreshFailure: null,
+  usedPriorSnapshot: false,
+};
+
+const REFRESH_FAILURE_SUBTYPES: readonly RefreshFailureSubtype[] = [
+  "parse",
+  "timeout",
+  "provider_request",
+  "unknown",
+];
+
+/**
+ * Lift the Phase 4 Step 2 refresh fail-safe status off the raw `_meta`. Tolerant
+ * of any shape: a missing/garbled `_meta`, missing keys, or wrong types all
+ * degrade to `refreshStatus: "ok"` with a null failure — a malformed or legacy
+ * response must NEVER read as a failure. Only an explicit `refreshStatus ===
+ * "failed"` flips the status. Mirrors `parseClusteringMetaSafe`; never throws.
+ */
+function parseRefreshFailsafeMetaSafe(meta: unknown): DashboardRefreshFailsafeMeta {
+  if (!meta || typeof meta !== "object") return REFRESH_FAILSAFE_META_DEFAULT;
+  const m = meta as Record<string, unknown>;
+  const usedPriorSnapshot = m.usedPriorSnapshot === true;
+  if (m.refreshStatus !== "failed") {
+    return { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot };
+  }
+  const rawFailure =
+    m.refreshFailure && typeof m.refreshFailure === "object"
+      ? (m.refreshFailure as Record<string, unknown>)
+      : {};
+  const subtype = rawFailure.subtype;
+  const retryable = rawFailure.retryable;
+  return {
+    refreshStatus: "failed",
+    refreshFailure: {
+      reason: strOrNull(rawFailure.reason),
+      subtype: REFRESH_FAILURE_SUBTYPES.includes(subtype as RefreshFailureSubtype)
+        ? (subtype as RefreshFailureSubtype)
+        : "unknown",
+      attempts: numOrNull(rawFailure.attempts),
+      retryable: typeof retryable === "boolean" ? retryable : null,
+      retryAfterMs: numOrNull(rawFailure.retryAfterMs),
+      nextRetryAt: parseIsoTimestampSafe(rawFailure.nextRetryAt),
+    },
+    usedPriorSnapshot,
+  };
 }
 
 /**
@@ -576,10 +663,12 @@ async function requestDashboard<TExtras extends object>({
       const clusterCap = parseClusterCapMetaSafe(meta?.clusterCap);
       const reclusterExecution = parseReclusterExecutionMetaSafe(meta?.reclusterExecution);
       const reclusterQueueCount = numOrNull(meta?.reclusterQueueCount);
+      const refreshFailsafe = parseRefreshFailsafeMetaSafe(meta);
       const extras = parseExtras ? parseExtras(raw) : ({} as TExtras);
       return {
         payload, selection, refreshedAt, lastCheckedAt, ...clustering, funnel, recall, whyEnrichment,
-        clusterSplit, overflowCap, clusterCap, reclusterExecution, reclusterQueueCount, ...extras,
+        clusterSplit, overflowCap, clusterCap, reclusterExecution, reclusterQueueCount,
+        ...refreshFailsafe, ...extras,
       };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
