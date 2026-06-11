@@ -917,6 +917,75 @@ function emptyDashboardResponse(metaExtra = {}) {
   };
 }
 
+// ─── Phase 4 · Step 2: refresh fail-safe contract ────────────────────────────
+// Explicit, machine-readable refresh status on `_meta` so a client can tell a
+// TRUE quiet/empty success apart from a refresh FAILURE that also returns
+// `stories: []` (a clustering fail-closed run with no prior snapshot). Without
+// this, both look identical on the wire and normal UX reads a failure as "quiet".
+//
+//   _meta.refreshStatus      "ok" | "failed"
+//   _meta.refreshFailure     null on ok; { reason, subtype, attempts, retryable } on failure
+//   _meta.usedPriorSnapshot  true ONLY when served stories came from a preserved
+//                            prior snapshot due to a failure (continuity); false
+//                            on success — including valid quiet/unchanged windows.
+//
+// The pipeline classifies clustering failures with an INTERNAL subtype vocabulary
+// ("timeout_budget" | "parse" | "provider_request" | "unknown"); we map it to the
+// stable WIRE subtype ("timeout" | "parse" | "provider_request" | "unknown") so
+// the public contract is decoupled from internal naming.
+const CLUSTERING_SUBTYPE_TO_CONTRACT = Object.freeze({
+  timeout_budget: "timeout",
+  timeout: "timeout",
+  parse: "parse",
+  provider_request: "provider_request",
+  unknown: "unknown",
+});
+
+function toContractFailureSubtype(rawSubtype) {
+  if (rawSubtype == null) return "unknown";
+  return CLUSTERING_SUBTYPE_TO_CONTRACT[rawSubtype] ?? "unknown";
+}
+
+// Transient subtypes (a later attempt may succeed) are retryable; a parse failure
+// (the model emitted unparseable output) and an unclassified failure are reported
+// non-retryable so clients don't hot-loop a likely-deterministic failure. Retry
+// TIMING (retryAfterMs / nextRetryAt) is omitted — in-pipeline retries are
+// immediate and carry no externally-meaningful schedule.
+function isRetryableFailureSubtype(subtype) {
+  return subtype === "timeout" || subtype === "provider_request";
+}
+
+/**
+ * Derive the additive refresh fail-safe `_meta` fields from a pipeline `log`.
+ * `usedPriorSnapshot` is decided by the caller (true only when the served stories
+ * came from a preserved prior snapshot). Returns the same three-field shape on
+ * every branch so the contract is uniform across success and failure.
+ */
+export function buildRefreshFailsafeMeta({ log = {}, usedPriorSnapshot = false } = {}) {
+  const reason = log?.clusteringFailureReason ?? null;
+  if (reason == null) {
+    return { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot };
+  }
+  const subtype = toContractFailureSubtype(log?.clusteringFailureSubtype);
+  // A failure represents at least one attempted run — `attempts=0` on a failed
+  // refresh is ambiguous. Use the pipeline's count when it's a finite >=1 value;
+  // otherwise floor to 1 (missing/zero/invalid count still means "we tried").
+  const attempts =
+    Number.isFinite(log?.clusteringAttempts) && log.clusteringAttempts >= 1
+      ? log.clusteringAttempts
+      : 1;
+  return {
+    refreshStatus: "failed",
+    refreshFailure: {
+      reason: "clustering_failure",
+      subtype,
+      attempts,
+      retryable: isRetryableFailureSubtype(subtype),
+    },
+    usedPriorSnapshot,
+  };
+}
+
 app.get("/api/dashboard", async (req, res) => {
   const identity = await requireIdentity(req, res);
   if (!identity) return;
@@ -1139,7 +1208,17 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         body: {
           ...body,
           _meta: attachInternalsToMeta(
-            { ...baseMeta, refreshSkippedReason: "in_flight", unchanged: false, lastCheckedAt },
+            {
+              ...baseMeta,
+              refreshSkippedReason: "in_flight",
+              unchanged: false,
+              lastCheckedAt,
+              // Step 2: in-flight is NOT a failure (a concurrent refresh is
+              // running and we re-serve the healthy snapshot) → status "ok".
+              refreshStatus: "ok",
+              refreshFailure: null,
+              usedPriorSnapshot: false,
+            },
             { selectionMeta }
           ),
         },
@@ -1152,6 +1231,10 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         refreshSkippedReason: "in_flight",
         unchanged: false,
         lastCheckedAt,
+        // Step 2: in-flight skip is not a failure; no prior snapshot to serve.
+        refreshStatus: "ok",
+        refreshFailure: null,
+        usedPriorSnapshot: false,
       }),
     };
   }
@@ -1399,6 +1482,11 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       const skipMeta = {
         unchanged: true,
         refreshSkippedReason: "unchanged_watermark",
+        // Step 2 (refresh-failsafe-contract): a watermark-unchanged skip is a
+        // valid quiet window → refreshStatus="ok". `usedPriorSnapshot` stays
+        // false: this flag marks failure-driven continuity, not a normal
+        // no-change result. (log.clusteringFailureReason is null on this path.)
+        ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false }),
         watermark: log.watermark,
         candidateCount: log.candidateCount,
         selectedFeedCount: log.selectedFeedCount,
@@ -1515,6 +1603,11 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         // kept the prior healthy stories because clustering failed" from a
         // normal unchanged-watermark skip.
         snapshotPreserved: true,
+        // Step 2 (refresh-failsafe-contract): explicit failure status with the
+        // prior healthy stories preserved — refreshStatus="failed" +
+        // usedPriorSnapshot=true distinguishes "kept old stories because refresh
+        // broke" from a true quiet/unchanged success.
+        ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: true }),
         usedFallbackClustering: log.usedFallbackClustering,
         clusteringFailureReason: log.clusteringFailureReason,
         clusteringAttempts: log.clusteringAttempts,
@@ -1860,6 +1953,11 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
           clusteringRecoverySubtype: log.clusteringRecoverySubtype ?? null,
           clusteringAttempts: log.clusteringAttempts,
           clusteringLatencyMs: log.clusteringLatencyMs,
+          // Step 2 (refresh-failsafe-contract): explicit refresh status. On the
+          // "ran" branch no prior snapshot is reused — this is a fresh publish
+          // (which is EMPTY on a fail-closed-no-prior run). `refreshStatus` is
+          // "failed" there so the empty result is never read as a quiet success.
+          ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false }),
           // Phase 2 lightweight decision trace.  Optional, compact,
           // backend-only.  Carries stage counts, beat-fit details, and a
           // capped sample of exclusions — no raw source bodies.
@@ -1900,7 +1998,28 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         return {
           kind: "error_fallback",
           httpStatus: 200,
-          body: { ...lastBody, _meta: { ...baseMeta, fallback: true, lastCheckedAt } },
+          body: {
+            ...lastBody,
+            _meta: {
+              ...baseMeta,
+              fallback: true,
+              lastCheckedAt,
+              // Step 2 (refresh-failsafe-contract): the pipeline threw and we
+              // served the prior snapshot as a soft fallback — this is a refresh
+              // FAILURE that returns prior stories, so it must not read as a
+              // healthy refresh. The thrown error is not a classified clustering
+              // failure, so reason is the generic "pipeline_exception"; treated
+              // as retryable (a re-run may succeed). attempts=1 (one run made).
+              refreshStatus: "failed",
+              refreshFailure: {
+                reason: "pipeline_exception",
+                subtype: "unknown",
+                attempts: 1,
+                retryable: true,
+              },
+              usedPriorSnapshot: true,
+            },
+          },
         };
       }
     } catch { /* ignore */ }

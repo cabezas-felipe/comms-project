@@ -3,6 +3,8 @@ import {
   CONTRACT_VERSION,
   dashboardPayloadSchema,
   dashboardClusterCapMetaSchema,
+  dashboardRefreshFailsafeMetaSchema,
+  refreshFailureSchema,
   settingsPayloadSchema,
   sourceSchema,
   storySchema,
@@ -250,6 +252,121 @@ describe("settingsPayloadSchema", () => {
         traditionalSources: ["NYT"],
         socialSources: ["@handle"],
       })
+    ).toThrow();
+  });
+});
+
+describe("refreshFailureSchema", () => {
+  const validFailure = {
+    reason: "clustering_failure",
+    subtype: "parse" as const,
+    attempts: 2,
+    retryable: false,
+  };
+
+  it("accepts a minimal failure (no retry timing)", () => {
+    const parsed = refreshFailureSchema.parse(validFailure);
+    expect(parsed.subtype).toBe("parse");
+    expect(parsed.retryAfterMs).toBeUndefined();
+    expect(parsed.nextRetryAt).toBeUndefined();
+  });
+
+  it("accepts the optional additive retry-timing fields when present", () => {
+    const parsed = refreshFailureSchema.parse({
+      ...validFailure,
+      subtype: "timeout",
+      retryable: true,
+      retryAfterMs: 1500,
+      nextRetryAt: "2026-06-10T00:00:01.500Z",
+    });
+    expect(parsed.retryAfterMs).toBe(1500);
+    expect(parsed.nextRetryAt).toBe("2026-06-10T00:00:01.500Z");
+  });
+
+  it("accepts each known subtype", () => {
+    for (const subtype of ["parse", "timeout", "provider_request", "unknown"] as const) {
+      expect(refreshFailureSchema.parse({ ...validFailure, subtype }).subtype).toBe(subtype);
+    }
+  });
+
+  it("rejects an unknown subtype", () => {
+    expect(() => refreshFailureSchema.parse({ ...validFailure, subtype: "explosion" })).toThrow();
+  });
+
+  it("rejects a non-integer / negative attempts count", () => {
+    expect(() => refreshFailureSchema.parse({ ...validFailure, attempts: -1 })).toThrow();
+    expect(() => refreshFailureSchema.parse({ ...validFailure, attempts: 1.5 })).toThrow();
+  });
+});
+
+describe("dashboardRefreshFailsafeMetaSchema", () => {
+  // "Legacy" here = a real `_meta` object that predates this contract: it carries
+  // assorted diagnostic keys but none of the fail-safe fields. The fail-safe
+  // fields are now always emitted, so a current `_meta` is the legacy diagnostics
+  // PLUS the three new keys — passthrough keeps both valid (additive).
+  const legacyMetaDiagnostics = {
+    hasSnapshot: true,
+    unchanged: false,
+    clusteringFailureReason: null,
+    clusteringAttempts: 0,
+    watermark: "wm-1",
+  };
+
+  it("ok success: refreshStatus=ok, refreshFailure=null, carries legacy keys (back-compat)", () => {
+    const parsed = dashboardRefreshFailsafeMetaSchema.parse({
+      ...legacyMetaDiagnostics,
+      refreshStatus: "ok",
+      refreshFailure: null,
+      usedPriorSnapshot: false,
+    });
+    expect(parsed.refreshStatus).toBe("ok");
+    expect(parsed.refreshFailure).toBeNull();
+    expect(parsed.usedPriorSnapshot).toBe(false);
+    // Legacy diagnostic keys survive validation via passthrough.
+    expect((parsed as Record<string, unknown>).watermark).toBe("wm-1");
+  });
+
+  it("failed + prior snapshot: enriched payload with full failure object", () => {
+    const parsed = dashboardRefreshFailsafeMetaSchema.parse({
+      ...legacyMetaDiagnostics,
+      clusteringFailureReason: "error",
+      refreshStatus: "failed",
+      refreshFailure: {
+        reason: "clustering_failure",
+        subtype: "parse",
+        attempts: 2,
+        retryable: false,
+      },
+      usedPriorSnapshot: true,
+    });
+    expect(parsed.refreshStatus).toBe("failed");
+    expect(parsed.refreshFailure?.subtype).toBe("parse");
+    expect(parsed.usedPriorSnapshot).toBe(true);
+  });
+
+  it("rejects an invalid refreshStatus value", () => {
+    expect(() =>
+      dashboardRefreshFailsafeMetaSchema.parse({
+        refreshStatus: "degraded",
+        refreshFailure: null,
+        usedPriorSnapshot: false,
+      })
+    ).toThrow();
+  });
+
+  it("rejects a failed status whose failure object has a bad subtype", () => {
+    expect(() =>
+      dashboardRefreshFailsafeMetaSchema.parse({
+        refreshStatus: "failed",
+        refreshFailure: { reason: "clustering_failure", subtype: "nope", attempts: 1, retryable: true },
+        usedPriorSnapshot: true,
+      })
+    ).toThrow();
+  });
+
+  it("rejects when usedPriorSnapshot is missing", () => {
+    expect(() =>
+      dashboardRefreshFailsafeMetaSchema.parse({ refreshStatus: "ok", refreshFailure: null })
     ).toThrow();
   });
 });
