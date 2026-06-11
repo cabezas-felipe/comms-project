@@ -41,22 +41,33 @@ function makeDeps({ assertResults = [], detectWarning = null } = {}) {
   };
 }
 
-const ARGS = { userId: "u1", email: "felipe@example.com" };
+const VALID_UUID = "e06d512d-2549-4b12-86d3-44148bfbd9d0";
+const ARGS = { userId: VALID_UUID, email: "felipe@example.com" };
 
 // ─── parseArgs ───────────────────────────────────────────────────────────────
 
 test("parseArgs: requires --user-id and --email", () => {
   assert.throws(() => parseArgs([]), /Missing --user-id/);
-  assert.throws(() => parseArgs(["--user-id", "u1"]), /Missing --email/);
+  assert.throws(() => parseArgs(["--user-id", VALID_UUID]), /Missing --email/);
 });
 
 test("parseArgs: backward-compatible CLI UX (--user-id / --email)", () => {
-  const r = parseArgs(["--user-id", "u1", "--email", "a@b.com"]);
-  assert.deepEqual(r, { userId: "u1", email: "a@b.com" });
+  const r = parseArgs(["--user-id", VALID_UUID, "--email", "a@b.com"]);
+  assert.deepEqual(r, { userId: VALID_UUID, email: "a@b.com" });
 });
 
 test("parseArgs: rejects unknown argument", () => {
-  assert.throws(() => parseArgs(["--user-id", "u1", "--email", "a@b.com", "--nope"]), /Unknown argument: --nope/);
+  assert.throws(
+    () => parseArgs(["--user-id", VALID_UUID, "--email", "a@b.com", "--nope"]),
+    /Unknown argument: --nope/
+  );
+});
+
+test("parseArgs: rejects non-UUID placeholders", () => {
+  assert.throws(
+    () => parseArgs(["--user-id", "e06xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", "--email", "a@b.com"]),
+    /Invalid --user-id/
+  );
 });
 
 // ─── two-phase ordering ──────────────────────────────────────────────────────
@@ -68,13 +79,13 @@ test("happy path: reset/assert/guard all happen before web start, ends at prefli
   // Web start must come strictly after both cleanliness checks.
   const idx = (tag) => order.indexOf(tag);
   const lastAssert = order.lastIndexOf("assertClean:baseline guard");
-  assert.ok(idx("resetUser:u1") < idx("assertClean:post-reset baseline"));
+  assert.ok(idx(`resetUser:${VALID_UUID}`) < idx("assertClean:post-reset baseline"));
   assert.ok(idx("assertClean:post-reset baseline") < lastAssert);
   assert.ok(lastAssert < idx("startWeb"), "web started before guard re-check");
   assert.ok(idx("startApi") < idx("startWeb"));
 
   // API is up before reset; web waits then preflight; ends in PASS.
-  assert.ok(idx("waitForApiHealth") < idx("resetUser:u1"));
+  assert.ok(idx("waitForApiHealth") < idx(`resetUser:${VALID_UUID}`));
   assert.ok(idx("startWeb") < idx("waitForWebReady"));
   assert.ok(idx("waitForWebReady") < idx("preflight"));
   assert.ok(order.some((o) => o.startsWith("log:[e2e:prepare-user] PASS")));

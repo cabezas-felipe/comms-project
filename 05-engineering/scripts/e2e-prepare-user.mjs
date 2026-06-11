@@ -26,6 +26,12 @@ import { pathToFileURL } from "node:url";
 
 // ─── pure helpers ────────────────────────────────────────────────────────────
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value ?? "")
+  );
+}
+
 export function parseArgs(argv) {
   const out = { userId: null, email: null };
   for (let i = 0; i < argv.length; i++) {
@@ -35,6 +41,11 @@ export function parseArgs(argv) {
     else throw new Error(`[e2e:prepare-user] Unknown argument: ${a}`);
   }
   if (!out.userId) throw new Error("[e2e:prepare-user] Missing --user-id <uuid>");
+  if (!isUuid(out.userId)) {
+    throw new Error(
+      `[e2e:prepare-user] Invalid --user-id '${out.userId}'. Expected a real UUID (do not pass placeholders like <e06-user-id>).`
+    );
+  }
   if (!out.email) throw new Error("[e2e:prepare-user] Missing --email <email>");
   return out;
 }

@@ -7,6 +7,25 @@ import { getSupabaseClient, isSupabaseEnabled } from "../src/db/client.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../.env"), override: false });
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value ?? "")
+  );
+}
+
+function formatSupabaseError(prefix, error, status, statusText) {
+  const message = typeof error?.message === "string" && error.message.trim() ? error.message.trim() : null;
+  const extras = [];
+  if (error?.code) extras.push(`code=${error.code}`);
+  if (error?.details) extras.push(`details=${error.details}`);
+  if (error?.hint) extras.push(`hint=${error.hint}`);
+  if (Number.isFinite(status)) {
+    extras.push(`status=${status}${statusText ? ` ${statusText}` : ""}`);
+  }
+  const suffix = extras.length ? ` (${extras.join("; ")})` : "";
+  return `${prefix}: ${message ?? "no error message returned"}${suffix}`;
+}
+
 function parseArgs(argv) {
   const out = { userId: null, email: null, dryRun: false };
   for (let i = 0; i < argv.length; i++) {
@@ -19,35 +38,59 @@ function parseArgs(argv) {
   if (!out.userId) {
     throw new Error("Missing required argument: --user-id <uuid>");
   }
+  if (!isUuid(out.userId)) {
+    throw new Error(
+      `Invalid --user-id '${out.userId}'. Expected a real UUID (do not pass placeholders like <e06-user-id>).`
+    );
+  }
   return out;
 }
 
 async function countByUser(supabase, table, userId) {
-  const { count, error } = await supabase
+  const { count, error, status, statusText } = await supabase
     .from(table)
     .select("*", { count: "exact", head: true })
     .eq("user_id", userId);
-  if (error) throw new Error(`[${table}] count failed: ${error.message}`);
+  if (error) {
+    throw new Error(
+      formatSupabaseError(`[${table}] count failed`, error, status, statusText)
+    );
+  }
   return count ?? 0;
 }
 
 async function countSettingsRows(supabase, userId) {
-  const { count, error } = await supabase
+  const { count, error, status, statusText } = await supabase
     .from("settings")
     .select("*", { count: "exact", head: true })
     .like("key", `%${userId}%`);
-  if (error) throw new Error(`[settings] count failed: ${error.message}`);
+  if (error) {
+    throw new Error(
+      formatSupabaseError("[settings] count failed", error, status, statusText)
+    );
+  }
   return count ?? 0;
 }
 
 async function deleteByUser(supabase, table, userId) {
-  const { error } = await supabase.from(table).delete().eq("user_id", userId);
-  if (error) throw new Error(`[${table}] delete failed: ${error.message}`);
+  const { error, status, statusText } = await supabase.from(table).delete().eq("user_id", userId);
+  if (error) {
+    throw new Error(
+      formatSupabaseError(`[${table}] delete failed`, error, status, statusText)
+    );
+  }
 }
 
 async function deleteSettingsRows(supabase, userId) {
-  const { error } = await supabase.from("settings").delete().like("key", `%${userId}%`);
-  if (error) throw new Error(`[settings] delete failed: ${error.message}`);
+  const { error, status, statusText } = await supabase
+    .from("settings")
+    .delete()
+    .like("key", `%${userId}%`);
+  if (error) {
+    throw new Error(
+      formatSupabaseError("[settings] delete failed", error, status, statusText)
+    );
+  }
 }
 
 async function run() {

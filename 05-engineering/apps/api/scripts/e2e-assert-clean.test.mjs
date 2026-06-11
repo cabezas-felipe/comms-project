@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 // helpers: arg parsing, redaction, the pass/fail summary, and report formatting.
 const { parseArgs, usage, redactSample, summarize, formatReport, BASE_TABLES, SESSION_TABLE } =
   await import("./e2e-assert-clean.mjs");
+const VALID_UUID = "e06d512d-2549-4b12-86d3-44148bfbd9d0";
 
 // ─── parseArgs ───────────────────────────────────────────────────────────────
 
@@ -16,22 +17,28 @@ test("parseArgs: requires --user-id", () => {
 });
 
 test("parseArgs: backward compatible — only --user-id", () => {
-  const r = parseArgs(["--user-id", "u1"]);
+  const r = parseArgs(["--user-id", VALID_UUID]);
   assert.equal(r.ok, true);
-  assert.equal(r.userId, "u1");
+  assert.equal(r.userId, VALID_UUID);
   assert.equal(r.requireNoSessions, false);
 });
 
 test("parseArgs: --require-no-sessions toggles the flag", () => {
-  const r = parseArgs(["--user-id", "u1", "--require-no-sessions"]);
+  const r = parseArgs(["--user-id", VALID_UUID, "--require-no-sessions"]);
   assert.equal(r.ok, true);
   assert.equal(r.requireNoSessions, true);
 });
 
 test("parseArgs: rejects unknown argument", () => {
-  const r = parseArgs(["--user-id", "u1", "--nope"]);
+  const r = parseArgs(["--user-id", VALID_UUID, "--nope"]);
   assert.equal(r.ok, false);
   assert.match(r.error, /Unknown argument: --nope/);
+});
+
+test("parseArgs: rejects non-UUID placeholders", () => {
+  const r = parseArgs(["--user-id", "e06xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"]);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /Invalid --user-id/);
 });
 
 // ─── usage ───────────────────────────────────────────────────────────────────
