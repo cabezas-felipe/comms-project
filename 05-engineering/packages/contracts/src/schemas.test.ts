@@ -297,6 +297,11 @@ describe("refreshFailureSchema", () => {
     expect(() => refreshFailureSchema.parse({ ...validFailure, attempts: -1 })).toThrow();
     expect(() => refreshFailureSchema.parse({ ...validFailure, attempts: 1.5 })).toThrow();
   });
+
+  it("pins the attempts floor: 0 is rejected (a failure means >= 1 attempt)", () => {
+    expect(() => refreshFailureSchema.parse({ ...validFailure, attempts: 0 })).toThrow();
+    expect(refreshFailureSchema.parse({ ...validFailure, attempts: 1 }).attempts).toBe(1);
+  });
 });
 
 describe("dashboardRefreshFailsafeMetaSchema", () => {
@@ -368,5 +373,37 @@ describe("dashboardRefreshFailsafeMetaSchema", () => {
     expect(() =>
       dashboardRefreshFailsafeMetaSchema.parse({ refreshStatus: "ok", refreshFailure: null })
     ).toThrow();
+  });
+
+  // Step 4: pin the status⇔failure coupling invariant in both directions.
+  it("invariant: rejects refreshStatus=failed with a null refreshFailure", () => {
+    expect(() =>
+      dashboardRefreshFailsafeMetaSchema.parse({
+        refreshStatus: "failed",
+        refreshFailure: null,
+        usedPriorSnapshot: false,
+      })
+    ).toThrow(/failed.*requires a non-null refreshFailure/);
+  });
+
+  it("invariant: rejects refreshStatus=ok carrying a non-null refreshFailure", () => {
+    expect(() =>
+      dashboardRefreshFailsafeMetaSchema.parse({
+        refreshStatus: "ok",
+        refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 1, retryable: false },
+        usedPriorSnapshot: false,
+      })
+    ).toThrow(/ok.*must have refreshFailure null/);
+  });
+
+  it("accepts the failed+no-prior shape (usedPriorSnapshot=false with a failure object)", () => {
+    const parsed = dashboardRefreshFailsafeMetaSchema.parse({
+      refreshStatus: "failed",
+      refreshFailure: { reason: "clustering_failure", subtype: "timeout", attempts: 2, retryable: true },
+      usedPriorSnapshot: false,
+    });
+    expect(parsed.refreshStatus).toBe("failed");
+    expect(parsed.usedPriorSnapshot).toBe(false);
+    expect(parsed.refreshFailure?.subtype).toBe("timeout");
   });
 });

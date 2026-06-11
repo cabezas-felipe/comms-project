@@ -171,7 +171,10 @@ export const refreshFailureSubtypeSchema = z.enum([
 export const refreshFailureSchema = z.object({
   reason: z.string().min(1),
   subtype: refreshFailureSubtypeSchema,
-  attempts: z.number().int().nonnegative(),
+  // `attempts` is `>= 1`: a refreshFailure object only exists on a FAILED refresh,
+  // and a failure represents at least one attempted run (the API floors it to 1).
+  // Pinning `positive()` here keeps the Step 2 floor honest at the contract level.
+  attempts: z.number().int().positive(),
   retryable: z.boolean(),
   retryAfterMs: z.number().int().nonnegative().optional(),
   nextRetryAt: z.string().min(1).optional(),
@@ -186,7 +189,27 @@ export const dashboardRefreshFailsafeMetaSchema = z
   })
   // `_meta` carries many other diagnostic keys alongside these — passthrough so
   // a full `_meta` object validates against the fail-safe surface additively.
-  .passthrough();
+  .passthrough()
+  // Invariant pinned by Step 4: status and failure object are coupled — a
+  // "failed" refresh ALWAYS carries a structured refreshFailure, and an "ok"
+  // refresh NEVER does (refreshFailure is null on success). The API honors both
+  // directions; this rejects contradictory payloads outright.
+  .superRefine((val, ctx) => {
+    if (val.refreshStatus === "failed" && val.refreshFailure == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refreshFailure"],
+        message: "refreshStatus 'failed' requires a non-null refreshFailure object",
+      });
+    }
+    if (val.refreshStatus === "ok" && val.refreshFailure != null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refreshFailure"],
+        message: "refreshStatus 'ok' must have refreshFailure null",
+      });
+    }
+  });
 
 export const settingsPayloadSchema = z.object({
   contractVersion: z.literal(CONTRACT_VERSION),

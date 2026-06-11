@@ -751,6 +751,45 @@ describe("Phase 4 · Step 3: refresh fail-safe meta from _meta", () => {
     expect(result.refreshStatus).toBe("ok");
     expect(result.refreshFailure).toBeNull();
   });
+
+  // Step 4 integration sanity: a real server emits the fail-safe fields ALONGSIDE
+  // the legacy clustering diagnostics in one `_meta`. The parser must surface both
+  // coherently — this guards against the new fields shadowing/breaking the old
+  // ones, and confirms the exact shape Dashboard.applyResult consumes.
+  it("surfaces fail-safe AND legacy clustering fields from one server-style _meta (coexistence)", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({
+        // legacy clustering surface (server keeps emitting these)
+        usedFallbackClustering: true,
+        clusteringFailureReason: "timeout",
+        clusteringFailureSubtype: "timeout_budget",
+        clusteringAttempts: 2,
+        // new fail-safe surface (Step 2 contract)
+        refreshStatus: "failed",
+        usedPriorSnapshot: true,
+        refreshFailure: { reason: "clustering_failure", subtype: "timeout", attempts: 2, retryable: true },
+      }, []),
+    });
+    // Legacy fields still parse.
+    expect(result.clusteringFailed).toBe(true);
+    expect(result.clusteringFailureReason).toBe("timeout");
+    expect(result.clusteringAttempts).toBe(2);
+    // New fail-safe fields parse and agree with the legacy surface.
+    expect(result.refreshStatus).toBe("failed");
+    expect(result.usedPriorSnapshot).toBe(true);
+    expect(result.refreshFailure).toEqual({
+      reason: "clustering_failure",
+      subtype: "timeout",
+      attempts: 2,
+      retryable: true,
+      retryAfterMs: null,
+      nextRetryAt: null,
+    });
+    // The exact keys Dashboard.applyResult reads are all present.
+    expect(result).toHaveProperty("refreshStatus");
+    expect(result).toHaveProperty("refreshFailure");
+    expect(result).toHaveProperty("usedPriorSnapshot");
+  });
 });
 
 describe("fetchDashboardPayload — identity header propagation", () => {

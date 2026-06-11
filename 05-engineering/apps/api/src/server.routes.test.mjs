@@ -2536,6 +2536,31 @@ describe("Step 2: buildRefreshFailsafeMeta (unit)", () => {
     const real = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "error", clusteringAttempts: 3 } });
     assert.equal(real.refreshFailure.attempts, 3);
   });
+
+  test("invariant: every failure (all reasons × all subtypes, incl. garbage) yields a non-null refreshFailure with attempts>=1 and a valid wire subtype", () => {
+    const wireSubtypes = new Set(["timeout", "parse", "provider_request", "unknown"]);
+    const rawSubtypes = ["timeout_budget", "parse", "provider_request", "unknown", undefined, null, "garbage"];
+    for (const clusteringFailureReason of ["timeout", "error"]) {
+      for (const clusteringFailureSubtype of rawSubtypes) {
+        const meta = buildRefreshFailsafeMeta({
+          log: { clusteringFailureReason, clusteringFailureSubtype, clusteringAttempts: 0 },
+          usedPriorSnapshot: false,
+        });
+        assert.equal(meta.refreshStatus, "failed");
+        assert.notEqual(meta.refreshFailure, null, "failed must always carry a refreshFailure object");
+        assert.ok(meta.refreshFailure.attempts >= 1, "attempts floored to >= 1");
+        assert.ok(
+          wireSubtypes.has(meta.refreshFailure.subtype),
+          `subtype ${meta.refreshFailure.subtype} must be a valid wire value`
+        );
+        assert.equal(meta.refreshFailure.reason, "clustering_failure");
+        assert.equal(typeof meta.refreshFailure.retryable, "boolean");
+      }
+    }
+    // The one mapping that must hold: internal timeout_budget → wire "timeout".
+    const t = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "timeout", clusteringFailureSubtype: "timeout_budget", clusteringAttempts: 2 } });
+    assert.equal(t.refreshFailure.subtype, "timeout");
+  });
 });
 
 // ─── Sub-slice 2.3: refresh reads from Tier-A cache, falls back to live ──────
@@ -3776,9 +3801,45 @@ test("POST /api/dashboard/refresh: returns 500 when pipeline fails and no prior 
     const res = await request(app).post("/api/dashboard/refresh");
     assert.equal(res.status, 500);
     assert.equal(typeof res.body.message, "string");
+    // Step 4: a hard 500 is non-200, so it can never be mistaken for a quiet
+    // success — no _meta/stories surface to misread.
+    assert.equal(res.body.stories, undefined);
   } finally {
     _refreshPipeline.run = prevRun;
     _snapshotRepo.read = prevRead;
+  }
+});
+
+test("Step 4: pipeline THROWS with a prior snapshot → error_fallback carries refreshStatus=failed + usedPriorSnapshot=true and re-serves prior stories", async () => {
+  // The error_fallback branch builds the fail-safe fields inline (the pipeline
+  // never returned a `log`), so this pins that path: an exception is a refresh
+  // FAILURE that served the prior snapshot, NOT a healthy refresh.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  _refreshPipeline.run = async () => { throw new Error("pipeline exploded"); };
+  _snapshotRepo.read = async () => PRIOR_HEALTHY_SNAPSHOT;
+  _snapshotRepo.writeMeta = async () => {};
+  try {
+    await withIsolatedUser("step4-error-fallback", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      // Prior healthy stories re-served (soft fallback), with the legacy flag.
+      assert.equal(res.body.stories.length, 1);
+      assert.equal(res.body._meta?.fallback, true);
+      // Fail-safe contract on the exception path.
+      assert.equal(res.body._meta?.refreshStatus, "failed");
+      assert.equal(res.body._meta?.usedPriorSnapshot, true);
+      assert.ok(res.body._meta?.refreshFailure, "a failed status must carry a refreshFailure object");
+      assert.equal(res.body._meta.refreshFailure.reason, "pipeline_exception");
+      assert.equal(res.body._meta.refreshFailure.subtype, "unknown");
+      assert.ok(res.body._meta.refreshFailure.attempts >= 1, "attempts floor >= 1 on failure");
+      assert.equal(res.body._meta.refreshFailure.retryable, true);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.writeMeta = prevWriteMeta;
   }
 });
 
