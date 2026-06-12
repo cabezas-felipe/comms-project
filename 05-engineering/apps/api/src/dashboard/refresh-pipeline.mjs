@@ -180,6 +180,14 @@ export const COLD_START_GEO_STAGE_BUDGET_MS_DEFAULT = 12000;
 export const COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT = 45000;
 export const COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT = 2;
 export const COLD_START_CLUSTER_INPUT_CAP_DEFAULT = 10;
+// A3: locked cold-start translation caps — PROFILE-ONLY in this step.  The
+// translation stage is NOT wired to them yet (that lands in A5/A6); for now they
+// only shape `_meta.profile`.  They bound how much of a cold-start run's budget
+// the translation stage may spend once wired: `…MAX_ITEMS` caps how many
+// non-English items get translated, `…MAX_MS` caps the stage wall-clock.  No env
+// overrides — locked like the other cold-start knobs above.
+export const COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT = 18;
+export const COLD_START_TRANSLATION_MAX_MS_DEFAULT = 10000;
 
 // ─── PR B / Step 2: cold-start clustering wall-clock envelope ────────────────
 //
@@ -274,6 +282,10 @@ export function resolveRefreshProfile(name) {
       clusterTotalBudgetMs: COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
       deferGeoLane2: true,
       clusterInputCap: COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
+      // A3: locked cold-start translation caps (profile-only — the translation
+      // stage reads these in a later step, A5/A6).
+      translationMaxItems: COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT,
+      translationMaxMs: COLD_START_TRANSLATION_MAX_MS_DEFAULT,
     };
   }
   if (name === "interactive") {
@@ -294,6 +306,10 @@ export function resolveRefreshProfile(name) {
       ),
       // Interactive keeps a flat per-attempt timeout; no total-envelope cap.
       clusterTotalBudgetMs: null,
+      // A3: no cold-start translation caps on this profile (explicit null for
+      // shape clarity — only cold_start opts into the translation caps).
+      translationMaxItems: null,
+      translationMaxMs: null,
     };
   }
   return {
@@ -303,6 +319,10 @@ export function resolveRefreshProfile(name) {
     clusterTimeoutMs: null, // fall through to env / cluster-engine default
     clusterMaxAttempts: DEFAULT_CLUSTER_MAX_ATTEMPTS,
     clusterTotalBudgetMs: null, // no clustering-envelope cap on the default path
+    // A3: no cold-start translation caps on the default path (explicit null for
+    // shape clarity).
+    translationMaxItems: null,
+    translationMaxMs: null,
   };
 }
 

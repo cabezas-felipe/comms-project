@@ -53,6 +53,8 @@ import {
   COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT,
   COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
   COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
+  COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT,
+  COLD_START_TRANSLATION_MAX_MS_DEFAULT,
   CLUSTER_CALL_MIN_TIMEOUT_MS,
   COLD_START_CLUSTER_DEADLINE_MS,
   COLD_START_CLUSTER_MIN_ENVELOPE_MS,
@@ -864,6 +866,28 @@ test("resolveRefreshProfile: cold_start profile yields the locked first-run knob
   // 2-attempt loop can never run two back-to-back 45s timeouts (~90s).
   assert.equal(p.clusterTotalBudgetMs, COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT);
   assert.equal(p.clusterTotalBudgetMs, 60000);
+  // A3: cold_start carries the locked translation caps (profile-only — not yet
+  // wired into the translation stage; that lands in A5/A6).
+  assert.equal(p.translationMaxItems, COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT);
+  assert.equal(p.translationMaxItems, 18);
+  assert.equal(p.translationMaxMs, COLD_START_TRANSLATION_MAX_MS_DEFAULT);
+  assert.equal(p.translationMaxMs, 10000);
+});
+
+test("resolveRefreshProfile: only cold_start carries the translation caps; other profiles are explicitly null (A3)", () => {
+  // Profile-shape lock: the cold-start translation caps must NOT leak onto the
+  // default/interactive profiles.  Shape-clarity choice (mirrors
+  // clusterTotalBudgetMs): non-cold_start profiles carry explicit nulls, not
+  // undefined, so the absence is asserted crisply.
+  for (const name of [null, "scheduled", "totally-unknown", "interactive"]) {
+    const p = resolveRefreshProfile(name);
+    assert.equal(p.translationMaxItems, null, `${name}: no cold-start translationMaxItems`);
+    assert.equal(p.translationMaxMs, null, `${name}: no cold-start translationMaxMs`);
+  }
+  // cold_start is the sole opt-in.
+  const cold = resolveRefreshProfile("cold_start");
+  assert.equal(cold.translationMaxItems, 18);
+  assert.equal(cold.translationMaxMs, 10000);
 });
 
 test("resolveRefreshProfile: default + interactive carry no clustering envelope cap (Step 2)", () => {
