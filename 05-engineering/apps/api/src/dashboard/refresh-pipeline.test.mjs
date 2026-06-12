@@ -10490,13 +10490,14 @@ test("Slice 3 follow-up: SLO does not overcount a recovered run as a failure (te
   assert.deepEqual(recovered.breaches, [], "no breach from a recovered run");
 });
 
-// ─── PR B Step 1: Option B clustering auto-recovery tier ──────────────────────
+// ─── PR B Step 1 + A2: Option B clustering auto-recovery tier ─────────────────
 //
-// A non-timeout (parse/schema-style) primary clustering failure triggers ONE
-// bounded recovery attempt on a reduced (top-half, min 6) candidate set.
-// Recovery success publishes recovered stories and clears the fail-closed
-// flags; recovery failure preserves the fail-closed (0 stories) outcome. Timeout
-// failures never trigger recovery. No `gracefulFallbackClustering` buckets ever.
+// A terminal clustering failure — error-class (parse/schema) OR timeout-class
+// (A2) — triggers ONE bounded recovery attempt on a reduced (top-half, min 6)
+// candidate set, but ONLY when that set genuinely shrinks. Recovery success
+// publishes recovered stories and clears the fail-closed flags; recovery failure
+// preserves the fail-closed (0 stories) outcome. A failure at the reduction
+// floor never triggers recovery. No `gracefulFallbackClustering` buckets ever.
 
 // 10 relevant items (beat-fit bypassed) so exactly 10 reach clustering and the
 // reduced recovery cap (max(6, floor(10/2))=6) genuinely shrinks the input.
@@ -10578,7 +10579,50 @@ test("PR B recovery: recovery also fails → remains fail-closed with recovery f
   assert.equal(log.clusteringAttempts, 3);
 });
 
-test("PR B recovery: timeout-class failure does NOT trigger recovery", async () => {
+test("PR B recovery (A2): timeout-class failure → recovery on reduced input succeeds and publishes", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  // Recovered story references src-0 (freshest → ranked first → inside the
+  // reduced set) and carries no factual_claims, so it grounds and publishes.
+  const recoveredStory = {
+    meta_story_id: "recovered-timeout-1",
+    title: "Recovered After Timeout",
+    subtitle: "Recovered on a lighter reduced-input retry.",
+    source_item_ids: ["src-0"],
+    summary: "Recovered.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+  };
+  let calls = 0;
+  let recoveryInputLen = null;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async (items) => {
+      calls += 1;
+      if (calls <= 2) {
+        // Both primary attempts time out on the full candidate set.
+        throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)");
+      }
+      recoveryInputLen = items.length; // the reduced recovery set
+      return [recoveredStory];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary attempts + 1 recovery attempt (A2: timeouts now recover)");
+  assert.equal(recoveryInputLen, 6, "recovery used the reduced (50%, min 6) input");
+  assert.equal(payload.stories.length, 1, "recovered story is published from the timeout path");
+  assert.equal(log.usedFallbackClustering, false, "recovery clears fail-closed on the timeout path");
+  assert.equal(log.clusteringFailureReason, null, "no terminal failure after timeout recovery");
+  assert.equal(log.clusteringFailureSubtype, null, "recovered run clears the terminal subtype");
+  assert.equal(log.clusteringRecoveryAttempted, true);
+  assert.equal(log.clusteringRecoverySucceeded, true);
+  assert.equal(log.clusteringRecoveryReason, null);
+  assert.equal(log.clusteringAttempts, 3, "attempt count includes the recovery attempt");
+  assert.equal(log.clusteringLatencyMs.length, 3, "one latency sample per attempt incl. recovery");
+});
+
+test("PR B recovery (A2): timeout recovery also fails → remains fail-closed with recovery flags set", async () => {
   const rawItems = makeRecoveryRawItems(10);
   let calls = 0;
   const { payload, log } = await runRefreshPipeline({
@@ -10592,11 +10636,42 @@ test("PR B recovery: timeout-class failure does NOT trigger recovery", async () 
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
   });
-  assert.equal(calls, 2, "timeout path keeps the locked 2-attempt behavior — no recovery call");
-  assert.equal(payload.stories.length, 0, "fail-closed on timeout");
+  assert.equal(calls, 3, "2 primary attempts + 1 recovery attempt");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved: zero stories (no fallback buckets)");
+  // No fabricated "* Updates"/"General Updates" buckets ever ship.
+  assert.deepEqual(payload.stories, [], "no gracefulFallbackClustering stories");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "timeout", "terminal timeout reason preserved");
+  assert.equal(log.clusteringFailureSubtype, "timeout_budget", "terminal subtype preserved");
+  assert.equal(log.clusteringRecoveryAttempted, true);
+  assert.equal(log.clusteringRecoverySucceeded, false);
+  assert.equal(log.clusteringRecoveryReason, "timeout", "recovery's own failure class");
+  assert.equal(log.clusteringRecoverySubtype, "timeout_budget");
+  assert.equal(log.clusteringAttempts, 3);
+});
+
+test("PR B recovery (A2): timeout-class failure at the reduction floor (no shrink) does NOT trigger recovery", async () => {
+  // 6 items → reduced cap max(6, floor(6/2))=6 → no actual shrink → recovery is
+  // skipped even though A2 makes timeouts eligible. Locks the reducibility guard
+  // for the timeout path (mirrors the error-class floor case).
+  const rawItems = makeRecoveryRawItems(6);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)");
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 2, "no recovery call when the set cannot be reduced");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved");
   assert.equal(log.usedFallbackClustering, true);
   assert.equal(log.clusteringFailureReason, "timeout");
-  assert.equal(log.clusteringRecoveryAttempted, false, "recovery not attempted for timeouts");
+  assert.equal(log.clusteringRecoveryAttempted, false, "recovery not attempted at the floor");
   assert.equal(log.clusteringRecoverySucceeded, false);
   assert.equal(log.clusteringRecoveryReason, null);
   assert.equal(log.clusteringAttempts, 2);

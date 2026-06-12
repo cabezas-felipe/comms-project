@@ -3064,10 +3064,12 @@ export async function runRefreshPipeline({
   let clusteringFailureSubtype = null;
   let clusteringAttempts = 0;
   const clusteringAttemptLatencyMs = [];
-  // PR B Step 1: Option B auto-recovery tier diagnostics.  A bounded, single
-  // extra clustering attempt on a reduced input set, triggered ONLY for a
-  // non-timeout (parse/schema-style) primary failure.  All default to the
-  // "not attempted" state so the fields are additive and stable.
+  // PR B Step 1 + A2: Option B auto-recovery tier diagnostics.  A bounded,
+  // single extra clustering attempt on a reduced input set, triggered for ANY
+  // terminal fail-closed clustering failure — both error-class (parse/schema)
+  // AND timeout-class (A2) — whenever the candidate set can genuinely shrink.
+  // All default to the "not attempted" state so the fields are additive and
+  // stable.
   let clusteringRecoveryAttempted = false;
   let clusteringRecoverySucceeded = false;
   let clusteringRecoveryReason = null; // recovery failure class ('error'|'timeout') or null
@@ -3162,18 +3164,21 @@ export async function runRefreshPipeline({
       );
     }
 
-    // PR B Step 1: Option B auto-recovery tier.  A non-timeout clustering
-    // failure (parse/schema-style, reason === "error") is frequently transient
-    // and input-size sensitive — ONE bounded retry on a reduced (top-half)
-    // candidate set can recover real stories without weakening fail-closed
-    // trust.  We deliberately do NOT retry timeout-class failures here: the
-    // primary loop already spent the latency budget, and a smaller set does not
-    // change a capacity/latency outcome.  On recovery success we publish the
-    // recovered meta-stories through the normal grounding/build path and clear
-    // the fail-closed flags; on recovery failure the existing fail-closed
-    // outcome (0 meta-stories) is preserved untouched.  No
-    // `gracefulFallbackClustering` buckets are ever produced — the trust posture
-    // is unchanged.
+    // PR B Step 1 + A2: Option B auto-recovery tier.  A terminal clustering
+    // failure is frequently transient and input-size sensitive — ONE bounded
+    // retry on a reduced (top-half) candidate set can recover real stories
+    // without weakening fail-closed trust.  A2 widens the trigger from
+    // error-class only to BOTH terminal reasons: error-class (parse/schema,
+    // where a smaller set is more likely to parse cleanly) AND timeout-class
+    // (where a smaller candidate set is a lighter, faster round-trip that can
+    // beat the budget the full set blew).  The retry stays Sonnet-only and
+    // reuses the same `clusterCallOpts()` timeout budgeting as the primary loop,
+    // so a total-budget profile still bounds it to the wall-clock left behind.
+    // On recovery success we publish the recovered meta-stories through the
+    // normal grounding/build path and clear the fail-closed flags; on recovery
+    // failure the existing fail-closed outcome (0 meta-stories) is preserved
+    // untouched.  No `gracefulFallbackClustering` buckets are ever produced —
+    // the trust posture is unchanged.
     const RECOVERY_MIN_ITEMS = 6;
     const recoveryCap = Math.max(
       RECOVERY_MIN_ITEMS,
@@ -3181,12 +3186,16 @@ export async function runRefreshPipeline({
     );
     const recoveryInput = clusterInputItems.slice(0, recoveryCap);
     // Recovery only runs when the reduced cap genuinely SHRINKS the input — its
-    // mechanism is "fewer items parse cleanly".  When the candidate set is
-    // already at/below the floor there is nothing to reduce, so we keep the
-    // existing fail-closed outcome rather than burn an identical extra call.
+    // mechanism is "fewer items parse cleanly / complete within budget".  When
+    // the candidate set is already at/below the floor there is nothing to
+    // reduce, so we keep the existing fail-closed outcome rather than burn an
+    // identical extra call (true for both error- and timeout-class failures).
     if (
       usedFallbackClustering &&
-      clusteringFailureReason === "error" &&
+      // A2: recover for BOTH terminal reasons — error-class (parse/schema) and
+      // timeout-class.  `usedFallbackClustering` already implies a non-null
+      // terminal reason; the explicit check documents the eligible set.
+      (clusteringFailureReason === "error" || clusteringFailureReason === "timeout") &&
       recoveryInput.length < clusterInputItems.length
     ) {
       clusteringRecoveryAttempted = true;
@@ -4077,14 +4086,16 @@ export async function runRefreshPipeline({
     // null and `usedFallbackClustering` is false on this path.
     clusteringRepairRecovered:
       clusteringRepair.attempted === true && clusteringRepair.succeeded === true,
-    // PR B Step 1 — Option B auto-recovery tier diagnostics (additive).
-    // `clusteringRecoveryAttempted` is true when a primary non-timeout failure
-    // triggered the single reduced-input recovery attempt; `…Succeeded` is true
-    // when that attempt published recovered stories (in which case
-    // `usedFallbackClustering` is false and `clusteringFailureReason` is null);
-    // `…Reason` is the recovery attempt's own failure class ('error'|'timeout')
-    // when it failed, else null.  Timeout-class primary failures never trigger
-    // recovery, so all three stay in the default state on that path.
+    // PR B Step 1 + A2 — Option B auto-recovery tier diagnostics (additive).
+    // `clusteringRecoveryAttempted` is true when a terminal primary failure —
+    // error-class OR timeout-class (A2) — triggered the single reduced-input
+    // recovery attempt; `…Succeeded` is true when that attempt published
+    // recovered stories (in which case `usedFallbackClustering` is false and
+    // `clusteringFailureReason` is null); `…Reason` is the recovery attempt's
+    // own failure class ('error'|'timeout') when it failed, else null.  Recovery
+    // only fires when the candidate set can genuinely shrink, so a failure at
+    // the reduction floor (e.g. ≤6 items) leaves all three in the default state
+    // regardless of the terminal reason.
     clusteringRecoveryAttempted,
     clusteringRecoverySucceeded,
     clusteringRecoveryReason,
