@@ -2586,12 +2586,20 @@ export async function runRefreshPipeline({
       .slice(0, coldStartTranslationCap.maxItems);
   }
 
+  // A6: when the cold-start cap is active, hand the profile's translation
+  // wall-clock budget (`translationMaxMs`) to the translator so it stops
+  // scheduling new calls once the stage budget is spent (in-flight calls still
+  // complete; deferred items fail open). Non-cold_start config is unchanged.
+  const translationCallConfig = { ...effectiveTranslationConfig, enabled: translationShouldRun };
+  if (translationCapApplied && coldStartTranslationCap.maxMs != null) {
+    translationCallConfig.maxWallClockMs = coldStartTranslationCap.maxMs;
+  }
   const translationStartedAt = Date.now();
   const { items: translatedInputItems, diagnostics: rawTranslationDiagnostics } =
     await translateEvidenceItems({
       items: translationInputItems,
       translateFn,
-      config: { ...effectiveTranslationConfig, enabled: translationShouldRun },
+      config: translationCallConfig,
       cache: translationCache ?? undefined,
     });
   const translationMs = Math.max(0, Date.now() - translationStartedAt);

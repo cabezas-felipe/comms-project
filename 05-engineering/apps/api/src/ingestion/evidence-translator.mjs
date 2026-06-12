@@ -185,6 +185,10 @@ export function resolveTranslationConfig() {
     timeoutMs: parsePositiveInt(process.env.TEMPO_TRANSLATION_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     maxChars: TRANSLATION_MAX_CHARS,
     maxSnippets: TRANSLATION_MAX_SNIPPETS,
+    // A6: optional stage wall-clock budget (ms). Null by default — env-driven
+    // runs do not cap the stage; the cold-start profile passes a finite budget
+    // through the pipeline. Absent/null/non-finite/non-positive → unbounded.
+    maxWallClockMs: null,
   };
 }
 
@@ -292,6 +296,12 @@ export async function translateEvidenceItems(opts) {
   } = opts ?? {};
 
   const candidateCount = Array.isArray(items) ? items.length : 0;
+  // A6: normalize the optional stage wall-clock budget. Anything non-finite or
+  // ≤ 0 disables the cap (unbounded scheduling, byte-identical to pre-A6).
+  const wallClockBudgetMs =
+    Number.isFinite(config?.maxWallClockMs) && config.maxWallClockMs > 0
+      ? Math.floor(config.maxWallClockMs)
+      : null;
   const baseDiagnostics = {
     version: EVIDENCE_TRANSLATION_VERSION,
     enabled: Boolean(config?.enabled),
@@ -306,6 +316,14 @@ export async function translateEvidenceItems(opts) {
     degradedFallbackRate: 0, // failed / needed
     latencyMsP50: 0,
     latencyMsP95: 0,
+    // A6: stage wall-clock budget diagnostics (additive). `wallClockBudgetMs` is
+    // the normalized cap (null when unbounded); `wallClockBudgetHit` is true when
+    // at least one needed item was deferred for budget; `wallClockSkippedCount`
+    // is how many. Budget-deferred items are NOT failures — see the scheduling
+    // guard below — so `failedCount` / `degradedFallbackRate` exclude them.
+    wallClockBudgetMs,
+    wallClockBudgetHit: false,
+    wallClockSkippedCount: 0,
   };
 
   // Disabled / no translator / nothing to do → pass items through untouched.
@@ -348,6 +366,12 @@ export async function translateEvidenceItems(opts) {
   let timeoutCount = 0;
   let cacheHits = 0;
   let neededCount = 0;
+  let wallClockSkippedCount = 0;
+  // A6: stage timer for the wall-clock budget. The pMap worker pool pulls items
+  // one at a time; the guard below runs when a worker PICKS UP an item, so once
+  // the budget is spent every newly-pulled item is deferred rather than starting
+  // a fresh translation call — but any call already in flight runs to completion.
+  const stageStartedAt = Date.now();
 
   const out = await pMap(
     items,
@@ -383,6 +407,29 @@ export async function translateEvidenceItems(opts) {
           normalizedHeadline: cached.normalizedHeadline,
           normalizedBody: cached.normalizedBody,
           _translation: { needed: true, applied: true, failed: false, fromCache: true, reason: null, lang },
+        };
+      }
+
+      // A6: wall-clock budget guard at the scheduling boundary. A worker that
+      // reaches a cache MISS after the stage budget is exhausted does NOT start a
+      // new translation call — the item passes through untranslated with a
+      // deterministic defer stamp. Cache hits above are free and always served.
+      // Budget exhaustion is a bounded DEFER, never a failure: it does not touch
+      // `failedCount`/`timeoutCount`, so `degradedFallbackRate` keeps reflecting
+      // true errors/timeouts only. Fail-open posture is preserved — recall still
+      // sees the original text.
+      if (wallClockBudgetMs != null && Date.now() - stageStartedAt >= wallClockBudgetMs) {
+        wallClockSkippedCount++;
+        return {
+          ...item,
+          _translation: {
+            needed: true,
+            applied: false,
+            failed: false,
+            fromCache: false,
+            reason: "wall_clock_budget_exhausted",
+            lang,
+          },
         };
       }
 
@@ -461,6 +508,10 @@ export async function translateEvidenceItems(opts) {
       degradedFallbackRate: neededCount > 0 ? failedCount / neededCount : 0,
       latencyMsP50: percentile(sorted, 50),
       latencyMsP95: percentile(sorted, 95),
+      // A6: wall-clock budget outcome for this run (additive; budgetMs already
+      // carried via baseDiagnostics). Hit/skipped reflect deferred-not-failed.
+      wallClockBudgetHit: wallClockSkippedCount > 0,
+      wallClockSkippedCount,
     },
   };
 }

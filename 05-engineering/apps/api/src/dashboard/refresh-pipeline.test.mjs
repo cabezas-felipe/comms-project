@@ -11039,4 +11039,41 @@ test("A5 cap (C): cold_start with candidate count <= cap reports the cap but def
   assert.ok(!stamped.includes("cold_start_cap"), "no items deferred → no cap stamps");
 });
 
+test("A6 wiring: cold_start passes translationMaxMs as the translator wall-clock budget (budget hit surfaces)", async () => {
+  // A slow ES→EN stub + a tiny profile wall-clock budget: the translator defers
+  // later items once the stage budget is spent, and the budget-hit diagnostics
+  // surface on `log.translation`. Item-cap is left wide so the WALL-CLOCK budget
+  // (not the item cap) is what bounds the run.
+  const rawItems = Array.from({ length: 4 }, (_, i) =>
+    makeEsItem(i, 10 + i * 10, `Titular numero ${i} sobre Colombia`)
+  );
+  const slowTranslateFn = async (segments, { sourceId }) => {
+    await new Promise((r) => setTimeout(r, 80));
+    const out = [`Sanctions update ${sourceId}`, ...segments.slice(1).map(() => `English body ${sourceId}`)];
+    while (out.length < segments.length) out.push("");
+    return out.slice(0, segments.length);
+  };
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    refreshProfile: "cold_start",
+    // Item cap wide (no item-capping), wall-clock budget tiny + concurrency 1 so
+    // the budget binds deterministically after the first in-flight translation.
+    refreshProfileOverrides: { translationMaxItems: 50, translationMaxMs: 30 },
+    translateFn: slowTranslateFn,
+    translationConfig: { enabled: true, concurrency: 1, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 },
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  // The cold-start wall-clock budget reached the translator and bound the stage.
+  assert.equal(log.translation.capMaxMs, 30, "profile translationMaxMs surfaced as the cap");
+  assert.equal(log.translation.wallClockBudgetMs, 30, "translator received the wall-clock budget");
+  assert.equal(log.translation.wallClockBudgetHit, true, "budget was hit on the slow run");
+  assert.ok(log.translation.wallClockSkippedCount >= 1, "at least one item deferred for budget");
+  // Budget defers are not failures.
+  assert.equal(log.translation.failedCount, 0);
+});
+
 });
