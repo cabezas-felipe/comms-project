@@ -10873,4 +10873,170 @@ test("Prompt 1 subtype: recovery failure reports its own subtype while terminal 
   assert.equal(log.clusteringRecoverySubtype, "parse", "recovery's own subtype is reported separately");
 });
 
+// ─── A5: cold-start translation candidate cap ─────────────────────────────────
+//
+// On a cold_start refresh the profile carries a locked translation budget. The
+// pipeline ranks post-geo candidates with `rankItemsForTranslation`, translates
+// only the top-N NON-ENGLISH items, and stamps the deferred non-English items
+// `_translation.reason = "cold_start_cap"`. English items never consume a slot.
+// Every other profile keeps the unchanged full-pool behavior.
+
+// Four non-English (es) items with structured topic + geo that match the
+// settings, so they survive geo + recall WITHOUT translation (recall matches the
+// structured `topic`) and therefore all reach `clusterFn` where their
+// `_translation` stamp is inspectable. Distinct headlines (no shared family) +
+// distinct freshness make the rank order deterministic: freshest-first.
+function makeEsItem(i, minutesAgo, headline) {
+  return makeItem({
+    sourceId: `es-${i}`,
+    outlet: "El Tiempo",
+    lang: "es",
+    topic: "Diplomatic relations",
+    geographies: ["Colombia"],
+    minutesAgo,
+    headline,
+    body: [`Cuerpo del articulo ${i}.`],
+  });
+}
+
+// Deterministic ES→EN stub: returns same-length English segments. The English
+// headline carries a configured keyword so translated items are unambiguously
+// recall-eligible too (structured topic already admits them).
+function makeCountingTranslateFn() {
+  const calls = [];
+  const translateFn = async (segments, { sourceId }) => {
+    calls.push(sourceId);
+    const out = [`Sanctions update ${sourceId}`, ...segments.slice(1).map(() => `English body ${sourceId}`)];
+    while (out.length < segments.length) out.push("");
+    return out.slice(0, segments.length);
+  };
+  return { translateFn, calls };
+}
+
+const A5_TRANSLATION_KNOBS = { enabled: true, concurrency: 2, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 };
+
+test("A5 cap (A): cold_start translates only the top-N non-English items; rest stamped cold_start_cap", async () => {
+  // Four ES items, freshest-first rank: es-0, es-1, es-2, es-3. With the cap
+  // pinned to 2, the two freshest are translated and the two stalest are deferred.
+  const rawItems = [
+    makeEsItem(0, 10, "Bogota firma acuerdo comercial historico"),
+    makeEsItem(1, 20, "Medellin anuncia proyecto vial regional"),
+    makeEsItem(2, 30, "Cali reporta cifras de turismo anuales"),
+    makeEsItem(3, 40, "Barranquilla celebra festival cultural caribe"),
+  ];
+  const { translateFn, calls } = makeCountingTranslateFn();
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    refreshProfile: "cold_start",
+    // Pin the cap small + deterministic (production constant is 18).
+    refreshProfileOverrides: { translationMaxItems: 2 },
+    translateFn,
+    translationConfig: A5_TRANSLATION_KNOBS,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  // Translator saw ONLY the 2 selected items (capped subset size).
+  assert.equal(calls.length, 2, "translateFn invoked once per selected item (cap=2)");
+  assert.deepEqual([...calls].sort(), ["es-0", "es-1"], "the two freshest (top-ranked) were selected");
+
+  // Diagnostics reflect the active cap.
+  assert.equal(log.translation.capped, true);
+  assert.equal(log.translation.capReason, "cold_start_profile");
+  assert.equal(log.translation.capMaxItems, 2);
+  assert.equal(log.translation.capMaxMs, COLD_START_TRANSLATION_MAX_MS_DEFAULT);
+  assert.equal(log.translation.cappedOutCount, 2);
+
+  // Inspect the merged-back stamps on the items that reached clustering.
+  assert.ok(Array.isArray(clusterInput) && clusterInput.length === 4, "all 4 items reached clustering");
+  const byId = Object.fromEntries(clusterInput.map((it) => [it.sourceId, it._translation]));
+  // Selected → translated (applied).
+  assert.equal(byId["es-0"].applied, true, "es-0 translated");
+  assert.equal(byId["es-1"].applied, true, "es-1 translated");
+  assert.equal(byId["es-0"].reason, null);
+  // Capped-out → cold_start_cap stamp (needed, not applied, not failed).
+  for (const id of ["es-2", "es-3"]) {
+    assert.equal(byId[id].reason, "cold_start_cap", `${id} deferred by the cap`);
+    assert.equal(byId[id].needed, true, `${id} still flagged as needing translation`);
+    assert.equal(byId[id].applied, false);
+    assert.equal(byId[id].failed, false);
+    assert.equal(byId[id].fromCache, false);
+    assert.equal(byId[id].lang, "es");
+  }
+});
+
+test("A5 cap (B): non-cold_start profile applies no cap — full set translated, capped=false", async () => {
+  const rawItems = [
+    makeEsItem(0, 10, "Bogota firma acuerdo comercial historico"),
+    makeEsItem(1, 20, "Medellin anuncia proyecto vial regional"),
+    makeEsItem(2, 30, "Cali reporta cifras de turismo anuales"),
+    makeEsItem(3, 40, "Barranquilla celebra festival cultural caribe"),
+  ];
+  const { translateFn, calls } = makeCountingTranslateFn();
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    refreshProfile: null, // default profile — no translation cap
+    translateFn,
+    translationConfig: A5_TRANSLATION_KNOBS,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(calls.length, 4, "every non-English item translated (no cap)");
+  assert.equal(log.translation.capped, false);
+  assert.equal(log.translation.capReason, null);
+  assert.equal(log.translation.capMaxItems, null);
+  assert.equal(log.translation.capMaxMs, null);
+  assert.equal(log.translation.cappedOutCount, 0);
+  // No item carries the cap stamp.
+  const stamped = clusterInput.map((it) => it._translation?.reason);
+  assert.ok(!stamped.includes("cold_start_cap"), "no cold_start_cap stamps off the cold_start path");
+});
+
+test("A5 cap (C): cold_start with candidate count <= cap reports the cap but defers nothing", async () => {
+  // Three ES items, cap left at the locked default (18) → nothing is capped out,
+  // but the cap config is still surfaced (cappedOutCount=0).
+  const rawItems = [
+    makeEsItem(0, 10, "Bogota firma acuerdo comercial historico"),
+    makeEsItem(1, 20, "Medellin anuncia proyecto vial regional"),
+    makeEsItem(2, 30, "Cali reporta cifras de turismo anuales"),
+  ];
+  const { translateFn, calls } = makeCountingTranslateFn();
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    refreshProfile: "cold_start", // cap = locked default (18)
+    translateFn,
+    translationConfig: A5_TRANSLATION_KNOBS,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(calls.length, 3, "all 3 (<= cap) translated");
+  assert.equal(log.translation.capped, true, "cap is active on cold_start");
+  assert.equal(log.translation.capReason, "cold_start_profile");
+  assert.equal(log.translation.capMaxItems, COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT);
+  assert.equal(log.translation.capMaxMs, COLD_START_TRANSLATION_MAX_MS_DEFAULT);
+  assert.equal(log.translation.cappedOutCount, 0, "nothing deferred when count <= cap");
+  const stamped = clusterInput.map((it) => it._translation?.reason);
+  assert.ok(!stamped.includes("cold_start_cap"), "no items deferred → no cap stamps");
+});
+
 });

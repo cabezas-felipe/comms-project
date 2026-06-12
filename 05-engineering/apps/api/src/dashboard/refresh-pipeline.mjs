@@ -48,6 +48,7 @@ import {
   computePreClusterRelevanceScore,
   comparePreClusterRank,
 } from "./pre-cluster-relevance.mjs";
+import { rankItemsForTranslation } from "./translation-priority.mjs";
 import {
   resolveGeoAdmissionMode,
   geoAdmissionDiagnostics,
@@ -2041,6 +2042,12 @@ export async function runRefreshPipeline({
   // behavior.  The route passes `"interactive"` only for onboarding-driven
   // interactive entries; the heartbeat and bootstrap paths leave it null.
   refreshProfile = null,
+  // A5 test seam: shallow-merge overrides onto the resolved refresh profile so
+  // tests can pin profile-driven knobs (e.g. the cold-start translation cap
+  // `translationMaxItems`) to small, deterministic values without depending on
+  // the locked production constants.  Null in production — the resolved profile
+  // is used verbatim.  Additive: it never changes which profile is selected.
+  refreshProfileOverrides = null,
   // Slice 5 — progressive whyItMatters enrichment.  When true, the per-story
   // implications WRITER is skipped at first paint: every published story gets
   // the deterministic, state-aware safe fallback copy (non-empty, never a
@@ -2050,7 +2057,10 @@ export async function runRefreshPipeline({
   // progressively enriched; clustering fail-closed continuity is untouched.
   deferWhyItMatters = false,
 }) {
-  const profile = resolveRefreshProfile(refreshProfile);
+  const profile =
+    refreshProfileOverrides && typeof refreshProfileOverrides === "object"
+      ? { ...resolveRefreshProfile(refreshProfile), ...refreshProfileOverrides }
+      : resolveRefreshProfile(refreshProfile);
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   // Geo admission mode, resolved once per run.
   const resolvedGeoAdmissionMode = resolveGeoAdmissionMode({
@@ -2544,15 +2554,99 @@ export async function runRefreshPipeline({
     hasApiKey: translationHasApiKey,
   });
   const translationShouldRun = translationActivation.shouldRun;
+
+  // A5: cold-start translation candidate cap.  On a cold_start refresh the
+  // profile carries a locked translation budget (`translationMaxItems` /
+  // `translationMaxMs`).  When the stage will actually run, we translate only
+  // the TOP-N non-English items by pre-cluster survival priority
+  // (`rankItemsForTranslation`) instead of the whole post-geo pool — English
+  // items never consume a cap slot, and the lowest-priority non-English items
+  // are deferred this run.  The cap is applied ONLY for cold_start with a finite
+  // `translationMaxItems` AND only when translation is active; every other
+  // profile keeps the unchanged full-pool behavior.  Wall-clock (`translationMaxMs`)
+  // is carried through diagnostics here but NOT yet enforced — that lands in A6.
+  const coldStartTranslationCap =
+    profile?.name === "cold_start" && Number.isFinite(profile?.translationMaxItems)
+      ? {
+          maxItems: profile.translationMaxItems,
+          maxMs: Number.isFinite(profile?.translationMaxMs) ? profile.translationMaxMs : null,
+        }
+      : null;
+  const translationCapApplied = Boolean(coldStartTranslationCap) && translationShouldRun;
+
+  // Default (uncapped) path translates the full candidate set.  Capped path
+  // narrows the translator input to the selected non-English subset.
+  let translationInputItems = geoPassedItems;
+  if (translationCapApplied) {
+    const ranked = rankItemsForTranslation(geoPassedItems, settings);
+    // Only non-English needed items consume the budget; English items pass
+    // through untranslated regardless (stamped during merge-back below).
+    translationInputItems = ranked
+      .filter(isNonEnglishItem)
+      .slice(0, coldStartTranslationCap.maxItems);
+  }
+
   const translationStartedAt = Date.now();
-  const { items: translatedGeoItems, diagnostics: rawTranslationDiagnostics } =
+  const { items: translatedInputItems, diagnostics: rawTranslationDiagnostics } =
     await translateEvidenceItems({
-      items: geoPassedItems,
+      items: translationInputItems,
       translateFn,
       config: { ...effectiveTranslationConfig, enabled: translationShouldRun },
       cache: translationCache ?? undefined,
     });
   const translationMs = Math.max(0, Date.now() - translationStartedAt);
+
+  // Merge the (possibly capped) translator output back into the FULL post-geo
+  // list in original order.  In the uncapped path the translator already saw
+  // every item, so its output IS the full list.  In the capped path we splice
+  // the translated subset back in and stamp the two un-translated buckets so
+  // every item carries a uniform `_translation` for downstream coverage math:
+  //   - capped-out non-English → reason "cold_start_cap" (needed, not applied)
+  //   - English / non-needed   → normal passthrough stamp (needed:false)
+  let translatedGeoItems;
+  let cappedOutCount = 0;
+  if (translationCapApplied) {
+    const translatedById = new Map(
+      translatedInputItems.map((it) => [it.sourceId, it])
+    );
+    translatedGeoItems = geoPassedItems.map((item) => {
+      const translated = translatedById.get(item.sourceId);
+      if (translated) return translated; // selected subset → translator result
+      const lang = typeof item?.lang === "string" ? item.lang : null;
+      if (isNonEnglishItem(item)) {
+        // Deferred this run by the cold-start cap (recall still sees the
+        // original text; fail-open posture is unchanged, just untranslated).
+        cappedOutCount += 1;
+        return {
+          ...item,
+          _translation: {
+            needed: true,
+            applied: false,
+            failed: false,
+            fromCache: false,
+            reason: "cold_start_cap",
+            lang,
+          },
+        };
+      }
+      // English / non-needed item — same stamp `translateEvidenceItems` gives a
+      // non-needed passthrough, so coverage math is identical to the full path.
+      return {
+        ...item,
+        _translation: {
+          needed: false,
+          applied: false,
+          failed: false,
+          fromCache: false,
+          reason: null,
+          lang,
+        },
+      };
+    });
+  } else {
+    translatedGeoItems = translatedInputItems;
+  }
+
   const translationStageDiagnostics = {
     ...rawTranslationDiagnostics,
     mode: translationActivation.mode,
@@ -2560,7 +2654,22 @@ export async function runRefreshPipeline({
     unavailable: translationActivation.unavailable,
     unavailableReason: translationActivation.unavailableReason,
     recallRisk: translationActivation.recallRisk,
+    // A5: cold-start translation cap diagnostics (additive; all inert off the
+    // cold_start path so existing consumers are unaffected).  `capMaxMs` is
+    // reported for observability but not enforced until A6.
+    capped: translationCapApplied,
+    capReason: translationCapApplied ? "cold_start_profile" : null,
+    capMaxItems: translationCapApplied ? coldStartTranslationCap.maxItems : null,
+    capMaxMs: translationCapApplied ? coldStartTranslationCap.maxMs : null,
+    cappedOutCount,
   };
+  console.log(
+    `[pipeline.translation] cap_applied=${translationCapApplied}` +
+      ` cap_reason=${translationStageDiagnostics.capReason ?? "none"}` +
+      ` cap_max_items=${translationStageDiagnostics.capMaxItems ?? "none"}` +
+      ` cap_max_ms=${translationStageDiagnostics.capMaxMs ?? "none"}` +
+      ` capped_out=${cappedOutCount}`
+  );
   console.log(
     `[pipeline.translation] mode=${translationActivation.mode}` +
       ` required=${translationActivation.required}` +
