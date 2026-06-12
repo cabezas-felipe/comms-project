@@ -13,6 +13,9 @@ export {
   dashboardClusterDroppedComponentsSchema,
   dashboardClusterDroppedEntrySchema,
   dashboardClusterCapMetaSchema,
+  refreshFailureSubtypeSchema,
+  refreshFailureSchema,
+  dashboardRefreshFailsafeMetaSchema,
   settingsPayloadSchema,
 } from "./schemas.js";
 export type {
@@ -29,6 +32,9 @@ export type {
   DashboardClusterDroppedComponents,
   DashboardClusterDroppedEntry,
   DashboardClusterCapMeta,
+  RefreshFailureSubtype,
+  RefreshFailure,
+  DashboardRefreshFailsafeMeta,
   SettingsPayload,
 } from "./schemas.js";
 export { classifySources } from "./source-classification.js";

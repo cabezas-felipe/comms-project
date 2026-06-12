@@ -653,6 +653,145 @@ describe("Slice 2: clustering fail-closed diagnostics from _meta", () => {
   });
 });
 
+describe("Phase 4 · Step 3: refresh fail-safe meta from _meta", () => {
+  function metaFetcher(meta: Record<string, unknown> | undefined, stories = STORIES) {
+    return vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ contractVersion: CONTRACT_VERSION, stories, ...(meta ? { _meta: meta } : {}) }),
+    });
+  }
+
+  it("parses an enriched failure with prior snapshot (failed + full failure object)", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({
+        refreshStatus: "failed",
+        usedPriorSnapshot: true,
+        refreshFailure: {
+          reason: "clustering_failure",
+          subtype: "parse",
+          attempts: 2,
+          retryable: false,
+          retryAfterMs: 1500,
+          nextRetryAt: "2026-06-10T00:00:01.500Z",
+        },
+      }),
+    });
+    expect(result.refreshStatus).toBe("failed");
+    expect(result.usedPriorSnapshot).toBe(true);
+    expect(result.refreshFailure).toEqual({
+      reason: "clustering_failure",
+      subtype: "parse",
+      attempts: 2,
+      retryable: false,
+      retryAfterMs: 1500,
+      nextRetryAt: "2026-06-10T00:00:01.500Z",
+    });
+  });
+
+  it("parses a failure with no prior snapshot and omitted retry timing", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({
+        refreshStatus: "failed",
+        usedPriorSnapshot: false,
+        refreshFailure: { reason: "clustering_failure", subtype: "timeout", attempts: 2, retryable: true },
+      }, []),
+    });
+    expect(result.refreshStatus).toBe("failed");
+    expect(result.usedPriorSnapshot).toBe(false);
+    expect(result.refreshFailure?.subtype).toBe("timeout");
+    expect(result.refreshFailure?.retryAfterMs).toBeNull();
+    expect(result.refreshFailure?.nextRetryAt).toBeNull();
+  });
+
+  it("ok status surfaces refreshFailure=null", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({ refreshStatus: "ok", usedPriorSnapshot: false }),
+    });
+    expect(result.refreshStatus).toBe("ok");
+    expect(result.refreshFailure).toBeNull();
+    expect(result.usedPriorSnapshot).toBe(false);
+  });
+
+  it("legacy payload WITHOUT fail-safe fields defaults to ok / null / false (back-compat)", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({ refreshedAt: "2026-06-10T00:00:00Z", hasSnapshot: true }),
+    });
+    expect(result.refreshStatus).toBe("ok");
+    expect(result.refreshFailure).toBeNull();
+    expect(result.usedPriorSnapshot).toBe(false);
+  });
+
+  it("payload with no _meta at all defaults safely (never throws, never failed)", async () => {
+    const result = await fetchDashboardWithMeta({ fetcher: metaFetcher(undefined) });
+    expect(result.refreshStatus).toBe("ok");
+    expect(result.refreshFailure).toBeNull();
+  });
+
+  it("malformed fail-safe fields degrade safely (unknown subtype, non-bool retryable)", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({
+        refreshStatus: "failed",
+        usedPriorSnapshot: "yes", // not boolean true → false
+        refreshFailure: { reason: 42, subtype: "explosion", attempts: "two", retryable: "maybe" },
+      }),
+    });
+    expect(result.refreshStatus).toBe("failed");
+    expect(result.usedPriorSnapshot).toBe(false);
+    expect(result.refreshFailure?.reason).toBeNull(); // non-string → null
+    expect(result.refreshFailure?.subtype).toBe("unknown"); // unrecognized → unknown
+    expect(result.refreshFailure?.attempts).toBeNull();
+    expect(result.refreshFailure?.retryable).toBeNull();
+  });
+
+  it("a non-'failed' refreshStatus string is treated as ok (no false failure)", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({ refreshStatus: "degraded", refreshFailure: { subtype: "parse" } }),
+    });
+    expect(result.refreshStatus).toBe("ok");
+    expect(result.refreshFailure).toBeNull();
+  });
+
+  // Step 4 integration sanity: a real server emits the fail-safe fields ALONGSIDE
+  // the legacy clustering diagnostics in one `_meta`. The parser must surface both
+  // coherently — this guards against the new fields shadowing/breaking the old
+  // ones, and confirms the exact shape Dashboard.applyResult consumes.
+  it("surfaces fail-safe AND legacy clustering fields from one server-style _meta (coexistence)", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({
+        // legacy clustering surface (server keeps emitting these)
+        usedFallbackClustering: true,
+        clusteringFailureReason: "timeout",
+        clusteringFailureSubtype: "timeout_budget",
+        clusteringAttempts: 2,
+        // new fail-safe surface (Step 2 contract)
+        refreshStatus: "failed",
+        usedPriorSnapshot: true,
+        refreshFailure: { reason: "clustering_failure", subtype: "timeout", attempts: 2, retryable: true },
+      }, []),
+    });
+    // Legacy fields still parse.
+    expect(result.clusteringFailed).toBe(true);
+    expect(result.clusteringFailureReason).toBe("timeout");
+    expect(result.clusteringAttempts).toBe(2);
+    // New fail-safe fields parse and agree with the legacy surface.
+    expect(result.refreshStatus).toBe("failed");
+    expect(result.usedPriorSnapshot).toBe(true);
+    expect(result.refreshFailure).toEqual({
+      reason: "clustering_failure",
+      subtype: "timeout",
+      attempts: 2,
+      retryable: true,
+      retryAfterMs: null,
+      nextRetryAt: null,
+    });
+    // The exact keys Dashboard.applyResult reads are all present.
+    expect(result).toHaveProperty("refreshStatus");
+    expect(result).toHaveProperty("refreshFailure");
+    expect(result).toHaveProperty("usedPriorSnapshot");
+  });
+});
+
 describe("fetchDashboardPayload — identity header propagation", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

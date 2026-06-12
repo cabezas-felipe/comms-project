@@ -5,6 +5,7 @@ import type {
   DashboardOverflowCapMeta,
   DashboardClusterCapMeta,
   DashboardReclusterExecutionMeta,
+  DashboardRefreshFailsafeMeta,
 } from "@/lib/api";
 import type { DashboardSelectionMeta } from "@tempo/contracts";
 
@@ -33,6 +34,10 @@ export interface DashboardRunDiagnosticsProps {
   clusterCap?: DashboardClusterCapMeta | null;
   reclusterExecution?: DashboardReclusterExecutionMeta | null;
   reclusterQueueCount?: number | null;
+  // Phase 4 · Step 3: refresh fail-safe status (refreshStatus / refreshFailure /
+  // usedPriorSnapshot). Optional/additive so older callers compile unchanged;
+  // absent → "n/a".
+  refreshFailsafe?: DashboardRefreshFailsafeMeta | null;
 }
 
 const NA = "n/a";
@@ -138,6 +143,19 @@ function reclusterLine(
   return `status=${exec.status ?? NA} queued=${num(exec.totalQueued)} attempted=${num(exec.attempted)} ok=${num(exec.succeeded)} fail=${num(exec.failed)} timeout=${num(exec.timedOut)} [${cands}]`;
 }
 
+// Phase 4 · Step 3: refresh fail-safe summary — status, and when failed the
+// failure reason/subtype/attempts/retryable, plus the usedPriorSnapshot flag.
+function refreshLine(r: DashboardRefreshFailsafeMeta | null | undefined): string {
+  if (!r) return NA;
+  const prior = `usedPriorSnapshot=${r.usedPriorSnapshot}`;
+  if (r.refreshStatus !== "failed" || !r.refreshFailure) {
+    return `status=ok ${prior}`;
+  }
+  const f = r.refreshFailure;
+  const retryable = typeof f.retryable === "boolean" ? String(f.retryable) : NA;
+  return `status=failed reason=${f.reason ?? NA} subtype=${f.subtype} attempts=${num(f.attempts)} retryable=${retryable} ${prior}`;
+}
+
 function Row({ label, value, testId }: { label: string; value: string; testId: string }) {
   return (
     <div className="flex gap-2" data-testid={testId}>
@@ -159,6 +177,7 @@ export function DashboardRunDiagnostics({
   clusterCap = null,
   reclusterExecution = null,
   reclusterQueueCount = null,
+  refreshFailsafe = null,
 }: DashboardRunDiagnosticsProps) {
   const clusteringValue = clusteringFailed
     ? `failed reason=${clusteringFailureReason ?? NA} attempts=${num(clusteringAttempts)}`
@@ -172,6 +191,7 @@ export function DashboardRunDiagnostics({
       <div className="mb-1.5 font-semibold uppercase tracking-wider text-muted-foreground">
         run diagnostics · debug
       </div>
+      <Row label="refresh:" value={refreshLine(refreshFailsafe)} testId="diag-refr" />
       <Row label="clustering:" value={clusteringValue} testId="diag-clustering" />
       <Row label="funnel:" value={funnelLine(funnel)} testId="diag-funnel" />
       <Row label="recall:" value={recallLine(recall)} testId="diag-recall" />

@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
 const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
@@ -2222,6 +2222,16 @@ test("POST /api/dashboard/refresh: clustering fail-closed WITH prior healthy sna
       assert.equal(res.body._meta?.refreshSkippedReason, "clustering_failed_snapshot_preserved");
       assert.equal(res.body._meta?.hasSnapshot, true);
       assert.equal(res.body._meta?.unchanged, false);
+      // Step 2 (refresh-failsafe-contract): explicit failure status with the
+      // prior snapshot preserved — this is the canonical "failure + prior" case.
+      assert.equal(res.body._meta?.refreshStatus, "failed");
+      assert.equal(res.body._meta?.usedPriorSnapshot, true);
+      assert.ok(res.body._meta?.refreshFailure, "refreshFailure object must be present on failure");
+      assert.equal(res.body._meta.refreshFailure.reason, "clustering_failure");
+      // timeout maps to the wire subtype "timeout" (internal "timeout_budget").
+      assert.equal(res.body._meta.refreshFailure.subtype, "timeout");
+      assert.equal(res.body._meta.refreshFailure.attempts, 2);
+      assert.equal(res.body._meta.refreshFailure.retryable, true);
       // Prior snapshot's own selection/watermark are re-served (contract parity
       // with GET /api/dashboard for that snapshot).
       assert.equal(res.body._meta?.watermark, "wm-prior-healthy");
@@ -2269,6 +2279,15 @@ test("POST /api/dashboard/refresh: clustering fail-closed with NO prior snapshot
       // "ran" branch (this is the gap the patch closes — probe reads it here).
       assert.equal(res.body._meta?.clusteringFailureSubtype, "provider_request");
       assert.equal(res.body._meta?.usedFallbackClustering, true);
+      // Step 2 (refresh-failsafe-contract): the empty result is a FAILURE, not a
+      // quiet success — this is exactly the case that used to be ambiguous.
+      assert.equal(res.body._meta?.refreshStatus, "failed");
+      assert.equal(res.body._meta?.usedPriorSnapshot, false, "no prior snapshot was reused");
+      assert.ok(res.body._meta?.refreshFailure, "refreshFailure must be present even with zero stories");
+      assert.equal(res.body._meta.refreshFailure.reason, "clustering_failure");
+      assert.equal(res.body._meta.refreshFailure.subtype, "provider_request");
+      assert.equal(res.body._meta.refreshFailure.attempts, 2);
+      assert.equal(res.body._meta.refreshFailure.retryable, true);
     });
   } finally {
     _refreshPipeline.run = prevRun;
@@ -2313,6 +2332,235 @@ test("POST /api/dashboard/refresh: clustering fail-closed with an EMPTY prior sn
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
   }
+});
+
+// ─── Phase 4 · Step 2: refresh fail-safe contract (refreshStatus/refreshFailure) ──
+
+// A successful pipeline run that publishes one story. Mirrors the real "ran"
+// success shape: no clustering failure, stories present.
+function successPipelineStub() {
+  return async (opts) => ({
+    payload: {
+      contractVersion: opts.contractVersion,
+      stories: [{
+        id: "ok-1", metaStoryId: "ok-1", title: "OK", subtitle: "sub",
+        geographies: ["US"], topic: "Diplomatic relations", summary: "x",
+        whyItMatters: "y", whatChanged: "z", priority: "standard",
+        outletCount: 1, tags: { topics: [], keywords: [], geographies: ["US"] }, sources: [],
+      }],
+    },
+    log: {
+      unchanged: false,
+      poolCount: 5, relevantCount: 3, metaStoryCount: 1,
+      usedFallbackClustering: false, clusteringFailureReason: null,
+      clusteringFailureSubtype: null, clusteringAttempts: 1, clusteringLatencyMs: [12],
+      groundingFailures: 0, droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+      watermark: "wm-ok", candidateCount: 3, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict" },
+      funnel: { primaryDropStage: "none" },
+      timings: { pipelineMs: 30 },
+      outcomes: { storiesPublished: 1, clusteringAttempts: 1, clusteringFailureReason: null, usedFallbackClustering: false },
+    },
+  });
+}
+
+test("Step 2: successful refresh marks refreshStatus=ok with no failure object", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _refreshPipeline.run = successPipelineStub();
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("step2-success", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.stories.length, 1, "success publishes the story");
+      assert.equal(res.body._meta?.refreshStatus, "ok");
+      assert.equal(res.body._meta?.refreshFailure, null, "no failure object on success");
+      assert.equal(res.body._meta?.usedPriorSnapshot, false);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("Step 2: clustering PARSE failure propagates refreshFailure.subtype=parse (non-retryable)", async () => {
+  // Parse-failure shape: the model emitted unparseable output → reason "error",
+  // subtype "parse". This is the headline case for this step.
+  const parseFailureStub = async (opts) => ({
+    payload: { contractVersion: opts.contractVersion, stories: [] },
+    log: {
+      unchanged: false,
+      usedFallbackClustering: true,
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: "parse",
+      clusteringRecoverySubtype: null,
+      clusteringAttempts: 2,
+      clusteringLatencyMs: [80, 95],
+      watermark: "wm-parse-fail",
+      candidateCount: 3, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict" },
+      timings: { pipelineMs: 50 },
+      outcomes: { storiesPublished: 0, clusteringAttempts: 2, clusteringFailureReason: "error", clusteringFailureSubtype: "parse", usedFallbackClustering: true },
+    },
+  });
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _refreshPipeline.run = parseFailureStub;
+  _snapshotRepo.read = async () => null; // no prior → "ran" branch with empty stories
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("step2-parse-subtype", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.stories.length, 0);
+      assert.equal(res.body._meta?.refreshStatus, "failed");
+      assert.equal(res.body._meta?.refreshFailure?.subtype, "parse");
+      assert.equal(res.body._meta?.refreshFailure?.reason, "clustering_failure");
+      assert.equal(res.body._meta?.refreshFailure?.attempts, 2);
+      // parse is a likely-deterministic failure → reported non-retryable.
+      assert.equal(res.body._meta?.refreshFailure?.retryable, false);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("Step 2: a true quiet/empty success is distinguishable from a fail-closed empty", async () => {
+  // Quiet success = honest empty result with NO clustering failure (e.g. empty
+  // pool). It must read as refreshStatus=ok, NOT failed — the exact ambiguity
+  // this step removes.
+  const quietEmptyStub = async (opts) => ({
+    payload: { contractVersion: opts.contractVersion, stories: [] },
+    log: {
+      unchanged: false,
+      usedFallbackClustering: false,
+      clusteringFailureReason: null,
+      clusteringFailureSubtype: null,
+      clusteringAttempts: 1,
+      clusteringLatencyMs: [10],
+      watermark: "wm-quiet",
+      candidateCount: 0, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict" },
+      timings: { pipelineMs: 20 },
+      outcomes: { storiesPublished: 0, clusteringAttempts: 1, clusteringFailureReason: null, usedFallbackClustering: false },
+    },
+  });
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  _refreshPipeline.run = quietEmptyStub;
+  _snapshotRepo.read = async () => null;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("step2-quiet-empty", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(res.body.stories.length, 0, "honest empty result");
+      // Same stories.length=0 as a fail-closed run, but the status disambiguates.
+      assert.equal(res.body._meta?.refreshStatus, "ok");
+      assert.equal(res.body._meta?.refreshFailure, null);
+      assert.equal(res.body._meta?.usedPriorSnapshot, false);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+describe("Step 2: buildRefreshFailsafeMeta (unit)", () => {
+  test("ok when no clustering failure reason", () => {
+    const meta = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: null }, usedPriorSnapshot: false });
+    assert.deepEqual(meta, { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot: false });
+  });
+
+  test("maps internal timeout_budget subtype to wire 'timeout' and marks retryable", () => {
+    const meta = buildRefreshFailsafeMeta({
+      log: { clusteringFailureReason: "timeout", clusteringFailureSubtype: "timeout_budget", clusteringAttempts: 2 },
+      usedPriorSnapshot: true,
+    });
+    assert.equal(meta.refreshStatus, "failed");
+    assert.equal(meta.usedPriorSnapshot, true);
+    assert.deepEqual(meta.refreshFailure, { reason: "clustering_failure", subtype: "timeout", attempts: 2, retryable: true });
+  });
+
+  test("parse subtype is preserved and non-retryable", () => {
+    const meta = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "error", clusteringFailureSubtype: "parse", clusteringAttempts: 2 } });
+    assert.equal(meta.refreshFailure.subtype, "parse");
+    assert.equal(meta.refreshFailure.retryable, false);
+  });
+
+  test("provider_request subtype is retryable; unknown/missing subtype defaults to unknown (non-retryable)", () => {
+    const provider = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "error", clusteringFailureSubtype: "provider_request", clusteringAttempts: 1 } });
+    assert.equal(provider.refreshFailure.subtype, "provider_request");
+    assert.equal(provider.refreshFailure.retryable, true);
+    const unknown = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "error", clusteringFailureSubtype: undefined, clusteringAttempts: 0 } });
+    assert.equal(unknown.refreshFailure.subtype, "unknown");
+    assert.equal(unknown.refreshFailure.retryable, false);
+    // attempts floor: a failure with a zero/missing/invalid count still means
+    // "we tried" → reported as at least 1, never 0.
+    assert.equal(unknown.refreshFailure.attempts, 1);
+  });
+
+  test("attempts floor: missing or invalid clusteringAttempts on a failure → attempts === 1", () => {
+    for (const bad of [undefined, null, 0, -3, NaN, "2"]) {
+      const meta = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "error", clusteringAttempts: bad } });
+      assert.equal(meta.refreshFailure.attempts, 1, `clusteringAttempts=${String(bad)} should floor to 1`);
+    }
+    // A finite >=1 count is preserved verbatim.
+    const real = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "error", clusteringAttempts: 3 } });
+    assert.equal(real.refreshFailure.attempts, 3);
+  });
+
+  test("invariant: every failure (all reasons × all subtypes, incl. garbage) yields a non-null refreshFailure with attempts>=1 and a valid wire subtype", () => {
+    const wireSubtypes = new Set(["timeout", "parse", "provider_request", "unknown"]);
+    const rawSubtypes = ["timeout_budget", "parse", "provider_request", "unknown", undefined, null, "garbage"];
+    for (const clusteringFailureReason of ["timeout", "error"]) {
+      for (const clusteringFailureSubtype of rawSubtypes) {
+        const meta = buildRefreshFailsafeMeta({
+          log: { clusteringFailureReason, clusteringFailureSubtype, clusteringAttempts: 0 },
+          usedPriorSnapshot: false,
+        });
+        assert.equal(meta.refreshStatus, "failed");
+        assert.notEqual(meta.refreshFailure, null, "failed must always carry a refreshFailure object");
+        assert.ok(meta.refreshFailure.attempts >= 1, "attempts floored to >= 1");
+        assert.ok(
+          wireSubtypes.has(meta.refreshFailure.subtype),
+          `subtype ${meta.refreshFailure.subtype} must be a valid wire value`
+        );
+        assert.equal(meta.refreshFailure.reason, "clustering_failure");
+        assert.equal(typeof meta.refreshFailure.retryable, "boolean");
+      }
+    }
+    // The one mapping that must hold: internal timeout_budget → wire "timeout".
+    const t = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "timeout", clusteringFailureSubtype: "timeout_budget", clusteringAttempts: 2 } });
+    assert.equal(t.refreshFailure.subtype, "timeout");
+  });
 });
 
 // ─── Sub-slice 2.3: refresh reads from Tier-A cache, falls back to live ──────
@@ -3553,9 +3801,45 @@ test("POST /api/dashboard/refresh: returns 500 when pipeline fails and no prior 
     const res = await request(app).post("/api/dashboard/refresh");
     assert.equal(res.status, 500);
     assert.equal(typeof res.body.message, "string");
+    // Step 4: a hard 500 is non-200, so it can never be mistaken for a quiet
+    // success — no _meta/stories surface to misread.
+    assert.equal(res.body.stories, undefined);
   } finally {
     _refreshPipeline.run = prevRun;
     _snapshotRepo.read = prevRead;
+  }
+});
+
+test("Step 4: pipeline THROWS with a prior snapshot → error_fallback carries refreshStatus=failed + usedPriorSnapshot=true and re-serves prior stories", async () => {
+  // The error_fallback branch builds the fail-safe fields inline (the pipeline
+  // never returned a `log`), so this pins that path: an exception is a refresh
+  // FAILURE that served the prior snapshot, NOT a healthy refresh.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  _refreshPipeline.run = async () => { throw new Error("pipeline exploded"); };
+  _snapshotRepo.read = async () => PRIOR_HEALTHY_SNAPSHOT;
+  _snapshotRepo.writeMeta = async () => {};
+  try {
+    await withIsolatedUser("step4-error-fallback", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      // Prior healthy stories re-served (soft fallback), with the legacy flag.
+      assert.equal(res.body.stories.length, 1);
+      assert.equal(res.body._meta?.fallback, true);
+      // Fail-safe contract on the exception path.
+      assert.equal(res.body._meta?.refreshStatus, "failed");
+      assert.equal(res.body._meta?.usedPriorSnapshot, true);
+      assert.ok(res.body._meta?.refreshFailure, "a failed status must carry a refreshFailure object");
+      assert.equal(res.body._meta.refreshFailure.reason, "pipeline_exception");
+      assert.equal(res.body._meta.refreshFailure.subtype, "unknown");
+      assert.ok(res.body._meta.refreshFailure.attempts >= 1, "attempts floor >= 1 on failure");
+      assert.equal(res.body._meta.refreshFailure.retryable, true);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.writeMeta = prevWriteMeta;
   }
 });
 

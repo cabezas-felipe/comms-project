@@ -22,14 +22,26 @@ cd 05-engineering
 npm run e2e:prepare-user -- --user-id <userId> --email <email>
 ```
 
-This is the primary path for a clean E2E run. It starts the API watcher and web
-dev server in the background, then runs `dev:api:clean` (with
-`TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` and `TEMPO_E2E_STRICT_IDENTITY=true`),
-`e2e:reset-user`, `e2e:assert-clean`, and `e2e:preflight` (`--require-web`,
-`--require-strict-identity`, `--require-web-identity-override`,
-`--identity-email <email>`). If any gate fails, stop and fix before testing.
+This is the primary path for a clean E2E run. It is **two-phase** (Phase 4 ·
+Step 1) so the baseline can't be re-dirtied during setup:
 
-After this passes, jump to §2 — the steps below are only needed as a fallback.
+1. Start the **API only** (`dev:api:clean` with
+   `TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` + `TEMPO_E2E_STRICT_IDENTITY=true`).
+2. `e2e:reset-user`, then `e2e:assert-clean` (post-reset baseline — must pass).
+3. **Baseline guard** — a *second* `assert-clean` re-check immediately before the
+   web server starts. Web is **not** started until both cleanliness checks pass.
+4. Start the **web** dev server, then `e2e:preflight` (`--require-web`,
+   `--require-strict-identity`, `--require-web-identity-override`,
+   `--identity-email <email>`).
+
+If the guard fails (baseline went dirty between reset and browser startup), the
+script exits non-zero with remediation text — almost always a stray
+`localhost:8080` tab or dev process touching the user. Close all `:8080` tabs and
+rerun. If any gate fails, stop and fix before testing.
+
+After this passes, jump to §2 — the manual steps below are only a fallback. For
+real-mode manual E2E execution, interpretation, and the gating policy, see
+[Phase 4 E2E Unblock protocol](#phase-4-e2e-unblock-protocol-real-mode-manual-e2e).
 
 ### Manual fallback
 
@@ -237,6 +249,128 @@ A landing → onboarding → dashboard pass is **green** when all of the followi
 If stories render but titles are **Spanish**, re-check §1.5: translation is almost
 certainly off / mock-only / missing a key — that is expected behavior, not a
 clustering or split-healer regression.
+
+---
+
+## Phase 4 E2E Unblock protocol (real-mode manual E2E)
+
+Real-mode E2E (live providers, real refresh) is **manual-required** for this
+phase: run it locally and sign off before merge. It is **not** a required PR
+status check (see [Gating policy](#gating-policy) below). This section is the
+operational contract for running it and reading the result.
+
+### Two-phase prep + baseline guard
+
+`e2e:prepare-user` is two-phase (see [§1](#happy-path--one-command-e2e-prep-strict-identity--reset--gates)):
+API-only → reset → assert-clean → **baseline guard re-check** → web → preflight.
+The guard exists because an active session hitting the dashboard *during* prep
+can re-write rows between reset and the browser step, leaving a baseline that
+looked clean at reset time. Web never starts until **both** cleanliness checks
+pass; a guard failure is fail-fast with remediation text.
+
+### Pre-run checks (do not skip)
+
+- [ ] **Single active web session.** Exactly one `localhost:8080` tab for the
+      whole run — no other tabs or stray dev servers on `:8080`. `prepare-user`
+      warns if it sees a process already on `:8080`; heed it.
+- [ ] **Clean baseline asserted.** `e2e:assert-clean` PASSes *before* any browser
+      step (the guard enforces this, but verify the PASS line in the output).
+- [ ] **Strict identity wired.** `prepare-user` preflight is green
+      (`--require-strict-identity`, `--require-web-identity-override`).
+- [ ] **Real providers (if testing real-mode behavior).** `TEMPO_AI_MOCK_ONLY`
+      unset and the relevant key(s) set (e.g. `TEMPO_OPENAI_API_KEY` for ES→EN
+      translation, per [§1 Pre-flight checklist](#1-pre-flight-checklist)). Mock-only is fine for
+      flow checks but won't exercise real clustering/translation.
+
+### Command sequence (copy-paste)
+
+```bash
+cd 05-engineering
+
+# 1. Two-phase prep + baseline guard + preflight (one command)
+npm run e2e:prepare-user -- --user-id <uuid> --email <email>
+
+# 2. Re-confirm the baseline PASS (pre-run only; expected to fail AFTER onboarding)
+npm run e2e:assert-clean --workspace=@tempo/api -- --user-id <uuid>
+
+# 3. Drive the journey in ONE browser tab:
+#      http://localhost:8080/  → enter <email> → expect /onboarding (clean user)
+#      submit onboarding → land on dashboard → open dashboard with ?debug=1
+
+# 4. Read the refresh fail-safe contract straight from the API (recognized-email
+#    identity, matching the E2E web override):
+curl -s -X POST localhost:8787/api/dashboard/refresh \
+  -H "x-recognized-email: <email>" \
+  | jq '._meta | {refreshStatus, refreshFailure, usedPriorSnapshot, hasSnapshot}'
+
+# 5. Confirm the journey wrote its expected state (NOT a cleanliness check)
+#    user_onboarding_narratives >= 1, settings >= 1, dashboard_snapshots >= 1
+```
+
+In the UI, the `?debug=1` panel's **`refresh:`** row (`diag-refr`) shows the same
+fields (`status=ok|failed`, and on failure `reason / subtype / attempts /
+retryable`, plus `usedPriorSnapshot`) — see
+[`DashboardRunDiagnostics`](../../04-prototype/src/components/DashboardRunDiagnostics.tsx).
+
+### Result interpretation matrix
+
+The key distinction the [refresh fail-safe contract](../apps/api/src/server.mjs)
+makes: **0 stories is not automatically a failure.** Read `_meta.refreshStatus`
+first, then the story count.
+
+| Outcome | `_meta` signal | Stories | UI surface | Read it as |
+|---|---|---|---|---|
+| **Pass / Healthy** | `refreshStatus=ok`, `refreshFailure=null` | ≥1 (populated beat) | story list (debug rows coherent) | Green — done. |
+| **Neutral Expected (quiet)** | `refreshStatus=ok`, `refreshFailure=null` | 0 | quiet empty — "No stories yet." (`dashboard-empty`) | Healthy quiet window: feeds simply published nothing on-beat. **Not** a failure. |
+| **Actionable Fail** | `refreshStatus=failed`, `refreshFailure` present | 0, **or** prior stories when `usedPriorSnapshot=true` | failure-aware empty (`dashboard-refresh-failed`) **or** stories + warning banner (`dashboard-refresh-banner`) | Refresh failed (parse / timeout / provider). Investigate via the debugging checklist. |
+| **Execution Error** | non-200 (e.g. `500`) with no `_meta`, **or** a `prepare-user`/preflight gate failure | n/a | full error state / no run | Code/config/infra problem — not a feed-window artifact. Fix before re-running. |
+
+### Debugging checklist (failed refresh)
+
+Work top-down — the contract is designed so each field narrows the cause:
+
+1. **`_meta.refreshStatus`** — `ok` means the backend is healthy; if the UI still
+   looks wrong, it's a **stale UI/session issue**, not a refresh failure (jump to
+   the stale-state checks below). `failed` means a genuine backend fail-safe
+   response — continue.
+2. **`_meta.refreshFailure`**:
+   - `reason` — `clustering_failure` (the model stage failed closed) vs
+     `pipeline_exception` (the refresh threw and a prior snapshot was served).
+   - `subtype` — `parse` (model emitted unparseable output — usually
+     deterministic, **`retryable=false`**), `timeout` / `provider_request`
+     (transient — **`retryable=true`**, retry is reasonable), `unknown`.
+   - `attempts` — always **≥1** on a failure; repeated high attempts point at a
+     persistent provider/timeout issue, not a one-off blip.
+   - `retryable` — `true` → re-run the refresh; `false` → don't hot-loop, capture
+     the run and investigate the model/prompt path.
+3. **`_meta.usedPriorSnapshot`** — `true` means the user is seeing **preserved
+   prior stories** under a warning banner (the refresh failed but continuity was
+   kept); `false` means there was nothing to fall back to (empty failure state).
+4. **Differentiate stale UI/session from a backend fail-safe response.** If the
+   **API** `curl` shows `refreshStatus=ok` but the **browser** looks stale/empty,
+   it is a client-state problem, not a backend failure:
+   - Multiple tabs / concurrent sessions open against the same user → close to one.
+   - Stale `localStorage` refresh timestamp
+     (`tempo_dashboard_last_refresh_attempt_at:<userId>`) → clear it (see
+     [first-time browser hygiene](#first-time--colombia-election-manual-e2e)).
+   - Re-fetch with the `curl` line above to compare API truth vs. on-screen state.
+
+### Gating policy
+
+- **Required (manual):** a real-mode manual E2E **signoff before merging this
+  phase** — run the command sequence above and confirm the result lands in
+  *Pass/Healthy* or *Neutral Expected*. Capture the `_meta` fail-safe block (and
+  the `?debug=1` rows) in the PR/review notes as evidence.
+- **Optional (advisory):** a **nightly advisory smoke** job (e.g. the
+  [Live Colombia-election smoke](#live-colombia-election-smoke-advisory)) may run
+  on a schedule. It is informational only.
+- **Not a PR status check.** Real-mode E2E and the nightly advisory are
+  **deliberately excluded** from required PR checks — those remain the two
+  hermetic gates
+  ([`api-quality-gate.yml`](../../.github/workflows/api-quality-gate.yml),
+  [`relevance-path-gate.yml`](../../.github/workflows/relevance-path-gate.yml)).
+  Live/real-mode variability must never block a merge; escalate a genuine
+  *Actionable Fail* or *Execution Error* instead.
 
 ---
 

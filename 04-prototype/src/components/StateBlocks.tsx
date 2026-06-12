@@ -145,6 +145,73 @@ export function ClusteringFailedState({ onRetry, reason }: ClusteringFailedState
   );
 }
 
+/* ---------------- Refresh failed (Phase 4 · Step 3 fail-safe) ---------------- */
+//
+// Surfaced when the Step 2 server contract reports `_meta.refreshStatus ===
+// "failed"` (parse / timeout / provider issue) — a refresh FAILURE, not a quiet
+// beat. Two shapes:
+//   • banner  — non-blocking warning shown ABOVE preserved prior-snapshot stories
+//               (server kept the last healthy snapshot), so the user keeps their
+//               feed while knowing it didn't refresh.
+//   • block   — full failure-aware empty state when there are no stories to show,
+//               visually distinct from the quiet "No stories yet." EmptyState.
+
+const REFRESH_FAILED_TITLE = "Couldn't refresh stories right now";
+const REFRESH_FAILED_BODY = "We hit a temporary processing issue. You can retry now.";
+
+export function RefreshFailedBanner({ onRetry }: { onRetry?: () => void }) {
+  return (
+    <div
+      data-testid="dashboard-refresh-banner"
+      className="border-y border-amber-500/30 bg-amber-500/5 px-6 py-4"
+    >
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-2 text-sm">
+          <AlertCircle className="h-4 w-4 text-amber-600" />
+          <span className="text-amber-700 dark:text-amber-500">
+            <span className="font-medium">{REFRESH_FAILED_TITLE}.</span>{" "}
+            Showing your last results — {REFRESH_FAILED_BODY}
+          </span>
+        </div>
+        {onRetry && (
+          <button
+            onClick={onRetry}
+            className="shrink-0 rounded-sm border border-amber-500/40 px-2.5 py-1 text-xs text-amber-700 hover:bg-amber-500/10 dark:text-amber-500"
+          >
+            Retry
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function RefreshFailedState({ onRetry }: { onRetry?: () => void }) {
+  return (
+    <div
+      data-testid="dashboard-refresh-failed"
+      className="flex flex-col items-center justify-center gap-4 py-24 text-center"
+    >
+      <RefreshCw className="h-6 w-6 text-amber-600" />
+      <p className="max-w-[36ch] font-display text-2xl leading-snug">
+        {REFRESH_FAILED_TITLE}
+      </p>
+      <p className="max-w-[44ch] text-sm text-muted-foreground">
+        {REFRESH_FAILED_BODY} Your sources and topics are unchanged — this is a
+        processing issue, not a quiet beat.
+      </p>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="mt-2 rounded-sm border border-rule/60 px-3 py-1.5 text-sm hover:bg-secondary"
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- Error ---------------- */
 export function ErrorState({ variant, onRetry }: StateProps) {
   // Inline banner: refresh failed but a previous run is still on-screen.

@@ -86,6 +86,25 @@ const MAX_STR = 120; // truncate long string fields in samples
 
 // ─── pure helpers ────────────────────────────────────────────────────────────
 
+export function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value ?? "")
+  );
+}
+
+export function formatSupabaseError(prefix, error, status, statusText) {
+  const message = typeof error?.message === "string" && error.message.trim() ? error.message.trim() : null;
+  const extras = [];
+  if (error?.code) extras.push(`code=${error.code}`);
+  if (error?.details) extras.push(`details=${error.details}`);
+  if (error?.hint) extras.push(`hint=${error.hint}`);
+  if (Number.isFinite(status)) {
+    extras.push(`status=${status}${statusText ? ` ${statusText}` : ""}`);
+  }
+  const suffix = extras.length ? ` (${extras.join("; ")})` : "";
+  return `${prefix}: ${message ?? "no error message returned"}${suffix}`;
+}
+
 export function usage() {
   return `Usage:
   npm run e2e:assert-clean --workspace=@tempo/api -- --user-id <uuid> [--require-no-sessions]
@@ -110,6 +129,12 @@ export function parseArgs(argv) {
     else return { ok: false, error: `Unknown argument: ${a}` };
   }
   if (!out.userId) return { ok: false, error: "Missing required argument: --user-id <uuid>" };
+  if (!isUuid(out.userId)) {
+    return {
+      ok: false,
+      error: `Invalid --user-id '${out.userId}'. Expected a real UUID (do not pass placeholders like <e06-user-id>).`,
+    };
+  }
   return out;
 }
 
@@ -190,13 +215,13 @@ async function probeTable(supabase, spec, userId) {
   const label = spec.label ?? spec.table;
   const result = { table: label, count: null, samples: [], error: null };
 
-  const { count, error: countErr } = await applyFilter(
+  const { count, error: countErr, status: countStatus, statusText: countStatusText } = await applyFilter(
     fromTable(supabase, spec).select("*", { count: "exact", head: true }),
     spec,
     userId
   );
   if (countErr) {
-    result.error = `count failed: ${countErr.message}`;
+    result.error = formatSupabaseError("count failed", countErr, countStatus, countStatusText);
     return result;
   }
   result.count = count ?? 0;
@@ -204,9 +229,10 @@ async function probeTable(supabase, spec, userId) {
 
   let sampleQuery = applyFilter(fromTable(supabase, spec).select(spec.select.join(",")), spec, userId);
   if (spec.orderBy) sampleQuery = sampleQuery.order(spec.orderBy, { ascending: false });
-  const { data, error: sampleErr } = await sampleQuery.limit(MAX_SAMPLES);
+  const { data, error: sampleErr, status: sampleStatus, statusText: sampleStatusText } =
+    await sampleQuery.limit(MAX_SAMPLES);
   if (sampleErr) {
-    result.error = `sample failed: ${sampleErr.message}`;
+    result.error = formatSupabaseError("sample failed", sampleErr, sampleStatus, sampleStatusText);
     return result;
   }
   result.samples = (data ?? []).map(redactSample);

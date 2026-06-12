@@ -144,6 +144,73 @@ export const dashboardClusterCapMetaSchema = z.object({
   clusterInputCapEffective: z.number().int().positive().optional(),
 });
 
+/**
+ * Refresh fail-safe contract (Phase 4 · Step 2) surfaced on `_meta` of a
+ * dashboard refresh response. Lets clients distinguish a TRUE quiet/empty
+ * success from a refresh failure that ALSO returns `stories: []` (e.g. a
+ * clustering fail-closed run). ADDITIVE: older clients that don't read these
+ * keys are unaffected; the rest of `_meta` is unchanged.
+ *
+ *   refreshStatus      "ok" | "failed"
+ *   refreshFailure     null when ok; the structured failure when failed
+ *   usedPriorSnapshot  true when the served stories came from a preserved prior
+ *                      snapshot (failure-driven continuity), false otherwise
+ *
+ * `subtype` is the stable WIRE vocabulary, decoupled from the pipeline's
+ * internal naming (the API maps internal "timeout_budget" → "timeout").
+ * `retryAfterMs` / `nextRetryAt` are OPTIONAL — present only when retry timing
+ * is known; omitted otherwise (immediate in-pipeline retries carry no schedule).
+ */
+export const refreshFailureSubtypeSchema = z.enum([
+  "parse",
+  "timeout",
+  "provider_request",
+  "unknown",
+]);
+
+export const refreshFailureSchema = z.object({
+  reason: z.string().min(1),
+  subtype: refreshFailureSubtypeSchema,
+  // `attempts` is `>= 1`: a refreshFailure object only exists on a FAILED refresh,
+  // and a failure represents at least one attempted run (the API floors it to 1).
+  // Pinning `positive()` here keeps the Step 2 floor honest at the contract level.
+  attempts: z.number().int().positive(),
+  retryable: z.boolean(),
+  retryAfterMs: z.number().int().nonnegative().optional(),
+  nextRetryAt: z.string().min(1).optional(),
+});
+
+export const dashboardRefreshFailsafeMetaSchema = z
+  .object({
+    refreshStatus: z.enum(["ok", "failed"]),
+    // null (not absent) on success — a single, explicit shape clients can rely on.
+    refreshFailure: refreshFailureSchema.nullable(),
+    usedPriorSnapshot: z.boolean(),
+  })
+  // `_meta` carries many other diagnostic keys alongside these — passthrough so
+  // a full `_meta` object validates against the fail-safe surface additively.
+  .passthrough()
+  // Invariant pinned by Step 4: status and failure object are coupled — a
+  // "failed" refresh ALWAYS carries a structured refreshFailure, and an "ok"
+  // refresh NEVER does (refreshFailure is null on success). The API honors both
+  // directions; this rejects contradictory payloads outright.
+  .superRefine((val, ctx) => {
+    if (val.refreshStatus === "failed" && val.refreshFailure == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refreshFailure"],
+        message: "refreshStatus 'failed' requires a non-null refreshFailure object",
+      });
+    }
+    if (val.refreshStatus === "ok" && val.refreshFailure != null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refreshFailure"],
+        message: "refreshStatus 'ok' must have refreshFailure null",
+      });
+    }
+  });
+
 export const settingsPayloadSchema = z.object({
   contractVersion: z.literal(CONTRACT_VERSION),
   topics: z.array(z.string().min(1)),
@@ -168,4 +235,7 @@ export type DashboardClusterDroppedComponents = z.infer<
 >;
 export type DashboardClusterDroppedEntry = z.infer<typeof dashboardClusterDroppedEntrySchema>;
 export type DashboardClusterCapMeta = z.infer<typeof dashboardClusterCapMetaSchema>;
+export type RefreshFailureSubtype = z.infer<typeof refreshFailureSubtypeSchema>;
+export type RefreshFailure = z.infer<typeof refreshFailureSchema>;
+export type DashboardRefreshFailsafeMeta = z.infer<typeof dashboardRefreshFailsafeMetaSchema>;
 export type SettingsPayload = z.infer<typeof settingsPayloadSchema>;
