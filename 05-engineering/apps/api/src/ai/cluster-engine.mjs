@@ -529,9 +529,14 @@ export function clusteringReasonFromSubtype(subtype) {
   return subtype === CLUSTERING_FAILURE_SUBTYPE.TIMEOUT_BUDGET ? "timeout" : "error";
 }
 
-// Clustering completion token budget.  Named (not a new tuning knob — same
-// value that was inline) so the observability line can report it verbatim.
-export const CLUSTER_MAX_TOKENS = 2048;
+// Clustering completion token budget.  Named (not a new tuning knob) so the
+// observability line can report it verbatim.  Raised 2048 → 4096 (A1): a full
+// candidate-pool Sonnet clustering completion can exceed 2048 tokens, and a
+// completion truncated at the ceiling (stop_reason="max_tokens") yields
+// incomplete, unparseable JSON that fails closed.  4096 gives headroom for the
+// bounded output (C1-capped pool, max 5 meta-stories) without changing model
+// behavior.
+export const CLUSTER_MAX_TOKENS = 4096;
 
 // ─── Step 2: structured-path observability ───────────────────────────────────
 //
@@ -634,6 +639,30 @@ export async function clusterWithAnthropic({ apiKey, model, items, settings, tim
   if (!block || block.type !== "text" || !block.text.trim()) {
     emitClusterObs({ mode: "structured", result: "fail", errorClass: "empty_response" }, obsCtx);
     throw new Error("Anthropic returned empty clustering response");
+  }
+  // Truncation guard (A1): a completion stopped at the token ceiling
+  // (stop_reason="max_tokens") is almost certainly incomplete JSON.  Classify it
+  // deterministically as a parse/truncation failure within the EXISTING taxonomy
+  // (errorClass / failureReason / rawFailureClass = "parse_error") rather than
+  // relying on the partial text happening to fail JSON.parse — the truncation
+  // itself stays visible via the obs line's stopReason=max_tokens.  Carry
+  // `_clusteringRepair` so `classifyClusteringFailureSubtype` reads PARSE; the
+  // public coarse reason mapping (PARSE → "error") is unchanged, and failing
+  // closed here lets the pipeline's graceful fallback run as before.
+  if (message?.stop_reason === "max_tokens") {
+    emitClusterObs({ mode: "structured", result: "fail", errorClass: "parse_error" }, obsCtx);
+    const err = new Error(
+      "Clustering response truncated: provider stopped at max_tokens before completing JSON"
+    );
+    err._clusteringRepair = {
+      attempted: true,
+      succeeded: false,
+      failureReason: "parse_error",
+      rawFailureClass: "parse_error",
+      schemaErrorBucket: null,
+      coercion: null,
+    };
+    throw err;
   }
   let parsed;
   try {
