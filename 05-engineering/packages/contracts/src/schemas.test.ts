@@ -352,9 +352,61 @@ describe("dashboardRefreshFailsafeMetaSchema", () => {
   it("rejects an invalid refreshStatus value", () => {
     expect(() =>
       dashboardRefreshFailsafeMetaSchema.parse({
+        refreshStatus: "exploded",
+        refreshFailure: null,
+        usedPriorSnapshot: false,
+      })
+    ).toThrow();
+  });
+
+  // B3: degraded = LLM clustering failed but the deterministic relevance-gated
+  // fallback published bounded stories. A real publish (NOT a failure) that
+  // retains the LLM-failure metadata for attribution + the B2 diagnostic fields.
+  it("B3: accepts refreshStatus=degraded carrying the LLM-failure metadata + deterministic fields", () => {
+    const parsed = dashboardRefreshFailsafeMetaSchema.parse({
+      ...legacyMetaDiagnostics,
+      clusteringFailureReason: "error",
+      refreshStatus: "degraded",
+      refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 2, retryable: false },
+      usedPriorSnapshot: false,
+      clusteringLlmFailed: true,
+      usedDeterministicClustering: true,
+      deterministicClusteringDiagnostics: {
+        inputCount: 6,
+        eligibleCount: 3,
+        outputCount: 3,
+        excludedReasons: { no_keyword_fit: 2, over_cap: 1 },
+      },
+    });
+    expect(parsed.refreshStatus).toBe("degraded");
+    expect(parsed.refreshFailure?.subtype).toBe("parse");
+    expect(parsed.usedDeterministicClustering).toBe(true);
+    expect(parsed.clusteringLlmFailed).toBe(true);
+    expect(parsed.deterministicClusteringDiagnostics?.outputCount).toBe(3);
+  });
+
+  it("B3 invariant: rejects refreshStatus=degraded with a null refreshFailure", () => {
+    expect(() =>
+      dashboardRefreshFailsafeMetaSchema.parse({
         refreshStatus: "degraded",
         refreshFailure: null,
         usedPriorSnapshot: false,
+      })
+    ).toThrow(/degraded.*requires a non-null refreshFailure/);
+  });
+
+  it("B3: deterministicClusteringDiagnostics rejects negative / non-integer counts", () => {
+    expect(() =>
+      dashboardRefreshFailsafeMetaSchema.parse({
+        refreshStatus: "degraded",
+        refreshFailure: { reason: "clustering_failure", subtype: "timeout", attempts: 1, retryable: true },
+        usedPriorSnapshot: false,
+        deterministicClusteringDiagnostics: {
+          inputCount: -1,
+          eligibleCount: 0,
+          outputCount: 0,
+          excludedReasons: {},
+        },
       })
     ).toThrow();
   });

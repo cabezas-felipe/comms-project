@@ -198,6 +198,20 @@ if (published) {
     stories: [validStory],
   };
 
+  // B3 — refresh fail-safe surface fixtures.
+  const validFailure = {
+    reason: "clustering_failure",
+    subtype: "timeout",
+    attempts: 2,
+    retryable: true,
+  };
+  const validDeterministicDiagnostics = {
+    inputCount: 7,
+    eligibleCount: 3,
+    outputCount: 3,
+    excludedReasons: { no_keyword_fit: 2, over_cap: 1 },
+  };
+
   const schemaCases = [
     ["sourceSchema", validSource, true],
     ["sourceSchema", { ...validSource, url: "" }, false],
@@ -213,6 +227,48 @@ if (published) {
     [
       "settingsPayloadSchema",
       { ...validSettings, contractVersion: "wrong" },
+      false,
+    ],
+    // B3: refresh fail-safe contract parity (ok / degraded / failed + invariants).
+    ["refreshFailureSchema", validFailure, true],
+    ["refreshFailureSchema", { ...validFailure, subtype: "explosion" }, false],
+    ["deterministicClusteringDiagnosticsSchema", validDeterministicDiagnostics, true],
+    [
+      "deterministicClusteringDiagnosticsSchema",
+      { ...validDeterministicDiagnostics, inputCount: -1 },
+      false,
+    ],
+    [
+      "dashboardRefreshFailsafeMetaSchema",
+      { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot: false },
+      true,
+    ],
+    [
+      "dashboardRefreshFailsafeMetaSchema",
+      {
+        refreshStatus: "degraded",
+        refreshFailure: validFailure,
+        usedPriorSnapshot: false,
+        clusteringLlmFailed: true,
+        usedDeterministicClustering: true,
+        deterministicClusteringDiagnostics: validDeterministicDiagnostics,
+      },
+      true,
+    ],
+    // degraded REQUIRES a non-null failure object (chosen invariant).
+    [
+      "dashboardRefreshFailsafeMetaSchema",
+      { refreshStatus: "degraded", refreshFailure: null, usedPriorSnapshot: false },
+      false,
+    ],
+    [
+      "dashboardRefreshFailsafeMetaSchema",
+      { refreshStatus: "failed", refreshFailure: null, usedPriorSnapshot: false },
+      false,
+    ],
+    [
+      "dashboardRefreshFailsafeMetaSchema",
+      { refreshStatus: "ok", refreshFailure: validFailure, usedPriorSnapshot: false },
       false,
     ],
   ];

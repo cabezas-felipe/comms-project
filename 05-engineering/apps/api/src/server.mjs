@@ -923,8 +923,11 @@ function emptyDashboardResponse(metaExtra = {}) {
 // `stories: []` (a clustering fail-closed run with no prior snapshot). Without
 // this, both look identical on the wire and normal UX reads a failure as "quiet".
 //
-//   _meta.refreshStatus      "ok" | "failed"
-//   _meta.refreshFailure     null on ok; { reason, subtype, attempts, retryable } on failure
+//   _meta.refreshStatus      "ok" | "degraded" | "failed"
+//   _meta.refreshFailure     null on ok; { reason, subtype, attempts, retryable } on
+//                            failure AND on degraded (B3 — degraded retains the
+//                            LLM-failure metadata that forced the deterministic
+//                            relevance-gated fallback to publish bounded stories)
 //   _meta.usedPriorSnapshot  true ONLY when served stories came from a preserved
 //                            prior snapshot due to a failure (continuity); false
 //                            on success — including valid quiet/unchanged windows.
@@ -955,35 +958,82 @@ function isRetryableFailureSubtype(subtype) {
   return subtype === "timeout" || subtype === "provider_request";
 }
 
+// B3: copy the additive deterministic-fallback (B2) signals from the pipeline
+// `log` onto a fail-safe meta object — but ONLY the keys actually present, so a
+// minimal `log` (e.g. `{ clusteringFailureReason: null }`) still yields the exact
+// three-field shape older callers/tests rely on. Mutates and returns `meta`.
+function attachDeterministicFallbackFields(meta, log) {
+  if (log?.usedDeterministicClustering !== undefined) {
+    meta.usedDeterministicClustering = log.usedDeterministicClustering;
+  }
+  if (log?.clusteringLlmFailed !== undefined) {
+    meta.clusteringLlmFailed = log.clusteringLlmFailed;
+  }
+  // Diagnostics are an optional OBJECT in the contract — surface ONLY a real
+  // object (the deterministic builder ran). `null` (builder never ran) is omitted
+  // so the optional field never carries an invalid null.
+  if (log?.deterministicClusteringDiagnostics != null) {
+    meta.deterministicClusteringDiagnostics = log.deterministicClusteringDiagnostics;
+  }
+  return meta;
+}
+
 /**
  * Derive the additive refresh fail-safe `_meta` fields from a pipeline `log`.
  * `usedPriorSnapshot` is decided by the caller (true only when the served stories
- * came from a preserved prior snapshot). Returns the same three-field shape on
- * every branch so the contract is uniform across success and failure.
+ * came from a preserved prior snapshot).
+ *
+ * Status mapping (B3):
+ *   - `degraded` — the LLM clustering path failed terminally BUT the deterministic
+ *     relevance-gated fallback (B2) published bounded stories
+ *     (`clusteringLlmFailed === true && usedDeterministicClustering === true`).
+ *     This is the bug-fix target: such a run shipped real content and must NOT
+ *     read as `failed`. It RETAINS the LLM-failure metadata in `refreshFailure`
+ *     for attribution.
+ *   - `failed` — a terminal clustering failure with NO deterministic stories
+ *     published (`clusteringFailureReason != null` and not degraded).
+ *   - `ok` — every successful / recovered path (no terminal failure reason).
+ *
+ * `refreshFailure` is non-null on BOTH `failed` and `degraded`, and null on `ok`
+ * (the schema `superRefine` enforces this coupling).
  */
 export function buildRefreshFailsafeMeta({ log = {}, usedPriorSnapshot = false } = {}) {
   const reason = log?.clusteringFailureReason ?? null;
-  if (reason == null) {
-    return { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot };
+  const llmFailed = log?.clusteringLlmFailed === true;
+  const deterministicPublished = log?.usedDeterministicClustering === true;
+  // Degraded: the LLM failed but the deterministic fallback rescued the run.
+  const degraded = llmFailed && deterministicPublished;
+
+  if (reason == null && !degraded) {
+    return attachDeterministicFallbackFields(
+      { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot },
+      log
+    );
   }
+
   const subtype = toContractFailureSubtype(log?.clusteringFailureSubtype);
-  // A failure represents at least one attempted run — `attempts=0` on a failed
-  // refresh is ambiguous. Use the pipeline's count when it's a finite >=1 value;
-  // otherwise floor to 1 (missing/zero/invalid count still means "we tried").
+  // A failure represents at least one attempted run — `attempts=0` on a failed/
+  // degraded refresh is ambiguous. Use the pipeline's count when it's a finite
+  // >=1 value; otherwise floor to 1 (missing/zero/invalid count still means
+  // "we tried").
   const attempts =
     Number.isFinite(log?.clusteringAttempts) && log.clusteringAttempts >= 1
       ? log.clusteringAttempts
       : 1;
-  return {
-    refreshStatus: "failed",
-    refreshFailure: {
-      reason: "clustering_failure",
-      subtype,
-      attempts,
-      retryable: isRetryableFailureSubtype(subtype),
+  return attachDeterministicFallbackFields(
+    {
+      // Degraded keeps the LLM-failure attribution but is NOT a failed refresh.
+      refreshStatus: degraded ? "degraded" : "failed",
+      refreshFailure: {
+        reason: "clustering_failure",
+        subtype,
+        attempts,
+        retryable: isRetryableFailureSubtype(subtype),
+      },
+      usedPriorSnapshot,
     },
-    usedPriorSnapshot,
-  };
+    log
+  );
 }
 
 app.get("/api/dashboard", async (req, res) => {

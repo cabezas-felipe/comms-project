@@ -68,7 +68,7 @@ const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefr
 // implementation explicitly.
 const _realPrefetchStart = _refreshPrefetch.start;
 const { default: request } = await import("supertest");
-const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
+const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel, dashboardRefreshFailsafeMetaSchema } = await import("./contracts-runtime/index.mjs");
 
 // D1: shared shape guard for the additive `_meta.cacheBenefit` advisory.
 // Asserts the runtime observability object is present and well-formed on a
@@ -2560,6 +2560,86 @@ describe("Step 2: buildRefreshFailsafeMeta (unit)", () => {
     // The one mapping that must hold: internal timeout_budget → wire "timeout".
     const t = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "timeout", clusteringFailureSubtype: "timeout_budget", clusteringAttempts: 2 } });
     assert.equal(t.refreshFailure.subtype, "timeout");
+  });
+
+  // ── B3: degraded mapping (deterministic relevance-gated rescue) ────────────
+
+  test("B3 degraded: LLM failed but deterministic fallback published → refreshStatus='degraded' (NOT failed)", () => {
+    // This is the B3 bug-fix target: a deterministic-rescue run retains the
+    // LLM-failure reason for attribution but must read as degraded, not failed.
+    const diagnostics = {
+      inputCount: 6,
+      eligibleCount: 3,
+      outputCount: 3,
+      excludedReasons: { no_keyword_fit: 2, over_cap: 1 },
+    };
+    const meta = buildRefreshFailsafeMeta({
+      log: {
+        clusteringFailureReason: "error",
+        clusteringFailureSubtype: "parse",
+        clusteringAttempts: 2,
+        clusteringLlmFailed: true,
+        usedDeterministicClustering: true,
+        deterministicClusteringDiagnostics: diagnostics,
+      },
+      usedPriorSnapshot: false,
+    });
+    assert.equal(meta.refreshStatus, "degraded", "deterministic rescue is degraded, not failed");
+    // Failure metadata retained for attribution (chosen invariant: non-null on degraded).
+    assert.notEqual(meta.refreshFailure, null);
+    assert.equal(meta.refreshFailure.reason, "clustering_failure");
+    assert.equal(meta.refreshFailure.subtype, "parse");
+    assert.equal(meta.refreshFailure.attempts, 2);
+    // B2 fields surfaced for clients.
+    assert.equal(meta.clusteringLlmFailed, true);
+    assert.equal(meta.usedDeterministicClustering, true);
+    assert.deepEqual(meta.deterministicClusteringDiagnostics, diagnostics);
+    // Resulting object validates against the contract.
+    assert.equal(dashboardRefreshFailsafeMetaSchema.safeParse(meta).success, true);
+  });
+
+  test("B3 failed: LLM failed and deterministic published nothing → refreshStatus='failed'", () => {
+    const meta = buildRefreshFailsafeMeta({
+      log: {
+        clusteringFailureReason: "error",
+        clusteringFailureSubtype: "parse",
+        clusteringAttempts: 2,
+        clusteringLlmFailed: true,
+        usedDeterministicClustering: false,
+        deterministicClusteringDiagnostics: {
+          inputCount: 1,
+          eligibleCount: 0,
+          outputCount: 0,
+          excludedReasons: { no_keyword_fit: 1 },
+        },
+      },
+      usedPriorSnapshot: true,
+    });
+    assert.equal(meta.refreshStatus, "failed", "no deterministic stories → true fail-closed");
+    assert.notEqual(meta.refreshFailure, null);
+    assert.equal(meta.usedDeterministicClustering, false);
+    assert.equal(meta.clusteringLlmFailed, true);
+    assert.equal(dashboardRefreshFailsafeMetaSchema.safeParse(meta).success, true);
+  });
+
+  test("B3 ok: normal success path → refreshStatus='ok' (deterministic builder never ran)", () => {
+    const meta = buildRefreshFailsafeMeta({
+      log: {
+        clusteringFailureReason: null,
+        usedDeterministicClustering: false,
+        clusteringLlmFailed: false,
+        deterministicClusteringDiagnostics: null,
+      },
+      usedPriorSnapshot: false,
+    });
+    assert.equal(meta.refreshStatus, "ok");
+    assert.equal(meta.refreshFailure, null);
+    assert.equal(meta.usedDeterministicClustering, false);
+    assert.equal(meta.clusteringLlmFailed, false);
+    // null diagnostics (builder never ran) are omitted — the optional contract
+    // field carries an object or is absent, never a null.
+    assert.equal(meta.deterministicClusteringDiagnostics, undefined);
+    assert.equal(dashboardRefreshFailsafeMetaSchema.safeParse(meta).success, true);
   });
 });
 
