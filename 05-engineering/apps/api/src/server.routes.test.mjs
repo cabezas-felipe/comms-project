@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _refreshUpgrade, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
 const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
@@ -67,6 +67,12 @@ const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefr
 // shared snapshot store across tests. The Slice 6 tests opt back into the real
 // implementation explicitly.
 const _realPrefetchStart = _refreshPrefetch.start;
+// B5: the genuine default-profile upgrade scheduler. Captured once so the suite
+// can neutralize it by default (most route tests stub the pipeline, not the
+// executor, and a real fire-and-forget upgrade would run a second background
+// refresh that contaminates the shared snapshot store). The dedicated B5 tests
+// opt back into the real implementation (or stub/observe) explicitly.
+const _realUpgradeStart = _refreshUpgrade.start;
 const { default: request } = await import("supertest");
 const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel, dashboardRefreshFailsafeMetaSchema } = await import("./contracts-runtime/index.mjs");
 
@@ -216,6 +222,11 @@ describe("server.routes", () => {
     // bleeds into later tests. The dedicated Slice 6 tests restore the genuine
     // implementation. No-op returns undefined → handler omits _meta.refreshJobId.
     _refreshPrefetch.start = () => undefined;
+    // B5: neutralize the default-profile upgrade kickoff by default (returns
+    // `false` → "not scheduled", so the handler adds no `_meta.upgradeRefreshScheduled`
+    // and never fires a real background refresh). Dedicated B5 tests override this.
+    _refreshUpgrade.start = () => false;
+    _refreshUpgrade._inFlight.clear();
   });
   afterEach(() => {
     for (const k of _ROUTES_ENV_KEYS) {
@@ -223,6 +234,8 @@ describe("server.routes", () => {
       else process.env[k] = _routesEnvSnapshot[k];
     }
     _refreshPrefetch.start = _realPrefetchStart;
+    _refreshUpgrade.start = _realUpgradeStart;
+    _refreshUpgrade._inFlight.clear();
   });
 
 // ─── Public routes ────────────────────────────────────────────────────────────
@@ -2431,6 +2444,149 @@ test("B4 (B): degraded deterministic rescue WITH prior healthy snapshot still pu
     _snapshotRepo.writeMeta = prevWriteMeta;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── B5: default-profile upgrade scheduling after degraded rescue ────────────
+
+// Build a stubbed `_refreshExecutor.execute` return shape with a controllable
+// `_meta`, so B5 trigger tests isolate the route's scheduling DECISION from the
+// pipeline entirely (no real refresh runs).
+function execResult({ usedDeterministicClustering = false, clusteringLlmFailed = false, refreshStatus = "ok", stories = [], extraMeta = {} } = {}) {
+  return {
+    kind: "ran",
+    httpStatus: 200,
+    body: {
+      contractVersion: "2026-05-19-meta-story-fields",
+      stories,
+      _meta: {
+        hasSnapshot: true,
+        refreshStatus,
+        usedDeterministicClustering,
+        clusteringLlmFailed,
+        ...extraMeta,
+      },
+    },
+  };
+}
+
+test("B5 (A): degraded deterministic rescue schedules exactly one default-profile upgrade + sets _meta", async () => {
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshUpgrade.start;
+  let upgradeCalls = 0;
+  let lastReason = null;
+  _refreshExecutor.execute = async () =>
+    execResult({ usedDeterministicClustering: true, clusteringLlmFailed: true, refreshStatus: "degraded", stories: [{ id: "det-1" }] });
+  _refreshUpgrade.start = (_identity, opts) => { upgradeCalls += 1; lastReason = opts?.reason; return true; };
+  try {
+    await withIsolatedUser("b5-degraded-schedules", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(upgradeCalls, 1, "exactly one default-profile upgrade scheduled");
+      assert.equal(lastReason, "degraded_deterministic_rescue");
+      // Additive response metadata reflects the scheduling decision.
+      assert.equal(res.body._meta?.upgradeRefreshScheduled, true);
+      assert.equal(res.body._meta?.upgradeRefreshReason, "degraded_deterministic_rescue");
+    });
+  } finally {
+    _refreshExecutor.execute = prevExec;
+    _refreshUpgrade.start = prevStart;
+  }
+});
+
+test("B5 (B): clean LLM success schedules no upgrade and adds no upgrade _meta", async () => {
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshUpgrade.start;
+  let upgradeCalls = 0;
+  _refreshExecutor.execute = async () =>
+    execResult({ usedDeterministicClustering: false, clusteringLlmFailed: false, refreshStatus: "ok", stories: [{ id: "s1" }] });
+  _refreshUpgrade.start = () => { upgradeCalls += 1; return true; };
+  try {
+    await withIsolatedUser("b5-clean-success", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(upgradeCalls, 0, "clean LLM success must NOT schedule an upgrade");
+      assert.equal(res.body._meta?.upgradeRefreshScheduled, undefined);
+      assert.equal(res.body._meta?.upgradeRefreshReason, undefined);
+    });
+  } finally {
+    _refreshExecutor.execute = prevExec;
+    _refreshUpgrade.start = prevStart;
+  }
+});
+
+test("B5 (C): fail-closed zero-story and preserved-prior runs schedule no upgrade", async () => {
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshUpgrade.start;
+  let upgradeCalls = 0;
+  _refreshUpgrade.start = () => { upgradeCalls += 1; return true; };
+  try {
+    // (1) True fail-closed: LLM failed, ZERO stories published.
+    _refreshExecutor.execute = async () =>
+      execResult({ usedDeterministicClustering: false, clusteringLlmFailed: true, refreshStatus: "failed", stories: [] });
+    await withIsolatedUser("b5-failclosed-zero", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.upgradeRefreshScheduled, undefined);
+    });
+    // (2) Preserved-prior continuity: prior stories re-served (length > 0) and
+    //     clusteringLlmFailed true — the OR branch must NOT fire here.
+    _refreshExecutor.execute = async () =>
+      execResult({
+        usedDeterministicClustering: false,
+        clusteringLlmFailed: true,
+        refreshStatus: "failed",
+        stories: [{ id: "prior-1" }],
+        extraMeta: { usedPriorSnapshot: true, snapshotPreserved: true },
+      });
+    await withIsolatedUser("b5-preserved-prior", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.upgradeRefreshScheduled, undefined);
+    });
+    assert.equal(upgradeCalls, 0, "neither fail-closed nor preserved-prior may schedule an upgrade");
+  } finally {
+    _refreshExecutor.execute = prevExec;
+    _refreshUpgrade.start = prevStart;
+  }
+});
+
+test("B5 (D): a second degraded refresh while an upgrade is in-flight does NOT schedule a duplicate", async () => {
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshUpgrade.start;
+  // Use the REAL scheduler so the in-flight guard is exercised.
+  _refreshUpgrade.start = _realUpgradeStart;
+  _refreshUpgrade._inFlight.clear();
+  let upgradeCalls = 0;
+  // Foreground requests use ?profile=cold_start → refreshProfile "cold_start";
+  // the background upgrade uses refreshProfile null. Distinguish on that.
+  _refreshExecutor.execute = async (_identity, opts) => {
+    if (opts?.refreshProfile === null) {
+      // The background upgrade — stay pending so `_inFlight` keeps the user
+      // across the second foreground refresh.
+      upgradeCalls += 1;
+      return new Promise(() => {});
+    }
+    // Foreground degraded rescue.
+    return execResult({ usedDeterministicClustering: true, clusteringLlmFailed: true, refreshStatus: "degraded", stories: [{ id: "det-1" }] });
+  };
+  try {
+    await withIsolatedUser("b5-anti-dup", async () => {
+      const res1 = await request(app).post("/api/dashboard/refresh?profile=cold_start");
+      assert.equal(res1.status, 200);
+      assert.equal(res1.body._meta?.upgradeRefreshScheduled, true, "first degraded run schedules the upgrade");
+      assert.equal(upgradeCalls, 1, "one upgrade kicked off");
+
+      const res2 = await request(app).post("/api/dashboard/refresh?profile=cold_start");
+      assert.equal(res2.status, 200);
+      // The upgrade from run 1 is still in-flight → run 2 joins (no duplicate).
+      assert.equal(upgradeCalls, 1, "no duplicate upgrade while one is in-flight");
+      assert.equal(res2.body._meta?.upgradeRefreshScheduled, undefined, "joined run does not re-advertise scheduling");
+    });
+  } finally {
+    _refreshExecutor.execute = prevExec;
+    _refreshUpgrade.start = prevStart;
+    _refreshUpgrade._inFlight.clear();
   }
 });
 

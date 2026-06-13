@@ -2389,6 +2389,90 @@ function startColdStartPrefetch(identity) {
 /** Mutable hook so tests can stub/observe the prefetch kickoff. */
 export const _refreshPrefetch = { start: startColdStartPrefetch };
 
+// B5: per-user in-flight guard for the default-profile LLM upgrade. Dedicated
+// (NOT the cold-start job tracker) so an upgrade never conflates with a prefetch
+// job. A userId is present here while that user's background upgrade is running;
+// a second trigger for the same user is skipped until the first settles.
+const _upgradeInFlight = new Set();
+
+/**
+ * B5: schedule a fire-and-forget DEFAULT-profile LLM "upgrade" refresh after a
+ * degraded deterministic rescue published strict deterministic stories.
+ *
+ * Cold-start can now publish bounded, relevance-gated deterministic stories
+ * IMMEDIATELY (B2) when LLM clustering fails; this kicks off a background retry
+ * on the full default profile so a healthy LLM run can REPLACE the degraded
+ * snapshot moments later — without blocking or failing the foreground response.
+ *
+ * Anti-duplication: a `_upgradeInFlight` membership check joins (no-ops) when an
+ * upgrade for this user is already running, so repeated degraded refreshes never
+ * stack concurrent upgrades. The flag clears when the run settles (always, via
+ * `finally`). The upgrade runs `_refreshExecutor.execute(identity,
+ * { refreshProfile: null })` — the same path a normal default refresh uses — so
+ * its own in-flight lock / watermark / persistence semantics are unchanged.
+ *
+ * Non-fatal by construction: the kickoff is fire-and-forget with a `.catch`, so
+ * an upgrade error can never reach the foreground caller. Returns `true` when a
+ * new upgrade was scheduled, `false` when joined/skipped.
+ */
+function startDefaultProfileUpgrade(identity, { reason = "deterministic_rescue" } = {}) {
+  const userId = identity.userId;
+  if (_upgradeInFlight.has(userId)) {
+    console.log(
+      `[dashboard.upgrade] user=${userId} default-profile upgrade already in-flight — skipping duplicate (reason=${reason})`
+    );
+    return false;
+  }
+  _upgradeInFlight.add(userId);
+  console.log(
+    `[dashboard.upgrade] user=${userId} scheduling background default-profile LLM upgrade (reason=${reason})`
+  );
+  Promise.resolve(_refreshExecutor.execute(identity, { refreshProfile: null }))
+    .then((result) => {
+      const stories = result?.body?.stories;
+      console.log(
+        `[dashboard.upgrade] user=${userId} upgrade settled kind=${result?.kind} ` +
+          `stories=${Array.isArray(stories) ? stories.length : "n/a"} (reason=${reason})`
+      );
+    })
+    .catch((err) => {
+      console.error(
+        `[dashboard.upgrade] user=${userId} upgrade failed (reason=${reason}): ${err instanceof Error ? err.message : err}`
+      );
+    })
+    .finally(() => {
+      _upgradeInFlight.delete(userId);
+    });
+  return true;
+}
+
+/** Mutable hook so tests can stub/observe the upgrade kickoff + inspect state. */
+export const _refreshUpgrade = {
+  start: startDefaultProfileUpgrade,
+  _inFlight: _upgradeInFlight,
+};
+
+// B5: should this refresh outcome trigger a background default-profile LLM
+// upgrade? True ONLY for a degraded deterministic rescue — the LLM clustering
+// path failed but the deterministic fallback published stories. A clean LLM
+// success (no rescue), a true fail-closed (zero stories), and a preserved-prior
+// continuity run all leave these signals false/absent, so none schedule an
+// upgrade. Pure read over the response `_meta` + stories.
+function shouldScheduleDeterministicUpgrade(body) {
+  const meta = body?._meta;
+  if (!meta || typeof meta !== "object") return false;
+  // Never upgrade a preserved-prior continuity run: its visible stories are the
+  // PRIOR snapshot's (a true fail-closed re-serve), NOT a fresh deterministic
+  // rescue. That path can carry `clusteringLlmFailed === true` with prior stories
+  // present, which would otherwise spuriously satisfy the OR branch below.
+  if (meta.usedPriorSnapshot === true || meta.snapshotPreserved === true) return false;
+  // The unambiguous signal: a deterministic rescue actually published this run.
+  if (meta.usedDeterministicClustering === true) return true;
+  // Defensive OR: LLM failed yet this run still published stories.
+  const storyCount = Array.isArray(body?.stories) ? body.stories.length : 0;
+  return meta.clusteringLlmFailed === true && storyCount > 0;
+}
+
 /**
  * Slice 3 test hook: direct access to the refresh SLO evaluator and its
  * in-process rolling-window reset, so suites can drive breach conditions
@@ -2442,6 +2526,31 @@ app.post("/api/dashboard/refresh", async (req, res) => {
     console.log(
       `[dashboard.refresh] user=${identity.userId} profileRequested=default profileEffective=${effective}`
     );
+  }
+  // B5: after a degraded deterministic rescue (LLM clustering failed but the
+  // deterministic fallback published bounded stories), schedule a background
+  // default-profile LLM upgrade so a healthy run can replace the degraded
+  // snapshot moments later. The foreground response is sent immediately with the
+  // deterministic stories; the upgrade is fire-and-forget and NEVER blocks or
+  // fails this response. Only this `null`-profile upgrade requests the full
+  // default profile — `?profile=default` retries above are untouched. Additive
+  // `_meta.upgradeRefreshScheduled` lets the client know a background retry is
+  // coming (B6 owns the UI semantics). Skipped (joined) when one is in-flight.
+  if (shouldScheduleDeterministicUpgrade(body)) {
+    const reason = "degraded_deterministic_rescue";
+    let scheduled = false;
+    try {
+      scheduled = _refreshUpgrade.start(identity, { reason });
+    } catch (err) {
+      // Non-fatal: a scheduler hiccup must never break the foreground response.
+      console.error(
+        `[dashboard.upgrade] user=${identity.userId} failed to schedule upgrade (reason=${reason}): ${err instanceof Error ? err.message : err}`
+      );
+    }
+    if (scheduled && body && typeof body._meta === "object" && body._meta !== null) {
+      body._meta.upgradeRefreshScheduled = true;
+      body._meta.upgradeRefreshReason = reason;
+    }
   }
   res.status(httpStatus).json(body);
 });
