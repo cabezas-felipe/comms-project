@@ -48,6 +48,7 @@ import {
   computePreClusterRelevanceScore,
   comparePreClusterRank,
 } from "./pre-cluster-relevance.mjs";
+import { buildRelevanceGatedFallbackStories } from "./relevance-gated-fallback.mjs";
 import { rankItemsForTranslation } from "./translation-priority.mjs";
 import {
   resolveGeoAdmissionMode,
@@ -3213,6 +3214,26 @@ export async function runRefreshPipeline({
   // Prompt 1: subtype of the recovery attempt's OWN failure (mirrors
   // clusteringFailureSubtype). Null when recovery didn't run or succeeded.
   let clusteringRecoverySubtype = null;
+  // B2: strict relevance-gated deterministic fallback diagnostics.  After both
+  // the primary loop AND the Option B reduced-input recovery tier fail terminally
+  // (i.e. `usedFallbackClustering` is still true here), we attempt a LAST-resort
+  // DETERMINISTIC build — singleton meta-stories from the beat-fit survivors that
+  // pass the strict topic+keyword relevance bar (`relevance-gated-fallback.mjs`).
+  // This NEVER calls `gracefulFallbackClustering` and never weakens trust: an
+  // item that fails the strict gate produces no story, so when nothing is
+  // eligible the run stays fail-closed (0 stories) exactly as before.
+  //   - `usedDeterministicClustering` — true ONLY when the deterministic builder
+  //     published ≥1 story (so the run shipped real, relevance-gated content
+  //     despite the LLM failing).
+  //   - `clusteringLlmFailed` — true whenever the LLM clustering path terminally
+  //     failed and the deterministic builder ran, REGARDLESS of whether it
+  //     published. Honest attribution that the LLM did not produce these stories;
+  //     `clusteringFailureReason`/`…Subtype` are retained for root-cause triage.
+  //   - `deterministicClusteringDiagnostics` — the B1 builder's diagnostics
+  //     (`inputCount`/`eligibleCount`/`outputCount`/`excludedReasons`).
+  let usedDeterministicClustering = false;
+  let clusteringLlmFailed = false;
+  let deterministicClusteringDiagnostics = null;
   // C2 + Slice 3: clustering JSON repair diagnostics for the last attempt
   // (success or failure both carry them via `_clusteringRepair`).  Shape
   // mirrors `EMPTY_CLUSTERING_REPAIR` — `rawFailureClass` / `schemaErrorBucket`
@@ -3367,6 +3388,52 @@ export async function runRefreshPipeline({
         rawMetaStories = [];
         console.warn(
           `[pipeline] clustering recovery FAILED (reason=${clusteringRecoveryReason} subtype=${clusteringRecoverySubtype}) — remaining fail-closed (0 meta-stories)`
+        );
+      }
+    }
+
+    // B2: strict relevance-gated deterministic fallback (LAST resort).  If the
+    // primary loop AND the Option B recovery tier both failed terminally
+    // (`usedFallbackClustering` still true), build SINGLETON meta-stories from
+    // the beat-fit survivors that clear the strict topic+keyword relevance bar.
+    // This is the trigger Plan Step B2 specifies: terminal LLM failure with no
+    // recovered LLM stories.  It runs over `clusterInputItems` — the exact
+    // beat-fit-survivor candidate set the LLM saw — and never touches
+    // `gracefulFallbackClustering`, so trust posture is unchanged.  When nothing
+    // is eligible the run stays fail-closed (0 stories) exactly as before; the
+    // LLM-failure reason/subtype are preserved for attribution either way.
+    if (usedFallbackClustering) {
+      clusteringLlmFailed = true;
+      const deterministicFallback = buildRelevanceGatedFallbackStories({
+        items: clusterInputItems,
+        settings,
+        maxStories: 5,
+        maxSourcesPerStory: 1,
+      });
+      deterministicClusteringDiagnostics = deterministicFallback.diagnostics;
+      if (deterministicFallback.stories.length > 0) {
+        rawMetaStories = deterministicFallback.stories;
+        usedDeterministicClustering = true;
+        // We published real, relevance-gated stories — the run is no longer the
+        // "fail-closed published 0" case `usedFallbackClustering` denotes, so
+        // clear ONLY that flag.  `clusteringFailureReason`/`…Subtype` and the
+        // explicit `clusteringLlmFailed` flag are RETAINED for attribution (we
+        // do not pretend the LLM succeeded), and the snapshot-preservation guard
+        // (which also requires zero published stories) correctly does not fire.
+        usedFallbackClustering = false;
+        console.warn(
+          `[pipeline] deterministic relevance-gated fallback PUBLISHED ${deterministicFallback.stories.length} story(ies)` +
+            ` (eligible=${deterministicClusteringDiagnostics.eligibleCount}/${deterministicClusteringDiagnostics.inputCount}` +
+            ` output=${deterministicClusteringDiagnostics.outputCount})` +
+            ` — LLM clustering failed (reason=${clusteringFailureReason} subtype=${clusteringFailureSubtype})`
+        );
+      } else {
+        // Nothing cleared the strict gate — preserve the fail-closed outcome
+        // (0 meta-stories) untouched; the diagnostics record the empty result.
+        console.warn(
+          `[pipeline] deterministic relevance-gated fallback found 0 eligible stories` +
+            ` (input=${deterministicClusteringDiagnostics.inputCount}) — remaining fail-closed (0 meta-stories)` +
+            ` — LLM clustering failed (reason=${clusteringFailureReason} subtype=${clusteringFailureSubtype})`
         );
       }
     }
@@ -4240,6 +4307,21 @@ export async function runRefreshPipeline({
     // provider_request | unknown | timeout_budget), or null when recovery didn't
     // run or succeeded. Mirrors `clusteringFailureSubtype` for the recovery tier.
     clusteringRecoverySubtype,
+    // B2 — strict relevance-gated deterministic fallback diagnostics (additive).
+    // `usedDeterministicClustering` is true when the deterministic builder
+    // published ≥1 singleton story after the LLM path (primary + recovery) failed
+    // terminally — in which case `usedFallbackClustering` is false (stories WERE
+    // published) while `clusteringLlmFailed` + `clusteringFailureReason`/`…Subtype`
+    // remain set for attribution.  `clusteringLlmFailed` is true whenever the LLM
+    // clustering path failed terminally and the deterministic builder ran
+    // (regardless of whether it published), so an operator can split "LLM failed,
+    // deterministic rescued it" from "LLM failed, nothing eligible → fail-closed".
+    // `deterministicClusteringDiagnostics` carries the B1 builder's
+    // `inputCount`/`eligibleCount`/`outputCount`/`excludedReasons` (null when the
+    // deterministic builder never ran — i.e. clustering succeeded or recovered).
+    usedDeterministicClustering,
+    clusteringLlmFailed,
+    deterministicClusteringDiagnostics,
     timings: pipelineTimings,
     // Slice 4: latency-shaping profile applied to this run.  Additive,
     // deterministic snapshot of the resolved knobs (name + the geo budget /
@@ -4277,6 +4359,12 @@ export async function runRefreshPipeline({
       // surface can split `error` without walking the full diagnostics tree.
       clusteringFailureSubtype,
       usedFallbackClustering,
+      // B2: additive rollup signals so the SLO/summary surface can tell apart a
+      // true terminal fail-closed (clusteringLlmFailed && !usedDeterministicClustering
+      // && storiesPublished === 0) from an LLM-failed run rescued deterministically
+      // (clusteringLlmFailed && usedDeterministicClustering && storiesPublished > 0).
+      usedDeterministicClustering,
+      clusteringLlmFailed,
       ...geoDiagnostics,
     },
     clusteringLatencyMs: clusteringAttemptLatencyMs,

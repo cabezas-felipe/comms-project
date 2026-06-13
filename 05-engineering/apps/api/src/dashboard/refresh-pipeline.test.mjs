@@ -498,6 +498,160 @@ test("runRefreshPipeline: fail-closed emits the exact diagnostic contract the ro
   assert.notEqual(log.clusteringFailureReason, null, "clusteringFailureReason must be set on fail-closed");
   assert.equal(log.usedFallbackClustering, true);
   assert.equal(typeof log.clusteringAttempts, "number");
+  // B2: the strict deterministic fallback ran (default fixture has no keyword →
+  // nothing eligible), so the run stays fail-closed and the diagnostics record
+  // a zero-output result without changing the gating contract above.
+  assert.equal(log.usedDeterministicClustering, false);
+  assert.equal(log.clusteringLlmFailed, true);
+  assert.equal(log.deterministicClusteringDiagnostics.outputCount, 0);
+});
+
+// ─── B2: strict relevance-gated deterministic fallback integration ────────────
+//
+// After BOTH the primary clustering loop and the Option B reduced-input recovery
+// tier fail terminally, the pipeline attempts a deterministic, relevance-gated
+// build of SINGLETON meta-stories from the beat-fit survivors. It never calls
+// `gracefulFallbackClustering`: an item that fails the strict topic+keyword bar
+// produces no story, so a pool with nothing eligible stays fail-closed.
+
+// Beat-fit survivor that ALSO clears the strict B1 gate: topic "Diplomatic
+// relations" (topic fit) + an OFAC/sanctions keyword in the headline (keyword
+// fit), on a configured geography.
+function makeEligibleFallbackItem(i) {
+  return makeItem({
+    sourceId: `elig-${i}`,
+    outlet: "Reuters",
+    topic: "Diplomatic relations",
+    geographies: ["US", "Colombia"],
+    minutesAgo: i,
+    headline: `OFAC sanctions reshape US-Colombia diplomatic relations (${i})`,
+    body: ["New sanctions were announced amid diplomatic talks."],
+  });
+}
+
+test("B2: terminal LLM failure + eligible items → deterministic fallback publishes (LLM-failure attribution retained)", async () => {
+  const rawItems = [0, 1, 2].map(makeEligibleFallbackItem);
+  let attempts = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { attempts++; throw new Error("model unavailable"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  // 3 items < reduction floor → no Option B recovery attempt; just the 2 primary
+  // attempts fail, then deterministic fallback runs over the 3 survivors.
+  assert.equal(attempts, 2, "two primary attempts, no recovery (set can't shrink)");
+  assert.equal(log.clusteringRecoveryAttempted, false);
+  assert.ok(payload.stories.length > 0, "deterministic fallback publishes ≥1 story");
+  assert.equal(payload.stories.length, 3, "one singleton per eligible survivor");
+
+  // Deterministic-fallback flags.
+  assert.equal(log.usedDeterministicClustering, true);
+  assert.equal(log.clusteringLlmFailed, true);
+  // Published stories → no longer the "fail-closed published 0" case.
+  assert.equal(log.usedFallbackClustering, false);
+  // Attribution that the LLM failed is RETAINED (we do not pretend it succeeded).
+  assert.notEqual(log.clusteringFailureReason, null, "LLM failure reason retained for attribution");
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.notEqual(log.clusteringFailureSubtype, null, "failure subtype retained for attribution");
+
+  // Diagnostics from the B1 builder.
+  const diag = log.deterministicClusteringDiagnostics;
+  assert.equal(diag.inputCount, 3);
+  assert.equal(diag.eligibleCount, 3);
+  assert.equal(diag.outputCount, 3);
+
+  // Each published story is a singleton (exactly one source) and carries
+  // extractive, evidence-derived copy — NOT a "* Updates"/"General Updates"
+  // gracefulFallbackClustering bucket.
+  for (const story of payload.stories) {
+    assert.equal(story.sources.length, 1, "singleton story");
+    assert.doesNotMatch(`${story.title} ${story.summary}`, /general updates/i);
+    assert.doesNotMatch(`${story.title} ${story.summary}`, /\bUpdates\b/);
+  }
+  // outcomes rollup splits "rescued by deterministic" from a true fail-closed.
+  assert.equal(log.outcomes.usedDeterministicClustering, true);
+  assert.equal(log.outcomes.clusteringLlmFailed, true);
+  assert.ok(log.outcomes.storiesPublished > 0);
+});
+
+test("B2: terminal LLM failure + no eligible items → stays fail-closed (zero stories, zero deterministic output)", async () => {
+  // Default fixture carries no OFAC/sanctions keyword → fails the strict gate →
+  // nothing eligible → fail-closed preserved exactly as before B2.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { throw new Error("model unavailable"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 0, "fail-closed: zero stories");
+  assert.deepEqual(payload.stories, [], "no fabricated buckets");
+  // Fail-closed continuity contract unchanged.
+  assert.equal(log.usedFallbackClustering, true);
+  assert.notEqual(log.clusteringFailureReason, null);
+  // Deterministic fallback ran but published nothing.
+  assert.equal(log.usedDeterministicClustering, false);
+  assert.equal(log.clusteringLlmFailed, true);
+  const diag = log.deterministicClusteringDiagnostics;
+  assert.equal(diag.inputCount, 1);
+  assert.equal(diag.eligibleCount, 0);
+  assert.equal(diag.outputCount, 0);
+  assert.equal(diag.excludedReasons.no_keyword_fit, 1);
+});
+
+test("B2: LLM clustering success → deterministic fallback is not used", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(log.usedFallbackClustering, false);
+  assert.equal(log.usedDeterministicClustering, false);
+  assert.equal(log.clusteringLlmFailed, false);
+  assert.equal(log.deterministicClusteringDiagnostics, null, "builder never ran on success");
+});
+
+test("B2: Option B recovery success → deterministic fallback is not used", async () => {
+  // 10 survivors so the reduced recovery set (max(6, floor(10/2))=6) shrinks the
+  // input and recovery fires; the recovery attempt succeeds and publishes, so the
+  // LLM path did NOT terminally fail and the deterministic builder never runs.
+  const rawItems = makeRecoveryRawItems(10);
+  const recoveredStory = {
+    meta_story_id: "recovered-b2",
+    title: "Recovered Story",
+    subtitle: "Recovered after reduced-input retry.",
+    source_item_ids: ["src-0"],
+    summary: "Recovered.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+  };
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async (items) => {
+      calls += 1;
+      if (calls <= 2) throw new Error("model unavailable");
+      return [recoveredStory];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary + 1 recovery");
+  assert.equal(payload.stories.length, 1, "recovered LLM story published");
+  assert.equal(log.clusteringRecoverySucceeded, true);
+  assert.equal(log.usedFallbackClustering, false);
+  // LLM path recovered → no terminal failure → deterministic builder never ran.
+  assert.equal(log.usedDeterministicClustering, false);
+  assert.equal(log.clusteringLlmFailed, false);
+  assert.equal(log.deterministicClusteringDiagnostics, null);
 });
 
 test("runRefreshPipeline: applies 24h filter before clustering", async () => {
