@@ -1627,7 +1627,22 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       Array.isArray(payload?.stories) && payload.stories.length === 0;
     const priorHasHealthyStories =
       !!priorSnapshot && typeof priorStoryCount === "number" && priorStoryCount > 0;
-    if (clusteringFailedClosed && producedNoStories && priorHasHealthyStories) {
+    // B4: a DEGRADED deterministic-rescue run (the LLM clustering path failed but
+    // the deterministic relevance-gated fallback published bounded stories — B2/B3)
+    // RETAINS `clusteringFailureReason` for attribution, so `clusteringFailedClosed`
+    // is true on it too. It must NOT be trapped behind the prior snapshot: it
+    // produced real, current stories and must publish them. `producedNoStories`
+    // already excludes it (stories > 0); the explicit `!usedDeterministicRescue`
+    // guard documents and hard-guarantees that a rescue never enters preservation,
+    // even if a future change let a rescue emit zero stories. Preservation stays a
+    // TRUE-fail-closed-only path.
+    const usedDeterministicRescue = log?.usedDeterministicClustering === true;
+    if (
+      clusteringFailedClosed &&
+      producedNoStories &&
+      priorHasHealthyStories &&
+      !usedDeterministicRescue
+    ) {
       const elapsedMs = Date.now() - startedAt;
       console.warn(
         `[dashboard.refresh] user=${identity.userId} clustering FAILED (reason=${log.clusteringFailureReason} attempts=${log.clusteringAttempts}) — preserving prior healthy snapshot (${priorStoryCount} stories), NOT publishing empty replacement elapsed=${elapsedMs}ms`
@@ -1774,6 +1789,16 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     // surfaces (consistency across immediate response and snapshot reads).
     if (log.clusteringFailureSubtype !== undefined) lastRunMeta.clusteringFailureSubtype = log.clusteringFailureSubtype;
     if (log.clusteringRecoverySubtype !== undefined) lastRunMeta.clusteringRecoverySubtype = log.clusteringRecoverySubtype;
+    // B4: persist the deterministic relevance-gated fallback (B2) signals so GET
+    // /api/dashboard can explain a DEGRADED rescue ("LLM clustering failed but we
+    // published deterministic stories") on a later read without replaying refresh.
+    // Booleans are persisted whenever present (false on normal runs); the
+    // diagnostics OBJECT is persisted only when non-null (the builder actually
+    // ran) so the optional field never carries an invalid null. All additive +
+    // individually optional for back-compat with pre-B2 snapshots.
+    if (log.usedDeterministicClustering !== undefined) lastRunMeta.usedDeterministicClustering = log.usedDeterministicClustering;
+    if (log.clusteringLlmFailed !== undefined) lastRunMeta.clusteringLlmFailed = log.clusteringLlmFailed;
+    if (log.deterministicClusteringDiagnostics != null) lastRunMeta.deterministicClusteringDiagnostics = log.deterministicClusteringDiagnostics;
     if (log.clusteringAttempts !== undefined) lastRunMeta.clusteringAttempts = log.clusteringAttempts;
     if (log.clusteringLatencyMs !== undefined) lastRunMeta.clusteringLatencyMs = log.clusteringLatencyMs;
     if (log.funnel !== undefined) lastRunMeta.funnel = log.funnel;
@@ -2112,6 +2137,10 @@ const _LAST_RUN_META_LIFTED_KEYS = Object.freeze([
   "clusteringLatencyMs", "tags", "whatChanged", "whyItMatters", "timings",
   "outcomes", "ingestionSource", "whyEnrichment", "profile", "reclusterExecution",
   "clusterSplit", "overflowCap", "reclusterQueue", "reclusterQueueCount",
+  // B4: deterministic relevance-gated fallback (B2/B3) signals — keep them on the
+  // enrichment re-write merge so a degraded rescue snapshot doesn't lose its
+  // deterministic fields when the deferred whyItMatters pass rewrites it.
+  "usedDeterministicClustering", "clusteringLlmFailed", "deterministicClusteringDiagnostics",
 ]);
 function liftedMetaToLastRunMeta(meta) {
   const out = {};
