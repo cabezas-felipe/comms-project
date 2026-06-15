@@ -166,6 +166,23 @@
       "byline": "Staff"
     }
   ],
+  "failClosedClusteringItem": {
+    "sourceId": "fail-closed-1",
+    "outlet": "Reuters",
+    "topic": "Trade policy",
+    "geographies": [
+      "US"
+    ],
+    "weight": 86,
+    "minutesAgo": 30,
+    "url": "https://www.reuters.com/world/reserve-requirements",
+    "headline": "Central bank adjusts reserve requirements",
+    "body": [
+      "Monetary policy shift."
+    ],
+    "kind": "traditional",
+    "byline": "Staff"
+  },
   "weakSemanticItem": {
     "sourceId": "weak-semantic-1",
     "outlet": "Reuters",
