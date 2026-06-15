@@ -4,7 +4,7 @@ import { Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
 import StoryCard from "@/components/StoryCard";
 import SourceReader from "@/components/SourceReader";
-import { ClusteringFailedState, EmptyState, ErrorState, LoadingState, RefreshFailedBanner, RefreshFailedState } from "@/components/StateBlocks";
+import { ClusteringFailedState, EmptyState, ErrorState, LoadingState, RefreshDegradedBanner, RefreshFailedBanner, RefreshFailedState } from "@/components/StateBlocks";
 import {
   trackDashboardViewed,
   trackSourceOpenError,
@@ -343,6 +343,14 @@ export default function Dashboard() {
         refreshStatus: result.refreshStatus,
         refreshFailure: result.refreshFailure,
         usedPriorSnapshot: result.usedPriorSnapshot,
+        // B6: deterministic-rescue (B3) + background-upgrade (B5) signals so the
+        // render path can show the non-blocking "degraded" cue and the debug
+        // panel can report the rescue.
+        usedDeterministicClustering: result.usedDeterministicClustering,
+        clusteringLlmFailed: result.clusteringLlmFailed,
+        deterministicClusteringDiagnostics: result.deterministicClusteringDiagnostics,
+        upgradeRefreshScheduled: result.upgradeRefreshScheduled,
+        upgradeRefreshReason: result.upgradeRefreshReason,
       });
       setRunDiagnostics({
         clusteringAttempts: result.clusteringAttempts,
@@ -819,6 +827,20 @@ export default function Dashboard() {
             refreshFailsafe?.usedPriorSnapshot === true &&
             stories.length > 0 && (
               <RefreshFailedBanner onRetry={handleRetry} />
+            )}
+
+          {/* B6: non-blocking DEGRADED cue — the LLM clustering stage failed but
+              the deterministic fallback (B3) published bounded stories, which we
+              render normally below. This is NOT a hard failure: a subtle banner
+              tells the user a better grouping is coming (when the B5 background
+              upgrade was scheduled). Gated on stories present so it never shows
+              over an empty/failed state. */}
+          {!loadError &&
+            refreshFailsafe?.refreshStatus === "degraded" &&
+            stories.length > 0 && (
+              <RefreshDegradedBanner
+                upgradeScheduled={refreshFailsafe?.upgradeRefreshScheduled === true}
+              />
             )}
 
           {/* Feed zone — distinguishes loading / fetch error / legitimate empty */}

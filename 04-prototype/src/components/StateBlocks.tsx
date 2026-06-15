@@ -186,6 +186,36 @@ export function RefreshFailedBanner({ onRetry }: { onRetry?: () => void }) {
   );
 }
 
+/* ---------------- Refresh degraded (B6 deterministic rescue) ---------------- */
+//
+// Surfaced when `_meta.refreshStatus === "degraded"` (B3): the LLM clustering
+// stage failed but the deterministic relevance-gated fallback PUBLISHED bounded
+// stories, so the user keeps a real (if simpler) feed. This is NOT a failure —
+// the banner is a subtle, non-blocking cue that a better grouping is on the way
+// when the background LLM upgrade (B5) was scheduled. No retry button: the
+// upgrade runs automatically; a manual retry would only duplicate it.
+
+const REFRESH_DEGRADED_TITLE = "Showing a quick grouping";
+
+export function RefreshDegradedBanner({ upgradeScheduled = false }: { upgradeScheduled?: boolean }) {
+  const tail = upgradeScheduled
+    ? "Refining your story grouping in the background — it'll update shortly."
+    : "These stories use a simpler grouping for now.";
+  return (
+    <div
+      data-testid="dashboard-refresh-degraded"
+      className="border-y border-sky-500/30 bg-sky-500/5 px-6 py-3"
+    >
+      <div className="flex items-center gap-2 text-sm">
+        <Loader2 className="h-4 w-4 animate-spin text-sky-600" />
+        <span className="text-sky-700 dark:text-sky-400">
+          <span className="font-medium">{REFRESH_DEGRADED_TITLE}.</span> {tail}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function RefreshFailedState({ onRetry }: { onRetry?: () => void }) {
   return (
     <div

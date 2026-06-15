@@ -985,24 +985,38 @@ function attachDeterministicFallbackFields(meta, log) {
  *
  * Status mapping (B3):
  *   - `degraded` — the LLM clustering path failed terminally BUT the deterministic
- *     relevance-gated fallback (B2) published bounded stories
- *     (`clusteringLlmFailed === true && usedDeterministicClustering === true`).
- *     This is the bug-fix target: such a run shipped real content and must NOT
- *     read as `failed`. It RETAINS the LLM-failure metadata in `refreshFailure`
- *     for attribution.
- *   - `failed` — a terminal clustering failure with NO deterministic stories
- *     published (`clusteringFailureReason != null` and not degraded).
+ *     relevance-gated fallback (B2) published bounded stories that actually SHIP
+ *     in the final response (`clusteringLlmFailed === true &&
+ *     usedDeterministicClustering === true && final published stories > 0`).
+ *     Such a run shipped real content and must NOT read as `failed`. It RETAINS
+ *     the LLM-failure metadata in `refreshFailure` for attribution.
+ *   - `failed` — a terminal clustering failure with NO stories in the final
+ *     response. This includes a rescue whose stories were ALL dropped by
+ *     grounding/publish shaping (`usedDeterministicClustering === true` but the
+ *     final published count is 0): it is a true fail-closed, not degraded.
  *   - `ok` — every successful / recovered path (no terminal failure reason).
+ *
+ * `publishedStoryCount` is the count of stories THIS run ships in the final
+ * response (after grounding/publish shaping). Callers on a publishing path pass
+ * it so a rescue that shipped zero stories resolves to `failed`. When omitted
+ * (`null`), the rescue flags alone decide `degraded` (legacy/unit callers).
  *
  * `refreshFailure` is non-null on BOTH `failed` and `degraded`, and null on `ok`
  * (the schema `superRefine` enforces this coupling).
  */
-export function buildRefreshFailsafeMeta({ log = {}, usedPriorSnapshot = false } = {}) {
+export function buildRefreshFailsafeMeta({
+  log = {},
+  usedPriorSnapshot = false,
+  publishedStoryCount = null,
+} = {}) {
   const reason = log?.clusteringFailureReason ?? null;
   const llmFailed = log?.clusteringLlmFailed === true;
   const deterministicPublished = log?.usedDeterministicClustering === true;
-  // Degraded: the LLM failed but the deterministic fallback rescued the run.
-  const degraded = llmFailed && deterministicPublished;
+  // A rescue only DEGRADES (vs FAILS) when its stories survive to the final
+  // response. With an explicit count, a fully-dropped rescue (count 0) is a true
+  // fail-closed; without one, trust the rescue flag (legacy behavior).
+  const rescueShipsStories = publishedStoryCount == null ? true : publishedStoryCount > 0;
+  const degraded = llmFailed && deterministicPublished && rescueShipsStories;
 
   if (reason == null && !degraded) {
     return attachDeterministicFallbackFields(
@@ -1627,22 +1641,15 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       Array.isArray(payload?.stories) && payload.stories.length === 0;
     const priorHasHealthyStories =
       !!priorSnapshot && typeof priorStoryCount === "number" && priorStoryCount > 0;
-    // B4: a DEGRADED deterministic-rescue run (the LLM clustering path failed but
-    // the deterministic relevance-gated fallback published bounded stories — B2/B3)
-    // RETAINS `clusteringFailureReason` for attribution, so `clusteringFailedClosed`
-    // is true on it too. It must NOT be trapped behind the prior snapshot: it
-    // produced real, current stories and must publish them. `producedNoStories`
-    // already excludes it (stories > 0); the explicit `!usedDeterministicRescue`
-    // guard documents and hard-guarantees that a rescue never enters preservation,
-    // even if a future change let a rescue emit zero stories. Preservation stays a
-    // TRUE-fail-closed-only path.
-    const usedDeterministicRescue = log?.usedDeterministicClustering === true;
-    if (
-      clusteringFailedClosed &&
-      producedNoStories &&
-      priorHasHealthyStories &&
-      !usedDeterministicRescue
-    ) {
+    // Preservation is a TRUE-fail-closed-only path, gated on `producedNoStories`
+    // (this run shipped ZERO final stories). A DEGRADED deterministic rescue that
+    // published stories is excluded automatically — `producedNoStories` is false
+    // for it — so it publishes its fresh stories instead of preserving. A rescue
+    // whose stories were ALL dropped by grounding/publish shaping ships zero final
+    // stories and IS a true fail-closed: it correctly preserves a prior healthy
+    // snapshot here, and its status resolves to `failed` (not `degraded`) via the
+    // published-count check in `buildRefreshFailsafeMeta` below.
+    if (clusteringFailedClosed && producedNoStories && priorHasHealthyStories) {
       const elapsedMs = Date.now() - startedAt;
       console.warn(
         `[dashboard.refresh] user=${identity.userId} clustering FAILED (reason=${log.clusteringFailureReason} attempts=${log.clusteringAttempts}) — preserving prior healthy snapshot (${priorStoryCount} stories), NOT publishing empty replacement elapsed=${elapsedMs}ms`
@@ -1671,8 +1678,10 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         // Step 2 (refresh-failsafe-contract): explicit failure status with the
         // prior healthy stories preserved — refreshStatus="failed" +
         // usedPriorSnapshot=true distinguishes "kept old stories because refresh
-        // broke" from a true quiet/unchanged success.
-        ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: true }),
+        // broke" from a true quiet/unchanged success. This run produced zero final
+        // stories (`producedNoStories`), so the published count pins `failed` even
+        // if a fully-dropped deterministic rescue set its attribution flags.
+        ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: true, publishedStoryCount: payload.stories.length }),
         usedFallbackClustering: log.usedFallbackClustering,
         clusteringFailureReason: log.clusteringFailureReason,
         clusteringAttempts: log.clusteringAttempts,
@@ -2032,7 +2041,10 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
           // "ran" branch no prior snapshot is reused — this is a fresh publish
           // (which is EMPTY on a fail-closed-no-prior run). `refreshStatus` is
           // "failed" there so the empty result is never read as a quiet success.
-          ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false }),
+          // Pass the actual shipped story count so a deterministic rescue whose
+          // stories were all dropped by grounding/shaping reads as `failed`, not
+          // `degraded` (degraded requires stories to actually ship).
+          ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false, publishedStoryCount: responsePayload.stories?.length ?? 0 }),
           // Phase 2 lightweight decision trace.  Optional, compact,
           // backend-only.  Carries stage counts, beat-fit details, and a
           // capped sample of exclusions — no raw source bodies.

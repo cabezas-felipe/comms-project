@@ -298,31 +298,52 @@ npm run e2e:assert-clean --workspace=@tempo/api -- --user-id <uuid>
 #      submit onboarding → land on dashboard → open dashboard with ?debug=1
 
 # 4. Read the refresh fail-safe contract straight from the API (recognized-email
-#    identity, matching the E2E web override):
+#    identity, matching the E2E web override). The second jq line surfaces the
+#    deterministic-rescue + background-upgrade signals needed to tell `degraded`
+#    from `failed`:
 curl -s -X POST localhost:8787/api/dashboard/refresh \
   -H "x-recognized-email: <email>" \
-  | jq '._meta | {refreshStatus, refreshFailure, usedPriorSnapshot, hasSnapshot}'
+  | jq '._meta | {refreshStatus, refreshFailure, usedPriorSnapshot, hasSnapshot,
+                  clusteringLlmFailed, usedDeterministicClustering,
+                  deterministicClusteringDiagnostics, upgradeRefreshScheduled,
+                  upgradeRefreshReason}'
 
 # 5. Confirm the journey wrote its expected state (NOT a cleanliness check)
 #    user_onboarding_narratives >= 1, settings >= 1, dashboard_snapshots >= 1
 ```
 
 In the UI, the `?debug=1` panel's **`refresh:`** row (`diag-refr`) shows the same
-fields (`status=ok|failed`, and on failure `reason / subtype / attempts /
-retryable`, plus `usedPriorSnapshot`) — see
+fields (`status=ok|degraded|failed`, and on `failed`/`degraded` `reason / subtype /
+attempts / retryable`, plus `usedPriorSnapshot`). On a degraded deterministic
+rescue it also appends the rescue trailer — `llmFailed=true deterministic=true
+det_diag=in:N/elig:N/out:N upgrade=scheduled(<reason>)` — so a rescue is fully
+explainable without the `curl`. See
 [`DashboardRunDiagnostics`](../../04-prototype/src/components/DashboardRunDiagnostics.tsx).
 
 ### Result interpretation matrix
 
 The key distinction the [refresh fail-safe contract](../apps/api/src/server.mjs)
-makes: **0 stories is not automatically a failure.** Read `_meta.refreshStatus`
-first, then the story count.
+makes: **0 stories is not automatically a failure**, and **`refreshStatus=failed`
+is not the only non-`ok` outcome.** Read `_meta.refreshStatus` first (it is
+`ok | degraded | failed`), then the story count.
+
+> **`refreshStatus` is the verdict — read it first.** The deterministic-rescue
+> flags (`usedDeterministicClustering`, `clusteringLlmFailed`,
+> `deterministicClusteringDiagnostics`) are **attribution / diagnostics only** —
+> they describe whether the deterministic builder *ran* and *produced* raw
+> stories, **not** whether the run shipped them. Degraded vs failed is decided by
+> the **shipped** story count (degraded ≥1, failed 0), which the backend has
+> already resolved into `refreshStatus`. In particular, a `failed` run **can**
+> carry `usedDeterministicClustering=true`: the builder produced raw stories that
+> were then **all dropped before publish** (0 shipped). Never infer the verdict
+> from the deterministic flag — infer it from `refreshStatus`.
 
 | Outcome | `_meta` signal | Stories | UI surface | Read it as |
 |---|---|---|---|---|
 | **Pass / Healthy** | `refreshStatus=ok`, `refreshFailure=null` | ≥1 (populated beat) | story list (debug rows coherent) | Green — done. |
 | **Neutral Expected (quiet)** | `refreshStatus=ok`, `refreshFailure=null` | 0 | quiet empty — "No stories yet." (`dashboard-empty`) | Healthy quiet window: feeds simply published nothing on-beat. **Not** a failure. |
-| **Actionable Fail** | `refreshStatus=failed`, `refreshFailure` present | 0, **or** prior stories when `usedPriorSnapshot=true` | failure-aware empty (`dashboard-refresh-failed`) **or** stories + warning banner (`dashboard-refresh-banner`) | Refresh failed (parse / timeout / provider). Investigate via the debugging checklist. |
+| **Degraded (deterministic rescue)** | `refreshStatus=degraded` (the verdict); confirming attribution: `refreshFailure` present, `clusteringLlmFailed=true`, `usedDeterministicClustering=true`, `deterministicClusteringDiagnostics` present, `upgradeRefreshScheduled=true` | ≥1 shipped (deterministic singletons) | story list (B6 may add a "refreshing in background" hint) | **Acceptable / expected**, NOT a hard failure: LLM clustering failed but the strict topic+keyword deterministic fallback **shipped** real on-beat stories (the backend only sets `degraded` when ≥1 rescue story ships), and a background default-profile upgrade is auto-scheduled to replace them. Signoff may proceed — see [Degraded deterministic rescue signoff](#degraded-deterministic-rescue-signoff). |
+| **Actionable Fail** | `refreshStatus=failed`, `refreshFailure` present (`usedDeterministicClustering` may be `true` or `false` — diagnostic, not part of the verdict) | 0 shipped, **or** prior stories when `usedPriorSnapshot=true` | failure-aware empty (`dashboard-refresh-failed`) **or** stories + warning banner (`dashboard-refresh-banner`) | True fail-closed — the verdict is `refreshStatus=failed` (read it first). Either nothing cleared the deterministic gate (`usedDeterministicClustering=false`), **or** a deterministic rescue built stories that were all dropped before publish (`usedDeterministicClustering=true`, 0 shipped). Either way it is a hard failure; investigate via the debugging checklist. |
 | **Execution Error** | non-200 (e.g. `500`) with no `_meta`, **or** a `prepare-user`/preflight gate failure | n/a | full error state / no run | Code/config/infra problem — not a feed-window artifact. Fix before re-running. |
 
 ### Debugging checklist (failed refresh)
@@ -331,7 +352,9 @@ Work top-down — the contract is designed so each field narrows the cause:
 
 1. **`_meta.refreshStatus`** — `ok` means the backend is healthy; if the UI still
    looks wrong, it's a **stale UI/session issue**, not a refresh failure (jump to
-   the stale-state checks below). `failed` means a genuine backend fail-safe
+   the stale-state checks below). `degraded` is an **acceptable deterministic
+   rescue** (stories shipped — see [Degraded deterministic rescue signoff](#degraded-deterministic-rescue-signoff)),
+   not a fault to debug here. `failed` means a genuine backend fail-safe
    response — continue.
 2. **`_meta.refreshFailure`**:
    - `reason` — `clustering_failure` (the model stage failed closed) vs
@@ -346,6 +369,12 @@ Work top-down — the contract is designed so each field narrows the cause:
 3. **`_meta.usedPriorSnapshot`** — `true` means the user is seeing **preserved
    prior stories** under a warning banner (the refresh failed but continuity was
    kept); `false` means there was nothing to fall back to (empty failure state).
+   Prior-snapshot preservation is a **`failed`-path** mechanism only — it fires on
+   the true fail-closed zero-story path. A **`degraded`** run is NOT preserved-prior:
+   its stories were freshly built by the deterministic rescue this run, so it
+   carries `usedPriorSnapshot=false` and `usedDeterministicClustering=true`. The B5
+   background upgrade is deliberately **not** scheduled for a preserved-prior run —
+   only for an actual deterministic rescue.
 4. **Differentiate stale UI/session from a backend fail-safe response.** If the
    **API** `curl` shows `refreshStatus=ok` but the **browser** looks stale/empty,
    it is a client-state problem, not a backend failure:
@@ -355,12 +384,73 @@ Work top-down — the contract is designed so each field narrows the cause:
      [first-time browser hygiene](#first-time--colombia-election-manual-e2e)).
    - Re-fetch with the `curl` line above to compare API truth vs. on-screen state.
 
+### Degraded deterministic rescue signoff
+
+A `degraded` run is **acceptable, expected behavior — not a hard failure.** LLM
+clustering failed terminally, but the strict relevance-gated **deterministic
+fallback** (topic+keyword singletons, never `"<Topic> Updates"` buckets — see
+[cold-start v1 → Refresh outcomes](cold-start-v1.md#refresh-outcomes-post-phase-a--b))
+published real on-beat stories. Signoff **may proceed** on a degraded run; do not
+treat it as an *Actionable Fail*.
+
+**The verdict is `refreshStatus === "degraded"`** — read it first. The backend only
+sets it when the deterministic rescue **shipped ≥1 story**, so the field already
+encodes the pass. The remaining items are **confirming attribution** that you should
+see on a genuine degraded run (they are diagnostics, not the classifier). Read from the
+§"Command sequence" `curl` or the `?debug=1` `refresh:` row:
+
+- [ ] `refreshStatus === "degraded"` ← the verdict
+- [ ] story count **≥ 1** shipped
+- [ ] `clusteringLlmFailed === true` (attribution: the LLM path failed)
+- [ ] `usedDeterministicClustering === true` (attribution: the deterministic builder
+      published — note this flag alone is **not** the verdict; it can also appear on a
+      `failed` dropped-rescue run)
+- [ ] `deterministicClusteringDiagnostics` present (`outputCount ≥ 1`, matching the
+      visible story count)
+- [ ] `usedPriorSnapshot === false` (a degraded publish is freshly built, **not**
+      preserved-prior)
+- [ ] `refreshFailure` present — this is **retained LLM-failure attribution**, not a
+      verdict. A non-null `refreshFailure`/`clusteringFailureReason` on a `degraded`
+      run is expected and does **not** downgrade it to *failed*.
+
+Trust `refreshStatus`: if it is `degraded`, the run shipped ≥1 rescue story and may
+sign off. If the rescue's stories were all dropped before publish, the backend
+already resolves the run to **`failed`** (a true fail-closed that can still carry
+`usedDeterministicClustering=true`) — handle it as an *Actionable Fail*, not a
+degraded run.
+
+**Background-upgrade verification (B5).** A degraded rescue auto-schedules a
+fire-and-forget **default-profile LLM upgrade** so a healthy run can replace the
+deterministic snapshot:
+
+- [ ] `_meta.upgradeRefreshScheduled === true` on the degraded response (with
+      `upgradeRefreshReason="degraded_deterministic_rescue"`). In logs, confirm one
+      `[dashboard.upgrade] user=<id> scheduling background default-profile LLM upgrade`
+      line.
+- [ ] **Settles in logs:** within ~60–90s, a `[dashboard.upgrade] … upgrade settled
+      kind=… stories=…` line (or `upgrade failed …` on error — non-fatal to the
+      foreground response).
+- [ ] **Eventual replacement (if observable this session):** re-fetch
+      `GET /api/dashboard` after the window; a healthy upgrade flips the snapshot back
+      to `refreshStatus === "ok"` and clears `usedDeterministicClustering`.
+
+**In-flight dedupe.** A second degraded refresh while an upgrade is already running
+is **joined (de-duped)**, not stacked — it logs `[dashboard.upgrade] user=<id>
+default-profile upgrade already in-flight — skipping duplicate` and leaves
+`upgradeRefreshScheduled` absent on that response. That absence is **expected** under
+dedupe (or on a preserved-prior run), **not** a missing-upgrade fault. If the upgrade
+does not materialize in-window, the user keeps the valid degraded stories regardless —
+do **not** fail signoff solely on a missing in-session upgrade; capture logs and flag
+a background-upgrade investigation.
+
 ### Gating policy
 
 - **Required (manual):** a real-mode manual E2E **signoff before merging this
   phase** — run the command sequence above and confirm the result lands in
-  *Pass/Healthy* or *Neutral Expected*. Capture the `_meta` fail-safe block (and
-  the `?debug=1` rows) in the PR/review notes as evidence.
+  *Pass/Healthy*, *Neutral Expected*, or *Degraded (deterministic rescue)* (the last
+  only when its [pass criteria](#degraded-deterministic-rescue-signoff) all hold).
+  Capture the `_meta` fail-safe block (and the `?debug=1` rows) in the PR/review notes
+  as evidence.
 - **Optional (advisory):** a **nightly advisory smoke** job (e.g. the
   [Live Colombia-election smoke](#live-colombia-election-smoke-advisory)) may run
   on a schedule. It is informational only.

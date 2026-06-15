@@ -744,12 +744,81 @@ describe("Phase 4 · Step 3: refresh fail-safe meta from _meta", () => {
     expect(result.refreshFailure?.retryable).toBeNull();
   });
 
-  it("a non-'failed' refreshStatus string is treated as ok (no false failure)", async () => {
+  it("an UNKNOWN refreshStatus string is treated as ok (no false failure)", async () => {
     const result = await fetchDashboardWithMeta({
-      fetcher: metaFetcher({ refreshStatus: "degraded", refreshFailure: { subtype: "parse" } }),
+      fetcher: metaFetcher({ refreshStatus: "weird", refreshFailure: { subtype: "parse" } }),
     });
     expect(result.refreshStatus).toBe("ok");
     expect(result.refreshFailure).toBeNull();
+  });
+
+  // ── B6: degraded deterministic rescue + B3/B5 additive fields ──────────────
+
+  it("parses refreshStatus=degraded with the retained failure metadata + B3/B5 fields", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({
+        refreshStatus: "degraded",
+        usedPriorSnapshot: false,
+        refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 2, retryable: false },
+        clusteringLlmFailed: true,
+        usedDeterministicClustering: true,
+        deterministicClusteringDiagnostics: {
+          inputCount: 6,
+          eligibleCount: 3,
+          outputCount: 3,
+          excludedReasons: { no_keyword_fit: 2, over_cap: 1 },
+        },
+        upgradeRefreshScheduled: true,
+        upgradeRefreshReason: "degraded_deterministic_rescue",
+      }),
+    });
+    expect(result.refreshStatus).toBe("degraded");
+    // Degraded retains the LLM-failure metadata for attribution.
+    expect(result.refreshFailure?.subtype).toBe("parse");
+    expect(result.clusteringLlmFailed).toBe(true);
+    expect(result.usedDeterministicClustering).toBe(true);
+    expect(result.deterministicClusteringDiagnostics).toEqual({
+      inputCount: 6,
+      eligibleCount: 3,
+      outputCount: 3,
+      excludedReasons: { no_keyword_fit: 2, over_cap: 1 },
+    });
+    expect(result.upgradeRefreshScheduled).toBe(true);
+    expect(result.upgradeRefreshReason).toBe("degraded_deterministic_rescue");
+  });
+
+  it("legacy/ok payloads omit the B3/B5 fields → safe defaults (false / null), never degraded", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({ refreshStatus: "ok", usedPriorSnapshot: false }),
+    });
+    expect(result.refreshStatus).toBe("ok");
+    expect(result.usedDeterministicClustering).toBe(false);
+    expect(result.clusteringLlmFailed).toBe(false);
+    expect(result.deterministicClusteringDiagnostics).toBeNull();
+    expect(result.upgradeRefreshScheduled).toBe(false);
+    expect(result.upgradeRefreshReason).toBeNull();
+  });
+
+  it("malformed deterministicClusteringDiagnostics degrades safely (null counts, {} reasons)", async () => {
+    const result = await fetchDashboardWithMeta({
+      fetcher: metaFetcher({
+        refreshStatus: "degraded",
+        refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 1, retryable: false },
+        deterministicClusteringDiagnostics: {
+          inputCount: "lots", // non-number → null
+          excludedReasons: { ok: 2, bad: "nope" }, // non-number value dropped
+        },
+        usedDeterministicClustering: "yes", // non-bool → false
+      }),
+    });
+    expect(result.refreshStatus).toBe("degraded");
+    expect(result.usedDeterministicClustering).toBe(false);
+    expect(result.deterministicClusteringDiagnostics).toEqual({
+      inputCount: null,
+      eligibleCount: null,
+      outputCount: null,
+      excludedReasons: { ok: 2 },
+    });
   });
 
   // Step 4 integration sanity: a real server emits the fail-safe fields ALONGSIDE

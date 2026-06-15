@@ -160,9 +160,15 @@ export function evaluateRefreshSlo(
   }
 
   // Sample the attempt-only window (terminal-field guard — see header note).
+  // A sample counts as fail-closed ONLY when `usedFallbackClustering === true`
+  // (clustering failed AND zero stories shipped). A deterministic rescue retains
+  // `clusteringFailureReason` for attribution but flips `usedFallbackClustering`
+  // to false because it published stories — so it must NOT inflate the timeout/
+  // failure rates. Attribution-only metadata never marks a fail-closed sample.
   if (clusteringAttempts > 0) {
-    const timeout = clusteringFailureReason === "timeout";
-    const failed = usedFallbackClustering === true || clusteringFailureReason != null;
+    const failClosed = usedFallbackClustering === true;
+    const timeout = failClosed && clusteringFailureReason === "timeout";
+    const failed = failClosed;
     _clusterAttemptWindow.push({ timeout, failed });
     while (_clusterAttemptWindow.length > CLUSTER_TIMEOUT_WINDOW) {
       _clusterAttemptWindow.shift();

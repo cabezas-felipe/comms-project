@@ -116,6 +116,34 @@ test("terminal guard: recovered parse-repair runs are NOT counted as timeouts or
   assert.equal(warn.length, 0);
 });
 
+test("terminal guard: deterministic rescues (published stories, attribution reason retained) are NOT counted as failures/timeouts", () => {
+  _resetSloState();
+  const { logger, warn } = makeLogger();
+  // A degraded deterministic rescue: clustering attempted and the LLM failed, so
+  // `clusteringFailureReason` is retained for ATTRIBUTION, but the deterministic
+  // fallback published stories → `usedFallbackClustering` is false. This is NOT a
+  // fail-closed and must never inflate the timeout/failure rates (Bugbot #2). We
+  // mix an "error" rescue and a "timeout" rescue to cover both classifications.
+  let res;
+  for (let i = 0; i < CLUSTER_TIMEOUT_WINDOW; i++) {
+    res = evaluateRefreshSlo(
+      {
+        pipelineMs: 10,
+        clusteringAttempts: 2,
+        clusteringFailureReason: i % 2 === 0 ? "error" : "timeout", // attribution only
+        usedFallbackClustering: false, // rescue published → NOT fail-closed
+        storiesPublished: 1,
+      },
+      logger
+    );
+  }
+  assert.equal(res.windowSize, CLUSTER_TIMEOUT_WINDOW, "rescued runs DO sample the window");
+  assert.equal(res.clusterTimeoutRate, 0, "a rescue with reason='timeout' is not a fail-closed timeout");
+  assert.equal(res.clusterFailureRate, 0, "a rescue with a retained reason is not a fail-closed failure");
+  assert.deepEqual(res.breaches, [], "no breach from deterministic rescues");
+  assert.equal(warn.length, 0);
+});
+
 // ─── B. cluster_timeout_rate: trigger + clear across window boundaries ───────
 
 test("cluster_timeout_rate: only fires once the window is full, then CLEARS as timeouts age out", () => {

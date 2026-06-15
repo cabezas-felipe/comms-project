@@ -158,6 +158,15 @@ describe("DashboardRunDiagnostics — Phase 4 · Step 3 refresh fail-safe row (d
     selection: null,
   } as const;
 
+  // B6: deterministic-rescue (B3) + upgrade (B5) signals, default off.
+  const detDefaults = {
+    usedDeterministicClustering: false,
+    clusteringLlmFailed: false,
+    deterministicClusteringDiagnostics: null,
+    upgradeRefreshScheduled: false,
+    upgradeRefreshReason: null,
+  } as const;
+
   it("renders status=failed with reason/subtype/attempts/retryable + usedPriorSnapshot", () => {
     render(
       <DashboardRunDiagnostics
@@ -166,6 +175,7 @@ describe("DashboardRunDiagnostics — Phase 4 · Step 3 refresh fail-safe row (d
           refreshStatus: "failed",
           usedPriorSnapshot: true,
           refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 2, retryable: false, retryAfterMs: null, nextRetryAt: null },
+          ...detDefaults,
         }}
       />,
     );
@@ -182,13 +192,37 @@ describe("DashboardRunDiagnostics — Phase 4 · Step 3 refresh fail-safe row (d
     render(
       <DashboardRunDiagnostics
         {...base}
-        refreshFailsafe={{ refreshStatus: "ok", usedPriorSnapshot: false, refreshFailure: null }}
+        refreshFailsafe={{ refreshStatus: "ok", usedPriorSnapshot: false, refreshFailure: null, ...detDefaults }}
       />,
     );
     const row = screen.getByTestId("diag-refr");
     expect(row.textContent).toContain("status=ok");
     expect(row.textContent).toContain("usedPriorSnapshot=false");
     expect(row.textContent).not.toContain("subtype=");
+  });
+
+  it("B6: renders status=degraded with deterministic + upgrade detail", () => {
+    render(
+      <DashboardRunDiagnostics
+        {...base}
+        refreshFailsafe={{
+          refreshStatus: "degraded",
+          usedPriorSnapshot: false,
+          refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 2, retryable: false, retryAfterMs: null, nextRetryAt: null },
+          usedDeterministicClustering: true,
+          clusteringLlmFailed: true,
+          deterministicClusteringDiagnostics: { inputCount: 6, eligibleCount: 3, outputCount: 3, excludedReasons: { no_keyword_fit: 2 } },
+          upgradeRefreshScheduled: true,
+          upgradeRefreshReason: "degraded_deterministic_rescue",
+        }}
+      />,
+    );
+    const row = screen.getByTestId("diag-refr");
+    expect(row.textContent).toContain("status=degraded");
+    expect(row.textContent).toContain("llmFailed=true");
+    expect(row.textContent).toContain("deterministic=true");
+    expect(row.textContent).toContain("det_diag=in:6/elig:3/out:3");
+    expect(row.textContent).toContain("upgrade=scheduled(degraded_deterministic_rescue)");
   });
 
   it("shows n/a when refreshFailsafe is absent (older payload)", () => {

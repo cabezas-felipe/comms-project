@@ -103,14 +103,45 @@ export interface DashboardFetchResult {
    * fields this defaults to `refreshStatus: "ok"`, `refreshFailure: null`,
    * `usedPriorSnapshot: false` — pre-Step-3 behavior, never a false failure.
    * Parsed defensively off the raw `_meta`; never schema-validated.
+   *
+   * B6: `"degraded"` (B3) is the LLM-clustering-failed-but-deterministic-fallback-
+   * published outcome — a real, bounded publish. The additive B3/B5 fields below
+   * (`usedDeterministicClustering` / `clusteringLlmFailed` /
+   * `deterministicClusteringDiagnostics` / `upgradeRefreshScheduled` /
+   * `upgradeRefreshReason`) describe the rescue + the background LLM upgrade.
    */
-  refreshStatus: "ok" | "failed";
+  refreshStatus: RefreshStatus;
   refreshFailure: DashboardRefreshFailure | null;
   usedPriorSnapshot: boolean;
+  usedDeterministicClustering: boolean;
+  clusteringLlmFailed: boolean;
+  deterministicClusteringDiagnostics: DashboardDeterministicClusteringDiagnostics | null;
+  upgradeRefreshScheduled: boolean;
+  upgradeRefreshReason: string | null;
 }
+
+/**
+ * Refresh status wire vocabulary (Phase 4 Step 3 + B3). `"degraded"` was added
+ * by B3: the LLM clustering path failed but the deterministic relevance-gated
+ * fallback published bounded stories — a real publish, NOT a hard failure.
+ */
+export type RefreshStatus = "ok" | "degraded" | "failed";
 
 /** Phase 4 · Step 2/3 wire vocabulary for a classified refresh failure. */
 export type RefreshFailureSubtype = "parse" | "timeout" | "provider_request" | "unknown";
+
+/**
+ * B6 (B3): deterministic relevance-gated fallback diagnostics lifted from
+ * `_meta.deterministicClusteringDiagnostics` (counts only). All fields parsed
+ * defensively — a missing/garbled object lifts to `null`; missing/mistyped
+ * counts degrade to `null`; `excludedReasons` to `{}`. Debug aid only.
+ */
+export interface DashboardDeterministicClusteringDiagnostics {
+  inputCount: number | null;
+  eligibleCount: number | null;
+  outputCount: number | null;
+  excludedReasons: Record<string, number>;
+}
 
 /**
  * Structured refresh failure lifted from `_meta.refreshFailure`. All fields are
@@ -128,11 +159,24 @@ export interface DashboardRefreshFailure {
   nextRetryAt: string | null;
 }
 
-/** Phase 4 · Step 3: parsed fail-safe status surface (subset spread into the result). */
+/** Phase 4 · Step 3 + B6: parsed fail-safe status surface (subset spread into the result). */
 export interface DashboardRefreshFailsafeMeta {
-  refreshStatus: "ok" | "failed";
+  refreshStatus: RefreshStatus;
   refreshFailure: DashboardRefreshFailure | null;
   usedPriorSnapshot: boolean;
+  /**
+   * B3 attribution flag: the deterministic fallback path produced builder output.
+   * Diagnostic only — final shipped verdict is `refreshStatus`.
+   */
+  usedDeterministicClustering: boolean;
+  /** B3: the LLM clustering path failed terminally (attribution). */
+  clusteringLlmFailed: boolean;
+  /** B3: deterministic fallback diagnostics (counts); null when it never ran. */
+  deterministicClusteringDiagnostics: DashboardDeterministicClusteringDiagnostics | null;
+  /** B5: a background default-profile LLM upgrade was scheduled for this run. */
+  upgradeRefreshScheduled: boolean;
+  /** B5: reason string for the scheduled upgrade; null when none. */
+  upgradeRefreshReason: string | null;
 }
 
 /** Subset of the server progressive-enrichment state surfaced for the client poll loop. */
@@ -364,7 +408,36 @@ const REFRESH_FAILSAFE_META_DEFAULT: DashboardRefreshFailsafeMeta = {
   refreshStatus: "ok",
   refreshFailure: null,
   usedPriorSnapshot: false,
+  usedDeterministicClustering: false,
+  clusteringLlmFailed: false,
+  deterministicClusteringDiagnostics: null,
+  upgradeRefreshScheduled: false,
+  upgradeRefreshReason: null,
 };
+
+/**
+ * Lift B3 deterministic-fallback diagnostics off `_meta`. Tolerant of any shape:
+ * a missing/garbled object returns `null`; missing/mistyped counts degrade to
+ * `null`; a non-object `excludedReasons` degrades to `{}`. Never throws.
+ */
+function parseDeterministicDiagnosticsSafe(
+  raw: unknown
+): DashboardDeterministicClusteringDiagnostics | null {
+  if (!raw || typeof raw !== "object") return null;
+  const d = raw as Record<string, unknown>;
+  const excludedReasons: Record<string, number> = {};
+  if (d.excludedReasons && typeof d.excludedReasons === "object") {
+    for (const [k, v] of Object.entries(d.excludedReasons as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v)) excludedReasons[k] = v;
+    }
+  }
+  return {
+    inputCount: numOrNull(d.inputCount),
+    eligibleCount: numOrNull(d.eligibleCount),
+    outputCount: numOrNull(d.outputCount),
+    excludedReasons,
+  };
+}
 
 const REFRESH_FAILURE_SUBTYPES: readonly RefreshFailureSubtype[] = [
   "parse",
@@ -384,9 +457,27 @@ function parseRefreshFailsafeMetaSafe(meta: unknown): DashboardRefreshFailsafeMe
   if (!meta || typeof meta !== "object") return REFRESH_FAILSAFE_META_DEFAULT;
   const m = meta as Record<string, unknown>;
   const usedPriorSnapshot = m.usedPriorSnapshot === true;
-  if (m.refreshStatus !== "failed") {
-    return { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot };
+  // B6: additive B3/B5 deterministic-fallback + upgrade signals — parsed
+  // defensively and ALWAYS present in the result (false/null when absent) so a
+  // legacy/malformed payload reads as a clean non-degraded run.
+  const common = {
+    usedPriorSnapshot,
+    usedDeterministicClustering: m.usedDeterministicClustering === true,
+    clusteringLlmFailed: m.clusteringLlmFailed === true,
+    deterministicClusteringDiagnostics: parseDeterministicDiagnosticsSafe(
+      m.deterministicClusteringDiagnostics
+    ),
+    upgradeRefreshScheduled: m.upgradeRefreshScheduled === true,
+    upgradeRefreshReason: strOrNull(m.upgradeRefreshReason),
+  };
+  // Only an explicit "failed"/"degraded" flips the status; anything else
+  // (including a missing or unknown value) safely reads as "ok".
+  const status = m.refreshStatus;
+  if (status !== "failed" && status !== "degraded") {
+    return { refreshStatus: "ok", refreshFailure: null, ...common };
   }
+  // Both "failed" and "degraded" carry the structured failure (degraded retains
+  // the LLM-failure metadata for attribution).
   const rawFailure =
     m.refreshFailure && typeof m.refreshFailure === "object"
       ? (m.refreshFailure as Record<string, unknown>)
@@ -394,7 +485,7 @@ function parseRefreshFailsafeMetaSafe(meta: unknown): DashboardRefreshFailsafeMe
   const subtype = rawFailure.subtype;
   const retryable = rawFailure.retryable;
   return {
-    refreshStatus: "failed",
+    refreshStatus: status,
     refreshFailure: {
       reason: strOrNull(rawFailure.reason),
       subtype: REFRESH_FAILURE_SUBTYPES.includes(subtype as RefreshFailureSubtype)
@@ -405,7 +496,7 @@ function parseRefreshFailsafeMetaSafe(meta: unknown): DashboardRefreshFailsafeMe
       retryAfterMs: numOrNull(rawFailure.retryAfterMs),
       nextRetryAt: parseIsoTimestampSafe(rawFailure.nextRetryAt),
     },
-    usedPriorSnapshot,
+    ...common,
   };
 }
 
