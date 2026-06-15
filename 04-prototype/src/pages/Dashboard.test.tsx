@@ -95,6 +95,12 @@ const OK_RESULT = {
   refreshStatus: "ok",
   refreshFailure: null,
   usedPriorSnapshot: false,
+  // B6: deterministic-rescue (B3) + background-upgrade (B5) signals — default off.
+  usedDeterministicClustering: false,
+  clusteringLlmFailed: false,
+  deterministicClusteringDiagnostics: null,
+  upgradeRefreshScheduled: false,
+  upgradeRefreshReason: null,
 };
 
 afterEach(() => {
@@ -384,6 +390,61 @@ describe("Dashboard load states (no fake-story fallback)", () => {
     // After a clean retry the banner clears and the quiet-beat empty returns.
     expect(await screen.findByTestId("dashboard-empty")).toBeInTheDocument();
     expect(refreshSpy).toHaveBeenCalledWith({ endpoint: "/api/dashboard/refresh?profile=default" });
+  });
+
+  // ── B6: degraded deterministic-rescue surface ────────────────────────────
+  it("B6: degraded + stories → renders stories WITH the non-blocking degraded banner, no hard failure", async () => {
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "det-1", title: "Deterministic story" })] },
+      refreshStatus: "degraded",
+      usedPriorSnapshot: false,
+      refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 2, retryable: false, retryAfterMs: null, nextRetryAt: null },
+      clusteringLlmFailed: true,
+      usedDeterministicClustering: true,
+      upgradeRefreshScheduled: true,
+      upgradeRefreshReason: "degraded_deterministic_rescue",
+    });
+    renderAt(null);
+    // Stories render normally…
+    expect(await screen.findByText("Deterministic story")).toBeInTheDocument();
+    // …under the subtle degraded cue (upgrade-in-progress copy).
+    expect(screen.getByTestId("dashboard-refresh-degraded")).toBeInTheDocument();
+    expect(screen.getByText(/Refining your story grouping in the background/i)).toBeInTheDocument();
+    // NEVER the hard-failure / quiet-empty / failed-banner surfaces.
+    expect(screen.queryByTestId("dashboard-refresh-failed")).toBeNull();
+    expect(screen.queryByTestId("dashboard-refresh-banner")).toBeNull();
+    expect(screen.queryByTestId("dashboard-empty")).toBeNull();
+  });
+
+  it("B6: degraded WITHOUT a scheduled upgrade → still renders the simpler-grouping cue", async () => {
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "det-1", title: "Deterministic story" })] },
+      refreshStatus: "degraded",
+      refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 2, retryable: false, retryAfterMs: null, nextRetryAt: null },
+      clusteringLlmFailed: true,
+      usedDeterministicClustering: true,
+      upgradeRefreshScheduled: false,
+    });
+    renderAt(null);
+    expect(await screen.findByText("Deterministic story")).toBeInTheDocument();
+    expect(screen.getByTestId("dashboard-refresh-degraded")).toBeInTheDocument();
+    expect(screen.getByText(/simpler grouping for now/i)).toBeInTheDocument();
+  });
+
+  it("B6: ok + stories → unchanged (stories render, no degraded/failure banners)", async () => {
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: { contractVersion: CONTRACT_VERSION, stories: [makeStoryDto({ id: "s-1", title: "Healthy story" })] },
+      refreshStatus: "ok",
+      refreshFailure: null,
+    });
+    renderAt(null);
+    expect(await screen.findByText("Healthy story")).toBeInTheDocument();
+    expect(screen.queryByTestId("dashboard-refresh-degraded")).toBeNull();
+    expect(screen.queryByTestId("dashboard-refresh-banner")).toBeNull();
+    expect(screen.queryByTestId("dashboard-refresh-failed")).toBeNull();
   });
 
   it("Slice 10: clustering-failed Refresh action retries via the default-profile endpoint", async () => {

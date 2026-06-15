@@ -48,6 +48,8 @@ import {
   computePreClusterRelevanceScore,
   comparePreClusterRank,
 } from "./pre-cluster-relevance.mjs";
+import { buildRelevanceGatedFallbackStories } from "./relevance-gated-fallback.mjs";
+import { rankItemsForTranslation } from "./translation-priority.mjs";
 import {
   resolveGeoAdmissionMode,
   geoAdmissionDiagnostics,
@@ -180,6 +182,14 @@ export const COLD_START_GEO_STAGE_BUDGET_MS_DEFAULT = 12000;
 export const COLD_START_CLUSTER_TIMEOUT_MS_DEFAULT = 45000;
 export const COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT = 2;
 export const COLD_START_CLUSTER_INPUT_CAP_DEFAULT = 10;
+// A3: locked cold-start translation caps — PROFILE-ONLY in this step.  The
+// translation stage is NOT wired to them yet (that lands in A5/A6); for now they
+// only shape `_meta.profile`.  They bound how much of a cold-start run's budget
+// the translation stage may spend once wired: `…MAX_ITEMS` caps how many
+// non-English items get translated, `…MAX_MS` caps the stage wall-clock.  No env
+// overrides — locked like the other cold-start knobs above.
+export const COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT = 18;
+export const COLD_START_TRANSLATION_MAX_MS_DEFAULT = 10000;
 
 // ─── PR B / Step 2: cold-start clustering wall-clock envelope ────────────────
 //
@@ -274,6 +284,10 @@ export function resolveRefreshProfile(name) {
       clusterTotalBudgetMs: COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
       deferGeoLane2: true,
       clusterInputCap: COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
+      // A3: locked cold-start translation caps (profile-only — the translation
+      // stage reads these in a later step, A5/A6).
+      translationMaxItems: COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT,
+      translationMaxMs: COLD_START_TRANSLATION_MAX_MS_DEFAULT,
     };
   }
   if (name === "interactive") {
@@ -294,6 +308,10 @@ export function resolveRefreshProfile(name) {
       ),
       // Interactive keeps a flat per-attempt timeout; no total-envelope cap.
       clusterTotalBudgetMs: null,
+      // A3: no cold-start translation caps on this profile (explicit null for
+      // shape clarity — only cold_start opts into the translation caps).
+      translationMaxItems: null,
+      translationMaxMs: null,
     };
   }
   return {
@@ -303,6 +321,10 @@ export function resolveRefreshProfile(name) {
     clusterTimeoutMs: null, // fall through to env / cluster-engine default
     clusterMaxAttempts: DEFAULT_CLUSTER_MAX_ATTEMPTS,
     clusterTotalBudgetMs: null, // no clustering-envelope cap on the default path
+    // A3: no cold-start translation caps on the default path (explicit null for
+    // shape clarity).
+    translationMaxItems: null,
+    translationMaxMs: null,
   };
 }
 
@@ -2021,6 +2043,12 @@ export async function runRefreshPipeline({
   // behavior.  The route passes `"interactive"` only for onboarding-driven
   // interactive entries; the heartbeat and bootstrap paths leave it null.
   refreshProfile = null,
+  // A5 test seam: shallow-merge overrides onto the resolved refresh profile so
+  // tests can pin profile-driven knobs (e.g. the cold-start translation cap
+  // `translationMaxItems`) to small, deterministic values without depending on
+  // the locked production constants.  Null in production — the resolved profile
+  // is used verbatim.  Additive: it never changes which profile is selected.
+  refreshProfileOverrides = null,
   // Slice 5 — progressive whyItMatters enrichment.  When true, the per-story
   // implications WRITER is skipped at first paint: every published story gets
   // the deterministic, state-aware safe fallback copy (non-empty, never a
@@ -2030,7 +2058,10 @@ export async function runRefreshPipeline({
   // progressively enriched; clustering fail-closed continuity is untouched.
   deferWhyItMatters = false,
 }) {
-  const profile = resolveRefreshProfile(refreshProfile);
+  const profile =
+    refreshProfileOverrides && typeof refreshProfileOverrides === "object"
+      ? { ...resolveRefreshProfile(refreshProfile), ...refreshProfileOverrides }
+      : resolveRefreshProfile(refreshProfile);
   const effectiveRecallConfig = recallConfig ?? resolveRecallConfig();
   // Geo admission mode, resolved once per run.
   const resolvedGeoAdmissionMode = resolveGeoAdmissionMode({
@@ -2524,15 +2555,107 @@ export async function runRefreshPipeline({
     hasApiKey: translationHasApiKey,
   });
   const translationShouldRun = translationActivation.shouldRun;
+
+  // A5: cold-start translation candidate cap.  On a cold_start refresh the
+  // profile carries a locked translation budget (`translationMaxItems` /
+  // `translationMaxMs`).  When the stage will actually run, we translate only
+  // the TOP-N non-English items by pre-cluster survival priority
+  // (`rankItemsForTranslation`) instead of the whole post-geo pool — English
+  // items never consume a cap slot, and the lowest-priority non-English items
+  // are deferred this run.  The cap is applied ONLY for cold_start with a finite
+  // `translationMaxItems` AND only when translation is active; every other
+  // profile keeps the unchanged full-pool behavior.  Wall-clock (`translationMaxMs`)
+  // is carried through diagnostics here but NOT yet enforced — that lands in A6.
+  const coldStartTranslationCap =
+    profile?.name === "cold_start" && Number.isFinite(profile?.translationMaxItems)
+      ? {
+          maxItems: profile.translationMaxItems,
+          maxMs: Number.isFinite(profile?.translationMaxMs) ? profile.translationMaxMs : null,
+        }
+      : null;
+  const translationCapApplied = Boolean(coldStartTranslationCap) && translationShouldRun;
+
+  // Default (uncapped) path translates the full candidate set.  Capped path
+  // narrows the translator input to the selected non-English subset.
+  let translationInputItems = geoPassedItems;
+  if (translationCapApplied) {
+    const ranked = rankItemsForTranslation(geoPassedItems, settings);
+    // Only non-English needed items consume the budget; English items pass
+    // through untranslated regardless (stamped during merge-back below).
+    translationInputItems = ranked
+      .filter(isNonEnglishItem)
+      .slice(0, coldStartTranslationCap.maxItems);
+  }
+
+  // A6: when the cold-start cap is active, hand the profile's translation
+  // wall-clock budget (`translationMaxMs`) to the translator so it stops
+  // scheduling new calls once the stage budget is spent (in-flight calls still
+  // complete; deferred items fail open). Non-cold_start config is unchanged.
+  const translationCallConfig = { ...effectiveTranslationConfig, enabled: translationShouldRun };
+  if (translationCapApplied && coldStartTranslationCap.maxMs != null) {
+    translationCallConfig.maxWallClockMs = coldStartTranslationCap.maxMs;
+  }
   const translationStartedAt = Date.now();
-  const { items: translatedGeoItems, diagnostics: rawTranslationDiagnostics } =
+  const { items: translatedInputItems, diagnostics: rawTranslationDiagnostics } =
     await translateEvidenceItems({
-      items: geoPassedItems,
+      items: translationInputItems,
       translateFn,
-      config: { ...effectiveTranslationConfig, enabled: translationShouldRun },
+      config: translationCallConfig,
       cache: translationCache ?? undefined,
     });
   const translationMs = Math.max(0, Date.now() - translationStartedAt);
+
+  // Merge the (possibly capped) translator output back into the FULL post-geo
+  // list in original order.  In the uncapped path the translator already saw
+  // every item, so its output IS the full list.  In the capped path we splice
+  // the translated subset back in and stamp the two un-translated buckets so
+  // every item carries a uniform `_translation` for downstream coverage math:
+  //   - capped-out non-English → reason "cold_start_cap" (needed, not applied)
+  //   - English / non-needed   → normal passthrough stamp (needed:false)
+  let translatedGeoItems;
+  let cappedOutCount = 0;
+  if (translationCapApplied) {
+    const translatedById = new Map(
+      translatedInputItems.map((it) => [it.sourceId, it])
+    );
+    translatedGeoItems = geoPassedItems.map((item) => {
+      const translated = translatedById.get(item.sourceId);
+      if (translated) return translated; // selected subset → translator result
+      const lang = typeof item?.lang === "string" ? item.lang : null;
+      if (isNonEnglishItem(item)) {
+        // Deferred this run by the cold-start cap (recall still sees the
+        // original text; fail-open posture is unchanged, just untranslated).
+        cappedOutCount += 1;
+        return {
+          ...item,
+          _translation: {
+            needed: true,
+            applied: false,
+            failed: false,
+            fromCache: false,
+            reason: "cold_start_cap",
+            lang,
+          },
+        };
+      }
+      // English / non-needed item — same stamp `translateEvidenceItems` gives a
+      // non-needed passthrough, so coverage math is identical to the full path.
+      return {
+        ...item,
+        _translation: {
+          needed: false,
+          applied: false,
+          failed: false,
+          fromCache: false,
+          reason: null,
+          lang,
+        },
+      };
+    });
+  } else {
+    translatedGeoItems = translatedInputItems;
+  }
+
   const translationStageDiagnostics = {
     ...rawTranslationDiagnostics,
     mode: translationActivation.mode,
@@ -2540,7 +2663,22 @@ export async function runRefreshPipeline({
     unavailable: translationActivation.unavailable,
     unavailableReason: translationActivation.unavailableReason,
     recallRisk: translationActivation.recallRisk,
+    // A5: cold-start translation cap diagnostics (additive; all inert off the
+    // cold_start path so existing consumers are unaffected).  `capMaxMs` is
+    // reported for observability but not enforced until A6.
+    capped: translationCapApplied,
+    capReason: translationCapApplied ? "cold_start_profile" : null,
+    capMaxItems: translationCapApplied ? coldStartTranslationCap.maxItems : null,
+    capMaxMs: translationCapApplied ? coldStartTranslationCap.maxMs : null,
+    cappedOutCount,
   };
+  console.log(
+    `[pipeline.translation] cap_applied=${translationCapApplied}` +
+      ` cap_reason=${translationStageDiagnostics.capReason ?? "none"}` +
+      ` cap_max_items=${translationStageDiagnostics.capMaxItems ?? "none"}` +
+      ` cap_max_ms=${translationStageDiagnostics.capMaxMs ?? "none"}` +
+      ` capped_out=${cappedOutCount}`
+  );
   console.log(
     `[pipeline.translation] mode=${translationActivation.mode}` +
       ` required=${translationActivation.required}` +
@@ -3064,16 +3202,38 @@ export async function runRefreshPipeline({
   let clusteringFailureSubtype = null;
   let clusteringAttempts = 0;
   const clusteringAttemptLatencyMs = [];
-  // PR B Step 1: Option B auto-recovery tier diagnostics.  A bounded, single
-  // extra clustering attempt on a reduced input set, triggered ONLY for a
-  // non-timeout (parse/schema-style) primary failure.  All default to the
-  // "not attempted" state so the fields are additive and stable.
+  // PR B Step 1 + A2: Option B auto-recovery tier diagnostics.  A bounded,
+  // single extra clustering attempt on a reduced input set, triggered for ANY
+  // terminal fail-closed clustering failure — both error-class (parse/schema)
+  // AND timeout-class (A2) — whenever the candidate set can genuinely shrink.
+  // All default to the "not attempted" state so the fields are additive and
+  // stable.
   let clusteringRecoveryAttempted = false;
   let clusteringRecoverySucceeded = false;
   let clusteringRecoveryReason = null; // recovery failure class ('error'|'timeout') or null
   // Prompt 1: subtype of the recovery attempt's OWN failure (mirrors
   // clusteringFailureSubtype). Null when recovery didn't run or succeeded.
   let clusteringRecoverySubtype = null;
+  // B2: strict relevance-gated deterministic fallback diagnostics.  After both
+  // the primary loop AND the Option B reduced-input recovery tier fail terminally
+  // (i.e. `usedFallbackClustering` is still true here), we attempt a LAST-resort
+  // DETERMINISTIC build — singleton meta-stories from the beat-fit survivors that
+  // pass the strict topic+keyword relevance bar (`relevance-gated-fallback.mjs`).
+  // This NEVER calls `gracefulFallbackClustering` and never weakens trust: an
+  // item that fails the strict gate produces no story, so when nothing is
+  // eligible the run stays fail-closed (0 stories) exactly as before.
+  //   - `usedDeterministicClustering` — true ONLY when the deterministic builder
+  //     published ≥1 story (so the run shipped real, relevance-gated content
+  //     despite the LLM failing).
+  //   - `clusteringLlmFailed` — true whenever the LLM clustering path terminally
+  //     failed and the deterministic builder ran, REGARDLESS of whether it
+  //     published. Honest attribution that the LLM did not produce these stories;
+  //     `clusteringFailureReason`/`…Subtype` are retained for root-cause triage.
+  //   - `deterministicClusteringDiagnostics` — the B1 builder's diagnostics
+  //     (`inputCount`/`eligibleCount`/`outputCount`/`excludedReasons`).
+  let usedDeterministicClustering = false;
+  let clusteringLlmFailed = false;
+  let deterministicClusteringDiagnostics = null;
   // C2 + Slice 3: clustering JSON repair diagnostics for the last attempt
   // (success or failure both carry them via `_clusteringRepair`).  Shape
   // mirrors `EMPTY_CLUSTERING_REPAIR` — `rawFailureClass` / `schemaErrorBucket`
@@ -3162,18 +3322,21 @@ export async function runRefreshPipeline({
       );
     }
 
-    // PR B Step 1: Option B auto-recovery tier.  A non-timeout clustering
-    // failure (parse/schema-style, reason === "error") is frequently transient
-    // and input-size sensitive — ONE bounded retry on a reduced (top-half)
-    // candidate set can recover real stories without weakening fail-closed
-    // trust.  We deliberately do NOT retry timeout-class failures here: the
-    // primary loop already spent the latency budget, and a smaller set does not
-    // change a capacity/latency outcome.  On recovery success we publish the
-    // recovered meta-stories through the normal grounding/build path and clear
-    // the fail-closed flags; on recovery failure the existing fail-closed
-    // outcome (0 meta-stories) is preserved untouched.  No
-    // `gracefulFallbackClustering` buckets are ever produced — the trust posture
-    // is unchanged.
+    // PR B Step 1 + A2: Option B auto-recovery tier.  A terminal clustering
+    // failure is frequently transient and input-size sensitive — ONE bounded
+    // retry on a reduced (top-half) candidate set can recover real stories
+    // without weakening fail-closed trust.  A2 widens the trigger from
+    // error-class only to BOTH terminal reasons: error-class (parse/schema,
+    // where a smaller set is more likely to parse cleanly) AND timeout-class
+    // (where a smaller candidate set is a lighter, faster round-trip that can
+    // beat the budget the full set blew).  The retry stays Sonnet-only and
+    // reuses the same `clusterCallOpts()` timeout budgeting as the primary loop,
+    // so a total-budget profile still bounds it to the wall-clock left behind.
+    // On recovery success we publish the recovered meta-stories through the
+    // normal grounding/build path and clear the fail-closed flags; on recovery
+    // failure the existing fail-closed outcome (0 meta-stories) is preserved
+    // untouched.  No `gracefulFallbackClustering` buckets are ever produced —
+    // the trust posture is unchanged.
     const RECOVERY_MIN_ITEMS = 6;
     const recoveryCap = Math.max(
       RECOVERY_MIN_ITEMS,
@@ -3181,12 +3344,16 @@ export async function runRefreshPipeline({
     );
     const recoveryInput = clusterInputItems.slice(0, recoveryCap);
     // Recovery only runs when the reduced cap genuinely SHRINKS the input — its
-    // mechanism is "fewer items parse cleanly".  When the candidate set is
-    // already at/below the floor there is nothing to reduce, so we keep the
-    // existing fail-closed outcome rather than burn an identical extra call.
+    // mechanism is "fewer items parse cleanly / complete within budget".  When
+    // the candidate set is already at/below the floor there is nothing to
+    // reduce, so we keep the existing fail-closed outcome rather than burn an
+    // identical extra call (true for both error- and timeout-class failures).
     if (
       usedFallbackClustering &&
-      clusteringFailureReason === "error" &&
+      // A2: recover for BOTH terminal reasons — error-class (parse/schema) and
+      // timeout-class.  `usedFallbackClustering` already implies a non-null
+      // terminal reason; the explicit check documents the eligible set.
+      (clusteringFailureReason === "error" || clusteringFailureReason === "timeout") &&
       recoveryInput.length < clusterInputItems.length
     ) {
       clusteringRecoveryAttempted = true;
@@ -3221,6 +3388,52 @@ export async function runRefreshPipeline({
         rawMetaStories = [];
         console.warn(
           `[pipeline] clustering recovery FAILED (reason=${clusteringRecoveryReason} subtype=${clusteringRecoverySubtype}) — remaining fail-closed (0 meta-stories)`
+        );
+      }
+    }
+
+    // B2: strict relevance-gated deterministic fallback (LAST resort).  If the
+    // primary loop AND the Option B recovery tier both failed terminally
+    // (`usedFallbackClustering` still true), build SINGLETON meta-stories from
+    // the beat-fit survivors that clear the strict topic+keyword relevance bar.
+    // This is the trigger Plan Step B2 specifies: terminal LLM failure with no
+    // recovered LLM stories.  It runs over `clusterInputItems` — the exact
+    // beat-fit-survivor candidate set the LLM saw — and never touches
+    // `gracefulFallbackClustering`, so trust posture is unchanged.  When nothing
+    // is eligible the run stays fail-closed (0 stories) exactly as before; the
+    // LLM-failure reason/subtype are preserved for attribution either way.
+    if (usedFallbackClustering) {
+      clusteringLlmFailed = true;
+      const deterministicFallback = buildRelevanceGatedFallbackStories({
+        items: clusterInputItems,
+        settings,
+        maxStories: 5,
+        maxSourcesPerStory: 1,
+      });
+      deterministicClusteringDiagnostics = deterministicFallback.diagnostics;
+      if (deterministicFallback.stories.length > 0) {
+        rawMetaStories = deterministicFallback.stories;
+        usedDeterministicClustering = true;
+        // We published real, relevance-gated stories — the run is no longer the
+        // "fail-closed published 0" case `usedFallbackClustering` denotes, so
+        // clear ONLY that flag.  `clusteringFailureReason`/`…Subtype` and the
+        // explicit `clusteringLlmFailed` flag are RETAINED for attribution (we
+        // do not pretend the LLM succeeded), and the snapshot-preservation guard
+        // (which also requires zero published stories) correctly does not fire.
+        usedFallbackClustering = false;
+        console.warn(
+          `[pipeline] deterministic relevance-gated fallback PUBLISHED ${deterministicFallback.stories.length} story(ies)` +
+            ` (eligible=${deterministicClusteringDiagnostics.eligibleCount}/${deterministicClusteringDiagnostics.inputCount}` +
+            ` output=${deterministicClusteringDiagnostics.outputCount})` +
+            ` — LLM clustering failed (reason=${clusteringFailureReason} subtype=${clusteringFailureSubtype})`
+        );
+      } else {
+        // Nothing cleared the strict gate — preserve the fail-closed outcome
+        // (0 meta-stories) untouched; the diagnostics record the empty result.
+        console.warn(
+          `[pipeline] deterministic relevance-gated fallback found 0 eligible stories` +
+            ` (input=${deterministicClusteringDiagnostics.inputCount}) — remaining fail-closed (0 meta-stories)` +
+            ` — LLM clustering failed (reason=${clusteringFailureReason} subtype=${clusteringFailureSubtype})`
         );
       }
     }
@@ -4077,14 +4290,16 @@ export async function runRefreshPipeline({
     // null and `usedFallbackClustering` is false on this path.
     clusteringRepairRecovered:
       clusteringRepair.attempted === true && clusteringRepair.succeeded === true,
-    // PR B Step 1 — Option B auto-recovery tier diagnostics (additive).
-    // `clusteringRecoveryAttempted` is true when a primary non-timeout failure
-    // triggered the single reduced-input recovery attempt; `…Succeeded` is true
-    // when that attempt published recovered stories (in which case
-    // `usedFallbackClustering` is false and `clusteringFailureReason` is null);
-    // `…Reason` is the recovery attempt's own failure class ('error'|'timeout')
-    // when it failed, else null.  Timeout-class primary failures never trigger
-    // recovery, so all three stay in the default state on that path.
+    // PR B Step 1 + A2 — Option B auto-recovery tier diagnostics (additive).
+    // `clusteringRecoveryAttempted` is true when a terminal primary failure —
+    // error-class OR timeout-class (A2) — triggered the single reduced-input
+    // recovery attempt; `…Succeeded` is true when that attempt published
+    // recovered stories (in which case `usedFallbackClustering` is false and
+    // `clusteringFailureReason` is null); `…Reason` is the recovery attempt's
+    // own failure class ('error'|'timeout') when it failed, else null.  Recovery
+    // only fires when the candidate set can genuinely shrink, so a failure at
+    // the reduction floor (e.g. ≤6 items) leaves all three in the default state
+    // regardless of the terminal reason.
     clusteringRecoveryAttempted,
     clusteringRecoverySucceeded,
     clusteringRecoveryReason,
@@ -4092,6 +4307,21 @@ export async function runRefreshPipeline({
     // provider_request | unknown | timeout_budget), or null when recovery didn't
     // run or succeeded. Mirrors `clusteringFailureSubtype` for the recovery tier.
     clusteringRecoverySubtype,
+    // B2 — strict relevance-gated deterministic fallback diagnostics (additive).
+    // `usedDeterministicClustering` is true when the deterministic builder
+    // published ≥1 singleton story after the LLM path (primary + recovery) failed
+    // terminally — in which case `usedFallbackClustering` is false (stories WERE
+    // published) while `clusteringLlmFailed` + `clusteringFailureReason`/`…Subtype`
+    // remain set for attribution.  `clusteringLlmFailed` is true whenever the LLM
+    // clustering path failed terminally and the deterministic builder ran
+    // (regardless of whether it published), so an operator can split "LLM failed,
+    // deterministic rescued it" from "LLM failed, nothing eligible → fail-closed".
+    // `deterministicClusteringDiagnostics` carries the B1 builder's
+    // `inputCount`/`eligibleCount`/`outputCount`/`excludedReasons` (null when the
+    // deterministic builder never ran — i.e. clustering succeeded or recovered).
+    usedDeterministicClustering,
+    clusteringLlmFailed,
+    deterministicClusteringDiagnostics,
     timings: pipelineTimings,
     // Slice 4: latency-shaping profile applied to this run.  Additive,
     // deterministic snapshot of the resolved knobs (name + the geo budget /
@@ -4129,6 +4359,12 @@ export async function runRefreshPipeline({
       // surface can split `error` without walking the full diagnostics tree.
       clusteringFailureSubtype,
       usedFallbackClustering,
+      // B2: additive rollup signals so the SLO/summary surface can tell apart a
+      // true terminal fail-closed (clusteringLlmFailed && !usedDeterministicClustering
+      // && storiesPublished === 0) from an LLM-failed run rescued deterministically
+      // (clusteringLlmFailed && usedDeterministicClustering && storiesPublished > 0).
+      usedDeterministicClustering,
+      clusteringLlmFailed,
       ...geoDiagnostics,
     },
     clusteringLatencyMs: clusteringAttemptLatencyMs,

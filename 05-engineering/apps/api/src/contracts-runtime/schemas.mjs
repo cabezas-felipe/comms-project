@@ -73,3 +73,71 @@ export const settingsPayloadSchema = z.object({
   traditionalSources: z.array(z.string().min(1)),
   socialSources: z.array(z.string().min(1)),
 });
+
+// ─── Refresh fail-safe contract (mirror of @tempo/contracts) ──────────────────
+// Surfaced on `_meta` so a client can tell a TRUE quiet/empty success apart from
+// a refresh FAILURE (or B3 DEGRADED deterministic rescue) that also returns
+// `stories: []` / bounded stories. Kept in lockstep with the TS package by the
+// parity test. See packages/contracts/src/schemas.ts for full rationale.
+export const refreshFailureSubtypeSchema = z.enum([
+  "parse",
+  "timeout",
+  "provider_request",
+  "unknown",
+]);
+
+export const refreshFailureSchema = z.object({
+  reason: z.string().min(1),
+  subtype: refreshFailureSubtypeSchema,
+  attempts: z.number().int().positive(),
+  retryable: z.boolean(),
+  retryAfterMs: z.number().int().nonnegative().optional(),
+  nextRetryAt: z.string().min(1).optional(),
+});
+
+// B3 — deterministic relevance-gated fallback (B2) diagnostics (counts only).
+export const deterministicClusteringDiagnosticsSchema = z
+  .object({
+    inputCount: z.number().int().nonnegative(),
+    eligibleCount: z.number().int().nonnegative(),
+    outputCount: z.number().int().nonnegative(),
+    excludedReasons: z.record(z.string(), z.number().int().nonnegative()),
+  })
+  .passthrough();
+
+export const dashboardRefreshFailsafeMetaSchema = z
+  .object({
+    // B3: `degraded` = LLM clustering failed but the deterministic fallback
+    // published bounded stories (a real publish, not a failure).
+    refreshStatus: z.enum(["ok", "degraded", "failed"]),
+    refreshFailure: refreshFailureSchema.nullable(),
+    usedPriorSnapshot: z.boolean(),
+    // B3 — additive deterministic-fallback signals; OPTIONAL for back-compat.
+    usedDeterministicClustering: z.boolean().optional(),
+    clusteringLlmFailed: z.boolean().optional(),
+    deterministicClusteringDiagnostics: deterministicClusteringDiagnosticsSchema.optional(),
+  })
+  .passthrough()
+  .superRefine((val, ctx) => {
+    if (val.refreshStatus === "failed" && val.refreshFailure == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refreshFailure"],
+        message: "refreshStatus 'failed' requires a non-null refreshFailure object",
+      });
+    }
+    if (val.refreshStatus === "degraded" && val.refreshFailure == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refreshFailure"],
+        message: "refreshStatus 'degraded' requires a non-null refreshFailure object",
+      });
+    }
+    if (val.refreshStatus === "ok" && val.refreshFailure != null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refreshFailure"],
+        message: "refreshStatus 'ok' must have refreshFailure null",
+      });
+    }
+  });

@@ -1111,13 +1111,13 @@ test("formatClusterObsLine: stable key order; renders null; omits absent fallbac
     mode: "structured",
     result: "ok",
     model: "claude-haiku-4-5",
-    maxTokens: 2048,
+    maxTokens: 4096,
     stopReason: null,
     errorClass: null,
   });
   assert.equal(
     line,
-    "[cluster-engine.obs] mode=structured result=ok model=claude-haiku-4-5 maxTokens=2048 stopReason=null errorClass=null"
+    "[cluster-engine.obs] mode=structured result=ok model=claude-haiku-4-5 maxTokens=4096 stopReason=null errorClass=null"
   );
 });
 
@@ -1126,7 +1126,7 @@ test("formatClusterObsLine: includes fallbackTo when set", () => {
     mode: "legacy",
     result: "fallback",
     model: "m",
-    maxTokens: 2048,
+    maxTokens: 4096,
     stopReason: "end_turn",
     errorClass: "json_parse_error",
     fallbackTo: "legacy",
@@ -1237,6 +1237,47 @@ test("obs: stopReason renders null when the provider omits it", async () => {
   const obs = obsLines(lines);
   assert.equal(obs.length, 1);
   assert.match(obs[0].text, /stopReason=null/);
+});
+
+test("obs: truncated completion (stop_reason=max_tokens) → fail closed, classified as parse/truncation", async () => {
+  // A1: a completion cut off at the token ceiling is incomplete JSON. The engine
+  // must deterministically fail closed and classify it within the EXISTING
+  // taxonomy (errorClass=parse_error) with the truncation itself visible via
+  // stopReason=max_tokens — never relying on the partial text happening to fail
+  // JSON.parse. Driven offline through the injected fake client.
+  const truncated = '{"meta_stories": [ {"title": "Diplomatic Rela';
+  const { result, error, lines } = await withConsoleCapture(() =>
+    clusterWithAnthropic({
+      apiKey: "test",
+      model: "claude-sonnet-4-6",
+      items: [makeItem()],
+      settings: BASE_SETTINGS,
+      client: fakeAnthropic(anthropicTextMessage(truncated, "max_tokens")),
+    })
+  );
+  assert.ok(error instanceof Error, "truncation must throw (fail closed)");
+  assert.equal(result, undefined, "no stories published from a truncated completion");
+  // Must not look like a timeout — the pipeline keys terminal `error` off this.
+  assert.doesNotMatch(error.message, /timed out|timeout|abort/i);
+
+  const obs = obsLines(lines);
+  assert.equal(obs.length, 1, "exactly one obs line");
+  assert.equal(obs[0].stream, "error", "terminal failure goes to stderr");
+  assert.match(obs[0].text, /result=fail/);
+  assert.match(obs[0].text, /stopReason=max_tokens/, "truncation visible on the obs line");
+  assert.match(obs[0].text, /errorClass=parse_error/, "classified within the existing parse taxonomy");
+  assert.match(obs[0].text, new RegExp(`maxTokens=${CLUSTER_MAX_TOKENS}`));
+
+  // Diagnostics ride the thrown error and resolve to a PARSE failure subtype,
+  // which maps to the coarse reason "error" (fail-closed) — no new public enum.
+  const repair = readClusteringRepairDiagnostics(error);
+  assert.equal(repair.attempted, true);
+  assert.equal(repair.succeeded, false);
+  assert.equal(repair.failureReason, "parse_error");
+  assert.equal(repair.rawFailureClass, "parse_error");
+  const subtype = classifyClusteringFailureSubtype(error);
+  assert.equal(subtype, CLUSTERING_FAILURE_SUBTYPE.PARSE, "truncation → parse subtype");
+  assert.equal(clusteringReasonFromSubtype(subtype), "error", "fail-closed: coarse reason stays 'error'");
 });
 
 // ─── Prompt 1: clustering failure subtype taxonomy ───────────────────────────

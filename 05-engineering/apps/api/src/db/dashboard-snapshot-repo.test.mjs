@@ -328,6 +328,51 @@ test("readSnapshot: omits _meta.e2e when the snapshot carries no e2e marker", as
   assert.equal(result._meta?.e2e, undefined);
 });
 
+test("readSnapshot (B4): lifts persisted deterministic-fallback (B2/B3) fields into _meta", async () => {
+  // A degraded deterministic-rescue snapshot persists the B2 signals on
+  // `_lastRunMeta`; the read boundary must surface them on `_meta` so GET
+  // /api/dashboard explains the rescue without replaying refresh.
+  const userId = "b4-deterministic-lift-user";
+  const diagnostics = {
+    inputCount: 6,
+    eligibleCount: 3,
+    outputCount: 3,
+    excludedReasons: { no_keyword_fit: 2, over_cap: 1 },
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: {
+      clusterModel: "mock",
+      // Retained LLM-failure attribution on a degraded rescue.
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: "parse",
+      usedFallbackClustering: false,
+      usedDeterministicClustering: true,
+      clusteringLlmFailed: true,
+      deterministicClusteringDiagnostics: diagnostics,
+    },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta?.usedDeterministicClustering, true);
+  assert.equal(result._meta?.clusteringLlmFailed, true);
+  assert.deepEqual(result._meta?.deterministicClusteringDiagnostics, diagnostics);
+  // Attribution fields remain available alongside the deterministic signals.
+  assert.equal(result._meta?.clusteringFailureReason, "error");
+  // Raw _lastRunMeta is still stripped at the boundary.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot (B4): omits deterministic-fallback fields when the snapshot predates B2", async () => {
+  const userId = "b4-deterministic-absent-user";
+  await writeSnapshot(userId, { ...SAMPLE_PAYLOAD, _lastRunMeta: { clusterModel: "mock" } });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta?.usedDeterministicClustering, undefined);
+  assert.equal(result._meta?.clusteringLlmFailed, undefined);
+  assert.equal(result._meta?.deterministicClusteringDiagnostics, undefined);
+});
+
 test("writeSnapshot: overwrites existing snapshot on second call", async () => {
   const updated = { ...SAMPLE_PAYLOAD, stories: [] };
   await writeSnapshot(USER_ID, updated);

@@ -923,8 +923,11 @@ function emptyDashboardResponse(metaExtra = {}) {
 // `stories: []` (a clustering fail-closed run with no prior snapshot). Without
 // this, both look identical on the wire and normal UX reads a failure as "quiet".
 //
-//   _meta.refreshStatus      "ok" | "failed"
-//   _meta.refreshFailure     null on ok; { reason, subtype, attempts, retryable } on failure
+//   _meta.refreshStatus      "ok" | "degraded" | "failed"
+//   _meta.refreshFailure     null on ok; { reason, subtype, attempts, retryable } on
+//                            failure AND on degraded (B3 — degraded retains the
+//                            LLM-failure metadata that forced the deterministic
+//                            relevance-gated fallback to publish bounded stories)
 //   _meta.usedPriorSnapshot  true ONLY when served stories came from a preserved
 //                            prior snapshot due to a failure (continuity); false
 //                            on success — including valid quiet/unchanged windows.
@@ -955,35 +958,96 @@ function isRetryableFailureSubtype(subtype) {
   return subtype === "timeout" || subtype === "provider_request";
 }
 
+// B3: copy the additive deterministic-fallback (B2) signals from the pipeline
+// `log` onto a fail-safe meta object — but ONLY the keys actually present, so a
+// minimal `log` (e.g. `{ clusteringFailureReason: null }`) still yields the exact
+// three-field shape older callers/tests rely on. Mutates and returns `meta`.
+function attachDeterministicFallbackFields(meta, log) {
+  if (log?.usedDeterministicClustering !== undefined) {
+    meta.usedDeterministicClustering = log.usedDeterministicClustering;
+  }
+  if (log?.clusteringLlmFailed !== undefined) {
+    meta.clusteringLlmFailed = log.clusteringLlmFailed;
+  }
+  // Diagnostics are an optional OBJECT in the contract — surface ONLY a real
+  // object (the deterministic builder ran). `null` (builder never ran) is omitted
+  // so the optional field never carries an invalid null.
+  if (log?.deterministicClusteringDiagnostics != null) {
+    meta.deterministicClusteringDiagnostics = log.deterministicClusteringDiagnostics;
+  }
+  return meta;
+}
+
 /**
  * Derive the additive refresh fail-safe `_meta` fields from a pipeline `log`.
  * `usedPriorSnapshot` is decided by the caller (true only when the served stories
- * came from a preserved prior snapshot). Returns the same three-field shape on
- * every branch so the contract is uniform across success and failure.
+ * came from a preserved prior snapshot).
+ *
+ * Status mapping (B3):
+ *   - `degraded` — the LLM clustering path failed terminally BUT the deterministic
+ *     relevance-gated fallback (B2) published bounded stories that actually SHIP
+ *     in the final response (`clusteringLlmFailed === true &&
+ *     usedDeterministicClustering === true && final published stories > 0`).
+ *     Such a run shipped real content and must NOT read as `failed`. It RETAINS
+ *     the LLM-failure metadata in `refreshFailure` for attribution.
+ *   - `failed` — a terminal clustering failure with NO stories in the final
+ *     response. This includes a rescue whose stories were ALL dropped by
+ *     grounding/publish shaping (`usedDeterministicClustering === true` but the
+ *     final published count is 0): it is a true fail-closed, not degraded.
+ *   - `ok` — every successful / recovered path (no terminal failure reason).
+ *
+ * `publishedStoryCount` is the count of stories THIS run ships in the final
+ * response (after grounding/publish shaping). Callers on a publishing path pass
+ * it so a rescue that shipped zero stories resolves to `failed`. When omitted
+ * (`null`), the rescue flags alone decide `degraded` (legacy/unit callers).
+ *
+ * `refreshFailure` is non-null on BOTH `failed` and `degraded`, and null on `ok`
+ * (the schema `superRefine` enforces this coupling).
  */
-export function buildRefreshFailsafeMeta({ log = {}, usedPriorSnapshot = false } = {}) {
+export function buildRefreshFailsafeMeta({
+  log = {},
+  usedPriorSnapshot = false,
+  publishedStoryCount = null,
+} = {}) {
   const reason = log?.clusteringFailureReason ?? null;
-  if (reason == null) {
-    return { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot };
+  const llmFailed = log?.clusteringLlmFailed === true;
+  const deterministicPublished = log?.usedDeterministicClustering === true;
+  // A rescue only DEGRADES (vs FAILS) when its stories survive to the final
+  // response. With an explicit count, a fully-dropped rescue (count 0) is a true
+  // fail-closed; without one, trust the rescue flag (legacy behavior).
+  const rescueShipsStories = publishedStoryCount == null ? true : publishedStoryCount > 0;
+  const degraded = llmFailed && deterministicPublished && rescueShipsStories;
+
+  if (reason == null && !degraded) {
+    return attachDeterministicFallbackFields(
+      { refreshStatus: "ok", refreshFailure: null, usedPriorSnapshot },
+      log
+    );
   }
+
   const subtype = toContractFailureSubtype(log?.clusteringFailureSubtype);
-  // A failure represents at least one attempted run — `attempts=0` on a failed
-  // refresh is ambiguous. Use the pipeline's count when it's a finite >=1 value;
-  // otherwise floor to 1 (missing/zero/invalid count still means "we tried").
+  // A failure represents at least one attempted run — `attempts=0` on a failed/
+  // degraded refresh is ambiguous. Use the pipeline's count when it's a finite
+  // >=1 value; otherwise floor to 1 (missing/zero/invalid count still means
+  // "we tried").
   const attempts =
     Number.isFinite(log?.clusteringAttempts) && log.clusteringAttempts >= 1
       ? log.clusteringAttempts
       : 1;
-  return {
-    refreshStatus: "failed",
-    refreshFailure: {
-      reason: "clustering_failure",
-      subtype,
-      attempts,
-      retryable: isRetryableFailureSubtype(subtype),
+  return attachDeterministicFallbackFields(
+    {
+      // Degraded keeps the LLM-failure attribution but is NOT a failed refresh.
+      refreshStatus: degraded ? "degraded" : "failed",
+      refreshFailure: {
+        reason: "clustering_failure",
+        subtype,
+        attempts,
+        retryable: isRetryableFailureSubtype(subtype),
+      },
+      usedPriorSnapshot,
     },
-    usedPriorSnapshot,
-  };
+    log
+  );
 }
 
 app.get("/api/dashboard", async (req, res) => {
@@ -1577,6 +1641,14 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       Array.isArray(payload?.stories) && payload.stories.length === 0;
     const priorHasHealthyStories =
       !!priorSnapshot && typeof priorStoryCount === "number" && priorStoryCount > 0;
+    // Preservation is a TRUE-fail-closed-only path, gated on `producedNoStories`
+    // (this run shipped ZERO final stories). A DEGRADED deterministic rescue that
+    // published stories is excluded automatically — `producedNoStories` is false
+    // for it — so it publishes its fresh stories instead of preserving. A rescue
+    // whose stories were ALL dropped by grounding/publish shaping ships zero final
+    // stories and IS a true fail-closed: it correctly preserves a prior healthy
+    // snapshot here, and its status resolves to `failed` (not `degraded`) via the
+    // published-count check in `buildRefreshFailsafeMeta` below.
     if (clusteringFailedClosed && producedNoStories && priorHasHealthyStories) {
       const elapsedMs = Date.now() - startedAt;
       console.warn(
@@ -1606,8 +1678,10 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         // Step 2 (refresh-failsafe-contract): explicit failure status with the
         // prior healthy stories preserved — refreshStatus="failed" +
         // usedPriorSnapshot=true distinguishes "kept old stories because refresh
-        // broke" from a true quiet/unchanged success.
-        ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: true }),
+        // broke" from a true quiet/unchanged success. This run produced zero final
+        // stories (`producedNoStories`), so the published count pins `failed` even
+        // if a fully-dropped deterministic rescue set its attribution flags.
+        ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: true, publishedStoryCount: payload.stories.length }),
         usedFallbackClustering: log.usedFallbackClustering,
         clusteringFailureReason: log.clusteringFailureReason,
         clusteringAttempts: log.clusteringAttempts,
@@ -1724,6 +1798,16 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     // surfaces (consistency across immediate response and snapshot reads).
     if (log.clusteringFailureSubtype !== undefined) lastRunMeta.clusteringFailureSubtype = log.clusteringFailureSubtype;
     if (log.clusteringRecoverySubtype !== undefined) lastRunMeta.clusteringRecoverySubtype = log.clusteringRecoverySubtype;
+    // B4: persist the deterministic relevance-gated fallback (B2) signals so GET
+    // /api/dashboard can explain a DEGRADED rescue ("LLM clustering failed but we
+    // published deterministic stories") on a later read without replaying refresh.
+    // Booleans are persisted whenever present (false on normal runs); the
+    // diagnostics OBJECT is persisted only when non-null (the builder actually
+    // ran) so the optional field never carries an invalid null. All additive +
+    // individually optional for back-compat with pre-B2 snapshots.
+    if (log.usedDeterministicClustering !== undefined) lastRunMeta.usedDeterministicClustering = log.usedDeterministicClustering;
+    if (log.clusteringLlmFailed !== undefined) lastRunMeta.clusteringLlmFailed = log.clusteringLlmFailed;
+    if (log.deterministicClusteringDiagnostics != null) lastRunMeta.deterministicClusteringDiagnostics = log.deterministicClusteringDiagnostics;
     if (log.clusteringAttempts !== undefined) lastRunMeta.clusteringAttempts = log.clusteringAttempts;
     if (log.clusteringLatencyMs !== undefined) lastRunMeta.clusteringLatencyMs = log.clusteringLatencyMs;
     if (log.funnel !== undefined) lastRunMeta.funnel = log.funnel;
@@ -1957,7 +2041,10 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
           // "ran" branch no prior snapshot is reused — this is a fresh publish
           // (which is EMPTY on a fail-closed-no-prior run). `refreshStatus` is
           // "failed" there so the empty result is never read as a quiet success.
-          ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false }),
+          // Pass the actual shipped story count so a deterministic rescue whose
+          // stories were all dropped by grounding/shaping reads as `failed`, not
+          // `degraded` (degraded requires stories to actually ship).
+          ...buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false, publishedStoryCount: responsePayload.stories?.length ?? 0 }),
           // Phase 2 lightweight decision trace.  Optional, compact,
           // backend-only.  Carries stage counts, beat-fit details, and a
           // capped sample of exclusions — no raw source bodies.
@@ -2062,6 +2149,10 @@ const _LAST_RUN_META_LIFTED_KEYS = Object.freeze([
   "clusteringLatencyMs", "tags", "whatChanged", "whyItMatters", "timings",
   "outcomes", "ingestionSource", "whyEnrichment", "profile", "reclusterExecution",
   "clusterSplit", "overflowCap", "reclusterQueue", "reclusterQueueCount",
+  // B4: deterministic relevance-gated fallback (B2/B3) signals — keep them on the
+  // enrichment re-write merge so a degraded rescue snapshot doesn't lose its
+  // deterministic fields when the deferred whyItMatters pass rewrites it.
+  "usedDeterministicClustering", "clusteringLlmFailed", "deterministicClusteringDiagnostics",
 ]);
 function liftedMetaToLastRunMeta(meta) {
   const out = {};
@@ -2310,6 +2401,90 @@ function startColdStartPrefetch(identity) {
 /** Mutable hook so tests can stub/observe the prefetch kickoff. */
 export const _refreshPrefetch = { start: startColdStartPrefetch };
 
+// B5: per-user in-flight guard for the default-profile LLM upgrade. Dedicated
+// (NOT the cold-start job tracker) so an upgrade never conflates with a prefetch
+// job. A userId is present here while that user's background upgrade is running;
+// a second trigger for the same user is skipped until the first settles.
+const _upgradeInFlight = new Set();
+
+/**
+ * B5: schedule a fire-and-forget DEFAULT-profile LLM "upgrade" refresh after a
+ * degraded deterministic rescue published strict deterministic stories.
+ *
+ * Cold-start can now publish bounded, relevance-gated deterministic stories
+ * IMMEDIATELY (B2) when LLM clustering fails; this kicks off a background retry
+ * on the full default profile so a healthy LLM run can REPLACE the degraded
+ * snapshot moments later — without blocking or failing the foreground response.
+ *
+ * Anti-duplication: a `_upgradeInFlight` membership check joins (no-ops) when an
+ * upgrade for this user is already running, so repeated degraded refreshes never
+ * stack concurrent upgrades. The flag clears when the run settles (always, via
+ * `finally`). The upgrade runs `_refreshExecutor.execute(identity,
+ * { refreshProfile: null })` — the same path a normal default refresh uses — so
+ * its own in-flight lock / watermark / persistence semantics are unchanged.
+ *
+ * Non-fatal by construction: the kickoff is fire-and-forget with a `.catch`, so
+ * an upgrade error can never reach the foreground caller. Returns `true` when a
+ * new upgrade was scheduled, `false` when joined/skipped.
+ */
+function startDefaultProfileUpgrade(identity, { reason = "deterministic_rescue" } = {}) {
+  const userId = identity.userId;
+  if (_upgradeInFlight.has(userId)) {
+    console.log(
+      `[dashboard.upgrade] user=${userId} default-profile upgrade already in-flight — skipping duplicate (reason=${reason})`
+    );
+    return false;
+  }
+  _upgradeInFlight.add(userId);
+  console.log(
+    `[dashboard.upgrade] user=${userId} scheduling background default-profile LLM upgrade (reason=${reason})`
+  );
+  Promise.resolve(_refreshExecutor.execute(identity, { refreshProfile: null }))
+    .then((result) => {
+      const stories = result?.body?.stories;
+      console.log(
+        `[dashboard.upgrade] user=${userId} upgrade settled kind=${result?.kind} ` +
+          `stories=${Array.isArray(stories) ? stories.length : "n/a"} (reason=${reason})`
+      );
+    })
+    .catch((err) => {
+      console.error(
+        `[dashboard.upgrade] user=${userId} upgrade failed (reason=${reason}): ${err instanceof Error ? err.message : err}`
+      );
+    })
+    .finally(() => {
+      _upgradeInFlight.delete(userId);
+    });
+  return true;
+}
+
+/** Mutable hook so tests can stub/observe the upgrade kickoff + inspect state. */
+export const _refreshUpgrade = {
+  start: startDefaultProfileUpgrade,
+  _inFlight: _upgradeInFlight,
+};
+
+// B5: should this refresh outcome trigger a background default-profile LLM
+// upgrade? True ONLY for a degraded deterministic rescue — the LLM clustering
+// path failed but the deterministic fallback published stories. A clean LLM
+// success (no rescue), a true fail-closed (zero stories), and a preserved-prior
+// continuity run all leave these signals false/absent, so none schedule an
+// upgrade. Pure read over the response `_meta` + stories.
+function shouldScheduleDeterministicUpgrade(body) {
+  const meta = body?._meta;
+  if (!meta || typeof meta !== "object") return false;
+  // Never upgrade a preserved-prior continuity run: its visible stories are the
+  // PRIOR snapshot's (a true fail-closed re-serve), NOT a fresh deterministic
+  // rescue. That path can carry `clusteringLlmFailed === true` with prior stories
+  // present, which would otherwise spuriously satisfy the OR branch below.
+  if (meta.usedPriorSnapshot === true || meta.snapshotPreserved === true) return false;
+  // The unambiguous signal: a deterministic rescue actually published this run.
+  if (meta.usedDeterministicClustering === true) return true;
+  // Defensive OR: LLM failed yet this run still published stories.
+  const storyCount = Array.isArray(body?.stories) ? body.stories.length : 0;
+  return meta.clusteringLlmFailed === true && storyCount > 0;
+}
+
 /**
  * Slice 3 test hook: direct access to the refresh SLO evaluator and its
  * in-process rolling-window reset, so suites can drive breach conditions
@@ -2363,6 +2538,31 @@ app.post("/api/dashboard/refresh", async (req, res) => {
     console.log(
       `[dashboard.refresh] user=${identity.userId} profileRequested=default profileEffective=${effective}`
     );
+  }
+  // B5: after a degraded deterministic rescue (LLM clustering failed but the
+  // deterministic fallback published bounded stories), schedule a background
+  // default-profile LLM upgrade so a healthy run can replace the degraded
+  // snapshot moments later. The foreground response is sent immediately with the
+  // deterministic stories; the upgrade is fire-and-forget and NEVER blocks or
+  // fails this response. Only this `null`-profile upgrade requests the full
+  // default profile — `?profile=default` retries above are untouched. Additive
+  // `_meta.upgradeRefreshScheduled` lets the client know a background retry is
+  // coming (B6 owns the UI semantics). Skipped (joined) when one is in-flight.
+  if (shouldScheduleDeterministicUpgrade(body)) {
+    const reason = "degraded_deterministic_rescue";
+    let scheduled = false;
+    try {
+      scheduled = _refreshUpgrade.start(identity, { reason });
+    } catch (err) {
+      // Non-fatal: a scheduler hiccup must never break the foreground response.
+      console.error(
+        `[dashboard.upgrade] user=${identity.userId} failed to schedule upgrade (reason=${reason}): ${err instanceof Error ? err.message : err}`
+      );
+    }
+    if (scheduled && body && typeof body._meta === "object" && body._meta !== null) {
+      body._meta.upgradeRefreshScheduled = true;
+      body._meta.upgradeRefreshReason = reason;
+    }
   }
   res.status(httpStatus).json(body);
 });

@@ -185,7 +185,8 @@ geographies US + Iran) plus three deterministic raw-item sets:
 
 | ID | Intent | Must pass |
 |---|---|---|
-| `gold-01-fail-closed` | Clustering throws on both attempts | `stories.length === 0`, `usedFallbackClustering === true`, `clusteringFailureReason === "error"`, `clusteringAttempts === 2`, no degraded titles |
+| `gold-01-fail-closed` | Clustering throws on both attempts; pool has no deterministic-rescue-eligible items (topic-only survivor) | `stories.length === 0`, `usedFallbackClustering === true`, `clusteringFailureReason === "error"`, `clusteringAttempts === 2`, no degraded titles |
+| `gold-01b-deterministic-rescue` | Clustering throws on both attempts; on-beat pool passes strict rescue gate | `stories.length >= 1`, `usedDeterministicClustering === true`, `usedFallbackClustering === false`, `clusteringFailureReason === "error"`, `clusteringAttempts === 2`, no degraded titles |
 | `gold-02-healthy-path` | Stub returns 2 grounded clusters | `metaStoryCount >= 2`, `usedFallbackClustering === false`, Reuters present, no `/updates?$/i` or "General Updates" titles |
 | `gold-03-liveblog-dedupe` | 4 Spelling Bee variants ingested | exactly 1 reaches clustering (newest `lb-4` survives), `dedupe.collapsedCount >= 3` |
 | `gold-04-recall-floor` | Weak semantic-only item present | `recall.minSimilarityThreshold === 0.35`, `recall.similarityRejected >= 1`, item excluded from clustering |

@@ -151,8 +151,10 @@ export const dashboardClusterCapMetaSchema = z.object({
  * clustering fail-closed run). ADDITIVE: older clients that don't read these
  * keys are unaffected; the rest of `_meta` is unchanged.
  *
- *   refreshStatus      "ok" | "failed"
- *   refreshFailure     null when ok; the structured failure when failed
+ *   refreshStatus      "ok" | "degraded" | "failed"
+ *   refreshFailure     null when ok; the structured failure when failed OR degraded
+ *                      (degraded retains the LLM-failure metadata that forced the
+ *                      deterministic relevance-gated fallback to publish — B3)
  *   usedPriorSnapshot  true when the served stories came from a preserved prior
  *                      snapshot (failure-driven continuity), false otherwise
  *
@@ -171,35 +173,70 @@ export const refreshFailureSubtypeSchema = z.enum([
 export const refreshFailureSchema = z.object({
   reason: z.string().min(1),
   subtype: refreshFailureSubtypeSchema,
-  // `attempts` is `>= 1`: a refreshFailure object only exists on a FAILED refresh,
-  // and a failure represents at least one attempted run (the API floors it to 1).
-  // Pinning `positive()` here keeps the Step 2 floor honest at the contract level.
+  // `attempts` is `>= 1`: a refreshFailure object only exists on a FAILED or
+  // DEGRADED refresh, and a failure represents at least one attempted run (the
+  // API floors it to 1). Pinning `positive()` keeps the Step 2 floor honest at
+  // the contract level.
   attempts: z.number().int().positive(),
   retryable: z.boolean(),
   retryAfterMs: z.number().int().nonnegative().optional(),
   nextRetryAt: z.string().min(1).optional(),
 });
 
+// B3 — deterministic relevance-gated fallback (B2) diagnostics surfaced on
+// `_meta`. Counts only (no bodies), so the object stays cheap to ship. Passthrough
+// so a future B-step can add fields without a contract break; `excludedReasons`
+// is an open record of bucketed nonnegative counts (the bucket keys are an
+// evolving vocabulary owned by `relevance-gated-fallback.mjs`).
+export const deterministicClusteringDiagnosticsSchema = z
+  .object({
+    inputCount: z.number().int().nonnegative(),
+    eligibleCount: z.number().int().nonnegative(),
+    outputCount: z.number().int().nonnegative(),
+    excludedReasons: z.record(z.string(), z.number().int().nonnegative()),
+  })
+  .passthrough();
+
 export const dashboardRefreshFailsafeMetaSchema = z
   .object({
-    refreshStatus: z.enum(["ok", "failed"]),
+    // B3: `degraded` is the LLM-clustering-failed-but-deterministic-fallback-
+    // published outcome — a real, bounded publish, NOT a failure. `ok` and
+    // `failed` keep their Step 2 meaning. Additive: older readers that only know
+    // `ok`/`failed` still match their cases; a `degraded` value is simply unknown
+    // to them (treated conservatively by the UI in B6).
+    refreshStatus: z.enum(["ok", "degraded", "failed"]),
     // null (not absent) on success — a single, explicit shape clients can rely on.
     refreshFailure: refreshFailureSchema.nullable(),
     usedPriorSnapshot: z.boolean(),
+    // B3 — additive deterministic-fallback (B2) signals. OPTIONAL so legacy
+    // `_meta` payloads that predate B2 still validate. When present they let a
+    // client distinguish a deterministic rescue from a pure LLM success.
+    usedDeterministicClustering: z.boolean().optional(),
+    clusteringLlmFailed: z.boolean().optional(),
+    deterministicClusteringDiagnostics: deterministicClusteringDiagnosticsSchema.optional(),
   })
   // `_meta` carries many other diagnostic keys alongside these — passthrough so
   // a full `_meta` object validates against the fail-safe surface additively.
   .passthrough()
-  // Invariant pinned by Step 4: status and failure object are coupled — a
-  // "failed" refresh ALWAYS carries a structured refreshFailure, and an "ok"
-  // refresh NEVER does (refreshFailure is null on success). The API honors both
-  // directions; this rejects contradictory payloads outright.
+  // Invariant pinned by Step 4, extended by B3: status and failure object are
+  // coupled. A "failed" refresh ALWAYS carries a structured refreshFailure; a
+  // "degraded" refresh ALSO carries one (the retained LLM-failure metadata that
+  // forced the deterministic rescue); an "ok" refresh NEVER does (refreshFailure
+  // is null on success). The API honors all directions; this rejects
+  // contradictory payloads outright.
   .superRefine((val, ctx) => {
     if (val.refreshStatus === "failed" && val.refreshFailure == null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["refreshFailure"],
         message: "refreshStatus 'failed' requires a non-null refreshFailure object",
+      });
+    }
+    if (val.refreshStatus === "degraded" && val.refreshFailure == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["refreshFailure"],
+        message: "refreshStatus 'degraded' requires a non-null refreshFailure object",
       });
     }
     if (val.refreshStatus === "ok" && val.refreshFailure != null) {
@@ -237,5 +274,8 @@ export type DashboardClusterDroppedEntry = z.infer<typeof dashboardClusterDroppe
 export type DashboardClusterCapMeta = z.infer<typeof dashboardClusterCapMetaSchema>;
 export type RefreshFailureSubtype = z.infer<typeof refreshFailureSubtypeSchema>;
 export type RefreshFailure = z.infer<typeof refreshFailureSchema>;
+export type DeterministicClusteringDiagnostics = z.infer<
+  typeof deterministicClusteringDiagnosticsSchema
+>;
 export type DashboardRefreshFailsafeMeta = z.infer<typeof dashboardRefreshFailsafeMetaSchema>;
 export type SettingsPayload = z.infer<typeof settingsPayloadSchema>;

@@ -53,6 +53,8 @@ import {
   COLD_START_CLUSTER_MAX_ATTEMPTS_DEFAULT,
   COLD_START_CLUSTER_INPUT_CAP_DEFAULT,
   COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT,
+  COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT,
+  COLD_START_TRANSLATION_MAX_MS_DEFAULT,
   CLUSTER_CALL_MIN_TIMEOUT_MS,
   COLD_START_CLUSTER_DEADLINE_MS,
   COLD_START_CLUSTER_MIN_ENVELOPE_MS,
@@ -496,6 +498,160 @@ test("runRefreshPipeline: fail-closed emits the exact diagnostic contract the ro
   assert.notEqual(log.clusteringFailureReason, null, "clusteringFailureReason must be set on fail-closed");
   assert.equal(log.usedFallbackClustering, true);
   assert.equal(typeof log.clusteringAttempts, "number");
+  // B2: the strict deterministic fallback ran (default fixture has no keyword →
+  // nothing eligible), so the run stays fail-closed and the diagnostics record
+  // a zero-output result without changing the gating contract above.
+  assert.equal(log.usedDeterministicClustering, false);
+  assert.equal(log.clusteringLlmFailed, true);
+  assert.equal(log.deterministicClusteringDiagnostics.outputCount, 0);
+});
+
+// ─── B2: strict relevance-gated deterministic fallback integration ────────────
+//
+// After BOTH the primary clustering loop and the Option B reduced-input recovery
+// tier fail terminally, the pipeline attempts a deterministic, relevance-gated
+// build of SINGLETON meta-stories from the beat-fit survivors. It never calls
+// `gracefulFallbackClustering`: an item that fails the strict topic+keyword bar
+// produces no story, so a pool with nothing eligible stays fail-closed.
+
+// Beat-fit survivor that ALSO clears the strict B1 gate: topic "Diplomatic
+// relations" (topic fit) + an OFAC/sanctions keyword in the headline (keyword
+// fit), on a configured geography.
+function makeEligibleFallbackItem(i) {
+  return makeItem({
+    sourceId: `elig-${i}`,
+    outlet: "Reuters",
+    topic: "Diplomatic relations",
+    geographies: ["US", "Colombia"],
+    minutesAgo: i,
+    headline: `OFAC sanctions reshape US-Colombia diplomatic relations (${i})`,
+    body: ["New sanctions were announced amid diplomatic talks."],
+  });
+}
+
+test("B2: terminal LLM failure + eligible items → deterministic fallback publishes (LLM-failure attribution retained)", async () => {
+  const rawItems = [0, 1, 2].map(makeEligibleFallbackItem);
+  let attempts = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { attempts++; throw new Error("model unavailable"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  // 3 items < reduction floor → no Option B recovery attempt; just the 2 primary
+  // attempts fail, then deterministic fallback runs over the 3 survivors.
+  assert.equal(attempts, 2, "two primary attempts, no recovery (set can't shrink)");
+  assert.equal(log.clusteringRecoveryAttempted, false);
+  assert.ok(payload.stories.length > 0, "deterministic fallback publishes ≥1 story");
+  assert.equal(payload.stories.length, 3, "one singleton per eligible survivor");
+
+  // Deterministic-fallback flags.
+  assert.equal(log.usedDeterministicClustering, true);
+  assert.equal(log.clusteringLlmFailed, true);
+  // Published stories → no longer the "fail-closed published 0" case.
+  assert.equal(log.usedFallbackClustering, false);
+  // Attribution that the LLM failed is RETAINED (we do not pretend it succeeded).
+  assert.notEqual(log.clusteringFailureReason, null, "LLM failure reason retained for attribution");
+  assert.equal(log.clusteringFailureReason, "error");
+  assert.notEqual(log.clusteringFailureSubtype, null, "failure subtype retained for attribution");
+
+  // Diagnostics from the B1 builder.
+  const diag = log.deterministicClusteringDiagnostics;
+  assert.equal(diag.inputCount, 3);
+  assert.equal(diag.eligibleCount, 3);
+  assert.equal(diag.outputCount, 3);
+
+  // Each published story is a singleton (exactly one source) and carries
+  // extractive, evidence-derived copy — NOT a "* Updates"/"General Updates"
+  // gracefulFallbackClustering bucket.
+  for (const story of payload.stories) {
+    assert.equal(story.sources.length, 1, "singleton story");
+    assert.doesNotMatch(`${story.title} ${story.summary}`, /general updates/i);
+    assert.doesNotMatch(`${story.title} ${story.summary}`, /\bUpdates\b/);
+  }
+  // outcomes rollup splits "rescued by deterministic" from a true fail-closed.
+  assert.equal(log.outcomes.usedDeterministicClustering, true);
+  assert.equal(log.outcomes.clusteringLlmFailed, true);
+  assert.ok(log.outcomes.storiesPublished > 0);
+});
+
+test("B2: terminal LLM failure + no eligible items → stays fail-closed (zero stories, zero deterministic output)", async () => {
+  // Default fixture carries no OFAC/sanctions keyword → fails the strict gate →
+  // nothing eligible → fail-closed preserved exactly as before B2.
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => { throw new Error("model unavailable"); },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 0, "fail-closed: zero stories");
+  assert.deepEqual(payload.stories, [], "no fabricated buckets");
+  // Fail-closed continuity contract unchanged.
+  assert.equal(log.usedFallbackClustering, true);
+  assert.notEqual(log.clusteringFailureReason, null);
+  // Deterministic fallback ran but published nothing.
+  assert.equal(log.usedDeterministicClustering, false);
+  assert.equal(log.clusteringLlmFailed, true);
+  const diag = log.deterministicClusteringDiagnostics;
+  assert.equal(diag.inputCount, 1);
+  assert.equal(diag.eligibleCount, 0);
+  assert.equal(diag.outputCount, 0);
+  assert.equal(diag.excludedReasons.no_keyword_fit, 1);
+});
+
+test("B2: LLM clustering success → deterministic fallback is not used", async () => {
+  const rawItems = [makeItem({ sourceId: "src-1", outlet: "Reuters", minutesAgo: 30 })];
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => MOCK_META_STORIES,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(payload.stories.length, 1);
+  assert.equal(log.usedFallbackClustering, false);
+  assert.equal(log.usedDeterministicClustering, false);
+  assert.equal(log.clusteringLlmFailed, false);
+  assert.equal(log.deterministicClusteringDiagnostics, null, "builder never ran on success");
+});
+
+test("B2: Option B recovery success → deterministic fallback is not used", async () => {
+  // 10 survivors so the reduced recovery set (max(6, floor(10/2))=6) shrinks the
+  // input and recovery fires; the recovery attempt succeeds and publishes, so the
+  // LLM path did NOT terminally fail and the deterministic builder never runs.
+  const rawItems = makeRecoveryRawItems(10);
+  const recoveredStory = {
+    meta_story_id: "recovered-b2",
+    title: "Recovered Story",
+    subtitle: "Recovered after reduced-input retry.",
+    source_item_ids: ["src-0"],
+    summary: "Recovered.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+  };
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async (items) => {
+      calls += 1;
+      if (calls <= 2) throw new Error("model unavailable");
+      return [recoveredStory];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary + 1 recovery");
+  assert.equal(payload.stories.length, 1, "recovered LLM story published");
+  assert.equal(log.clusteringRecoverySucceeded, true);
+  assert.equal(log.usedFallbackClustering, false);
+  // LLM path recovered → no terminal failure → deterministic builder never ran.
+  assert.equal(log.usedDeterministicClustering, false);
+  assert.equal(log.clusteringLlmFailed, false);
+  assert.equal(log.deterministicClusteringDiagnostics, null);
 });
 
 test("runRefreshPipeline: applies 24h filter before clustering", async () => {
@@ -864,6 +1020,28 @@ test("resolveRefreshProfile: cold_start profile yields the locked first-run knob
   // 2-attempt loop can never run two back-to-back 45s timeouts (~90s).
   assert.equal(p.clusterTotalBudgetMs, COLD_START_CLUSTER_TOTAL_BUDGET_MS_DEFAULT);
   assert.equal(p.clusterTotalBudgetMs, 60000);
+  // A3: cold_start carries the locked translation caps (profile-only — not yet
+  // wired into the translation stage; that lands in A5/A6).
+  assert.equal(p.translationMaxItems, COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT);
+  assert.equal(p.translationMaxItems, 18);
+  assert.equal(p.translationMaxMs, COLD_START_TRANSLATION_MAX_MS_DEFAULT);
+  assert.equal(p.translationMaxMs, 10000);
+});
+
+test("resolveRefreshProfile: only cold_start carries the translation caps; other profiles are explicitly null (A3)", () => {
+  // Profile-shape lock: the cold-start translation caps must NOT leak onto the
+  // default/interactive profiles.  Shape-clarity choice (mirrors
+  // clusterTotalBudgetMs): non-cold_start profiles carry explicit nulls, not
+  // undefined, so the absence is asserted crisply.
+  for (const name of [null, "scheduled", "totally-unknown", "interactive"]) {
+    const p = resolveRefreshProfile(name);
+    assert.equal(p.translationMaxItems, null, `${name}: no cold-start translationMaxItems`);
+    assert.equal(p.translationMaxMs, null, `${name}: no cold-start translationMaxMs`);
+  }
+  // cold_start is the sole opt-in.
+  const cold = resolveRefreshProfile("cold_start");
+  assert.equal(cold.translationMaxItems, 18);
+  assert.equal(cold.translationMaxMs, 10000);
 });
 
 test("resolveRefreshProfile: default + interactive carry no clustering envelope cap (Step 2)", () => {
@@ -10490,13 +10668,14 @@ test("Slice 3 follow-up: SLO does not overcount a recovered run as a failure (te
   assert.deepEqual(recovered.breaches, [], "no breach from a recovered run");
 });
 
-// ─── PR B Step 1: Option B clustering auto-recovery tier ──────────────────────
+// ─── PR B Step 1 + A2: Option B clustering auto-recovery tier ─────────────────
 //
-// A non-timeout (parse/schema-style) primary clustering failure triggers ONE
-// bounded recovery attempt on a reduced (top-half, min 6) candidate set.
-// Recovery success publishes recovered stories and clears the fail-closed
-// flags; recovery failure preserves the fail-closed (0 stories) outcome. Timeout
-// failures never trigger recovery. No `gracefulFallbackClustering` buckets ever.
+// A terminal clustering failure — error-class (parse/schema) OR timeout-class
+// (A2) — triggers ONE bounded recovery attempt on a reduced (top-half, min 6)
+// candidate set, but ONLY when that set genuinely shrinks. Recovery success
+// publishes recovered stories and clears the fail-closed flags; recovery failure
+// preserves the fail-closed (0 stories) outcome. A failure at the reduction
+// floor never triggers recovery. No `gracefulFallbackClustering` buckets ever.
 
 // 10 relevant items (beat-fit bypassed) so exactly 10 reach clustering and the
 // reduced recovery cap (max(6, floor(10/2))=6) genuinely shrinks the input.
@@ -10578,7 +10757,50 @@ test("PR B recovery: recovery also fails → remains fail-closed with recovery f
   assert.equal(log.clusteringAttempts, 3);
 });
 
-test("PR B recovery: timeout-class failure does NOT trigger recovery", async () => {
+test("PR B recovery (A2): timeout-class failure → recovery on reduced input succeeds and publishes", async () => {
+  const rawItems = makeRecoveryRawItems(10);
+  // Recovered story references src-0 (freshest → ranked first → inside the
+  // reduced set) and carries no factual_claims, so it grounds and publishes.
+  const recoveredStory = {
+    meta_story_id: "recovered-timeout-1",
+    title: "Recovered After Timeout",
+    subtitle: "Recovered on a lighter reduced-input retry.",
+    source_item_ids: ["src-0"],
+    summary: "Recovered.",
+    tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+  };
+  let calls = 0;
+  let recoveryInputLen = null;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async (items) => {
+      calls += 1;
+      if (calls <= 2) {
+        // Both primary attempts time out on the full candidate set.
+        throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)");
+      }
+      recoveryInputLen = items.length; // the reduced recovery set
+      return [recoveredStory];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 3, "2 primary attempts + 1 recovery attempt (A2: timeouts now recover)");
+  assert.equal(recoveryInputLen, 6, "recovery used the reduced (50%, min 6) input");
+  assert.equal(payload.stories.length, 1, "recovered story is published from the timeout path");
+  assert.equal(log.usedFallbackClustering, false, "recovery clears fail-closed on the timeout path");
+  assert.equal(log.clusteringFailureReason, null, "no terminal failure after timeout recovery");
+  assert.equal(log.clusteringFailureSubtype, null, "recovered run clears the terminal subtype");
+  assert.equal(log.clusteringRecoveryAttempted, true);
+  assert.equal(log.clusteringRecoverySucceeded, true);
+  assert.equal(log.clusteringRecoveryReason, null);
+  assert.equal(log.clusteringAttempts, 3, "attempt count includes the recovery attempt");
+  assert.equal(log.clusteringLatencyMs.length, 3, "one latency sample per attempt incl. recovery");
+});
+
+test("PR B recovery (A2): timeout recovery also fails → remains fail-closed with recovery flags set", async () => {
   const rawItems = makeRecoveryRawItems(10);
   let calls = 0;
   const { payload, log } = await runRefreshPipeline({
@@ -10592,11 +10814,42 @@ test("PR B recovery: timeout-class failure does NOT trigger recovery", async () 
     clusterModel: "mock-anthropic-haiku",
     contractVersion: "2026-05-19-meta-story-fields",
   });
-  assert.equal(calls, 2, "timeout path keeps the locked 2-attempt behavior — no recovery call");
-  assert.equal(payload.stories.length, 0, "fail-closed on timeout");
+  assert.equal(calls, 3, "2 primary attempts + 1 recovery attempt");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved: zero stories (no fallback buckets)");
+  // No fabricated "* Updates"/"General Updates" buckets ever ship.
+  assert.deepEqual(payload.stories, [], "no gracefulFallbackClustering stories");
+  assert.equal(log.usedFallbackClustering, true);
+  assert.equal(log.clusteringFailureReason, "timeout", "terminal timeout reason preserved");
+  assert.equal(log.clusteringFailureSubtype, "timeout_budget", "terminal subtype preserved");
+  assert.equal(log.clusteringRecoveryAttempted, true);
+  assert.equal(log.clusteringRecoverySucceeded, false);
+  assert.equal(log.clusteringRecoveryReason, "timeout", "recovery's own failure class");
+  assert.equal(log.clusteringRecoverySubtype, "timeout_budget");
+  assert.equal(log.clusteringAttempts, 3);
+});
+
+test("PR B recovery (A2): timeout-class failure at the reduction floor (no shrink) does NOT trigger recovery", async () => {
+  // 6 items → reduced cap max(6, floor(6/2))=6 → no actual shrink → recovery is
+  // skipped even though A2 makes timeouts eligible. Locks the reducibility guard
+  // for the timeout path (mirrors the error-class floor case).
+  const rawItems = makeRecoveryRawItems(6);
+  let calls = 0;
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    beatFitEnabled: false,
+    clusterFn: async () => {
+      calls += 1;
+      throw new Error("Anthropic clustering timed out (claude-sonnet-4-6)");
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.equal(calls, 2, "no recovery call when the set cannot be reduced");
+  assert.equal(payload.stories.length, 0, "fail-closed preserved");
   assert.equal(log.usedFallbackClustering, true);
   assert.equal(log.clusteringFailureReason, "timeout");
-  assert.equal(log.clusteringRecoveryAttempted, false, "recovery not attempted for timeouts");
+  assert.equal(log.clusteringRecoveryAttempted, false, "recovery not attempted at the floor");
   assert.equal(log.clusteringRecoverySucceeded, false);
   assert.equal(log.clusteringRecoveryReason, null);
   assert.equal(log.clusteringAttempts, 2);
@@ -10772,6 +11025,209 @@ test("Prompt 1 subtype: recovery failure reports its own subtype while terminal 
   assert.equal(log.clusteringFailureSubtype, "parse", "terminal subtype from the primary loop");
   assert.equal(log.clusteringRecoveryReason, "error");
   assert.equal(log.clusteringRecoverySubtype, "parse", "recovery's own subtype is reported separately");
+});
+
+// ─── A5: cold-start translation candidate cap ─────────────────────────────────
+//
+// On a cold_start refresh the profile carries a locked translation budget. The
+// pipeline ranks post-geo candidates with `rankItemsForTranslation`, translates
+// only the top-N NON-ENGLISH items, and stamps the deferred non-English items
+// `_translation.reason = "cold_start_cap"`. English items never consume a slot.
+// Every other profile keeps the unchanged full-pool behavior.
+
+// Four non-English (es) items with structured topic + geo that match the
+// settings, so they survive geo + recall WITHOUT translation (recall matches the
+// structured `topic`) and therefore all reach `clusterFn` where their
+// `_translation` stamp is inspectable. Distinct headlines (no shared family) +
+// distinct freshness make the rank order deterministic: freshest-first.
+function makeEsItem(i, minutesAgo, headline) {
+  return makeItem({
+    sourceId: `es-${i}`,
+    outlet: "El Tiempo",
+    lang: "es",
+    topic: "Diplomatic relations",
+    geographies: ["Colombia"],
+    minutesAgo,
+    headline,
+    body: [`Cuerpo del articulo ${i}.`],
+  });
+}
+
+// Deterministic ES→EN stub: returns same-length English segments. The English
+// headline carries a configured keyword so translated items are unambiguously
+// recall-eligible too (structured topic already admits them).
+function makeCountingTranslateFn() {
+  const calls = [];
+  const translateFn = async (segments, { sourceId }) => {
+    calls.push(sourceId);
+    const out = [`Sanctions update ${sourceId}`, ...segments.slice(1).map(() => `English body ${sourceId}`)];
+    while (out.length < segments.length) out.push("");
+    return out.slice(0, segments.length);
+  };
+  return { translateFn, calls };
+}
+
+const A5_TRANSLATION_KNOBS = { enabled: true, concurrency: 2, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 };
+
+test("A5 cap (A): cold_start translates only the top-N non-English items; rest stamped cold_start_cap", async () => {
+  // Four ES items, freshest-first rank: es-0, es-1, es-2, es-3. With the cap
+  // pinned to 2, the two freshest are translated and the two stalest are deferred.
+  const rawItems = [
+    makeEsItem(0, 10, "Bogota firma acuerdo comercial historico"),
+    makeEsItem(1, 20, "Medellin anuncia proyecto vial regional"),
+    makeEsItem(2, 30, "Cali reporta cifras de turismo anuales"),
+    makeEsItem(3, 40, "Barranquilla celebra festival cultural caribe"),
+  ];
+  const { translateFn, calls } = makeCountingTranslateFn();
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    refreshProfile: "cold_start",
+    // Pin the cap small + deterministic (production constant is 18).
+    refreshProfileOverrides: { translationMaxItems: 2 },
+    translateFn,
+    translationConfig: A5_TRANSLATION_KNOBS,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  // Translator saw ONLY the 2 selected items (capped subset size).
+  assert.equal(calls.length, 2, "translateFn invoked once per selected item (cap=2)");
+  assert.deepEqual([...calls].sort(), ["es-0", "es-1"], "the two freshest (top-ranked) were selected");
+
+  // Diagnostics reflect the active cap.
+  assert.equal(log.translation.capped, true);
+  assert.equal(log.translation.capReason, "cold_start_profile");
+  assert.equal(log.translation.capMaxItems, 2);
+  assert.equal(log.translation.capMaxMs, COLD_START_TRANSLATION_MAX_MS_DEFAULT);
+  assert.equal(log.translation.cappedOutCount, 2);
+
+  // Inspect the merged-back stamps on the items that reached clustering.
+  assert.ok(Array.isArray(clusterInput) && clusterInput.length === 4, "all 4 items reached clustering");
+  const byId = Object.fromEntries(clusterInput.map((it) => [it.sourceId, it._translation]));
+  // Selected → translated (applied).
+  assert.equal(byId["es-0"].applied, true, "es-0 translated");
+  assert.equal(byId["es-1"].applied, true, "es-1 translated");
+  assert.equal(byId["es-0"].reason, null);
+  // Capped-out → cold_start_cap stamp (needed, not applied, not failed).
+  for (const id of ["es-2", "es-3"]) {
+    assert.equal(byId[id].reason, "cold_start_cap", `${id} deferred by the cap`);
+    assert.equal(byId[id].needed, true, `${id} still flagged as needing translation`);
+    assert.equal(byId[id].applied, false);
+    assert.equal(byId[id].failed, false);
+    assert.equal(byId[id].fromCache, false);
+    assert.equal(byId[id].lang, "es");
+  }
+});
+
+test("A5 cap (B): non-cold_start profile applies no cap — full set translated, capped=false", async () => {
+  const rawItems = [
+    makeEsItem(0, 10, "Bogota firma acuerdo comercial historico"),
+    makeEsItem(1, 20, "Medellin anuncia proyecto vial regional"),
+    makeEsItem(2, 30, "Cali reporta cifras de turismo anuales"),
+    makeEsItem(3, 40, "Barranquilla celebra festival cultural caribe"),
+  ];
+  const { translateFn, calls } = makeCountingTranslateFn();
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    refreshProfile: null, // default profile — no translation cap
+    translateFn,
+    translationConfig: A5_TRANSLATION_KNOBS,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(calls.length, 4, "every non-English item translated (no cap)");
+  assert.equal(log.translation.capped, false);
+  assert.equal(log.translation.capReason, null);
+  assert.equal(log.translation.capMaxItems, null);
+  assert.equal(log.translation.capMaxMs, null);
+  assert.equal(log.translation.cappedOutCount, 0);
+  // No item carries the cap stamp.
+  const stamped = clusterInput.map((it) => it._translation?.reason);
+  assert.ok(!stamped.includes("cold_start_cap"), "no cold_start_cap stamps off the cold_start path");
+});
+
+test("A5 cap (C): cold_start with candidate count <= cap reports the cap but defers nothing", async () => {
+  // Three ES items, cap left at the locked default (18) → nothing is capped out,
+  // but the cap config is still surfaced (cappedOutCount=0).
+  const rawItems = [
+    makeEsItem(0, 10, "Bogota firma acuerdo comercial historico"),
+    makeEsItem(1, 20, "Medellin anuncia proyecto vial regional"),
+    makeEsItem(2, 30, "Cali reporta cifras de turismo anuales"),
+  ];
+  const { translateFn, calls } = makeCountingTranslateFn();
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    refreshProfile: "cold_start", // cap = locked default (18)
+    translateFn,
+    translationConfig: A5_TRANSLATION_KNOBS,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.equal(calls.length, 3, "all 3 (<= cap) translated");
+  assert.equal(log.translation.capped, true, "cap is active on cold_start");
+  assert.equal(log.translation.capReason, "cold_start_profile");
+  assert.equal(log.translation.capMaxItems, COLD_START_TRANSLATION_MAX_ITEMS_DEFAULT);
+  assert.equal(log.translation.capMaxMs, COLD_START_TRANSLATION_MAX_MS_DEFAULT);
+  assert.equal(log.translation.cappedOutCount, 0, "nothing deferred when count <= cap");
+  const stamped = clusterInput.map((it) => it._translation?.reason);
+  assert.ok(!stamped.includes("cold_start_cap"), "no items deferred → no cap stamps");
+});
+
+test("A6 wiring: cold_start passes translationMaxMs as the translator wall-clock budget (budget hit surfaces)", async () => {
+  // A slow ES→EN stub + a tiny profile wall-clock budget: the translator defers
+  // later items once the stage budget is spent, and the budget-hit diagnostics
+  // surface on `log.translation`. Item-cap is left wide so the WALL-CLOCK budget
+  // (not the item cap) is what bounds the run.
+  const rawItems = Array.from({ length: 4 }, (_, i) =>
+    makeEsItem(i, 10 + i * 10, `Titular numero ${i} sobre Colombia`)
+  );
+  const slowTranslateFn = async (segments, { sourceId }) => {
+    await new Promise((r) => setTimeout(r, 80));
+    const out = [`Sanctions update ${sourceId}`, ...segments.slice(1).map(() => `English body ${sourceId}`)];
+    while (out.length < segments.length) out.push("");
+    return out.slice(0, segments.length);
+  };
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    refreshProfile: "cold_start",
+    // Item cap wide (no item-capping), wall-clock budget tiny + concurrency 1 so
+    // the budget binds deterministically after the first in-flight translation.
+    refreshProfileOverrides: { translationMaxItems: 50, translationMaxMs: 30 },
+    translateFn: slowTranslateFn,
+    translationConfig: { enabled: true, concurrency: 1, timeoutMs: 8000, maxChars: 700, maxSnippets: 2 },
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  // The cold-start wall-clock budget reached the translator and bound the stage.
+  assert.equal(log.translation.capMaxMs, 30, "profile translationMaxMs surfaced as the cap");
+  assert.equal(log.translation.wallClockBudgetMs, 30, "translator received the wall-clock budget");
+  assert.equal(log.translation.wallClockBudgetHit, true, "budget was hit on the slow run");
+  assert.ok(log.translation.wallClockSkippedCount >= 1, "at least one item deferred for budget");
+  // Budget defers are not failures.
+  assert.equal(log.translation.failedCount, 0);
 });
 
 });

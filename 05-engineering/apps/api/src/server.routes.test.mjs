@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _refreshUpgrade, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
 const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
@@ -67,8 +67,14 @@ const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefr
 // shared snapshot store across tests. The Slice 6 tests opt back into the real
 // implementation explicitly.
 const _realPrefetchStart = _refreshPrefetch.start;
+// B5: the genuine default-profile upgrade scheduler. Captured once so the suite
+// can neutralize it by default (most route tests stub the pipeline, not the
+// executor, and a real fire-and-forget upgrade would run a second background
+// refresh that contaminates the shared snapshot store). The dedicated B5 tests
+// opt back into the real implementation (or stub/observe) explicitly.
+const _realUpgradeStart = _refreshUpgrade.start;
 const { default: request } = await import("supertest");
-const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel } = await import("./contracts-runtime/index.mjs");
+const { settingsPayloadSchema, dashboardPayloadSchema, normalizeTopicLabel, dashboardRefreshFailsafeMetaSchema } = await import("./contracts-runtime/index.mjs");
 
 // D1: shared shape guard for the additive `_meta.cacheBenefit` advisory.
 // Asserts the runtime observability object is present and well-formed on a
@@ -216,6 +222,11 @@ describe("server.routes", () => {
     // bleeds into later tests. The dedicated Slice 6 tests restore the genuine
     // implementation. No-op returns undefined → handler omits _meta.refreshJobId.
     _refreshPrefetch.start = () => undefined;
+    // B5: neutralize the default-profile upgrade kickoff by default (returns
+    // `false` → "not scheduled", so the handler adds no `_meta.upgradeRefreshScheduled`
+    // and never fires a real background refresh). Dedicated B5 tests override this.
+    _refreshUpgrade.start = () => false;
+    _refreshUpgrade._inFlight.clear();
   });
   afterEach(() => {
     for (const k of _ROUTES_ENV_KEYS) {
@@ -223,6 +234,8 @@ describe("server.routes", () => {
       else process.env[k] = _routesEnvSnapshot[k];
     }
     _refreshPrefetch.start = _realPrefetchStart;
+    _refreshUpgrade.start = _realUpgradeStart;
+    _refreshUpgrade._inFlight.clear();
   });
 
 // ─── Public routes ────────────────────────────────────────────────────────────
@@ -1214,10 +1227,13 @@ test("Slice 3 SLO: sustained cluster timeouts (>0.2 over a full window of 10) em
   // is full — a single cold-start timeout can't trip it (balanced, not noisy).
   // Each refresh here attempted clustering (clusteringAttempts=1), so every
   // call contributes a sample.
+  // A counted timeout is a TRUE fail-closed (usedFallbackClustering=true); the
+  // null entries are successful runs. Attribution-only timeouts (a rescue that
+  // published) never reach this window.
   const reasons = ["timeout", "timeout", "timeout", null, null, null, null, null, null, null];
   let last;
   reasons.forEach((r, i) => {
-    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 }, logger);
+    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1, usedFallbackClustering: r != null }, logger);
     if (i < 9) {
       assert.ok(
         !last.breaches.includes("cluster_timeout_rate"),
@@ -1241,7 +1257,7 @@ test("Slice 3 SLO: timeout rate exactly at 0.2 across a full window does NOT bre
   const reasons = ["timeout", "timeout", null, null, null, null, null, null, null, null];
   let last;
   reasons.forEach((r) => {
-    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 }, logger);
+    last = _refreshSlo.evaluate({ pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1, usedFallbackClustering: r != null }, logger);
   });
   assert.ok(!last.breaches.includes("cluster_timeout_rate"));
   assert.equal(lines.length, 0);
@@ -1265,7 +1281,7 @@ test("Slice 3 SLO: no-attempt refreshes (clusteringAttempts=0) never sample the 
     assert.equal(last.windowSize, 0, `no-attempt refresh ${i} must not be sampled`);
   }
   last = _refreshSlo.evaluate(
-    { pipelineMs: 10, clusteringFailureReason: "timeout", clusteringAttempts: 2 },
+    { pipelineMs: 10, clusteringFailureReason: "timeout", clusteringAttempts: 2, usedFallbackClustering: true },
     logger
   );
   assert.equal(last.windowSize, 1, "only the attempting refresh is sampled");
@@ -1279,7 +1295,7 @@ test("Slice 3 SLO: no-attempt refreshes (clusteringAttempts=0) never sample the 
   const reasons = ["timeout", "timeout", "timeout", null, null, null, null, null, null, null];
   reasons.forEach((r) => {
     last = _refreshSlo.evaluate(
-      { pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1 },
+      { pipelineMs: 10, clusteringFailureReason: r, clusteringAttempts: 1, usedFallbackClustering: r != null },
       logger
     );
   });
@@ -2139,6 +2155,143 @@ function failClosedClusteringPipelineStub(reason = "timeout") {
   });
 }
 
+// B4: a DEGRADED deterministic-rescue pipeline result — the LLM clustering path
+// failed terminally (reason/subtype retained for attribution) BUT the
+// deterministic relevance-gated fallback (B2) published bounded stories, so
+// `usedFallbackClustering` is false, `usedDeterministicClustering` is true, and
+// the payload carries real, contract-valid stories. Mirrors what
+// `runRefreshPipeline` returns on the B2 deterministic-publish path.
+function degradedDeterministicPipelineStub({ subtype = "parse" } = {}) {
+  const story = {
+    id: "det-1",
+    metaStoryId: "det-1",
+    title: "Deterministic Rescue Story",
+    subtitle: "Single-source report.",
+    geographies: ["US"],
+    topic: "Diplomatic relations",
+    summary: "Reuters reports: OFAC sanctions update.",
+    whyItMatters: "Implication.",
+    whatChanged: "Delta.",
+    priority: "standard",
+    outletCount: 1,
+    tags: { topics: ["Diplomatic relations"], keywords: ["sanctions"], geographies: ["US"] },
+    sources: [
+      {
+        id: "det-src-1",
+        outlet: "Reuters",
+        byline: "Staff",
+        kind: "traditional",
+        weight: 80,
+        url: "https://example.com/det-1",
+        minutesAgo: 20,
+        headline: "OFAC sanctions update",
+        body: ["New sanctions were announced."],
+      },
+    ],
+  };
+  const diagnostics = {
+    inputCount: 3,
+    eligibleCount: 1,
+    outputCount: 1,
+    excludedReasons: {
+      not_beat_fit_included: 0,
+      missing_source_id: 0,
+      no_topic_fit: 1,
+      no_keyword_fit: 1,
+      over_cap: 0,
+    },
+  };
+  return async (opts) => ({
+    payload: { contractVersion: opts.contractVersion, stories: [story] },
+    log: {
+      unchanged: false,
+      poolCount: 4,
+      relevantCount: 3,
+      metaStoryCount: 1,
+      // B2: deterministic publish CLEARS the fail-closed flag but RETAINS the
+      // LLM-failure reason/subtype for attribution.
+      usedFallbackClustering: false,
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: subtype,
+      clusteringRecoverySubtype: null,
+      clusteringLlmFailed: true,
+      usedDeterministicClustering: true,
+      deterministicClusteringDiagnostics: diagnostics,
+      clusteringAttempts: 2,
+      clusteringLatencyMs: [120, 130],
+      groundingFailures: 0,
+      droppedUngroundedStoryCount: 0,
+      groundingDropReasons: {},
+      watermark: "wm-degraded-run",
+      candidateCount: 3,
+      selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict" },
+      funnel: { primaryDropStage: "clustering_and_grounding" },
+      timings: { pipelineMs: 50 },
+      outcomes: {
+        storiesPublished: 1,
+        clusteringAttempts: 2,
+        clusteringFailureReason: "error",
+        clusteringFailureSubtype: subtype,
+        usedFallbackClustering: false,
+        usedDeterministicClustering: true,
+        clusteringLlmFailed: true,
+      },
+    },
+  });
+}
+
+// Bugbot #1 fixture: the deterministic builder produced raw stories (flags set),
+// but grounding/publish shaping dropped them ALL, so the pipeline returns ZERO
+// final stories. This is a TRUE fail-closed even though the rescue flags are set —
+// the route must read it as `failed` (not `degraded`) and preserve a prior
+// healthy snapshot like any fail-closed.
+function droppedRescuePipelineStub() {
+  return async (opts) => ({
+    payload: { contractVersion: opts.contractVersion, stories: [] },
+    log: {
+      unchanged: false,
+      poolCount: 4,
+      relevantCount: 3,
+      metaStoryCount: 0,
+      // Builder published >0 raw stories → fail-closed flag cleared — but grounding
+      // then dropped them all, so the FINAL response ships zero stories.
+      usedFallbackClustering: false,
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: "parse",
+      clusteringRecoverySubtype: null,
+      clusteringLlmFailed: true,
+      usedDeterministicClustering: true,
+      deterministicClusteringDiagnostics: {
+        inputCount: 3,
+        eligibleCount: 1,
+        outputCount: 1,
+        excludedReasons: { no_keyword_fit: 1 },
+      },
+      clusteringAttempts: 2,
+      clusteringLatencyMs: [120, 130],
+      groundingFailures: 1,
+      droppedUngroundedStoryCount: 1,
+      groundingDropReasons: { no_valid_source_ids: 1 },
+      watermark: "wm-dropped-rescue",
+      candidateCount: 3,
+      selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict" },
+      funnel: { primaryDropStage: "clustering_and_grounding" },
+      timings: { pipelineMs: 50 },
+      outcomes: {
+        storiesPublished: 0,
+        clusteringAttempts: 2,
+        clusteringFailureReason: "error",
+        clusteringFailureSubtype: "parse",
+        usedFallbackClustering: false,
+        usedDeterministicClustering: true,
+        clusteringLlmFailed: true,
+      },
+    },
+  });
+}
+
 // A prior HEALTHY snapshot — carries visible stories plus the persisted
 // `_watermark` / `_selectionMeta` the route re-serves on continuity.  The
 // story is contract-valid (passes `dashboardPayloadSchema`): a non-empty
@@ -2226,6 +2379,9 @@ test("POST /api/dashboard/refresh: clustering fail-closed WITH prior healthy sna
       // prior snapshot preserved — this is the canonical "failure + prior" case.
       assert.equal(res.body._meta?.refreshStatus, "failed");
       assert.equal(res.body._meta?.usedPriorSnapshot, true);
+      // B4: this is a TRUE fail-closed (no deterministic rescue) — the rescue
+      // signal must be absent so it is never confused with a degraded publish.
+      assert.notEqual(res.body._meta?.usedDeterministicClustering, true);
       assert.ok(res.body._meta?.refreshFailure, "refreshFailure object must be present on failure");
       assert.equal(res.body._meta.refreshFailure.reason, "clustering_failure");
       // timeout maps to the wire subtype "timeout" (internal "timeout_budget").
@@ -2247,6 +2403,287 @@ test("POST /api/dashboard/refresh: clustering fail-closed WITH prior healthy sna
     _snapshotRepo.writeMeta = prevWriteMeta;
     _snapshotRepo.getLocks = prevGetLocks;
     _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── B4: degraded deterministic-rescue publish semantics ─────────────────────
+
+test("B4 (A): degraded deterministic rescue with NO prior snapshot publishes stories, refreshStatus='degraded', NOT preserved", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  let writtenPayload = null;
+  _refreshPipeline.run = degradedDeterministicPipelineStub({ subtype: "parse" });
+  _snapshotRepo.read = async () => null; // no prior snapshot
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("b4-degraded-no-prior", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      // The deterministic stories ARE published (not an empty fail-closed result).
+      assert.equal(res.body.stories.length, 1, "deterministic rescue stories must be published");
+      assert.equal(res.body.stories[0].metaStoryId, "det-1");
+      // NOT the preservation branch.
+      assert.notEqual(res.body._meta?.snapshotPreserved, true, "rescue must NOT preserve a prior snapshot");
+      assert.equal(res.body._meta?.refreshSkippedReason, undefined);
+      // B3 failsafe mapping: degraded, NOT failed; usedPriorSnapshot false.
+      assert.equal(res.body._meta?.refreshStatus, "degraded");
+      assert.equal(res.body._meta?.usedPriorSnapshot, false);
+      // Degraded retains the LLM-failure metadata for attribution.
+      assert.ok(res.body._meta?.refreshFailure, "degraded retains a refreshFailure object");
+      assert.equal(res.body._meta.refreshFailure.subtype, "parse");
+      // Deterministic signals surfaced on the immediate response.
+      assert.equal(res.body._meta?.usedDeterministicClustering, true);
+      assert.equal(res.body._meta?.clusteringLlmFailed, true);
+      assert.equal(res.body._meta?.deterministicClusteringDiagnostics?.outputCount, 1);
+      // The fresh snapshot IS written, and it persists the deterministic fields.
+      assert.ok(writtenPayload !== null, "deterministic publish must persist a fresh snapshot");
+      assert.equal(writtenPayload.stories.length, 1);
+      assert.equal(writtenPayload._lastRunMeta.usedDeterministicClustering, true);
+      assert.equal(writtenPayload._lastRunMeta.clusteringLlmFailed, true);
+      assert.equal(writtenPayload._lastRunMeta.deterministicClusteringDiagnostics.outputCount, 1);
+      assert.equal(writtenPayload._lastRunMeta.clusteringFailureReason, "error");
+      // Response validates against the dashboard contract.
+      const parsed = dashboardPayloadSchema.safeParse({ contractVersion: res.body.contractVersion, stories: res.body.stories });
+      assert.ok(parsed.success, `degraded body must conform to dashboardPayloadSchema: ${JSON.stringify(parsed.error?.errors)}`);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("B4 (B): degraded deterministic rescue WITH prior healthy snapshot still publishes new stories (no preservation)", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  let writtenPayload = null;
+  let writeMetaCalled = false;
+  _refreshPipeline.run = degradedDeterministicPipelineStub({ subtype: "parse" });
+  _snapshotRepo.read = async () => PRIOR_HEALTHY_SNAPSHOT;
+  _snapshotRepo.write = async (_uid, payload) => { writtenPayload = payload; };
+  _snapshotRepo.writeMeta = async () => { writeMetaCalled = true; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("b4-degraded-with-prior", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      // The CURRENT deterministic stories win — the prior healthy snapshot is
+      // NOT preserved (a rescue produced real, current stories).
+      assert.equal(res.body.stories.length, 1);
+      assert.equal(res.body.stories[0].metaStoryId, "det-1", "current deterministic story, not the prior healthy one");
+      assert.notEqual(res.body._meta?.snapshotPreserved, true, "must NOT enter the preservation branch");
+      assert.equal(res.body._meta?.refreshStatus, "degraded");
+      assert.equal(res.body._meta?.usedPriorSnapshot, false);
+      // The new snapshot is persisted (replacing the prior), with deterministic fields.
+      assert.ok(writtenPayload !== null, "a fresh snapshot must be persisted (overwriting the prior)");
+      assert.equal(writtenPayload.stories[0].metaStoryId, "det-1");
+      assert.equal(writtenPayload._lastRunMeta.usedDeterministicClustering, true);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.writeMeta = prevWriteMeta;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("B4 (C / Bugbot #1): rescue whose stories are ALL dropped ships zero → refreshStatus='failed' and preserves prior healthy snapshot", async () => {
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevWriteMeta = _snapshotRepo.writeMeta;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  let writeCalled = false;
+  let writeMetaCalled = false;
+  _refreshPipeline.run = droppedRescuePipelineStub();
+  _snapshotRepo.read = async () => PRIOR_HEALTHY_SNAPSHOT;
+  _snapshotRepo.write = async () => { writeCalled = true; };
+  _snapshotRepo.writeMeta = async () => { writeMetaCalled = true; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  try {
+    await withIsolatedUser("b4-dropped-rescue-with-prior", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      // Zero final stories → true fail-closed → prior healthy snapshot preserved.
+      assert.equal(res.body.stories.length, 1, "prior healthy stories remain visible");
+      assert.equal(res.body.stories[0].metaStoryId, "healthy-1");
+      assert.equal(writeCalled, false, "must NOT overwrite the healthy snapshot with an empty rescue");
+      assert.equal(writeMetaCalled, true, "lastCheckedAt still bumped");
+      assert.equal(res.body._meta?.snapshotPreserved, true, "fully-dropped rescue preserves prior (continuity)");
+      // The core Bugbot #1 fix: a rescue that ships zero stories is FAILED, not degraded.
+      assert.equal(res.body._meta?.refreshStatus, "failed", "0 shipped stories → failed, never degraded");
+      assert.equal(res.body._meta?.usedPriorSnapshot, true);
+      assert.ok(res.body._meta?.refreshFailure, "failed retains a refreshFailure object");
+      // Attribution flags are retained (the builder did run), but never read as degraded.
+      assert.equal(res.body._meta?.clusteringLlmFailed, true);
+      assert.equal(res.body._meta?.usedDeterministicClustering, true);
+    });
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.writeMeta = prevWriteMeta;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+// ─── B5: default-profile upgrade scheduling after degraded rescue ────────────
+
+// Build a stubbed `_refreshExecutor.execute` return shape with a controllable
+// `_meta`, so B5 trigger tests isolate the route's scheduling DECISION from the
+// pipeline entirely (no real refresh runs).
+function execResult({ usedDeterministicClustering = false, clusteringLlmFailed = false, refreshStatus = "ok", stories = [], extraMeta = {} } = {}) {
+  return {
+    kind: "ran",
+    httpStatus: 200,
+    body: {
+      contractVersion: "2026-05-19-meta-story-fields",
+      stories,
+      _meta: {
+        hasSnapshot: true,
+        refreshStatus,
+        usedDeterministicClustering,
+        clusteringLlmFailed,
+        ...extraMeta,
+      },
+    },
+  };
+}
+
+test("B5 (A): degraded deterministic rescue schedules exactly one default-profile upgrade + sets _meta", async () => {
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshUpgrade.start;
+  let upgradeCalls = 0;
+  let lastReason = null;
+  _refreshExecutor.execute = async () =>
+    execResult({ usedDeterministicClustering: true, clusteringLlmFailed: true, refreshStatus: "degraded", stories: [{ id: "det-1" }] });
+  _refreshUpgrade.start = (_identity, opts) => { upgradeCalls += 1; lastReason = opts?.reason; return true; };
+  try {
+    await withIsolatedUser("b5-degraded-schedules", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(upgradeCalls, 1, "exactly one default-profile upgrade scheduled");
+      assert.equal(lastReason, "degraded_deterministic_rescue");
+      // Additive response metadata reflects the scheduling decision.
+      assert.equal(res.body._meta?.upgradeRefreshScheduled, true);
+      assert.equal(res.body._meta?.upgradeRefreshReason, "degraded_deterministic_rescue");
+    });
+  } finally {
+    _refreshExecutor.execute = prevExec;
+    _refreshUpgrade.start = prevStart;
+  }
+});
+
+test("B5 (B): clean LLM success schedules no upgrade and adds no upgrade _meta", async () => {
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshUpgrade.start;
+  let upgradeCalls = 0;
+  _refreshExecutor.execute = async () =>
+    execResult({ usedDeterministicClustering: false, clusteringLlmFailed: false, refreshStatus: "ok", stories: [{ id: "s1" }] });
+  _refreshUpgrade.start = () => { upgradeCalls += 1; return true; };
+  try {
+    await withIsolatedUser("b5-clean-success", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(upgradeCalls, 0, "clean LLM success must NOT schedule an upgrade");
+      assert.equal(res.body._meta?.upgradeRefreshScheduled, undefined);
+      assert.equal(res.body._meta?.upgradeRefreshReason, undefined);
+    });
+  } finally {
+    _refreshExecutor.execute = prevExec;
+    _refreshUpgrade.start = prevStart;
+  }
+});
+
+test("B5 (C): fail-closed zero-story and preserved-prior runs schedule no upgrade", async () => {
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshUpgrade.start;
+  let upgradeCalls = 0;
+  _refreshUpgrade.start = () => { upgradeCalls += 1; return true; };
+  try {
+    // (1) True fail-closed: LLM failed, ZERO stories published.
+    _refreshExecutor.execute = async () =>
+      execResult({ usedDeterministicClustering: false, clusteringLlmFailed: true, refreshStatus: "failed", stories: [] });
+    await withIsolatedUser("b5-failclosed-zero", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.upgradeRefreshScheduled, undefined);
+    });
+    // (2) Preserved-prior continuity: prior stories re-served (length > 0) and
+    //     clusteringLlmFailed true — the OR branch must NOT fire here.
+    _refreshExecutor.execute = async () =>
+      execResult({
+        usedDeterministicClustering: false,
+        clusteringLlmFailed: true,
+        refreshStatus: "failed",
+        stories: [{ id: "prior-1" }],
+        extraMeta: { usedPriorSnapshot: true, snapshotPreserved: true },
+      });
+    await withIsolatedUser("b5-preserved-prior", async () => {
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.upgradeRefreshScheduled, undefined);
+    });
+    assert.equal(upgradeCalls, 0, "neither fail-closed nor preserved-prior may schedule an upgrade");
+  } finally {
+    _refreshExecutor.execute = prevExec;
+    _refreshUpgrade.start = prevStart;
+  }
+});
+
+test("B5 (D): a second degraded refresh while an upgrade is in-flight does NOT schedule a duplicate", async () => {
+  const prevExec = _refreshExecutor.execute;
+  const prevStart = _refreshUpgrade.start;
+  // Use the REAL scheduler so the in-flight guard is exercised.
+  _refreshUpgrade.start = _realUpgradeStart;
+  _refreshUpgrade._inFlight.clear();
+  let upgradeCalls = 0;
+  // Foreground requests use ?profile=cold_start → refreshProfile "cold_start";
+  // the background upgrade uses refreshProfile null. Distinguish on that.
+  _refreshExecutor.execute = async (_identity, opts) => {
+    if (opts?.refreshProfile === null) {
+      // The background upgrade — stay pending so `_inFlight` keeps the user
+      // across the second foreground refresh.
+      upgradeCalls += 1;
+      return new Promise(() => {});
+    }
+    // Foreground degraded rescue.
+    return execResult({ usedDeterministicClustering: true, clusteringLlmFailed: true, refreshStatus: "degraded", stories: [{ id: "det-1" }] });
+  };
+  try {
+    await withIsolatedUser("b5-anti-dup", async () => {
+      const res1 = await request(app).post("/api/dashboard/refresh?profile=cold_start");
+      assert.equal(res1.status, 200);
+      assert.equal(res1.body._meta?.upgradeRefreshScheduled, true, "first degraded run schedules the upgrade");
+      assert.equal(upgradeCalls, 1, "one upgrade kicked off");
+
+      const res2 = await request(app).post("/api/dashboard/refresh?profile=cold_start");
+      assert.equal(res2.status, 200);
+      // The upgrade from run 1 is still in-flight → run 2 joins (no duplicate).
+      assert.equal(upgradeCalls, 1, "no duplicate upgrade while one is in-flight");
+      assert.equal(res2.body._meta?.upgradeRefreshScheduled, undefined, "joined run does not re-advertise scheduling");
+    });
+  } finally {
+    _refreshExecutor.execute = prevExec;
+    _refreshUpgrade.start = prevStart;
+    _refreshUpgrade._inFlight.clear();
   }
 });
 
@@ -2560,6 +2997,115 @@ describe("Step 2: buildRefreshFailsafeMeta (unit)", () => {
     // The one mapping that must hold: internal timeout_budget → wire "timeout".
     const t = buildRefreshFailsafeMeta({ log: { clusteringFailureReason: "timeout", clusteringFailureSubtype: "timeout_budget", clusteringAttempts: 2 } });
     assert.equal(t.refreshFailure.subtype, "timeout");
+  });
+
+  // ── B3: degraded mapping (deterministic relevance-gated rescue) ────────────
+
+  test("B3 degraded: LLM failed but deterministic fallback published → refreshStatus='degraded' (NOT failed)", () => {
+    // This is the B3 bug-fix target: a deterministic-rescue run retains the
+    // LLM-failure reason for attribution but must read as degraded, not failed.
+    const diagnostics = {
+      inputCount: 6,
+      eligibleCount: 3,
+      outputCount: 3,
+      excludedReasons: { no_keyword_fit: 2, over_cap: 1 },
+    };
+    const meta = buildRefreshFailsafeMeta({
+      log: {
+        clusteringFailureReason: "error",
+        clusteringFailureSubtype: "parse",
+        clusteringAttempts: 2,
+        clusteringLlmFailed: true,
+        usedDeterministicClustering: true,
+        deterministicClusteringDiagnostics: diagnostics,
+      },
+      usedPriorSnapshot: false,
+    });
+    assert.equal(meta.refreshStatus, "degraded", "deterministic rescue is degraded, not failed");
+    // Failure metadata retained for attribution (chosen invariant: non-null on degraded).
+    assert.notEqual(meta.refreshFailure, null);
+    assert.equal(meta.refreshFailure.reason, "clustering_failure");
+    assert.equal(meta.refreshFailure.subtype, "parse");
+    assert.equal(meta.refreshFailure.attempts, 2);
+    // B2 fields surfaced for clients.
+    assert.equal(meta.clusteringLlmFailed, true);
+    assert.equal(meta.usedDeterministicClustering, true);
+    assert.deepEqual(meta.deterministicClusteringDiagnostics, diagnostics);
+    // Resulting object validates against the contract.
+    assert.equal(dashboardRefreshFailsafeMetaSchema.safeParse(meta).success, true);
+  });
+
+  test("B3 failed: LLM failed and deterministic published nothing → refreshStatus='failed'", () => {
+    const meta = buildRefreshFailsafeMeta({
+      log: {
+        clusteringFailureReason: "error",
+        clusteringFailureSubtype: "parse",
+        clusteringAttempts: 2,
+        clusteringLlmFailed: true,
+        usedDeterministicClustering: false,
+        deterministicClusteringDiagnostics: {
+          inputCount: 1,
+          eligibleCount: 0,
+          outputCount: 0,
+          excludedReasons: { no_keyword_fit: 1 },
+        },
+      },
+      usedPriorSnapshot: true,
+    });
+    assert.equal(meta.refreshStatus, "failed", "no deterministic stories → true fail-closed");
+    assert.notEqual(meta.refreshFailure, null);
+    assert.equal(meta.usedDeterministicClustering, false);
+    assert.equal(meta.clusteringLlmFailed, true);
+    assert.equal(dashboardRefreshFailsafeMetaSchema.safeParse(meta).success, true);
+  });
+
+  test("Bugbot #1: rescue flags set but final published stories === 0 → refreshStatus='failed' (not degraded)", () => {
+    // The deterministic builder produced raw stories (flags true), but they were
+    // ALL dropped by grounding/publish shaping, so the response ships zero. The
+    // explicit publishedStoryCount makes this resolve to a true fail-closed.
+    const log = {
+      clusteringFailureReason: "error",
+      clusteringFailureSubtype: "parse",
+      clusteringAttempts: 2,
+      clusteringLlmFailed: true,
+      usedDeterministicClustering: true,
+      deterministicClusteringDiagnostics: { inputCount: 3, eligibleCount: 1, outputCount: 1, excludedReasons: {} },
+    };
+    const dropped = buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false, publishedStoryCount: 0 });
+    assert.equal(dropped.refreshStatus, "failed", "rescue that shipped 0 final stories is fail-closed, not degraded");
+    assert.notEqual(dropped.refreshFailure, null);
+    // Attribution flags are still surfaced (the builder did run).
+    assert.equal(dropped.usedDeterministicClustering, true);
+    assert.equal(dropped.clusteringLlmFailed, true);
+    assert.equal(dashboardRefreshFailsafeMetaSchema.safeParse(dropped).success, true);
+
+    // Same log, but the rescue stories DID ship (count > 0) → degraded.
+    const shipped = buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false, publishedStoryCount: 1 });
+    assert.equal(shipped.refreshStatus, "degraded", "rescue that shipped ≥1 story is degraded");
+
+    // Count omitted → legacy behavior: trust the rescue flag (degraded).
+    const legacy = buildRefreshFailsafeMeta({ log, usedPriorSnapshot: false });
+    assert.equal(legacy.refreshStatus, "degraded", "omitted count preserves legacy flag-only mapping");
+  });
+
+  test("B3 ok: normal success path → refreshStatus='ok' (deterministic builder never ran)", () => {
+    const meta = buildRefreshFailsafeMeta({
+      log: {
+        clusteringFailureReason: null,
+        usedDeterministicClustering: false,
+        clusteringLlmFailed: false,
+        deterministicClusteringDiagnostics: null,
+      },
+      usedPriorSnapshot: false,
+    });
+    assert.equal(meta.refreshStatus, "ok");
+    assert.equal(meta.refreshFailure, null);
+    assert.equal(meta.usedDeterministicClustering, false);
+    assert.equal(meta.clusteringLlmFailed, false);
+    // null diagnostics (builder never ran) are omitted — the optional contract
+    // field carries an object or is absent, never a null.
+    assert.equal(meta.deterministicClusteringDiagnostics, undefined);
+    assert.equal(dashboardRefreshFailsafeMetaSchema.safeParse(meta).success, true);
   });
 });
 

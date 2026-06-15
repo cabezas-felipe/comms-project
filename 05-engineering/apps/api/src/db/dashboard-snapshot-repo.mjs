@@ -150,6 +150,12 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // Optional for back-compat with snapshots written before the subtype taxonomy.
     if (_lastRunMeta.clusteringFailureSubtype !== undefined) meta.clusteringFailureSubtype = _lastRunMeta.clusteringFailureSubtype;
     if (_lastRunMeta.clusteringRecoverySubtype !== undefined) meta.clusteringRecoverySubtype = _lastRunMeta.clusteringRecoverySubtype;
+    // B4: deterministic relevance-gated fallback (B2/B3) signals — lift so GET
+    // /api/dashboard surfaces the same deterministic/degraded fields the immediate
+    // refresh response carried. Optional for back-compat with pre-B2 snapshots.
+    if (_lastRunMeta.usedDeterministicClustering !== undefined) meta.usedDeterministicClustering = _lastRunMeta.usedDeterministicClustering;
+    if (_lastRunMeta.clusteringLlmFailed !== undefined) meta.clusteringLlmFailed = _lastRunMeta.clusteringLlmFailed;
+    if (_lastRunMeta.deterministicClusteringDiagnostics !== undefined) meta.deterministicClusteringDiagnostics = _lastRunMeta.deterministicClusteringDiagnostics;
     if (_lastRunMeta.clusteringAttempts !== undefined) meta.clusteringAttempts = _lastRunMeta.clusteringAttempts;
     if (_lastRunMeta.clusteringLatencyMs !== undefined) meta.clusteringLatencyMs = _lastRunMeta.clusteringLatencyMs;
     // Phase 4: per-axis semantic tag-mapping aggregate (topics + keywords)

@@ -14,9 +14,10 @@ import {
   runDashboardRefreshGolden,
 } from "./dashboard-refresh-golden-core.mjs";
 
-test("golden scenario registry lists the 4 locked scenarios in order", () => {
+test("golden scenario registry lists the 5 locked scenarios in order", () => {
   assert.deepEqual(Array.from(DASHBOARD_GOLDEN_SCENARIO_IDS), [
     "gold-01-fail-closed",
+    "gold-01b-deterministic-rescue",
     "gold-02-healthy-path",
     "gold-03-liveblog-dedupe",
     "gold-04-recall-floor",
@@ -28,6 +29,7 @@ test("gold fixture loads and carries persona + on-beat + liveblog + weak-semanti
   assert.ok(gold.persona && Array.isArray(gold.persona.keywords), "persona.keywords present");
   assert.ok(gold.onBeatItems.length >= 4, "at least 4 on-beat items");
   assert.equal(gold.liveblogVariants.length, 4, "exactly 4 Spelling Bee liveblog variants");
+  assert.ok(gold.failClosedClusteringItem && gold.failClosedClusteringItem.sourceId === "fail-closed-1");
   assert.ok(gold.weakSemanticItem && gold.weakSemanticItem.sourceId === "weak-semantic-1");
   // Persona must include both Batch 1 publishers — the failed E2E lost Reuters.
   assert.ok(gold.persona.traditionalSources.includes("Reuters"));
@@ -36,10 +38,10 @@ test("gold fixture loads and carries persona + on-beat + liveblog + weak-semanti
 
 test("all golden scenarios pass against the live pipeline (hermetic)", async () => {
   const { results, summary } = await runDashboardRefreshGolden();
-  assert.equal(summary.total, 4);
+  assert.equal(summary.total, 5);
   assert.equal(
     summary.passed,
-    4,
+    5,
     `failed: ${JSON.stringify(results.filter((r) => !r.ok), null, 2)}`
   );
   assert.equal(summary.hardFail, false);

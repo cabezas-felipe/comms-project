@@ -143,17 +143,35 @@ function reclusterLine(
   return `status=${exec.status ?? NA} queued=${num(exec.totalQueued)} attempted=${num(exec.attempted)} ok=${num(exec.succeeded)} fail=${num(exec.failed)} timeout=${num(exec.timedOut)} [${cands}]`;
 }
 
-// Phase 4 · Step 3: refresh fail-safe summary — status, and when failed the
-// failure reason/subtype/attempts/retryable, plus the usedPriorSnapshot flag.
+// Phase 4 · Step 3 + B6: refresh fail-safe summary — status (ok | degraded |
+// failed), the failure reason/subtype/attempts/retryable when present, the
+// usedPriorSnapshot flag, and (B3/B5) the deterministic-rescue + background
+// upgrade signals.
 function refreshLine(r: DashboardRefreshFailsafeMeta | null | undefined): string {
   if (!r) return NA;
   const prior = `usedPriorSnapshot=${r.usedPriorSnapshot}`;
-  if (r.refreshStatus !== "failed" || !r.refreshFailure) {
-    return `status=ok ${prior}`;
+  // B6: deterministic rescue + upgrade trailer, shown whenever those signals
+  // are set so a degraded run is fully explainable in the debug panel.
+  const detParts: string[] = [];
+  if (r.clusteringLlmFailed) detParts.push("llmFailed=true");
+  if (r.usedDeterministicClustering) detParts.push("deterministic=true");
+  const d = r.deterministicClusteringDiagnostics;
+  if (d) {
+    detParts.push(
+      `det_diag=in:${num(d.inputCount)}/elig:${num(d.eligibleCount)}/out:${num(d.outputCount)}`
+    );
+  }
+  if (r.upgradeRefreshScheduled) {
+    detParts.push(`upgrade=scheduled${r.upgradeRefreshReason ? `(${r.upgradeRefreshReason})` : ""}`);
+  }
+  const detSuffix = detParts.length > 0 ? ` ${detParts.join(" ")}` : "";
+
+  if ((r.refreshStatus !== "failed" && r.refreshStatus !== "degraded") || !r.refreshFailure) {
+    return `status=${r.refreshStatus} ${prior}${detSuffix}`;
   }
   const f = r.refreshFailure;
   const retryable = typeof f.retryable === "boolean" ? String(f.retryable) : NA;
-  return `status=failed reason=${f.reason ?? NA} subtype=${f.subtype} attempts=${num(f.attempts)} retryable=${retryable} ${prior}`;
+  return `status=${r.refreshStatus} reason=${f.reason ?? NA} subtype=${f.subtype} attempts=${num(f.attempts)} retryable=${retryable} ${prior}${detSuffix}`;
 }
 
 function Row({ label, value, testId }: { label: string; value: string; testId: string }) {

@@ -151,9 +151,11 @@ export function hasDegradedTitle(stories) {
 // ─── Scenario runners ────────────────────────────────────────────────────────
 
 async function scenarioFailClosed(gold) {
+  // Topic-only survivor: passes recall but fails the strict keyword bar in the
+  // deterministic rescue builder, so clustering failure stays fail-closed.
   const { payload, log } = await runRefreshPipeline({
     settings: gold.persona,
-    rawItems: gold.onBeatItems,
+    rawItems: [gold.failClosedClusteringItem],
     clusterFn: throwingClusterFn,
     clusterModel: "mock-anthropic-haiku",
     contractVersion: CONTRACT_VERSION,
@@ -169,6 +171,37 @@ async function scenarioFailClosed(gold) {
   if (log?.clusteringAttempts !== 2) reasons.push(`expected 2 clustering attempts (initial + retry), got ${log?.clusteringAttempts}`);
   if (hasDegradedTitle(stories)) reasons.push("a degraded 'updates'/'General Updates' title shipped");
   return { ok: reasons.length === 0, reasons, diagnostics: { stories, usedFallbackClustering: log?.usedFallbackClustering, clusteringFailureReason: log?.clusteringFailureReason, clusteringAttempts: log?.clusteringAttempts } };
+}
+
+async function scenarioDeterministicRescue(gold) {
+  const { payload, log } = await runRefreshPipeline({
+    settings: gold.persona,
+    rawItems: gold.onBeatItems,
+    clusterFn: throwingClusterFn,
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: CONTRACT_VERSION,
+    recallConfig: KEYWORD,
+    beatFitEnabled: false,
+  });
+
+  const reasons = [];
+  const stories = payload?.stories ?? [];
+  if (stories.length < 1) reasons.push(`deterministic rescue must publish >= 1 story, got ${stories.length}`);
+  if (log?.usedDeterministicClustering !== true) reasons.push("usedDeterministicClustering must be true when rescue publishes");
+  if (log?.usedFallbackClustering !== false) reasons.push("usedFallbackClustering must be false when deterministic rescue ships stories");
+  if (log?.clusteringFailureReason !== "error") reasons.push(`expected clusteringFailureReason=error, got ${log?.clusteringFailureReason}`);
+  if (log?.clusteringAttempts !== 2) reasons.push(`expected 2 clustering attempts (initial + retry), got ${log?.clusteringAttempts}`);
+  if (hasDegradedTitle(stories)) reasons.push("a degraded 'updates'/'General Updates' title shipped on the rescue path");
+  return {
+    ok: reasons.length === 0,
+    reasons,
+    diagnostics: {
+      storyCount: stories.length,
+      titles: stories.map((s) => s.title),
+      usedDeterministicClustering: log?.usedDeterministicClustering,
+      usedFallbackClustering: log?.usedFallbackClustering,
+    },
+  };
 }
 
 async function scenarioHealthyPath(gold) {
@@ -255,7 +288,8 @@ async function scenarioRecallFloor(gold) {
 // ─── Scenario registry ───────────────────────────────────────────────────────
 
 const SCENARIO_DEFS = Object.freeze([
-  { id: "gold-01-fail-closed", intent: "Clustering throws twice → 0 stories, fail-closed, no degraded titles", run: scenarioFailClosed },
+  { id: "gold-01-fail-closed", intent: "Clustering throws twice with no rescue-eligible items → 0 stories, fail-closed, no degraded titles", run: scenarioFailClosed },
+  { id: "gold-01b-deterministic-rescue", intent: "Clustering throws twice on on-beat pool → relevance-gated singleton rescue, no degraded titles", run: scenarioDeterministicRescue },
   { id: "gold-02-healthy-path", intent: "Healthy clustering → >= 2 grounded stories, Reuters present, no degraded titles", run: scenarioHealthyPath },
   { id: "gold-03-liveblog-dedupe", intent: "Spelling Bee liveblog variants collapse to one before clustering", run: scenarioLiveblogDedupe },
   { id: "gold-04-recall-floor", intent: "Weak semantic-only item is excluded by the similarity floor", run: scenarioRecallFloor },

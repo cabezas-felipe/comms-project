@@ -349,6 +349,158 @@ test("translateEvidenceItems: invalid response (wrong segment count) fails open"
   assert.equal(diagnostics.failedCount, 1);
 });
 
+// ── A6: wall-clock budget (maxWallClockMs) ────────────────────────────────────
+//
+// Budget is enforced at the SCHEDULING boundary: a pMap worker that picks up a
+// cache-miss item after the stage budget is spent defers it (no new call) with
+// the canonical reason "wall_clock_budget_exhausted". In-flight calls finish.
+// Deferral is NOT a failure — failedCount / degradedFallbackRate exclude it.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const BUDGET_REASON = "wall_clock_budget_exhausted";
+
+test("A6 (A): generous budget → identical to baseline (all translated, no skips)", async () => {
+  const translateFn = async (segs) => segs.map((s) => s.toUpperCase());
+  const items = [esItem("a", "uno", ["dos"]), esItem("b", "tres", ["cuatro"]), esItem("c", "cinco", ["seis"])];
+
+  const baseline = await translateEvidenceItems({ items, translateFn, config: CONFIG_ON });
+  const budgeted = await translateEvidenceItems({
+    items,
+    translateFn,
+    config: { ...CONFIG_ON, maxWallClockMs: 100000 },
+  });
+
+  // Translation outcome is byte-identical to the un-budgeted run.
+  assert.equal(budgeted.diagnostics.translatedCount, baseline.diagnostics.translatedCount);
+  assert.equal(budgeted.diagnostics.neededCount, 3);
+  assert.equal(budgeted.diagnostics.translatedCount, 3);
+  assert.equal(budgeted.diagnostics.failedCount, 0);
+  for (const it of budgeted.items) {
+    assert.equal(it._translation.applied, true);
+    assert.equal(it._translation.reason, null);
+  }
+  // New diagnostics: budget recorded, but never hit.
+  assert.equal(budgeted.diagnostics.wallClockBudgetMs, 100000);
+  assert.equal(budgeted.diagnostics.wallClockBudgetHit, false);
+  assert.equal(budgeted.diagnostics.wallClockSkippedCount, 0);
+  // Baseline (no budget) reports a null budget and the additive fields exist.
+  assert.equal(baseline.diagnostics.wallClockBudgetMs, null);
+  assert.equal(baseline.diagnostics.wallClockBudgetHit, false);
+  assert.equal(baseline.diagnostics.wallClockSkippedCount, 0);
+});
+
+test("A6 (B): tiny budget → only the early in-flight subset translated; rest deferred with budget reason", async () => {
+  // concurrency 2 + an 80ms translate sleep + a 30ms budget: the first 2 items
+  // start in-flight at elapsed ~0 (< 30) and translate; by the time they finish
+  // (~80ms) the budget is spent, so every later item is deferred, not called.
+  const translateFn = async (segs) => {
+    await sleep(80);
+    return segs.map((s) => s.toUpperCase());
+  };
+  const items = Array.from({ length: 6 }, (_, i) => esItem(`es-${i}`, `t${i}`, [`b${i}`]));
+  const { items: out, diagnostics } = await translateEvidenceItems({
+    items,
+    translateFn,
+    config: { ...CONFIG_ON, concurrency: 2, maxWallClockMs: 30 },
+  });
+
+  // Exactly the 2 in-flight items translated; the other 4 deferred.
+  assert.equal(diagnostics.translatedCount, 2, "only the in-flight (concurrency) items translated");
+  assert.equal(diagnostics.wallClockSkippedCount, 4);
+  assert.equal(diagnostics.wallClockBudgetHit, true);
+  assert.equal(diagnostics.wallClockBudgetMs, 30);
+  // Coherence: every needed item is translated, failed, or budget-deferred.
+  assert.equal(diagnostics.neededCount, 6);
+  assert.equal(diagnostics.translatedCount + diagnostics.failedCount + diagnostics.wallClockSkippedCount, 6);
+  // Budget defer is NOT a failure → failure metrics stay clean.
+  assert.equal(diagnostics.failedCount, 0);
+  assert.equal(diagnostics.timeoutCount, 0);
+  assert.equal(diagnostics.degradedFallbackRate, 0, "skipped items do not inflate the failure rate");
+
+  // Results are index-aligned: the first two applied, the rest deferred.
+  assert.equal(out[0]._translation.applied, true);
+  assert.equal(out[1]._translation.applied, true);
+  for (let i = 2; i < 6; i++) {
+    const tr = out[i]._translation;
+    assert.equal(tr.reason, BUDGET_REASON, `out[${i}] deferred for budget`);
+    assert.equal(tr.needed, true);
+    assert.equal(tr.applied, false);
+    assert.equal(tr.failed, false);
+    assert.equal(tr.fromCache, false);
+    assert.equal(tr.lang, "es");
+    assert.equal(out[i].normalizedHeadline, undefined, "deferred item is left untranslated (fail-open)");
+  }
+});
+
+test("A6 (C): in-flight calls complete even when the budget is crossed mid-flight (concurrency > 1)", async () => {
+  // concurrency 3 + 100ms sleep + 20ms budget: 3 calls start before the budget
+  // is spent and must ALL finish (the guard never cancels in-flight work); the
+  // remaining 2 items, pulled after the calls resolve, are deferred.
+  const started = [];
+  const translateFn = async (segs, { sourceId }) => {
+    started.push(sourceId);
+    await sleep(100);
+    return segs.map((s) => s.toUpperCase());
+  };
+  const items = Array.from({ length: 5 }, (_, i) => esItem(`es-${i}`, `t${i}`, [`b${i}`]));
+  const { items: out, diagnostics } = await translateEvidenceItems({
+    items,
+    translateFn,
+    config: { ...CONFIG_ON, concurrency: 3, maxWallClockMs: 20 },
+  });
+
+  assert.equal(started.length, 3, "exactly the concurrency-many calls were started");
+  assert.equal(diagnostics.translatedCount, 3, "all started calls completed despite crossing the budget");
+  assert.equal(diagnostics.wallClockSkippedCount, 2);
+  assert.equal(diagnostics.wallClockBudgetHit, true);
+  assert.equal(diagnostics.failedCount, 0, "in-flight completion is not a failure");
+  for (let i = 0; i < 3; i++) assert.equal(out[i]._translation.applied, true);
+  for (let i = 3; i < 5; i++) assert.equal(out[i]._translation.reason, BUDGET_REASON);
+});
+
+test("A6: non-finite / non-positive budget is inert (unbounded, no new behavior)", async () => {
+  const translateFn = async (segs) => segs.map((s) => s.toUpperCase());
+  const items = [esItem("a", "uno", ["dos"]), esItem("b", "tres", ["cuatro"])];
+  for (const bad of [0, -5, NaN, Infinity, "30", null, undefined]) {
+    const { diagnostics } = await translateEvidenceItems({
+      items,
+      translateFn,
+      config: { ...CONFIG_ON, maxWallClockMs: bad },
+    });
+    assert.equal(diagnostics.wallClockBudgetMs, null, `budget=${String(bad)} → unbounded (null)`);
+    assert.equal(diagnostics.wallClockBudgetHit, false);
+    assert.equal(diagnostics.wallClockSkippedCount, 0);
+    assert.equal(diagnostics.translatedCount, 2, "all items translated when unbounded");
+  }
+});
+
+test("A6: cache hits are still served after the budget is spent (defers calls, not free lookups)", async () => {
+  // Pre-warm the cache for es-0, then run with a tiny budget and a slow stub.
+  // es-0 should be served from cache (free) even though es-1 is budget-deferred.
+  const slow = async (segs) => {
+    await sleep(80);
+    return segs.map((s) => s.toUpperCase());
+  };
+  const cache = new Map();
+  await translateEvidenceItems({ items: [esItem("es-0", "uno", ["dos"])], translateFn: slow, config: CONFIG_ON, cache });
+
+  // First worker burns the budget on es-1 (cache miss, slow); a later worker that
+  // reaches the spent budget still serves es-0 from cache.
+  const items = [esItem("es-1", "tres", ["cuatro"]), esItem("es-0", "uno", ["dos"])];
+  const { items: out, diagnostics } = await translateEvidenceItems({
+    items,
+    translateFn: slow,
+    config: { ...CONFIG_ON, concurrency: 1, maxWallClockMs: 30 },
+    cache,
+  });
+  const byId = Object.fromEntries(out.map((it) => [it.sourceId, it._translation]));
+  assert.equal(byId["es-1"].applied, true, "the first (in-flight) call completed");
+  assert.equal(byId["es-0"].fromCache, true, "cache hit served despite the spent budget");
+  assert.equal(byId["es-0"].applied, true);
+  assert.equal(diagnostics.wallClockSkippedCount, 0, "a cache hit is not a deferred call");
+  assert.equal(diagnostics.cacheHits, 1);
+});
+
 // ── coverage ────────────────────────────────────────────────────────────────
 
 test("computeStoryCoverage: all English → full confidence", () => {

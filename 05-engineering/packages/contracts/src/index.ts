@@ -15,6 +15,7 @@ export {
   dashboardClusterCapMetaSchema,
   refreshFailureSubtypeSchema,
   refreshFailureSchema,
+  deterministicClusteringDiagnosticsSchema,
   dashboardRefreshFailsafeMetaSchema,
   settingsPayloadSchema,
 } from "./schemas.js";
@@ -34,6 +35,7 @@ export type {
   DashboardClusterCapMeta,
   RefreshFailureSubtype,
   RefreshFailure,
+  DeterministicClusteringDiagnostics,
   DashboardRefreshFailsafeMeta,
   SettingsPayload,
 } from "./schemas.js";

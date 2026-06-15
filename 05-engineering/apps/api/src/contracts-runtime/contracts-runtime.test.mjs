@@ -15,6 +15,9 @@ import {
   storyTagsSchema,
   dashboardPayloadSchema,
   settingsPayloadSchema,
+  refreshFailureSchema,
+  deterministicClusteringDiagnosticsSchema,
+  dashboardRefreshFailsafeMetaSchema,
   normalizeTopicLabel,
   normalizeKeywordLabel,
   normalizeSourceName,
@@ -338,4 +341,119 @@ test("stripKeywordsMatchingGeographies tolerates non-string / blank entries", ()
     stripKeywordsMatchingGeographies(["China", "", null, 42, "  ", "trade"], ["China"]),
     ["trade"]
   );
+});
+
+// ─── B3: refresh fail-safe contract (degraded + deterministic-fallback fields) ──
+
+const validRefreshFailure = {
+  reason: "clustering_failure",
+  subtype: "timeout",
+  attempts: 2,
+  retryable: true,
+};
+
+const validDeterministicDiagnostics = {
+  inputCount: 7,
+  eligibleCount: 3,
+  outputCount: 3,
+  excludedReasons: { no_keyword_fit: 2, no_topic_fit: 1, over_cap: 1 },
+};
+
+// A) degraded is a valid refreshStatus value.
+test("dashboardRefreshFailsafeMetaSchema accepts refreshStatus 'degraded' with a failure object", () => {
+  const parsed = dashboardRefreshFailsafeMetaSchema.parse({
+    refreshStatus: "degraded",
+    refreshFailure: validRefreshFailure,
+    usedPriorSnapshot: false,
+  });
+  assert.equal(parsed.refreshStatus, "degraded");
+  assert.equal(parsed.refreshFailure.subtype, "timeout");
+});
+
+// B) degraded payload carrying the deterministic-fallback fields validates.
+test("dashboardRefreshFailsafeMetaSchema accepts a degraded payload with deterministic-fallback fields", () => {
+  const parsed = dashboardRefreshFailsafeMetaSchema.parse({
+    refreshStatus: "degraded",
+    refreshFailure: validRefreshFailure,
+    usedPriorSnapshot: false,
+    clusteringLlmFailed: true,
+    usedDeterministicClustering: true,
+    deterministicClusteringDiagnostics: validDeterministicDiagnostics,
+  });
+  assert.equal(parsed.clusteringLlmFailed, true);
+  assert.equal(parsed.usedDeterministicClustering, true);
+  assert.equal(parsed.deterministicClusteringDiagnostics.outputCount, 3);
+});
+
+test("deterministicClusteringDiagnosticsSchema requires nonnegative integer counts and count map", () => {
+  assert.equal(deterministicClusteringDiagnosticsSchema.safeParse(validDeterministicDiagnostics).success, true);
+  // Negative count rejected.
+  assert.equal(
+    deterministicClusteringDiagnosticsSchema.safeParse({ ...validDeterministicDiagnostics, inputCount: -1 }).success,
+    false
+  );
+  // Non-integer excludedReasons value rejected.
+  assert.equal(
+    deterministicClusteringDiagnosticsSchema.safeParse({
+      ...validDeterministicDiagnostics,
+      excludedReasons: { no_keyword_fit: 1.5 },
+    }).success,
+    false
+  );
+});
+
+// C) degraded/failed both REQUIRE a non-null failure object (chosen invariant).
+test("dashboardRefreshFailsafeMetaSchema rejects degraded with a null refreshFailure", () => {
+  const res = dashboardRefreshFailsafeMetaSchema.safeParse({
+    refreshStatus: "degraded",
+    refreshFailure: null,
+    usedPriorSnapshot: false,
+  });
+  assert.equal(res.success, false);
+});
+
+test("dashboardRefreshFailsafeMetaSchema rejects failed with a null refreshFailure", () => {
+  const res = dashboardRefreshFailsafeMetaSchema.safeParse({
+    refreshStatus: "failed",
+    refreshFailure: null,
+    usedPriorSnapshot: false,
+  });
+  assert.equal(res.success, false);
+});
+
+test("dashboardRefreshFailsafeMetaSchema accepts a failed payload with a full failure object", () => {
+  const parsed = dashboardRefreshFailsafeMetaSchema.parse({
+    refreshStatus: "failed",
+    refreshFailure: { reason: "clustering_failure", subtype: "parse", attempts: 2, retryable: false },
+    usedPriorSnapshot: true,
+  });
+  assert.equal(parsed.refreshStatus, "failed");
+  assert.equal(parsed.refreshFailure.subtype, "parse");
+});
+
+// D) ok requires a null failure object and still passes through legacy keys.
+test("dashboardRefreshFailsafeMetaSchema accepts ok with null failure and passes through legacy keys", () => {
+  const parsed = dashboardRefreshFailsafeMetaSchema.parse({
+    refreshStatus: "ok",
+    refreshFailure: null,
+    usedPriorSnapshot: false,
+    // legacy diagnostic key — survives via passthrough
+    watermark: "wm-1",
+  });
+  assert.equal(parsed.refreshStatus, "ok");
+  assert.equal(parsed.refreshFailure, null);
+  assert.equal(parsed.watermark, "wm-1");
+});
+
+test("dashboardRefreshFailsafeMetaSchema rejects ok carrying a non-null refreshFailure", () => {
+  const res = dashboardRefreshFailsafeMetaSchema.safeParse({
+    refreshStatus: "ok",
+    refreshFailure: validRefreshFailure,
+    usedPriorSnapshot: false,
+  });
+  assert.equal(res.success, false);
+});
+
+test("refreshFailureSchema accepts a minimal valid failure", () => {
+  assert.equal(refreshFailureSchema.safeParse(validRefreshFailure).success, true);
 });
