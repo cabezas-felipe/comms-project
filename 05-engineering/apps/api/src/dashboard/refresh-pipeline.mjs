@@ -1758,7 +1758,17 @@ function buildStory(metaStory, sourceItems, settings) {
     // + alias-driven).  Phase 4 semantic uplift, when enabled, is layered
     // over this baseline by the post-build overlay below.  See
     // [`meta-story-tags.mjs`](./meta-story-tags.mjs).
-    tags: assignMetaStoryTags({ metaStory, sourceItems, settings }),
+    //
+    // Phase 1.1 write-boundary guard: clamp every emitted axis to the saved
+    // settings vocabulary so `story.tags.{topics,keywords,geographies}` are
+    // guaranteed subsets of `settings.{topics,keywords,geographies}` even if
+    // the assigner regresses.  `constrainTagsToSettings` preserves canonical
+    // settings casing and dedupes — see the post-overlay clamp below for the
+    // semantic-uplift path.
+    tags: constrainTagsToSettings(
+      assignMetaStoryTags({ metaStory, sourceItems, settings }),
+      settings
+    ),
     // `_duplicates` provenance from the cross-feed dedupe stage is intentionally
     // NOT projected onto the response shape — duplicate provenance stays
     // server-side for integrity/debugging only (product req: no expand UI,
@@ -3727,7 +3737,13 @@ export async function runRefreshPipeline({
       });
       // Overlay only the tags — leave the rest of the deterministic story
       // payload (title, summary, geographies, sources, …) untouched.
-      stories[i].tags = tags;
+      //
+      // Phase 1.1 write-boundary guard: re-clamp the overlaid tags to the
+      // saved settings vocabulary so the semantic uplift path can never emit
+      // an out-of-vocabulary axis value.  This holds regardless of whether
+      // semantic uplift is on or off (off → deterministic tags pass through
+      // unchanged; on → any uplifted value outside settings is dropped).
+      stories[i].tags = constrainTagsToSettings(tags, settings);
       semanticTopicsAggMut = accumulateAxisDiagnostics(semanticTopicsAggMut, diagnostics.topics);
       semanticKeywordsAggMut = accumulateAxisDiagnostics(semanticKeywordsAggMut, diagnostics.keywords);
     }

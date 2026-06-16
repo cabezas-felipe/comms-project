@@ -412,7 +412,7 @@ test("runRefreshPipeline: two-outlet input (WaPo + Reuters) reaches clustering w
 test("runRefreshPipeline: returns empty stories when relevant pool is empty", async () => {
   const rawItems = [makeItem({ sourceId: "src-out", outlet: "BBC", topic: "Cooking", geographies: ["France"], headline: "Food" })];
   let clusterCalled = false;
-  const { payload, log } = await runRefreshPipeline({
+  const { payload } = await runRefreshPipeline({
     settings: BASE_SETTINGS,
     rawItems,
     clusterFn: async () => { clusterCalled = true; return []; },
@@ -789,7 +789,7 @@ test("runRefreshPipeline: story geographies are never fabricated — empty when 
     summary: "A story without geographies.",
     tags: { topics: ["Diplomatic relations"], keywords: [], geographies: [] },
   };
-  const { payload } = await runRefreshPipeline({
+  const { payload, log } = await runRefreshPipeline({
     settings: { ...BASE_SETTINGS, geographies: [] },
     rawItems,
     clusterFn: async () => [metaStory],
@@ -2168,7 +2168,7 @@ test("runRefreshPipeline: metaStoryId reused from prior when source set evolves 
   };
 
   // New cluster adds src-C — Jaccard = 2/3 ≈ 0.67 ≥ 0.5 → match
-  const { payload } = await runRefreshPipeline({
+  const { payload, log } = await runRefreshPipeline({
     settings: BASE_SETTINGS,
     rawItems,
     clusterFn: async () => [{
@@ -4600,7 +4600,7 @@ test("runRefreshPipeline: model-provided 'General' topic is excluded from story 
     factual_claims: ["Reuters reports: Test Headline"],
     claim_evidence_map: { "0": ["src-1"] },
   };
-  const { payload } = await runRefreshPipeline({
+  const { payload, log } = await runRefreshPipeline({
     settings: BASE_SETTINGS,
     rawItems,
     clusterFn: async () => [metaStory],
@@ -4682,6 +4682,198 @@ test("runRefreshPipeline: story.tags.geographies is never fabricated even when s
     contractVersion: "2026-05-19-meta-story-fields",
   });
   assert.deepEqual(payload.stories[0].tags.geographies, ["US"], "France must not appear — not in settings.geographies");
+});
+
+test("runRefreshPipeline: semantic uplift ON — post-overlay tags stay within settings vocabulary (write-boundary clamp)", async () => {
+  // Phase 1.1 write boundary: with semantic uplift enabled the Phase 4 overlay
+  // replaces `story.tags` wholesale.  The post-overlay clamp must keep every
+  // axis a subset of settings, in canonical settings casing, with no
+  // duplicates — regardless of the uplift path.  Here the scorer uplifts the
+  // in-settings keyword "sanctions" from "embargo" evidence; "sanctions" never
+  // appears as a whole word, so the deterministic phase emits no keyword and
+  // the asserted value can ONLY arrive via the semantic overlay path.
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US", "Colombia"],
+      headline: "Treasury weighs new embargo measures",
+      body: ["Officials debate embargo enforcement against the regime."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "semantic-overlay",
+    title: "Embargo Debate",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Markets react to the embargo talk.",
+    factual_claims: ["Reuters reports: Treasury weighs new embargo measures"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const SEMANTIC_ON = {
+    enabled: true,
+    topicsEnabled: true,
+    keywordsEnabled: true,
+    topicsThreshold: 0.75,
+    keywordsThreshold: 0.75,
+  };
+  // Scorer uplifts only the in-settings keyword "sanctions" from "embargo".
+  // Returns 0 for every other (axis, label) so no other uplift fires.
+  const scorer = async (evidence, label) => {
+    if (
+      label.toLowerCase() === "sanctions" &&
+      evidence.toLowerCase().includes("embargo")
+    ) {
+      return 0.9;
+    }
+    return 0;
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    semanticTagConfig: SEMANTIC_ON,
+    semanticTagScorer: scorer,
+  });
+  const tags = payload.stories[0].tags;
+  // Uplift fired AND survived the clamp, in canonical settings casing.
+  assert.ok(
+    tags.keywords.includes("sanctions"),
+    "semantic uplift must add the in-settings 'sanctions' keyword"
+  );
+  // Tighten the guard: prove the semantic path actually executed for this run
+  // (not a deterministic coincidence) and accepted at least one keyword.
+  assert.equal(
+    log.tags.keywords.runtimeState,
+    "enabled_scorer_ready",
+    "semantic runtime must report scorer-ready for this scenario"
+  );
+  assert.ok(
+    (log.tags.keywords.acceptedCount ?? 0) >= 1,
+    "semantic diagnostics must report at least one accepted keyword uplift"
+  );
+  // Every axis is a subset of settings after the overlay clamp.
+  for (const t of tags.topics) {
+    assert.ok(BASE_SETTINGS.topics.includes(t), `topic '${t}' must be in settings.topics`);
+  }
+  for (const k of tags.keywords) {
+    assert.ok(BASE_SETTINGS.keywords.includes(k), `keyword '${k}' must be in settings.keywords`);
+  }
+  for (const g of tags.geographies) {
+    assert.ok(BASE_SETTINGS.geographies.includes(g), `geography '${g}' must be in settings.geographies`);
+  }
+  // Dedupe preserved across the deterministic + semantic merge on every axis.
+  assert.equal(new Set(tags.topics).size, tags.topics.length, "topics must be deduped");
+  assert.equal(new Set(tags.keywords).size, tags.keywords.length, "keywords must be deduped");
+  assert.equal(new Set(tags.geographies).size, tags.geographies.length, "geographies must be deduped");
+});
+
+// ─── Phase 1.3: settings-clamp write-boundary guardrails ────────────────────
+//
+// Lock the Phase 1.1 contract end-to-end.  The semantic-overlay case above
+// already pins the post-overlay subset WITH diagnostics (so it cannot pass by
+// deterministic coincidence).  These two add (a) the deterministic-path subset
+// lock — explicitly asserting the semantic axes were disabled this run so the
+// subset is genuinely the Phase 3 baseline — and (b) a canonicalization/dedupe
+// check that REGRESSES if the `constrainTagsToSettings` write boundary is
+// removed (the only difference observable through the public pipeline, since
+// the assigner is otherwise settings-safe by construction).
+
+test("runRefreshPipeline: deterministic tags (semantic OFF) are a non-empty settings-subset on every axis", async () => {
+  // Evidence supports a tag on all three axes; with no semantic config the
+  // pipeline runs the Phase 3 deterministic baseline only.  Asserting the axes
+  // are NON-empty keeps the subset check from passing vacuously on empty arrays.
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US", "Colombia"],
+      headline: "Treasury expands OFAC sanctions program",
+      body: ["New sanctions land under the OFAC framework."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "deterministic-subset",
+    title: "OFAC Sanctions",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Treasury widens sanctions.",
+    factual_claims: ["Reuters reports: Treasury expands OFAC sanctions program"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload, log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    // No semanticTagConfig / scorer → semantic uplift stays OFF (default).
+  });
+  const tags = payload.stories[0].tags;
+  // Genuinely the deterministic path: both semantic axes report disabled.
+  assert.equal(log.tags.topics.runtimeState, "disabled");
+  assert.equal(log.tags.keywords.runtimeState, "disabled");
+  // Non-vacuous subset: each axis carries ≥1 value and every value ∈ settings.
+  assert.ok(tags.topics.length >= 1, "expected ≥1 deterministic topic");
+  assert.ok(tags.keywords.length >= 1, "expected ≥1 deterministic keyword");
+  assert.ok(tags.geographies.length >= 1, "expected ≥1 deterministic geography");
+  for (const t of tags.topics) {
+    assert.ok(BASE_SETTINGS.topics.includes(t), `topic '${t}' must be in settings.topics`);
+  }
+  for (const k of tags.keywords) {
+    assert.ok(BASE_SETTINGS.keywords.includes(k), `keyword '${k}' must be in settings.keywords`);
+  }
+  for (const g of tags.geographies) {
+    assert.ok(BASE_SETTINGS.geographies.includes(g), `geography '${g}' must be in settings.geographies`);
+  }
+});
+
+test("runRefreshPipeline: write boundary canonicalizes to settings spelling and dedupes (regresses if clamp removed)", async () => {
+  // Settings carry two casing variants of the same keyword.  The deterministic
+  // assigner whole-word-matches BOTH against the "sanctions" evidence, so the
+  // pre-clamp axis would be ["Sanctions", "sanctions"].  The
+  // `constrainTagsToSettings` write boundary canonicalizes to the first
+  // settings spelling and dedupes to a single value — deleting the clamp would
+  // leak the duplicate-cased pair onto the payload, failing this assertion.
+  const settings = { ...BASE_SETTINGS, keywords: ["sanctions", "Sanctions"] };
+  const rawItems = [
+    makeItem({
+      sourceId: "src-1",
+      outlet: "Reuters",
+      minutesAgo: 30,
+      topic: "Diplomatic relations",
+      geographies: ["US"],
+      headline: "New sanctions announced",
+      body: ["The sanctions take effect immediately."],
+    }),
+  ];
+  const metaStory = {
+    meta_story_id: "casing-dedupe",
+    title: "Sanctions",
+    subtitle: "Sub.",
+    source_item_ids: ["src-1"],
+    summary: "Sanctions announced.",
+    factual_claims: ["Reuters reports: New sanctions announced"],
+    claim_evidence_map: { "0": ["src-1"] },
+  };
+  const { payload } = await runRefreshPipeline({
+    settings,
+    rawItems,
+    clusterFn: async () => [metaStory],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  assert.deepEqual(
+    payload.stories[0].tags.keywords,
+    ["sanctions"],
+    "write boundary must canonicalize + dedupe duplicate-cased settings to one value"
+  );
 });
 
 // ─── Evidence-backed tag derivation (settings ∩ source evidence) ────────────
