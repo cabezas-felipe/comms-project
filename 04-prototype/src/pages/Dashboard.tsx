@@ -365,14 +365,28 @@ export default function Dashboard() {
     // other routing path (join/forceRefresh/bootstrap).  A retry is always a
     // refresh attempt.
     const isRetry = reloadCounter > 0;
-    // POST-style attempts (retry, bootstrap, OR forceRefresh) count as refresh
-    // attempts: they delegate to the server's refresh executor, so the global
-    // `isRefreshing` flag must reflect them and the anchor advances on settle.
-    // GET serves the persisted snapshot — it is NOT a refresh attempt, so it
-    // must not toggle the in-flight flag and must not advance the anchor (GET
-    // only seeds when nothing is set yet).  Local `isLoading` covers the GET
-    // path's own loading copy.
-    const isPostAttempt = isRetry || (!joinResolvedToGet && (useBootstrap || forceRefresh));
+    // Phase 2.1: mount-time staleness safety net.  Background timers can be
+    // throttled/suspended, so a returning user may land with the hourly
+    // heartbeat overdue — showing a stale snapshot AND a stale "next refresh"
+    // timestamp.  When the DEFAULT path would otherwise serve a plain GET and
+    // the clock is past due, replay the missed heartbeat as a POST /refresh.
+    // Read the anchor ONCE at mount: `lastAttemptAt` is intentionally NOT a dep
+    // (we don't want a subsequent anchor advance to re-trigger the loader).
+    const isDueOnMount =
+      lastAttemptAt !== null && Date.now() - lastAttemptAt >= REFRESH_INTERVAL_MS;
+    // Only fires on the default path — strictly after retry / join / forceRefresh
+    // / bootstrap have all been ruled out, so existing precedence is preserved.
+    const isOverdueDefaultRefresh =
+      !isRetry && !joinResolvedToGet && !forceRefresh && !useBootstrap && isDueOnMount;
+    // POST-style attempts (retry, bootstrap, forceRefresh, OR an overdue-mount
+    // default refresh) count as refresh attempts: they delegate to the server's
+    // refresh executor, so the global `isRefreshing` flag must reflect them and
+    // the anchor advances on settle.  GET serves the persisted snapshot — it is
+    // NOT a refresh attempt, so it must not toggle the in-flight flag and must
+    // not advance the anchor (GET only seeds when nothing is set yet).  Local
+    // `isLoading` covers the GET path's own loading copy.
+    const isPostAttempt =
+      isRetry || isOverdueDefaultRefresh || (!joinResolvedToGet && (useBootstrap || forceRefresh));
     const attemptToken = isPostAttempt ? recordAttemptStart() : null;
     // `bootstrapResult` is only set when the bootstrap POST resolves — used to
     // read its `decision` for the clock-advance rule.  `renderedResult` is
@@ -453,6 +467,11 @@ export default function Dashboard() {
           const r = await bootstrapDashboard();
           bootstrapResult = r;
           renderedResult = r;
+        } else if (isOverdueDefaultRefresh) {
+          // Phase 2.1: missed-heartbeat catch-up — replay the hourly default
+          // refresh (bare `/api/dashboard/refresh`, default profile) rather
+          // than serving a stale GET snapshot.
+          renderedResult = await refreshDashboard();
         } else {
           renderedResult = await fetchDashboardWithMeta();
         }
@@ -498,7 +517,7 @@ export default function Dashboard() {
           //     fact that a refresh was attempted.  Only a successful
           //     `served_fresh_snapshot` is a no-op.
           const advanceClock =
-            isRetry || forceRefresh
+            isRetry || forceRefresh || isOverdueDefaultRefresh
               ? true
               : shouldAdvanceClockForBootstrap({
                   failed: postFailed,
