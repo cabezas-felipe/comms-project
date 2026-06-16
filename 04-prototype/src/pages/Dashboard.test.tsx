@@ -27,6 +27,21 @@ let mockLastAttemptAt: number | null = null;
 let mockIsRefreshing = false;
 let mockLastRefreshedAt: string | null = null;
 
+// Phase 1.2: the dashboard fetches the saved settings vocabulary on load and
+// intersects the pill row against it.  Tests drive the vocabulary (and a
+// fetch-failure path) through these mutable knobs.  The default is a superset
+// of every tag carried by PHASE6_STORIES so the pre-existing pill tests keep
+// rendering the same pills.
+const DEFAULT_SETTINGS_VOCAB = {
+  topics: ["Diplomatic relations", "Migration policy"],
+  keywords: ["sanctions", "OFAC", "asylum", "iran trade"],
+  geographies: ["US", "Colombia"],
+};
+let mockSettingsVocab: { topics: string[]; keywords: string[]; geographies: string[] } = {
+  ...DEFAULT_SETTINGS_VOCAB,
+};
+let mockSettingsShouldReject = false;
+
 const { MockDashboardFetchError } = vi.hoisted(() => {
   class MockDashboardFetchError extends Error {
     kind: string;
@@ -60,6 +75,20 @@ vi.mock("@/lib/analytics", () => ({
 vi.mock("@/lib/notify", () => ({
   notifyError: (...args: unknown[]) => notifyErrorSpy(...args),
   notifyWarning: (...args: unknown[]) => notifyWarningSpy(...args),
+}));
+
+vi.mock("@/lib/settings-api", () => ({
+  fetchSettingsPayload: () =>
+    mockSettingsShouldReject
+      ? Promise.reject(new Error("settings unavailable"))
+      : Promise.resolve({
+          contractVersion: CONTRACT_VERSION,
+          topics: mockSettingsVocab.topics,
+          keywords: mockSettingsVocab.keywords,
+          geographies: mockSettingsVocab.geographies,
+          traditionalSources: [],
+          socialSources: [],
+        }),
 }));
 
 vi.mock("@/lib/refresh-context", () => ({
@@ -118,6 +147,8 @@ afterEach(() => {
   mockLastAttemptAt = null;
   mockIsRefreshing = false;
   mockLastRefreshedAt = null;
+  mockSettingsVocab = { ...DEFAULT_SETTINGS_VOCAB };
+  mockSettingsShouldReject = false;
 });
 
 function renderAt(state: object | null) {
@@ -861,6 +892,326 @@ describe("Phase 6: dynamic header pills", () => {
     await waitFor(() => expect(pill.getAttribute("aria-pressed")).toBe("true"));
     fireEvent.click(pill);
     await waitFor(() => expect(pill.getAttribute("aria-pressed")).toBe("false"));
+  });
+});
+
+// ─── Phase 1.2: settings-backed pill row ─────────────────────────────────────
+//
+// Pills shown = (current visible story tags) ∩ (saved settings vocabulary).
+// The "All" pill is permanent, and filter semantics are unchanged (tags-only
+// matching on the full story tags via `storyMatchesSelection`).  A story tag
+// that is NOT in the saved settings vocabulary must never surface as a pill,
+// and a settings-fetch failure must degrade gracefully (no out-of-settings
+// pills, stories still render).
+
+describe("Phase 1.2: settings-backed pills", () => {
+  it("renders only pills whose values are in the fetched settings vocabulary (per-axis subset)", async () => {
+    // Settings DROP "OFAC" (keyword) and "Colombia" (geography) relative to the
+    // story tags.  Those values appear in PHASE6_STORIES tags but must NOT
+    // render as pills; every other in-settings value still does.
+    mockSettingsVocab = {
+      topics: ["Diplomatic relations", "Migration policy"],
+      keywords: ["sanctions", "asylum"],
+      geographies: ["US"],
+    };
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+
+    // In-settings values still render.
+    await screen.findByTestId("pill-topic-Diplomatic relations");
+    expect(screen.getByTestId("pill-topic-Migration policy")).toBeInTheDocument();
+    expect(screen.getByTestId("pill-keyword-sanctions")).toBeInTheDocument();
+    expect(screen.getByTestId("pill-keyword-asylum")).toBeInTheDocument();
+    expect(screen.getByTestId("pill-geo-US")).toBeInTheDocument();
+
+    // Out-of-settings story tags are NOT rendered as pills.
+    expect(screen.queryByTestId("pill-keyword-OFAC")).toBeNull();
+    expect(screen.queryByTestId("pill-geo-Colombia")).toBeNull();
+
+    // Every rendered pill is a subset of the fetched settings, per axis.
+    const row = screen.getByTestId("header-pill-row");
+    const valuesFor = (prefix: string) =>
+      Array.from(row.querySelectorAll(`[data-testid^='${prefix}']`)).map(
+        (el) => el.getAttribute("data-testid")?.replace(prefix, "") ?? ""
+      );
+    for (const t of valuesFor("pill-topic-")) {
+      expect(mockSettingsVocab.topics).toContain(t);
+    }
+    for (const k of valuesFor("pill-keyword-")) {
+      expect(mockSettingsVocab.keywords).toContain(k);
+    }
+    for (const g of valuesFor("pill-geo-")) {
+      expect(mockSettingsVocab.geographies).toContain(g);
+    }
+  });
+
+  it("'All' pill is always present and clears filters even with a constrained settings vocabulary", async () => {
+    mockSettingsVocab = {
+      topics: ["Migration policy"],
+      keywords: [],
+      geographies: [],
+    };
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+
+    // Permanent "All" pill.
+    const all = await screen.findByTestId("pill-all");
+    expect(all).toBeInTheDocument();
+    // Only the in-settings topic surfaced.
+    await screen.findByTestId("pill-topic-Migration policy");
+    expect(screen.queryByTestId("pill-topic-Diplomatic relations")).toBeNull();
+
+    // Filter by it → only Story B remains; "All" resets to the full feed.
+    fireEvent.click(screen.getByTestId("pill-topic-Migration policy"));
+    await waitFor(() => expect(screen.queryByText("Story A")).toBeNull());
+    expect(screen.getByText("Story B")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("pill-all"));
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    expect(screen.getByText("Story B")).toBeInTheDocument();
+  });
+
+  it("filtering stays tags-only and unchanged when pills are settings-backed", async () => {
+    // Settings expose Migration policy + OFAC.  Selecting an in-settings pill
+    // must still match against the FULL story tags (not the settings list):
+    // Story A carries OFAC, Story B does not → AND across axes yields zero.
+    mockSettingsVocab = {
+      topics: ["Migration policy"],
+      keywords: ["OFAC"],
+      geographies: [],
+    };
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+
+    fireEvent.click(await screen.findByTestId("pill-topic-Migration policy"));
+    fireEvent.click(screen.getByTestId("pill-keyword-OFAC"));
+    // Story A has OFAC but topic=Diplomatic relations; Story B has Migration
+    // policy but no OFAC → identical AND-across-sections result as Phase 6.
+    await waitFor(() => {
+      expect(screen.queryByText("Story A")).toBeNull();
+      expect(screen.queryByText("Story B")).toBeNull();
+    });
+  });
+
+  it("degrades gracefully when the settings fetch fails: no out-of-settings pills, stories still render", async () => {
+    mockSettingsShouldReject = true;
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+
+    // Story rendering + the permanent "All" pill survive the failure.
+    expect(screen.getByText("Story B")).toBeInTheDocument();
+    expect(screen.getByTestId("pill-all")).toBeInTheDocument();
+    // Conservative posture: NO tag pills are introduced without a settings list.
+    expect(screen.queryByTestId(/pill-topic-/)).toBeNull();
+    expect(screen.queryByTestId(/pill-keyword-/)).toBeNull();
+    expect(screen.queryByTestId(/pill-geo-/)).toBeNull();
+  });
+
+  it("applies the settings intersection to heartbeat-overlaid stories too", async () => {
+    // Initial feed: in-settings story.  Settings expose only "Migration
+    // policy" + "asylum" + "Colombia".
+    mockSettingsVocab = {
+      topics: ["Migration policy"],
+      keywords: ["asylum"],
+      geographies: ["Colombia"],
+    };
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [
+          makeStoryDto({
+            id: "init",
+            title: "Initial Story",
+            tags: { topics: ["Migration policy"], keywords: ["asylum"], geographies: ["Colombia"] },
+          }),
+        ],
+      },
+    });
+    renderAt(null);
+    expect(await screen.findByText("Initial Story")).toBeInTheDocument();
+    await screen.findByTestId("pill-topic-Migration policy");
+
+    // Heartbeat overlays a story whose tags mix in-settings + out-of-settings
+    // values.  The intersection must apply to the overlaid feed: only the
+    // in-settings axis values become pills.
+    mockHeartbeatResult = {
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [
+          makeStoryDto({
+            id: "next",
+            title: "Refreshed Story",
+            tags: {
+              topics: ["Migration policy", "Diplomatic relations"],
+              keywords: ["asylum", "OFAC"],
+              geographies: ["Colombia", "US"],
+            },
+          }),
+        ],
+      },
+      refreshedAt: "2026-05-11T13:00:00Z",
+    };
+    fireEvent.click(screen.getByTestId("pill-all"));
+    await waitFor(() => expect(screen.queryByText("Initial Story")).toBeNull());
+    expect(screen.getByText("Refreshed Story")).toBeInTheDocument();
+
+    // In-settings values from the OVERLAID story render…
+    expect(screen.getByTestId("pill-topic-Migration policy")).toBeInTheDocument();
+    expect(screen.getByTestId("pill-keyword-asylum")).toBeInTheDocument();
+    expect(screen.getByTestId("pill-geo-Colombia")).toBeInTheDocument();
+    // …its out-of-settings tags do NOT.
+    expect(screen.queryByTestId("pill-topic-Diplomatic relations")).toBeNull();
+    expect(screen.queryByTestId("pill-keyword-OFAC")).toBeNull();
+    expect(screen.queryByTestId("pill-geo-US")).toBeNull();
+  });
+});
+
+// ─── Phase 1.3: pill subset regression sweep ─────────────────────────────────
+//
+// Mapping-agnostic guardrails: rather than naming specific in/out values,
+// these sweep EVERY rendered pill and assert membership in the fetched
+// settings vocabulary, per axis.  They make a regression obvious if the client
+// ever leaks an out-of-settings pill label — through the initial-load path OR
+// the heartbeat overlay path — and lock that filtering stays tags-only
+// (independent of the settings vocabulary, no hidden client-side mapping).
+
+describe("Phase 1.3: pill subset regression sweep", () => {
+  // Read the rendered pill values per axis straight off the DOM testIds so the
+  // assertion never assumes which values are in/out of settings.
+  function renderedPillValues() {
+    const row = screen.getByTestId("header-pill-row");
+    const valuesFor = (prefix: string) =>
+      Array.from(row.querySelectorAll(`[data-testid^='${prefix}']`)).map(
+        (el) => el.getAttribute("data-testid")?.replace(prefix, "") ?? ""
+      );
+    return {
+      topics: valuesFor("pill-topic-"),
+      keywords: valuesFor("pill-keyword-"),
+      geographies: valuesFor("pill-geo-"),
+    };
+  }
+
+  function expectEveryPillWithin(vocab: {
+    topics: string[];
+    keywords: string[];
+    geographies: string[];
+  }) {
+    const rendered = renderedPillValues();
+    for (const t of rendered.topics) expect(vocab.topics).toContain(t);
+    for (const k of rendered.keywords) expect(vocab.keywords).toContain(k);
+    for (const g of rendered.geographies) expect(vocab.geographies).toContain(g);
+    return rendered;
+  }
+
+  it("every rendered pill is within the settings vocabulary on initial load (story tags exceed the vocab)", async () => {
+    // Vocab is a strict subset of the PHASE6_STORIES tag universe.
+    mockSettingsVocab = {
+      topics: ["Migration policy"],
+      keywords: ["asylum"],
+      geographies: ["US"],
+    };
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    await screen.findByTestId("pill-topic-Migration policy");
+
+    const rendered = expectEveryPillWithin(mockSettingsVocab);
+    // Non-vacuous: the in-settings values that the stories carry DID render.
+    expect(rendered.topics).toContain("Migration policy");
+    expect(rendered.keywords).toContain("asylum");
+    expect(rendered.geographies).toContain("US");
+    // And the union of out-of-settings tag values is fully absent.
+    expect(rendered.topics).not.toContain("Diplomatic relations");
+    expect(rendered.keywords).not.toContain("OFAC");
+    expect(rendered.keywords).not.toContain("sanctions");
+    expect(rendered.geographies).not.toContain("Colombia");
+  });
+
+  it("every rendered pill stays within the settings vocabulary after a heartbeat overlay", async () => {
+    mockSettingsVocab = {
+      topics: ["Migration policy"],
+      keywords: ["asylum"],
+      geographies: ["Colombia"],
+    };
+    fetchSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [
+          makeStoryDto({
+            id: "init",
+            title: "Initial Story",
+            tags: { topics: ["Migration policy"], keywords: ["asylum"], geographies: ["Colombia"] },
+          }),
+        ],
+      },
+    });
+    renderAt(null);
+    expect(await screen.findByText("Initial Story")).toBeInTheDocument();
+    await screen.findByTestId("pill-topic-Migration policy");
+    expectEveryPillWithin(mockSettingsVocab);
+
+    // Heartbeat overlays a feed whose tags mix in- and out-of-settings values.
+    mockHeartbeatResult = {
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [
+          makeStoryDto({
+            id: "next",
+            title: "Refreshed Story",
+            tags: {
+              topics: ["Migration policy", "Diplomatic relations"],
+              keywords: ["asylum", "OFAC", "sanctions"],
+              geographies: ["Colombia", "US"],
+            },
+          }),
+        ],
+      },
+      refreshedAt: "2026-05-11T13:00:00Z",
+    };
+    fireEvent.click(screen.getByTestId("pill-all"));
+    await waitFor(() => expect(screen.queryByText("Initial Story")).toBeNull());
+    expect(screen.getByText("Refreshed Story")).toBeInTheDocument();
+
+    // The sweep must still hold against the OVERLAID story's larger tag set.
+    const rendered = expectEveryPillWithin(mockSettingsVocab);
+    expect(rendered.topics).toContain("Migration policy");
+    expect(rendered.keywords).toContain("asylum");
+    expect(rendered.geographies).toContain("Colombia");
+  });
+
+  it("settings-fetch failure keeps the conservative posture: zero tag pills, All present, stories render", async () => {
+    mockSettingsShouldReject = true;
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    expect(screen.getByText("Story B")).toBeInTheDocument();
+    expect(screen.getByTestId("pill-all")).toBeInTheDocument();
+
+    const rendered = renderedPillValues();
+    expect(rendered.topics).toEqual([]);
+    expect(rendered.keywords).toEqual([]);
+    expect(rendered.geographies).toEqual([]);
+  });
+
+  it("filtering is tags-only and independent of the settings vocabulary (no hidden client mapping)", async () => {
+    // Settings expose ONLY a topic — no keywords/geographies in the vocab.
+    mockSettingsVocab = { topics: ["Diplomatic relations"], keywords: [], geographies: [] };
+    renderWithStories(PHASE6_STORIES);
+    await waitFor(() => expect(screen.getByText("Story A")).toBeInTheDocument());
+    // Only the in-settings topic pill renders.
+    await screen.findByTestId("pill-topic-Diplomatic relations");
+    expect(screen.queryByTestId("pill-topic-Migration policy")).toBeNull();
+    expect(screen.queryByTestId(/pill-keyword-/)).toBeNull();
+    expect(screen.queryByTestId(/pill-geo-/)).toBeNull();
+
+    // Selecting it filters by the story's FULL tags: Story A matches on its
+    // "Diplomatic relations" topic and stays visible even though its keyword
+    // and geography tags are entirely outside the (empty) settings vocab —
+    // proving the filter never consults the settings list.
+    fireEvent.click(screen.getByTestId("pill-topic-Diplomatic relations"));
+    await waitFor(() => expect(screen.queryByText("Story B")).toBeNull());
+    expect(screen.getByText("Story A")).toBeInTheDocument();
   });
 });
 

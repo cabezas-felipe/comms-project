@@ -38,8 +38,10 @@ import {
   storyMatchesSelection,
   toggleInSet,
   type TagSelection,
+  type TagSections,
 } from "@/lib/dashboard-filters";
 import { type StoryDto, type DashboardSelectionMeta } from "@tempo/contracts";
+import { fetchSettingsPayload } from "@/lib/settings-api";
 import { notifyError, notifyWarning } from "@/lib/notify";
 import { isUxTestMode } from "@/lib/ux-test-mode";
 import { useRefreshContext } from "@/lib/refresh-context";
@@ -179,6 +181,12 @@ export default function Dashboard() {
   const [selectedTopics, setSelectedTopics] = useState<ReadonlySet<string>>(() => new Set());
   const [selectedKeywords, setSelectedKeywords] = useState<ReadonlySet<string>>(() => new Set());
   const [selectedGeographies, setSelectedGeographies] = useState<ReadonlySet<string>>(() => new Set());
+  // Phase 1.2: pill sections are settings-backed.  The saved settings
+  // vocabulary (topics/keywords/geographies) is fetched once on load and the
+  // visible pills are intersected against it below.  `null` means "not yet
+  // fetched OR fetch failed" — the conservative state where NO pills are
+  // introduced (an out-of-settings value can never leak into the pill row).
+  const [settingsVocab, setSettingsVocab] = useState<TagSections | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   // Stories are seeded empty — no static demo fallback. The dashboard renders
@@ -242,6 +250,25 @@ export default function Dashboard() {
   const debugMode = isUxTestMode || searchParams.get("debug") === "1";
 
   const tagSections = useMemo(() => aggregateTagSections(stories), [stories]);
+  // Phase 1.2: displayed pills = (current visible story tags) ∩ (saved
+  // settings vocabulary).  Re-derives whenever `stories` change (incl. the
+  // heartbeat overlay, which flows through `setStories`) or settings resolve.
+  // While `settingsVocab` is null (unfetched / fetch failed), every axis
+  // intersects to empty — the conservative posture that guarantees no
+  // out-of-settings pill is ever introduced.  Filtering still uses the full,
+  // unmodified `tagSections`/story tags via `storyMatchesSelection`.
+  const displayedTagSections = useMemo<TagSections>(() => {
+    if (!settingsVocab) return { topics: [], keywords: [], geographies: [] };
+    const intersect = (values: string[], allowed: string[]) => {
+      const allow = new Set(allowed);
+      return values.filter((v) => allow.has(v));
+    };
+    return {
+      topics: intersect(tagSections.topics, settingsVocab.topics),
+      keywords: intersect(tagSections.keywords, settingsVocab.keywords),
+      geographies: intersect(tagSections.geographies, settingsVocab.geographies),
+    };
+  }, [tagSections, settingsVocab]);
   const tagSelection = useMemo<TagSelection>(
     () => ({ topics: selectedTopics, keywords: selectedKeywords, geographies: selectedGeographies }),
     [selectedTopics, selectedKeywords, selectedGeographies]
@@ -255,9 +282,9 @@ export default function Dashboard() {
   // least one pill section is non-empty OR when the dashboard hasn't loaded
   // any stories yet (the empty-stories state has its own copy below).
   const hasAnyTagSection =
-    tagSections.topics.length > 0 ||
-    tagSections.keywords.length > 0 ||
-    tagSections.geographies.length > 0;
+    displayedTagSections.topics.length > 0 ||
+    displayedTagSections.keywords.length > 0 ||
+    displayedTagSections.geographies.length > 0;
   const showNoTagsCaption = stories.length > 0 && !hasAnyTagSection;
 
   const filtered = useMemo(
@@ -287,6 +314,34 @@ export default function Dashboard() {
   useEffect(() => {
     trackDashboardViewed();
   }, []);
+
+  // Phase 1.2: fetch the saved settings vocabulary once on load so the pill
+  // row can be intersected against it (see `displayedTagSections`).  Reuses
+  // the existing settings API client.  On failure we leave `settingsVocab`
+  // null — the dashboard keeps rendering stories and its load/error UX as
+  // before, and the pill row conservatively shows only "All".
+  useEffect(() => {
+    // emptyMode (?empty=1) renders a static empty block with no stories — the
+    // pill row is moot, so skip the fetch (mirrors the load/heartbeat effects).
+    if (emptyMode) return;
+    let canceled = false;
+    fetchSettingsPayload()
+      .then((payload) => {
+        if (canceled) return;
+        setSettingsVocab({
+          topics: payload.topics ?? [],
+          keywords: payload.keywords ?? [],
+          geographies: payload.geographies ?? [],
+        });
+      })
+      .catch(() => {
+        if (canceled) return;
+        setSettingsVocab(null);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [emptyMode]);
 
   useEffect(() => {
     if (expandedId) trackStoryExpanded(expandedId);
@@ -737,10 +792,10 @@ export default function Dashboard() {
                   No tag groups yet
                 </span>
               )}
-              {tagSections.topics.length > 0 && (
+              {displayedTagSections.topics.length > 0 && (
                 <>
                   <span className="mx-1 text-rule" aria-hidden="true">·</span>
-                  {tagSections.topics.map((t) => (
+                  {displayedTagSections.topics.map((t) => (
                     <Pill
                       key={`topic-${t}`}
                       active={selectedTopics.has(t)}
@@ -752,10 +807,10 @@ export default function Dashboard() {
                   ))}
                 </>
               )}
-              {tagSections.keywords.length > 0 && (
+              {displayedTagSections.keywords.length > 0 && (
                 <>
                   <span className="mx-1 text-rule" aria-hidden="true">·</span>
-                  {tagSections.keywords.map((k) => (
+                  {displayedTagSections.keywords.map((k) => (
                     // Display-only formatting: `k` is the canonical raw value
                     // used for key/testId/selection/filtering; only the pill's
                     // visible label is title-cased so lowercase settings
@@ -772,10 +827,10 @@ export default function Dashboard() {
                   ))}
                 </>
               )}
-              {tagSections.geographies.length > 0 && (
+              {displayedTagSections.geographies.length > 0 && (
                 <>
                   <span className="mx-1 text-rule" aria-hidden="true">·</span>
-                  {tagSections.geographies.map((g) => (
+                  {displayedTagSections.geographies.map((g) => (
                     <Pill
                       key={`geo-${g}`}
                       active={selectedGeographies.has(g)}
