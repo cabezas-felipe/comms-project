@@ -1074,6 +1074,169 @@ function formatSocialFunnel(social) {
   );
 }
 
+// ─── Social POST-DEDUPE funnel (clustering → grounding → cap → publish) ───────
+//
+// The pre-dedupe social funnel (above) ends at `afterDedupe`. This block traces
+// kind:"social" evidence the rest of the way — cluster output, grounding, the
+// overflow cap, and final publish — so a `inPublishedStories===0` despite
+// `afterDedupe>0` can be attributed to the EXACT post-dedupe stage. PURE
+// COUNTING: it never changes clustering, grounding, or cap decisions.
+
+const SOCIAL_POST_DEDUPE_ID_CAP = 25;
+
+// Does a meta-story (carrying `source_item_ids`) reference >=1 social source
+// item? Resolves ids against the same `sourceItemsById` universe clustering saw.
+function metaStoryHasSocialSource(ms, sourceItemsById) {
+  if (!ms || !(sourceItemsById instanceof Map)) return false;
+  const ids = Array.isArray(ms.source_item_ids) ? ms.source_item_ids : [];
+  for (const id of ids) {
+    if (sourceItemsById.get(id)?.kind === "social") return true;
+  }
+  return false;
+}
+
+// Does a BUILT story (shaped `sources[]` with mapped contract kind) carry a
+// kind:"social" source?
+function builtStoryHasSocialSource(story) {
+  const sources = Array.isArray(story?.sources) ? story.sources : [];
+  return sources.some((s) => s?.kind === "social");
+}
+
+/**
+ * Build the additive `_meta.funnel.social.postDedupe` block.
+ *
+ * Pass `null` for any stage that did NOT run this request (e.g. the
+ * watermark-skip branch, where clustering/grounding/cap are skipped). Un-run
+ * stage counts are `null`, drop attribution is `null`/0, and the post-grounding
+ * id arrays are empty. `afterDedupe` + `socialSourceItemIdsAtDedupe` are always
+ * populated (dedupe runs on every non-error path).
+ *
+ * Unit note: `cluster_output` drop is in ITEM units (social items that entered
+ * clustering but produced zero social clusters); `grounding` / `overflow_cap`
+ * are STORY-level deltas. These never need cross-unit comparison because a
+ * non-zero `cluster_output` drop forces `clusterOutputClusterCount===0`, which
+ * pins the later story-stage social counts to 0.
+ *
+ * @returns {object} additive post-dedupe diagnostics (counts + attribution + capped ids)
+ */
+export function buildSocialPostDedupeFunnel({
+  dedupedItems = null,
+  clusterInputItems = null,
+  clusterOutputStories = null,
+  groundedStories = null,
+  cappedEntries = null,
+  publishedStories = null,
+  sourceItemsById = null,
+  idCap = SOCIAL_POST_DEDUPE_ID_CAP,
+} = {}) {
+  const afterDedupe = countSocialItems(dedupedItems);
+  const socialSourceItemIdsAtDedupe = (Array.isArray(dedupedItems) ? dedupedItems : [])
+    .filter((it) => it?.kind === "social")
+    .map((it) => it?.sourceId)
+    .filter((id) => typeof id === "string")
+    .slice(0, idCap);
+
+  // A stage "ran" iff its input array was provided (the skip branch passes null).
+  const clusterRan = Array.isArray(clusterInputItems) && Array.isArray(clusterOutputStories);
+  const groundingRan = Array.isArray(groundedStories);
+  const capRan = Array.isArray(cappedEntries);
+
+  const clusterInputSocialCount = Array.isArray(clusterInputItems)
+    ? countSocialItems(clusterInputItems)
+    : null;
+
+  const socialClusters = clusterRan
+    ? clusterOutputStories.filter((ms) => metaStoryHasSocialSource(ms, sourceItemsById))
+    : null;
+  const clusterOutputClusterCount = socialClusters ? socialClusters.length : null;
+
+  const groundedSocial = groundingRan
+    ? groundedStories.filter((ms) => metaStoryHasSocialSource(ms, sourceItemsById))
+    : null;
+  const afterGroundingSocialStoryCount = groundedSocial ? groundedSocial.length : null;
+  const socialMetaStoryIdsAfterGrounding = (groundedSocial ?? [])
+    .map((ms) => ms?.meta_story_id)
+    .filter((id) => typeof id === "string")
+    .slice(0, idCap);
+
+  const cappedSocial = capRan
+    ? cappedEntries.filter((e) => builtStoryHasSocialSource(e?.story))
+    : null;
+  const afterOverflowCapSocialStoryCount = cappedSocial ? cappedSocial.length : null;
+  const socialMetaStoryIdsAfterOverflowCap = (cappedSocial ?? [])
+    .map((e) => e?.sortKey?.metaStoryId ?? e?.story?.metaStoryId)
+    .filter((id) => typeof id === "string")
+    .slice(0, idCap);
+
+  const publishedSocialSourceCount = Array.isArray(publishedStories)
+    ? countSocialSourcesInStories(publishedStories)
+    : null;
+
+  // Drop attribution — only when the post-dedupe stages actually ran.
+  let dropsByPostDedupeStage;
+  let primaryPostDedupeDropStage;
+  let largestPostDedupeDropCount;
+  if (clusterRan && groundingRan && capRan) {
+    const clusterOutputDrop =
+      clusterInputSocialCount > 0 && clusterOutputClusterCount === 0 ? clusterInputSocialCount : 0;
+    const groundingDrop = Math.max(0, clusterOutputClusterCount - afterGroundingSocialStoryCount);
+    const overflowDrop = Math.max(0, afterGroundingSocialStoryCount - afterOverflowCapSocialStoryCount);
+    dropsByPostDedupeStage = {
+      cluster_output: clusterOutputDrop,
+      grounding: groundingDrop,
+      overflow_cap: overflowDrop,
+    };
+    // Largest drop wins; ties resolve to the EARLIEST stage; "none" when no drop.
+    largestPostDedupeDropCount = 0;
+    primaryPostDedupeDropStage = "none";
+    for (const [stage, delta] of [
+      ["cluster_output", clusterOutputDrop],
+      ["grounding", groundingDrop],
+      ["overflow_cap", overflowDrop],
+    ]) {
+      if (delta > largestPostDedupeDropCount) {
+        largestPostDedupeDropCount = delta;
+        primaryPostDedupeDropStage = stage;
+      }
+    }
+  } else {
+    // Skip branch / un-run stages: deterministic null/zero semantics.
+    dropsByPostDedupeStage = { cluster_output: null, grounding: null, overflow_cap: null };
+    primaryPostDedupeDropStage = null;
+    largestPostDedupeDropCount = 0;
+  }
+
+  return {
+    afterDedupe,
+    clusterInputSocialCount,
+    clusterOutputClusterCount,
+    afterGroundingSocialStoryCount,
+    afterOverflowCapSocialStoryCount,
+    publishedSocialSourceCount,
+    primaryPostDedupeDropStage,
+    largestPostDedupeDropCount,
+    dropsByPostDedupeStage,
+    socialSourceItemIdsAtDedupe,
+    socialMetaStoryIdsAfterGrounding,
+    socialMetaStoryIdsAfterOverflowCap,
+  };
+}
+
+// One-line, grep-friendly post-dedupe summary for [pipeline.funnel.social.post_dedupe].
+// No secrets — counts are integers, ids are non-secret meta-story / source ids.
+function formatSocialPostDedupeFunnel(pd) {
+  return (
+    `afterDedupe=${pd.afterDedupe}` +
+    ` clusterInput=${pd.clusterInputSocialCount}` +
+    ` clusters=${pd.clusterOutputClusterCount}` +
+    ` grounded=${pd.afterGroundingSocialStoryCount}` +
+    ` afterCap=${pd.afterOverflowCapSocialStoryCount}` +
+    ` published=${pd.publishedSocialSourceCount}` +
+    ` primary_drop=${pd.primaryPostDedupeDropStage ?? "none"}` +
+    ` largest_drop=${pd.largestPostDedupeDropCount}`
+  );
+}
+
 // ─── Decision-trace (Phase 2 lightweight diagnostics) ───────────────────────
 //
 // Backend-only, internal-explainability surface on top of the pipeline log.
@@ -3205,11 +3368,24 @@ export async function runRefreshPipeline({
       socialSelectionApplied: selectionMeta?.socialSelectionApplied,
       matchedSocialSources: selectionMeta?.matchedSocialSources,
     });
+    // Post-dedupe trace on the skip branch: clustering/grounding/cap NEVER ran,
+    // so all post-cluster counts are null (only `afterDedupe` + the dedupe id
+    // list are real). Keeps the shape present + parity with the full-run path.
+    skipFunnel.social.postDedupe = buildSocialPostDedupeFunnel({
+      dedupedItems,
+      clusterInputItems: null,
+      clusterOutputStories: null,
+      groundedStories: null,
+      cappedEntries: null,
+      publishedStories: null,
+      sourceItemsById: null,
+    });
     console.log(
       `[pipeline.watermark] unchanged (${watermarkInfo.watermark}) — skipping clustering, grounding, locks, rejections`
     );
     console.log(`[pipeline.funnel] ${formatFunnel(skipFunnel)}  execution_mode=${skipFunnel.executionMode}  primary_drop=${skipFunnel.primaryDropStage}`);
     console.log(`[pipeline.funnel.social] ${formatSocialFunnel(skipFunnel.social)}`);
+    console.log(`[pipeline.funnel.social.post_dedupe] ${formatSocialPostDedupeFunnel(skipFunnel.social.postDedupe)}`);
     return {
       payload: null, // signals caller to re-serve prior snapshot
       log: {
@@ -4363,8 +4539,21 @@ export async function runRefreshPipeline({
     socialSelectionApplied: selectionMeta?.socialSelectionApplied,
     matchedSocialSources: selectionMeta?.matchedSocialSources,
   });
+  // Additive post-dedupe social trace (clustering → grounding → cap → publish).
+  // All stages ran on the full-run path, so every count is populated. Pure
+  // observability — never changes clustering/grounding/cap decisions.
+  funnel.social.postDedupe = buildSocialPostDedupeFunnel({
+    dedupedItems,
+    clusterInputItems,
+    clusterOutputStories: rawMetaStories,
+    groundedStories,
+    cappedEntries,
+    publishedStories: stories,
+    sourceItemsById,
+  });
   console.log(`[pipeline.funnel] ${formatFunnel(funnel)}  execution_mode=${funnel.executionMode}  primary_drop=${funnel.primaryDropStage}`);
   console.log(`[pipeline.funnel.social] ${formatSocialFunnel(funnel.social)}`);
+  console.log(`[pipeline.funnel.social.post_dedupe] ${formatSocialPostDedupeFunnel(funnel.social.postDedupe)}`);
   if (stories.length === 0) {
     const noteParts = [];
     noteParts.push(`primary_drop=${funnel.primaryDropStage}`);

@@ -72,6 +72,7 @@ import {
   prioritizeLane2Candidates,
   buildSourceGroundedWhyFallback,
   buildSocialFunnel,
+  buildSocialPostDedupeFunnel,
 } from "./refresh-pipeline.mjs";
 // C2: cross-module B1→B2 handoff regression — feed the pipeline's emitted
 // reclusterQueue straight into the deferred re-cluster executor.
@@ -4809,6 +4810,238 @@ test("runRefreshPipeline: social funnel — present and inert when X ingestion d
   assert.equal(sf.socialSelectionApplied, false);
   assert.equal(sf.matchedSocialSourceCount, 0);
   assert.deepEqual(sf.matchedSocialSources, []);
+});
+
+// ─── Social POST-DEDUPE funnel (clustering → grounding → cap → publish) ──────
+
+test("buildSocialPostDedupeFunnel: cluster_output drop (social at dedupe, zero social clusters out)", () => {
+  const items = new Map([
+    ["s1", { sourceId: "s1", kind: "social", outlet: "@petrogustavo" }],
+  ]);
+  const out = buildSocialPostDedupeFunnel({
+    dedupedItems: [{ sourceId: "s1", kind: "social" }],
+    clusterInputItems: [{ sourceId: "s1", kind: "social" }],
+    clusterOutputStories: [], // clustering produced no clusters at all
+    groundedStories: [],
+    cappedEntries: [],
+    publishedStories: [],
+    sourceItemsById: items,
+  });
+  assert.equal(out.afterDedupe, 1);
+  assert.equal(out.clusterInputSocialCount, 1);
+  assert.equal(out.clusterOutputClusterCount, 0);
+  assert.equal(out.afterGroundingSocialStoryCount, 0);
+  assert.equal(out.afterOverflowCapSocialStoryCount, 0);
+  assert.equal(out.publishedSocialSourceCount, 0);
+  assert.equal(out.primaryPostDedupeDropStage, "cluster_output");
+  assert.equal(out.largestPostDedupeDropCount, 1);
+  assert.deepEqual(out.dropsByPostDedupeStage, { cluster_output: 1, grounding: 0, overflow_cap: 0 });
+  assert.deepEqual(out.socialSourceItemIdsAtDedupe, ["s1"]);
+});
+
+test("buildSocialPostDedupeFunnel: grounding drop (social cluster formed, none grounded)", () => {
+  const items = new Map([["s1", { sourceId: "s1", kind: "social" }]]);
+  const out = buildSocialPostDedupeFunnel({
+    dedupedItems: [{ sourceId: "s1", kind: "social" }],
+    clusterInputItems: [{ sourceId: "s1", kind: "social" }],
+    clusterOutputStories: [{ meta_story_id: "m1", source_item_ids: ["s1"] }], // 1 social cluster
+    groundedStories: [], // grounding dropped it
+    cappedEntries: [],
+    publishedStories: [],
+    sourceItemsById: items,
+  });
+  assert.equal(out.clusterOutputClusterCount, 1);
+  assert.equal(out.afterGroundingSocialStoryCount, 0);
+  assert.equal(out.primaryPostDedupeDropStage, "grounding");
+  assert.equal(out.largestPostDedupeDropCount, 1);
+  assert.deepEqual(out.dropsByPostDedupeStage, { cluster_output: 0, grounding: 1, overflow_cap: 0 });
+});
+
+test("buildSocialPostDedupeFunnel: overflow_cap drop (social grounded, none survive cap)", () => {
+  const items = new Map([["s1", { sourceId: "s1", kind: "social" }]]);
+  const out = buildSocialPostDedupeFunnel({
+    dedupedItems: [{ sourceId: "s1", kind: "social" }],
+    clusterInputItems: [{ sourceId: "s1", kind: "social" }],
+    clusterOutputStories: [{ meta_story_id: "m1", source_item_ids: ["s1"] }],
+    groundedStories: [{ meta_story_id: "m1", source_item_ids: ["s1"] }], // grounded
+    cappedEntries: [], // cap dropped all social stories
+    publishedStories: [],
+    sourceItemsById: items,
+  });
+  assert.equal(out.afterGroundingSocialStoryCount, 1);
+  assert.equal(out.afterOverflowCapSocialStoryCount, 0);
+  assert.equal(out.primaryPostDedupeDropStage, "overflow_cap");
+  assert.equal(out.largestPostDedupeDropCount, 1);
+  assert.deepEqual(out.dropsByPostDedupeStage, { cluster_output: 0, grounding: 0, overflow_cap: 1 });
+  assert.deepEqual(out.socialMetaStoryIdsAfterGrounding, ["m1"]);
+  assert.deepEqual(out.socialMetaStoryIdsAfterOverflowCap, []);
+});
+
+test("buildSocialPostDedupeFunnel: happy path — social survives to publish, no drops", () => {
+  const items = new Map([["s1", { sourceId: "s1", kind: "social" }]]);
+  const builtStory = { metaStoryId: "m1", sources: [{ kind: "social", id: "s1" }, { kind: "traditional", id: "t1" }] };
+  const out = buildSocialPostDedupeFunnel({
+    dedupedItems: [{ sourceId: "s1", kind: "social" }],
+    clusterInputItems: [{ sourceId: "s1", kind: "social" }],
+    clusterOutputStories: [{ meta_story_id: "m1", source_item_ids: ["s1"] }],
+    groundedStories: [{ meta_story_id: "m1", source_item_ids: ["s1"] }],
+    cappedEntries: [{ story: builtStory, sortKey: { metaStoryId: "m1" } }],
+    publishedStories: [builtStory],
+    sourceItemsById: items,
+  });
+  assert.equal(out.clusterOutputClusterCount, 1);
+  assert.equal(out.afterGroundingSocialStoryCount, 1);
+  assert.equal(out.afterOverflowCapSocialStoryCount, 1);
+  assert.equal(out.publishedSocialSourceCount, 1);
+  assert.equal(out.primaryPostDedupeDropStage, "none");
+  assert.equal(out.largestPostDedupeDropCount, 0);
+  assert.deepEqual(out.dropsByPostDedupeStage, { cluster_output: 0, grounding: 0, overflow_cap: 0 });
+  assert.deepEqual(out.socialMetaStoryIdsAfterOverflowCap, ["m1"]);
+});
+
+test("buildSocialPostDedupeFunnel: watermark-skip semantics — null post-cluster counts, afterDedupe real", () => {
+  const out = buildSocialPostDedupeFunnel({
+    dedupedItems: [{ sourceId: "s1", kind: "social" }, { sourceId: "s2", kind: "social" }],
+    clusterInputItems: null, // nothing post-dedupe ran on a skip
+    clusterOutputStories: null,
+    groundedStories: null,
+    cappedEntries: null,
+    publishedStories: null,
+    sourceItemsById: null,
+  });
+  assert.equal(out.afterDedupe, 2, "dedupe always ran");
+  assert.deepEqual(out.socialSourceItemIdsAtDedupe, ["s1", "s2"]);
+  assert.equal(out.clusterInputSocialCount, null);
+  assert.equal(out.clusterOutputClusterCount, null);
+  assert.equal(out.afterGroundingSocialStoryCount, null);
+  assert.equal(out.afterOverflowCapSocialStoryCount, null);
+  assert.equal(out.publishedSocialSourceCount, null);
+  assert.equal(out.primaryPostDedupeDropStage, null);
+  assert.equal(out.largestPostDedupeDropCount, 0);
+  assert.deepEqual(out.dropsByPostDedupeStage, { cluster_output: null, grounding: null, overflow_cap: null });
+  assert.deepEqual(out.socialMetaStoryIdsAfterGrounding, []);
+  assert.deepEqual(out.socialMetaStoryIdsAfterOverflowCap, []);
+});
+
+test("buildSocialPostDedupeFunnel: diagnostic id arrays are capped to 25", () => {
+  const deduped = Array.from({ length: 40 }, (_, i) => ({ sourceId: `s${i}`, kind: "social" }));
+  const out = buildSocialPostDedupeFunnel({ dedupedItems: deduped });
+  assert.equal(out.afterDedupe, 40);
+  assert.equal(out.socialSourceItemIdsAtDedupe.length, 25, "id list capped to 25");
+});
+
+test("runRefreshPipeline: postDedupe cluster_output drop — social reaches dedupe but no cluster published", async () => {
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [makeSocialItem()],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async () => [], // social reaches clustering, no cluster formed
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+  const pd = log.funnel.social.postDedupe;
+  assert.ok(pd && typeof pd === "object", "_meta.funnel.social.postDedupe present");
+  assert.equal(pd.afterDedupe, 1);
+  assert.equal(pd.clusterInputSocialCount, 1);
+  assert.equal(pd.clusterOutputClusterCount, 0);
+  assert.equal(pd.publishedSocialSourceCount, 0);
+  assert.equal(pd.primaryPostDedupeDropStage, "cluster_output");
+  assert.deepEqual(pd.socialSourceItemIdsAtDedupe, ["x-petro-1"]);
+});
+
+test("runRefreshPipeline: postDedupe grounding drop — social cluster formed but fails grounding", async () => {
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [makeSocialItem()],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    // Cluster includes the real social id + a hallucinated id → partial_source_ids
+    // grounding failure (strict drop), so a social cluster forms but none ground.
+    clusterFn: async (input) => [
+      {
+        meta_story_id: "social-ungrounded",
+        title: "Social Ungrounded",
+        subtitle: "Refs a hallucinated source.",
+        source_item_ids: [...input.map((i) => i.sourceId), "fake-hallucinated-id"],
+        summary: "Summary referencing a hallucinated source id.",
+        tags: { topics: [], keywords: [], geographies: [] },
+      },
+    ],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
+  });
+  const pd = log.funnel.social.postDedupe;
+  assert.equal(pd.clusterOutputClusterCount, 1, "a social-bearing cluster formed");
+  assert.equal(pd.afterGroundingSocialStoryCount, 0, "but none survive grounding");
+  assert.equal(pd.publishedSocialSourceCount, 0);
+  assert.equal(pd.primaryPostDedupeDropStage, "grounding");
+  assert.equal(log.groundingDropReasons.partial_source_ids, 1, "sanity: strict grounding drop fired");
+});
+
+test("runRefreshPipeline: postDedupe happy path — social survives to published stories", async () => {
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const { payload, log } = await runRefreshPipeline({
+    settings,
+    rawItems: [makeSocialItem()],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async (items) => [
+      {
+        meta_story_id: "petro-diplomatic-statement",
+        title: "Petro Diplomatic Statement",
+        subtitle: "Official communication on US relations.",
+        source_item_ids: items.map((i) => i.sourceId),
+        summary: "Petro issued an official diplomatic statement on US relations.",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+      },
+    ],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
+  });
+  const pd = log.funnel.social.postDedupe;
+  assert.equal(pd.clusterOutputClusterCount, 1);
+  assert.equal(pd.afterGroundingSocialStoryCount, 1);
+  assert.equal(pd.afterOverflowCapSocialStoryCount, 1);
+  assert.ok(pd.publishedSocialSourceCount > 0, "social source reaches publish");
+  assert.equal(pd.primaryPostDedupeDropStage, "none");
+  // Parity contract: publishedSocialSourceCount mirrors social.inPublishedStories.
+  assert.equal(pd.publishedSocialSourceCount, log.funnel.social.inPublishedStories);
+  const realSocialSources = payload.stories.flatMap((s) => s.sources).filter((x) => x.kind === "social").length;
+  assert.equal(pd.publishedSocialSourceCount, realSocialSources);
+  assert.deepEqual(pd.socialMetaStoryIdsAfterOverflowCap, ["petro-diplomatic-statement"]);
+});
+
+test("runRefreshPipeline: postDedupe present with null semantics on watermark-skip", async () => {
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const priorWatermark = "skip-wm-postdedupe";
+  // First run computes the watermark; second run with the same candidate set +
+  // matching priorWatermark short-circuits.
+  const baseOpts = {
+    settings,
+    rawItems: [makeSocialItem()],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  };
+  const first = await runRefreshPipeline(baseOpts);
+  const wm = first.log.watermark;
+  const second = await runRefreshPipeline({ ...baseOpts, priorWatermark: wm, priorStoryCount: 1 });
+  assert.equal(second.log.unchanged, true, "second run short-circuits on the watermark");
+  const pd = second.log.funnel.social.postDedupe;
+  assert.ok(pd && typeof pd === "object", "postDedupe present on skip");
+  assert.equal(pd.afterDedupe, 1, "dedupe ran before the watermark decision");
+  assert.equal(pd.clusterInputSocialCount, null);
+  assert.equal(pd.clusterOutputClusterCount, null);
+  assert.equal(pd.publishedSocialSourceCount, null);
+  assert.equal(pd.primaryPostDedupeDropStage, null);
+  void priorWatermark;
 });
 
 test("runRefreshPipeline regression: strict-empty preserved — items with no matching feedId AND no outlet match still drop", async () => {

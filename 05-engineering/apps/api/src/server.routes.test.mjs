@@ -1189,6 +1189,21 @@ const SOCIAL_FUNNEL_BLOCK = {
   socialSelectionApplied: true,
   matchedSocialSourceCount: 1,
   matchedSocialSources: ["@petrogustavo"],
+  // Additive post-dedupe trace nested under the social funnel.
+  postDedupe: {
+    afterDedupe: 1,
+    clusterInputSocialCount: 1,
+    clusterOutputClusterCount: 1,
+    afterGroundingSocialStoryCount: 1,
+    afterOverflowCapSocialStoryCount: 1,
+    publishedSocialSourceCount: 1,
+    primaryPostDedupeDropStage: "none",
+    largestPostDedupeDropCount: 0,
+    dropsByPostDedupeStage: { cluster_output: 0, grounding: 0, overflow_cap: 0 },
+    socialSourceItemIdsAtDedupe: ["x:petrogustavo:deadbeefdeadbeef"],
+    socialMetaStoryIdsAfterGrounding: ["sf-story"],
+    socialMetaStoryIdsAfterOverflowCap: ["sf-story"],
+  },
 };
 
 function assertSocialFunnelShape(social, label) {
@@ -1206,6 +1221,25 @@ function assertSocialFunnelShape(social, label) {
   assert.equal(typeof social.socialSelectionApplied, "boolean", `${label}: socialSelectionApplied is boolean`);
   assert.equal(typeof social.matchedSocialSourceCount, "number", `${label}: matchedSocialSourceCount is a number`);
   assert.ok(Array.isArray(social.matchedSocialSources), `${label}: matchedSocialSources is an array`);
+}
+
+function assertSocialPostDedupeShape(pd, label) {
+  assert.ok(pd && typeof pd === "object", `${label}: _meta.funnel.social.postDedupe present`);
+  for (const k of [
+    "afterDedupe", "clusterInputSocialCount", "clusterOutputClusterCount",
+    "afterGroundingSocialStoryCount", "afterOverflowCapSocialStoryCount",
+    "publishedSocialSourceCount", "largestPostDedupeDropCount",
+  ]) {
+    assert.ok(k in pd, `${label}: ${k} present`);
+  }
+  assert.ok("primaryPostDedupeDropStage" in pd, `${label}: primaryPostDedupeDropStage present`);
+  assert.ok(pd.dropsByPostDedupeStage && typeof pd.dropsByPostDedupeStage === "object", `${label}: dropsByPostDedupeStage present`);
+  for (const stage of ["cluster_output", "grounding", "overflow_cap"]) {
+    assert.ok(stage in pd.dropsByPostDedupeStage, `${label}: dropsByPostDedupeStage.${stage} present`);
+  }
+  assert.ok(Array.isArray(pd.socialSourceItemIdsAtDedupe), `${label}: socialSourceItemIdsAtDedupe is an array`);
+  assert.ok(Array.isArray(pd.socialMetaStoryIdsAfterGrounding), `${label}: socialMetaStoryIdsAfterGrounding is an array`);
+  assert.ok(Array.isArray(pd.socialMetaStoryIdsAfterOverflowCap), `${label}: socialMetaStoryIdsAfterOverflowCap is an array`);
 }
 
 test("POST /api/dashboard/refresh surfaces _meta.funnel.social diagnostics", async () => {
@@ -1254,6 +1288,10 @@ test("POST /api/dashboard/refresh surfaces _meta.funnel.social diagnostics", asy
       assert.equal(social.inPublishedStories, 1);
       assert.equal(social.primaryDropStageForSocial, "afterSourceSelection");
       assert.deepEqual(social.matchedSocialSources, ["@petrogustavo"]);
+      // Post-dedupe trace surfaces nested under the social funnel.
+      assertSocialPostDedupeShape(social.postDedupe, "POST refresh");
+      assert.equal(social.postDedupe.publishedSocialSourceCount, 1);
+      assert.equal(social.postDedupe.primaryPostDedupeDropStage, "none");
     });
   } finally {
     _snapshotRepo.write = prevWrite;
@@ -1293,6 +1331,10 @@ test("GET /api/dashboard/refresh/meta surfaces persisted _meta.funnel.social", a
     assert.equal(social.inPublishedStories, 1);
     assert.equal(social.primaryDropStageForSocial, "afterSourceSelection");
     assert.deepEqual(social.matchedSocialSources, ["@petrogustavo"]);
+    // Persisted post-dedupe trace survives the lift path and surfaces here.
+    assertSocialPostDedupeShape(social.postDedupe, "GET refresh/meta");
+    assert.equal(social.postDedupe.publishedSocialSourceCount, 1);
+    assert.deepEqual(social.postDedupe.socialMetaStoryIdsAfterOverflowCap, ["sf-story"]);
   } finally {
     _auth.resolver = prevResolver;
   }
