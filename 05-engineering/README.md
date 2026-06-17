@@ -350,6 +350,40 @@ Operator-facing knobs and contracts that landed with source expansion. See [D-06
 - **`_meta.timings` per-stage latency.** Refresh responses now carry `_meta.timings` (persisted via `_lastRunMeta.timings`) with both ingestion and pipeline stage wall-clocks: `ingestionMs`, `preClusterMs`, `recallMs`, `clusterMs`, `whatChangedMs`, `whyMs`, `pipelineMs`. This is the first surface for "why was this refresh slow?".
 - **Expansion-safe allowlist contract.** **Do** leave `TEMPO_RSS_ALLOWLIST` **unset** during source expansion so fetch scope derives from the active manifest feeds — newly-activated publishers ingest automatically. **Don't** carry a legacy narrow allowlist (e.g. `washington post,reuters`) into an expansion rollout: a stale env silently blocks new feeds (the "Reuters-class block"). Set it only to *intentionally* constrain fetch scope, as temporary/explicit narrowing. See [`apps/api/.env.example`](apps/api/.env.example).
 
+## X ingestion pilot validation (Phase 1)
+
+The X (Twitter) ingestion path reads recent tweets for handles in a user's `socialSources` and merges them into the refresh pool alongside RSS — fail-open, so RSS still renders if X fails. Use this checklist to validate the **@petrogustavo pilot** end-to-end.
+
+**1. Set env vars** (`apps/api/.env`; server-side only — never `VITE_*`):
+
+```sh
+TEMPO_X_INGESTION_ENABLED=true
+TEMPO_X_BEARER_TOKEN=...          # App-only Bearer; never logged
+TEMPO_X_HANDLE_ALLOWLIST=petrogustavo   # pilot gate (see note below)
+```
+
+**2. Save settings** for the pilot user with the social handle(s) under `socialSources` (e.g. `@petrogustavo`) via `PUT /api/settings`.
+
+**3. Trigger a refresh** — `POST /api/dashboard/refresh`.
+
+**4. Verify ingestion** via the read-only diagnostics endpoint `GET /api/dashboard/refresh/meta` (returns `{ ok, meta }`; `meta` is the last run's `_meta`, or `null` with no snapshot). On a healthy pilot run, assert under `meta.ingestion.x`:
+
+- `enabled === true`
+- `handlesFetched >= 1`
+- `tweetsReturned > 0`
+- `degraded === false`
+
+A tweet from `@petrogustavo` clustered into a meta-story confirms the full path (read → merge → cluster).
+
+**5. Verify fail-open** — disable the token (unset/blank `TEMPO_X_BEARER_TOKEN`) or otherwise force an X failure, then refresh again. RSS continuity must hold:
+
+- the dashboard still returns stories derived from RSS
+- `meta.ingestion.x.degraded === true` (with an entry under `errors`)
+
+> **Pilot → full rollout:** `TEMPO_X_HANDLE_ALLOWLIST` is a pilot guardrail — when set, only those handles are fetched even if a user follows more. To expand from the pilot to **all** selected handles, **unset** `TEMPO_X_HANDLE_ALLOWLIST`.
+
+Wiring: [`x-api-client.mjs`](apps/api/src/ingestion/x-api-client.mjs), [`x-reader.mjs`](apps/api/src/ingestion/x-reader.mjs), merge + `_meta.ingestion.x` in [`server.mjs`](apps/api/src/server.mjs); env reference in [`apps/api/.env.example`](apps/api/.env.example).
+
 ## Deployment
 
 ### Prerequisites

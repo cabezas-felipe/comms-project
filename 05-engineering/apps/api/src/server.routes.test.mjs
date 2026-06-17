@@ -475,6 +475,76 @@ test("GET /api/dashboard returns empty stories with hasSnapshot=false when no sn
   }
 });
 
+// ─── GET /api/dashboard/refresh/meta (Phase 1, Step 1.4 diagnostics) ─────────
+
+test("GET /api/dashboard/refresh/meta returns ok:true + meta:null when no snapshot exists", async () => {
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => null;
+  try {
+    const res = await request(app).get("/api/dashboard/refresh/meta");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.body.meta, null);
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
+test("GET /api/dashboard/refresh/meta surfaces _meta.ingestion.x when the snapshot carries it", async () => {
+  // The endpoint reuses the snapshot read path and returns its `_meta`. Here we
+  // stub a snapshot whose lifted `_meta` carries the Step 1.3 X ingestion
+  // diagnostics, and assert they flow through verbatim under `{ ok, meta }`.
+  const SNAPSHOT = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _meta: {
+      hasSnapshot: true,
+      refreshedAt: "2026-06-17T12:00:00.000Z",
+      ingestionSource: "live",
+      ingestion: {
+        x: {
+          enabled: true,
+          handlesRequested: 1,
+          handlesSelected: 1,
+          handlesFetched: 1,
+          tweetsReturned: 4,
+          errors: [],
+          degraded: false,
+        },
+      },
+    },
+  };
+  const prev = _snapshotRepo.read;
+  _snapshotRepo.read = async () => SNAPSHOT;
+  try {
+    const res = await request(app).get("/api/dashboard/refresh/meta");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    const x = res.body.meta?.ingestion?.x;
+    assert.ok(x && typeof x === "object", "meta.ingestion.x present");
+    assert.equal(x.enabled, true);
+    assert.equal(x.handlesFetched, 1);
+    assert.equal(x.tweetsReturned, 4);
+    assert.equal(x.degraded, false);
+    // Read-only contract: a metadata read never writes a snapshot.
+    assert.equal(res.body.stories, undefined, "endpoint returns only meta, not story bodies");
+  } finally {
+    _snapshotRepo.read = prev;
+  }
+});
+
+test("GET /api/dashboard/refresh/meta returns 401 without valid token", async () => {
+  const prev = _auth.resolver;
+  _auth.resolver = async () => null;
+  try {
+    const res = await request(app).get("/api/dashboard/refresh/meta");
+    assert.equal(res.status, 401);
+    assert.equal(typeof res.body.message, "string");
+  } finally {
+    _auth.resolver = prev;
+  }
+});
+
 test("GET /api/dashboard returns persisted snapshot when one exists", async () => {
   const SNAPSHOT = {
     contractVersion: "2026-05-19-meta-story-fields",

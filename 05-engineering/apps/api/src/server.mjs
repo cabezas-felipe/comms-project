@@ -1110,6 +1110,47 @@ app.get("/api/dashboard", async (req, res) => {
 });
 
 /**
+ * Phase 1, Step 1.4 — lightweight, read-only diagnostics surface for the last
+ * refresh's `_meta`.  Reuses the SAME snapshot read path as GET /api/dashboard
+ * (so the `_meta` here is exactly what a dashboard read would lift), but returns
+ * ONLY the metadata — no story bodies — under a stable `{ ok, meta }` envelope.
+ *
+ * Primary use: the X ingestion pilot runbook (README) verifies
+ * `_meta.ingestion.x` (enabled / handlesFetched / tweetsReturned / degraded)
+ * after a refresh without scraping logs or parsing the full dashboard payload.
+ *
+ * Additive + idempotent: never writes, never runs the pipeline.  Returns
+ * `meta: null` when the user has no snapshot yet.  Auth mirrors the other
+ * dashboard routes via `requireIdentity` (401 when unauthenticated).
+ */
+app.get("/api/dashboard/refresh/meta", async (req, res) => {
+  const identity = await requireIdentity(req, res);
+  if (!identity) return;
+  try {
+    const snapshot = await _snapshotRepo.read(identity.userId);
+    if (!snapshot) {
+      return res.json({ ok: true, meta: null });
+    }
+    // Mirror GET /api/dashboard's `_meta` construction exactly: the lifted
+    // base meta plus the internal selection/watermark surfaces.  `_meta.ingestion.x`
+    // (Step 1.3 wiring) flows through whenever the snapshot's meta carries it.
+    const { baseMeta, selectionMeta, watermark } = stripPersistedFields(snapshot);
+    const meta = attachInternalsToMeta(baseMeta, { selectionMeta, watermark });
+    return res.json({ ok: true, meta });
+  } catch (error) {
+    trackServerEvent("api_error", {
+      route: "/api/dashboard/refresh/meta",
+      statusCode: 500,
+      message: error instanceof Error ? error.message : "Unknown error",
+    });
+    res.status(500).json({
+      message: "Failed to read refresh metadata.",
+      detail: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+/**
  * Slice 3: emit one structured, grep-friendly observability line per refresh
  * settle and run the balanced SLO breach evaluation.  `timings`/`funnel`/
  * `outcomes` come straight off the pipeline log; `ingestionSource` is
