@@ -331,3 +331,48 @@ test("readXItems: calls fetchUserTweets with exclude=retweets and 24h start_time
   assert.equal(calls.tweets[0].exclude, "retweets");
   assert.equal(calls.tweets[0].startTime, "2026-06-16T12:00:00.000Z");
 });
+
+// ─── readXItems: runtime fetch fallback (no injected fetchImpl) ───────────────
+
+// Scoped swap of globalThis.fetch, restored even on throw — mirrors the server
+// runtime where _xReader.read is called without a fetchImpl.
+async function withGlobalFetch(stub, fn) {
+  const had = Object.prototype.hasOwnProperty.call(globalThis, "fetch");
+  const original = globalThis.fetch;
+  globalThis.fetch = stub;
+  try {
+    return await fn();
+  } finally {
+    if (had) globalThis.fetch = original;
+    else delete globalThis.fetch;
+  }
+}
+
+test("readXItems: works without fetchImpl, falling back to globalThis.fetch", async () => {
+  __clearUserCache();
+  const { fetchImpl, calls } = createXApiMock({
+    users: { petrogustavo: { id: "u-petro", username: "petrogustavo" } },
+    tweetPages: {
+      "u-petro": [
+        { body: { data: [{ id: "t1", text: "comunicado", created_at: "2026-06-17T11:00:00Z", lang: "es" }], meta: { result_count: 1 } } },
+      ],
+    },
+  });
+
+  // No fetchImpl passed — the client must resolve globalThis.fetch at runtime.
+  const { items, diagnostics } = await withGlobalFetch(fetchImpl, () =>
+    readXItems({
+      socialSources: ["@petrogustavo"],
+      config: baseConfig(),
+      nowMs: NOW_MS,
+    })
+  );
+
+  assert.equal(calls.lookups.length, 1, "global fetch used for lookup");
+  assert.equal(calls.tweets.length, 1, "global fetch used for timeline");
+  assert.equal(items.length, 1);
+  assert.equal(items[0].outlet, "@petrogustavo");
+  assert.equal(diagnostics.handlesFetched, 1);
+  assert.equal(diagnostics.tweetsReturned, 1);
+  assert.equal(diagnostics.degraded, false);
+});

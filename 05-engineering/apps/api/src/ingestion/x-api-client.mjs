@@ -142,13 +142,29 @@ function describeStatus(status, statusText) {
   }
 }
 
+/**
+ * Single source of truth for fetch resolution. Tests inject `explicitFetchImpl`
+ * to stay hermetic; the server runtime omits it and falls back to the platform
+ * `globalThis.fetch` (Node 18+). Throws an actionable `XApiError` only when
+ * neither is available, so a genuinely fetch-less environment fails loudly.
+ *
+ * @param {Function|undefined} explicitFetchImpl
+ * @param {string} context — request label, surfaced in the error message.
+ * @returns {Function}
+ */
+export function resolveFetchImpl(explicitFetchImpl, context = "request") {
+  if (typeof explicitFetchImpl === "function") return explicitFetchImpl;
+  if (typeof globalThis.fetch === "function") return globalThis.fetch;
+  throw new XApiError(`[x-api-client] ${context}: no fetch implementation available`);
+}
+
 // Single request primitive shared by every endpoint. Builds the auth header,
 // applies a deterministic AbortController timeout, honors a caller-supplied
 // abort `signal`, asserts a 2xx, and returns the parsed JSON object.
 async function requestJson(url, { config, fetchImpl, signal }, context) {
-  if (typeof fetchImpl !== "function") {
-    throw new XApiError(`[x-api-client] ${context}: no fetch implementation available`);
-  }
+  // Resolve once here (the shared callsite) so endpoints never duplicate the
+  // injected → global → throw precedence.
+  const resolvedFetch = resolveFetchImpl(fetchImpl, context);
 
   const controller = new AbortController();
   const onExternalAbort = () => controller.abort();
@@ -160,7 +176,7 @@ async function requestJson(url, { config, fetchImpl, signal }, context) {
 
   let response;
   try {
-    response = await fetchImpl(url, {
+    response = await resolvedFetch(url, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${config.bearerToken}`,

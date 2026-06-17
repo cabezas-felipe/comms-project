@@ -139,7 +139,11 @@ function dedupeHandles(socialSources) {
  * @param {object} args
  * @param {string[]} args.socialSources — handles (any of `@x`, `x`, mixed case).
  * @param {object} args.config — resolved X config (see resolveXConfig).
- * @param {Function} args.fetchImpl — injected fetch (tests pass a mock).
+ * @param {Function} [args.fetchImpl] — injected fetch (tests pass a mock).
+ *   Optional: passed through to the client verbatim; when omitted the client
+ *   falls back to `globalThis.fetch` so the server runtime works without an
+ *   explicit injection. The reader stays a pure pass-through — no transport
+ *   logic lives here; `x-api-client` is the network boundary.
  * @param {number} [args.nowMs=Date.now()]
  * @param {number} [args.perHandleWeight=60]
  * @returns {Promise<{ items: object[], diagnostics: object }>}

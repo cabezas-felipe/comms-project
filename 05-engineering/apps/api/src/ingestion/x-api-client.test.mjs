@@ -6,6 +6,7 @@ import {
   normalizeUsername,
   lookupUserByUsername,
   fetchUserTweets,
+  resolveFetchImpl,
   XApiError,
   __clearUserCache,
 } from "./x-api-client.mjs";
@@ -260,4 +261,96 @@ test("fetchUserTweets: tolerates empty shape (missing data/meta) without crashin
   assert.deepEqual(result2.tweets, []);
   assert.equal(result2.resultCount, 0);
   assert.equal(result2.nextToken, null);
+});
+
+// ─── fetch resolution (runtime fallback) ─────────────────────────────────────
+
+// Scoped helper: swap globalThis.fetch for `stub` (or remove it when stub is
+// undefined) for the duration of `fn`, then restore the original — even on
+// throw. Keeps global mutation contained to the test that opts in.
+async function withGlobalFetch(stub, fn) {
+  const had = Object.prototype.hasOwnProperty.call(globalThis, "fetch");
+  const original = globalThis.fetch;
+  if (stub === undefined) delete globalThis.fetch;
+  else globalThis.fetch = stub;
+  try {
+    return await fn();
+  } finally {
+    if (had) globalThis.fetch = original;
+    else delete globalThis.fetch;
+  }
+}
+
+test("resolveFetchImpl: prefers injected fetch, then global, then throws", () => {
+  const injected = () => {};
+  assert.equal(resolveFetchImpl(injected), injected, "injected wins");
+
+  withGlobalFetch(() => {}, () => {
+    const g = resolveFetchImpl(undefined);
+    assert.equal(typeof g, "function", "falls back to globalThis.fetch");
+  });
+
+  withGlobalFetch(undefined, () => {
+    assert.throws(
+      () => resolveFetchImpl(undefined, "user lookup"),
+      (err) => {
+        assert.ok(err instanceof XApiError);
+        assert.match(err.message, /no fetch implementation available/);
+        assert.match(err.message, /user lookup/);
+        return true;
+      }
+    );
+  });
+});
+
+test("requestJson path: injected fetchImpl is used even when globalThis.fetch exists", async () => {
+  __clearUserCache();
+  let globalCalls = 0;
+  const globalSpy = async () => {
+    globalCalls += 1;
+    return { ok: true, status: 200, statusText: "", json: async () => ({ data: { id: "GLOBAL", username: "globaluser" } }) };
+  };
+  const { fetchImpl, calls } = createMockFetch({
+    body: { data: { id: "INJECTED", username: "injecteduser", name: "Injected" } },
+  });
+
+  await withGlobalFetch(globalSpy, async () => {
+    const user = await lookupUserByUsername("injectedUser", { config: baseConfig(), fetchImpl });
+    assert.equal(user.id, "INJECTED", "injected fetch result used");
+  });
+  assert.equal(calls.length, 1, "injected fetch invoked");
+  assert.equal(globalCalls, 0, "global fetch NOT invoked when injection present");
+});
+
+test("requestJson path: falls back to globalThis.fetch when no fetchImpl provided", async () => {
+  __clearUserCache();
+  let globalCalls = 0;
+  let seenAuth;
+  const globalSpy = async (url, init) => {
+    globalCalls += 1;
+    seenAuth = init?.headers?.Authorization;
+    return { ok: true, status: 200, statusText: "", json: async () => ({ data: { id: "999", username: "fallbackuser", name: "Fallback" } }) };
+  };
+
+  await withGlobalFetch(globalSpy, async () => {
+    const user = await lookupUserByUsername("fallbackUser", { config: baseConfig() });
+    assert.deepEqual(user, { id: "999", username: "fallbackuser", name: "Fallback" });
+  });
+  assert.equal(globalCalls, 1, "global fetch used as fallback");
+  // auth header + no-token-leak contract preserved on the fallback path
+  assert.equal(seenAuth, "Bearer test-token");
+});
+
+test("requestJson path: throws clear XApiError when neither injected nor global fetch exists", async () => {
+  __clearUserCache();
+  await withGlobalFetch(undefined, async () => {
+    await assert.rejects(
+      () => lookupUserByUsername("noFetchUser", { config: baseConfig() }),
+      (err) => {
+        assert.ok(err instanceof XApiError);
+        assert.match(err.message, /no fetch implementation available/);
+        return true;
+      }
+    );
+  });
 });
