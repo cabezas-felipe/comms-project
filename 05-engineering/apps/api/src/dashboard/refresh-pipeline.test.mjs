@@ -71,6 +71,7 @@ import {
   enrichWhyItMattersForStories,
   prioritizeLane2Candidates,
   buildSourceGroundedWhyFallback,
+  buildSocialFunnel,
 } from "./refresh-pipeline.mjs";
 // C2: cross-module B1→B2 handoff regression — feed the pipeline's emitted
 // reclusterQueue straight into the deferred re-cluster executor.
@@ -4633,6 +4634,181 @@ test("runRefreshPipeline: social path is inert when X ingestion is disabled (bac
   assert.deepEqual(log.selection.matchedSocialSources, []);
   // Backward-compatible: the unmatched handle is reported as unmatched.
   assert.ok(log.selection.unmatchedSelectedSources.includes("@petrogustavo"));
+});
+
+// ─── Social funnel observability (X ingestion — additive _meta.funnel.social) ─
+
+test("buildSocialFunnel: pure stage counting + drop insight (unit)", () => {
+  // 3 social items normalized, 1 dropped at time window, 1 at topic/keyword,
+  // 1 survives to dedupe; one social SOURCE in the published story.
+  const social = (id) => ({ sourceId: id, kind: "social", outlet: "@petrogustavo" });
+  const trad = (id) => ({ sourceId: id, kind: "traditional", outlet: "Reuters" });
+  const out = buildSocialFunnel({
+    normalizedItems: [social("a"), social("b"), social("c"), trad("t")],
+    recentNormalizedItems: [social("a"), social("c"), trad("t")], // b dropped at time window
+    recentItems: [social("a"), social("c"), trad("t")],
+    geoPassedItems: [social("a"), social("c"), trad("t")],
+    recallItems: [social("a"), trad("t")], // c dropped at topic/keyword
+    relevantItems: [social("a"), trad("t")],
+    dedupedItems: [social("a"), trad("t")],
+    publishedStories: [{ sources: [social("a"), trad("t")] }],
+    socialSelectionApplied: true,
+    matchedSocialSources: ["@petrogustavo"],
+  });
+  assert.equal(out.totalNormalized, 3);
+  assert.equal(out.afterTimeWindow, 2);
+  assert.equal(out.afterSourceSelection, 2);
+  assert.equal(out.afterGeoFilter, 2);
+  assert.equal(out.afterTopicKeyword, 1);
+  assert.equal(out.afterBeatFit, 1);
+  assert.equal(out.afterDedupe, 1);
+  assert.equal(out.inPublishedStories, 1);
+  // Two equal drops (timeWindow:1, topicKeyword:1) → first-largest wins (timeWindow).
+  assert.equal(out.primaryDropStageForSocial, "afterTimeWindow");
+  assert.equal(out.largestDropCountForSocial, 1);
+  assert.equal(out.dropsByStage.afterTimeWindow, 1);
+  assert.equal(out.dropsByStage.afterTopicKeyword, 1);
+  assert.equal(out.dropsByStage.afterGeoFilter, 0);
+  assert.equal(out.socialSelectionApplied, true);
+  assert.equal(out.matchedSocialSourceCount, 1);
+  assert.deepEqual(out.matchedSocialSources, ["@petrogustavo"]);
+});
+
+test("buildSocialFunnel: edge cases — no social items / null published stories / missing inputs", () => {
+  const empty = buildSocialFunnel({}); // no inputs at all → all zeros, no throw
+  assert.equal(empty.totalNormalized, 0);
+  assert.equal(empty.afterDedupe, 0);
+  assert.equal(empty.inPublishedStories, null); // publishedStories defaulted null
+  assert.equal(empty.primaryDropStageForSocial, null);
+  assert.equal(empty.largestDropCountForSocial, 0);
+  assert.equal(empty.socialSelectionApplied, false);
+  assert.deepEqual(empty.matchedSocialSources, []);
+
+  const noStories = buildSocialFunnel({
+    normalizedItems: [{ kind: "social", outlet: "@x" }],
+    recentNormalizedItems: [{ kind: "social", outlet: "@x" }],
+    recentItems: [{ kind: "social", outlet: "@x" }],
+    geoPassedItems: [{ kind: "social", outlet: "@x" }],
+    recallItems: [{ kind: "social", outlet: "@x" }],
+    relevantItems: [{ kind: "social", outlet: "@x" }],
+    dedupedItems: [{ kind: "social", outlet: "@x" }],
+    publishedStories: null, // watermark-skip semantics
+  });
+  assert.equal(noStories.afterDedupe, 1);
+  assert.equal(noStories.inPublishedStories, null);
+});
+
+test("runRefreshPipeline: social funnel — survives to published stories (inPublishedStories > 0)", async () => {
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const socialItem = makeSocialItem();
+  const { payload, log } = await runRefreshPipeline({
+    settings,
+    rawItems: [socialItem],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async (items) => [
+      {
+        meta_story_id: "petro-diplomatic-statement",
+        title: "Petro Diplomatic Statement",
+        subtitle: "Official communication on US relations.",
+        source_item_ids: items.map((i) => i.sourceId),
+        summary: "Petro issued an official diplomatic statement on US relations.",
+        tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+      },
+    ],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
+  });
+
+  const sf = log.funnel.social;
+  assert.ok(sf && typeof sf === "object", "_meta.funnel.social present");
+  assert.equal(sf.totalNormalized, 1);
+  assert.equal(sf.afterSourceSelection, 1);
+  assert.equal(sf.afterDedupe, 1);
+  assert.ok(sf.inPublishedStories > 0, "social source reaches published stories");
+  assert.equal(sf.primaryDropStageForSocial, null, "no item-stage drop");
+  assert.equal(sf.largestDropCountForSocial, 0);
+  assert.equal(sf.socialSelectionApplied, true);
+  assert.deepEqual(sf.matchedSocialSources, ["@petrogustavo"]);
+  // Sanity: the published story really does carry the social source counted above.
+  const socialSourceCount = payload.stories.flatMap((s) => s.sources).filter((x) => x.kind === "social").length;
+  assert.equal(sf.inPublishedStories, socialSourceCount);
+});
+
+test("runRefreshPipeline: social funnel — ingested + matched but dropped at a named stage (time window)", async () => {
+  // Two social items; one is stale (>24h) and drops at the time window. Matching
+  // succeeds for the surviving handle, so the diagnostics must point at the
+  // EXACT stage that lost a social item.
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const fresh = makeSocialItem({ sourceId: "x-fresh", minutesAgo: 20, url: "https://x.com/petrogustavo/status/fresh" });
+  const stale = makeSocialItem({ sourceId: "x-stale", minutesAgo: 2000, url: "https://x.com/petrogustavo/status/stale" });
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [fresh, stale],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  const sf = log.funnel.social;
+  assert.equal(sf.totalNormalized, 2, "both social items ingested");
+  assert.equal(sf.afterTimeWindow, 1, "stale social item dropped at the time window");
+  assert.equal(sf.afterSourceSelection, 1, "survivor still matched at source selection");
+  assert.equal(sf.primaryDropStageForSocial, "afterTimeWindow");
+  assert.equal(sf.largestDropCountForSocial, 1);
+  assert.equal(sf.dropsByStage.afterTimeWindow, 1);
+  assert.equal(sf.socialSelectionApplied, true);
+});
+
+test("runRefreshPipeline: social funnel — reaches candidate set but not published stories (clustering drop)", async () => {
+  // The reported bug shape: social survives every item stage (afterDedupe>0) but
+  // clustering publishes no story containing it → inPublishedStories=0 isolates
+  // the loss to clustering/grounding, not an earlier filter.
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [makeSocialItem()],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async () => [], // reaches clustering, but nothing is published
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  const sf = log.funnel.social;
+  assert.equal(sf.afterDedupe, 1, "social item reaches the clustering candidate set");
+  assert.equal(sf.inPublishedStories, 0, "but no social source in published stories");
+  assert.equal(sf.primaryDropStageForSocial, null, "no item-stage drop — loss is post-dedupe (clustering)");
+});
+
+test("runRefreshPipeline: social funnel — present and inert when X ingestion disabled", async () => {
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: ["@petrogustavo"] };
+  const rssItem = makeItem({
+    sourceId: "reuters-1", feedId: "reuters-world", outlet: "Reuters",
+    kind: "traditional", topic: "Diplomatic relations", minutesAgo: 30,
+  });
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [rssItem, makeSocialItem()],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    // socialIngestionEnabled omitted → false (X disabled).
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  const sf = log.funnel.social;
+  assert.ok(sf && typeof sf === "object", "_meta.funnel.social present even when X disabled");
+  // The stray social item is NOT admitted at source selection (inert path).
+  assert.equal(sf.afterSourceSelection, 0);
+  assert.equal(sf.afterDedupe, 0);
+  assert.equal(sf.inPublishedStories, 0);
+  assert.equal(sf.socialSelectionApplied, false);
+  assert.equal(sf.matchedSocialSourceCount, 0);
+  assert.deepEqual(sf.matchedSocialSources, []);
 });
 
 test("runRefreshPipeline regression: strict-empty preserved — items with no matching feedId AND no outlet match still drop", async () => {

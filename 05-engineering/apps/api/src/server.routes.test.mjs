@@ -1163,6 +1163,141 @@ test("refresh X wiring: disabled config makes no X call and reports baseline dia
   }
 });
 
+// ─── Social funnel diagnostics route contract (_meta.funnel.social) ──────────
+
+// Representative social-funnel block as the pipeline emits it (additive nested
+// object under _meta.funnel). Used to assert the route surfaces it intact.
+const SOCIAL_FUNNEL_BLOCK = {
+  totalNormalized: 2,
+  afterTimeWindow: 2,
+  afterSourceSelection: 1,
+  afterGeoFilter: 1,
+  afterTopicKeyword: 1,
+  afterBeatFit: 1,
+  afterDedupe: 1,
+  inPublishedStories: 1,
+  primaryDropStageForSocial: "afterSourceSelection",
+  largestDropCountForSocial: 1,
+  dropsByStage: {
+    afterTimeWindow: 0,
+    afterSourceSelection: 1,
+    afterGeoFilter: 0,
+    afterTopicKeyword: 0,
+    afterBeatFit: 0,
+    afterDedupe: 0,
+  },
+  socialSelectionApplied: true,
+  matchedSocialSourceCount: 1,
+  matchedSocialSources: ["@petrogustavo"],
+};
+
+function assertSocialFunnelShape(social, label) {
+  assert.ok(social && typeof social === "object", `${label}: _meta.funnel.social present`);
+  for (const k of [
+    "totalNormalized", "afterTimeWindow", "afterSourceSelection", "afterGeoFilter",
+    "afterTopicKeyword", "afterBeatFit", "afterDedupe",
+  ]) {
+    assert.equal(typeof social[k], "number", `${label}: ${k} is a number`);
+  }
+  assert.ok("inPublishedStories" in social, `${label}: inPublishedStories present`);
+  assert.ok("primaryDropStageForSocial" in social, `${label}: primaryDropStageForSocial present`);
+  assert.equal(typeof social.largestDropCountForSocial, "number", `${label}: largestDropCountForSocial is a number`);
+  assert.ok(social.dropsByStage && typeof social.dropsByStage === "object", `${label}: dropsByStage present`);
+  assert.equal(typeof social.socialSelectionApplied, "boolean", `${label}: socialSelectionApplied is boolean`);
+  assert.equal(typeof social.matchedSocialSourceCount, "number", `${label}: matchedSocialSourceCount is a number`);
+  assert.ok(Array.isArray(social.matchedSocialSources), `${label}: matchedSocialSources is an array`);
+}
+
+test("POST /api/dashboard/refresh surfaces _meta.funnel.social diagnostics", async () => {
+  const ISOLATED_USER_ID = "test-user-social-funnel-post";
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async (opts) => ({
+    payload: {
+      contractVersion: opts.contractVersion,
+      stories: [
+        {
+          id: "sf-story", metaStoryId: "sf-story", title: "Social Funnel Story",
+          subtitle: "Sub.", geographies: ["US"], topic: "Diplomatic relations",
+          summary: "S.", whyItMatters: "W.", whatChanged: "C.", priority: "standard",
+          outletCount: 1, tags: { topics: [], keywords: [], geographies: ["US"] },
+          sources: [{ outlet: "@petrogustavo", kind: "social", url: "https://x.com/petrogustavo/status/1" }],
+        },
+      ],
+    },
+    log: {
+      unchanged: false, poolCount: 1, relevantCount: 1, usedFallbackClustering: false,
+      groundingFailures: 0, droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+      watermark: "sf-watermark", candidateCount: 1, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict", matchedSocialSources: ["@petrogustavo"] },
+      // The additive social funnel nested under the standard funnel.
+      funnel: {
+        totalNormalized: 2, afterTimeWindow: 2, afterSourceSelection: 1, afterGeoFilter: 1,
+        afterTopicKeyword: 1, afterBeatFit: 1, afterDedupe: 1, finalStories: 1,
+        social: SOCIAL_FUNNEL_BLOCK,
+      },
+    },
+  });
+
+  try {
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      await request(app).put("/api/settings").send({ ...VALID_BODY }).set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      const social = res.body._meta?.funnel?.social;
+      assertSocialFunnelShape(social, "POST refresh");
+      assert.equal(social.inPublishedStories, 1);
+      assert.equal(social.primaryDropStageForSocial, "afterSourceSelection");
+      assert.deepEqual(social.matchedSocialSources, ["@petrogustavo"]);
+    });
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("GET /api/dashboard/refresh/meta surfaces persisted _meta.funnel.social", async () => {
+  // Persist a real snapshot carrying the social funnel under `_lastRunMeta.funnel`
+  // and read it back through the live lift path — proving the diagnostics survive
+  // persistence and surface on the read-only meta endpoint.
+  const LIFT_USER = "social-funnel-lift-user";
+  const payload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _lastRunMeta: {
+      ingestionSource: "live",
+      funnel: {
+        totalNormalized: 2, afterTimeWindow: 2, afterSourceSelection: 1, afterGeoFilter: 1,
+        afterTopicKeyword: 1, afterBeatFit: 1, afterDedupe: 1, finalStories: 0,
+        social: SOCIAL_FUNNEL_BLOCK,
+      },
+    },
+  };
+  const prevResolver = _auth.resolver;
+  _auth.resolver = async () => ({ userId: LIFT_USER, source: "bearer" });
+  await _snapshotRepo.write(LIFT_USER, payload);
+  try {
+    const res = await request(app).get("/api/dashboard/refresh/meta");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    const social = res.body.meta?.funnel?.social;
+    assertSocialFunnelShape(social, "GET refresh/meta");
+    assert.equal(social.inPublishedStories, 1);
+    assert.equal(social.primaryDropStageForSocial, "afterSourceSelection");
+    assert.deepEqual(social.matchedSocialSources, ["@petrogustavo"]);
+  } finally {
+    _auth.resolver = prevResolver;
+  }
+});
+
 // ─── E2E force-first-full-refresh (watermark bypass) ─────────────────────────
 //
 // `TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` makes the FIRST refresh after a

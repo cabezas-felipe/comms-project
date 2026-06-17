@@ -375,6 +375,8 @@ TEMPO_X_HANDLE_ALLOWLIST=petrogustavo   # pilot gate (see note below)
 
 A tweet from `@petrogustavo` clustered into a meta-story confirms the full path (read → merge → cluster).
 
+**4a. Trace where social items are lost** via `meta.funnel.social` — an additive, per-stage count of `kind:"social"` items mirroring the main funnel (`totalNormalized`, `afterTimeWindow`, `afterSourceSelection`, `afterGeoFilter`, `afterTopicKeyword`, `afterBeatFit`, `afterDedupe`) plus `inPublishedStories` (count of social sources in the final stories; `null` on a watermark-skip), `primaryDropStageForSocial` / `largestDropCountForSocial` / `dropsByStage` (where the biggest social drop happened), and selection context (`socialSelectionApplied`, `matchedSocialSourceCount`, `matchedSocialSources`). Pure observability — it never changes selection/ranking. Grep the one-line `[pipeline.funnel.social]` log for the same counts. Example: `afterSourceSelection > 0` but `inPublishedStories === 0` isolates the loss to clustering/grounding, not source selection.
+
 **5. Verify fail-open** — disable the token (unset/blank `TEMPO_X_BEARER_TOKEN`) or otherwise force an X failure, then refresh again. RSS continuity must hold:
 
 - the dashboard still returns stories derived from RSS

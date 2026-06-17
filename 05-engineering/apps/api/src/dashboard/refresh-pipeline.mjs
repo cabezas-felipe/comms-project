@@ -962,6 +962,118 @@ export function summarizeFunnel(funnel, settings = {}, opts = {}) {
   };
 }
 
+// ─── Social-item funnel (X ingestion observability — additive) ───────────────
+//
+// Per-stage counts of `kind:"social"` items, mirroring the main funnel's stage
+// names, so operators can see EXACTLY where social (X) evidence is lost between
+// ingestion and published stories.  PURE COUNTING — it never changes which
+// items pass any stage, never relaxes a filter, and never touches ranking.
+
+// Item-funnel stages in pipeline order (published-stories is excluded — it
+// counts SOURCES, not items, so it is not part of the item-drop analysis).
+const SOCIAL_FUNNEL_STAGE_ORDER = Object.freeze([
+  "totalNormalized",
+  "afterTimeWindow",
+  "afterSourceSelection",
+  "afterGeoFilter",
+  "afterTopicKeyword",
+  "afterBeatFit",
+  "afterDedupe",
+]);
+
+// Count `kind:"social"` items in an array (defensive: non-arrays → 0).
+function countSocialItems(items) {
+  if (!Array.isArray(items)) return 0;
+  let n = 0;
+  for (const it of items) if (it?.kind === "social") n += 1;
+  return n;
+}
+
+// Count `kind:"social"` SOURCES across the final published stories.
+function countSocialSourcesInStories(stories) {
+  if (!Array.isArray(stories)) return 0;
+  let n = 0;
+  for (const s of stories) {
+    const sources = Array.isArray(s?.sources) ? s.sources : [];
+    for (const src of sources) if (src?.kind === "social") n += 1;
+  }
+  return n;
+}
+
+/**
+ * Build the additive `_meta.funnel.social` diagnostics block.  Stage inputs are
+ * the SAME arrays the main funnel measures, so the social counts are a strict
+ * subset view.  `publishedStories` is `null` when stories were not computed this
+ * run (e.g. the watermark-skip branch) → `inPublishedStories` is `null` then.
+ *
+ * @returns {object} stage counts + drop insight + selection context (all additive)
+ */
+export function buildSocialFunnel({
+  normalizedItems,
+  recentNormalizedItems,
+  recentItems,
+  geoPassedItems,
+  recallItems,
+  relevantItems,
+  dedupedItems,
+  publishedStories = null,
+  socialSelectionApplied = false,
+  matchedSocialSources = [],
+} = {}) {
+  const stages = {
+    totalNormalized: countSocialItems(normalizedItems),
+    afterTimeWindow: countSocialItems(recentNormalizedItems),
+    afterSourceSelection: countSocialItems(recentItems),
+    afterGeoFilter: countSocialItems(geoPassedItems),
+    afterTopicKeyword: countSocialItems(recallItems),
+    afterBeatFit: countSocialItems(relevantItems),
+    afterDedupe: countSocialItems(dedupedItems),
+  };
+
+  // Adjacent-stage deltas + the single largest drop (item stages only).
+  const dropsByStage = {};
+  let primaryDropStageForSocial = null;
+  let largestDropCountForSocial = 0;
+  for (let i = 1; i < SOCIAL_FUNNEL_STAGE_ORDER.length; i += 1) {
+    const prevStage = SOCIAL_FUNNEL_STAGE_ORDER[i - 1];
+    const curStage = SOCIAL_FUNNEL_STAGE_ORDER[i];
+    const delta = Math.max(0, stages[prevStage] - stages[curStage]);
+    dropsByStage[curStage] = delta;
+    if (delta > largestDropCountForSocial) {
+      largestDropCountForSocial = delta;
+      primaryDropStageForSocial = curStage;
+    }
+  }
+
+  const safeMatched = Array.isArray(matchedSocialSources) ? matchedSocialSources : [];
+  return {
+    ...stages,
+    // Count of social SOURCES that reached the final payload stories. `null`
+    // when stories were not computed this run (watermark-skip).
+    inPublishedStories:
+      publishedStories == null ? null : countSocialSourcesInStories(publishedStories),
+    primaryDropStageForSocial,
+    largestDropCountForSocial,
+    dropsByStage,
+    // Selection context (reuses the truth computed at source selection).
+    socialSelectionApplied: socialSelectionApplied === true,
+    matchedSocialSourceCount: safeMatched.length,
+    matchedSocialSources: safeMatched,
+  };
+}
+
+// One-line, grep-friendly social funnel summary for the [pipeline.funnel.social]
+// log tag.  No secrets — handles are public identifiers, counts are integers.
+function formatSocialFunnel(social) {
+  const stagePairs = SOCIAL_FUNNEL_STAGE_ORDER.map((k) => `${k}=${social[k]}`).join(" ");
+  return (
+    `${stagePairs} inPublishedStories=${social.inPublishedStories}` +
+    ` primary_drop=${social.primaryDropStageForSocial ?? "none"}` +
+    ` largest_drop=${social.largestDropCountForSocial}` +
+    ` applied=${social.socialSelectionApplied} matchedHandles=${social.matchedSocialSourceCount}`
+  );
+}
+
 // ─── Decision-trace (Phase 2 lightweight diagnostics) ───────────────────────
 //
 // Backend-only, internal-explainability surface on top of the pipeline log.
@@ -3078,10 +3190,26 @@ export async function runRefreshPipeline({
       settings,
       { executionMode: FUNNEL_EXECUTION_MODE.WATERMARK_SKIP }
     );
+    // Additive social funnel on the skip branch too. Clustering never ran here,
+    // so `publishedStories` is null → `inPublishedStories` is null (the prior
+    // snapshot's social sources are re-served by the route, not recomputed).
+    skipFunnel.social = buildSocialFunnel({
+      normalizedItems,
+      recentNormalizedItems,
+      recentItems,
+      geoPassedItems,
+      recallItems,
+      relevantItems,
+      dedupedItems,
+      publishedStories: null,
+      socialSelectionApplied: selectionMeta?.socialSelectionApplied,
+      matchedSocialSources: selectionMeta?.matchedSocialSources,
+    });
     console.log(
       `[pipeline.watermark] unchanged (${watermarkInfo.watermark}) — skipping clustering, grounding, locks, rejections`
     );
     console.log(`[pipeline.funnel] ${formatFunnel(skipFunnel)}  execution_mode=${skipFunnel.executionMode}  primary_drop=${skipFunnel.primaryDropStage}`);
+    console.log(`[pipeline.funnel.social] ${formatSocialFunnel(skipFunnel.social)}`);
     return {
       payload: null, // signals caller to re-serve prior snapshot
       log: {
@@ -4220,7 +4348,23 @@ export async function runRefreshPipeline({
     settings,
     { executionMode: FUNNEL_EXECUTION_MODE.FULL_RUN }
   );
+  // Additive social-item observability (X ingestion). Mirrors the funnel stages
+  // for `kind:"social"` items so operators can trace where social evidence is
+  // dropped. Pure counting — does not alter the funnel or any item set.
+  funnel.social = buildSocialFunnel({
+    normalizedItems,
+    recentNormalizedItems,
+    recentItems,
+    geoPassedItems,
+    recallItems,
+    relevantItems,
+    dedupedItems,
+    publishedStories: stories,
+    socialSelectionApplied: selectionMeta?.socialSelectionApplied,
+    matchedSocialSources: selectionMeta?.matchedSocialSources,
+  });
   console.log(`[pipeline.funnel] ${formatFunnel(funnel)}  execution_mode=${funnel.executionMode}  primary_drop=${funnel.primaryDropStage}`);
+  console.log(`[pipeline.funnel.social] ${formatSocialFunnel(funnel.social)}`);
   if (stories.length === 0) {
     const noteParts = [];
     noteParts.push(`primary_drop=${funnel.primaryDropStage}`);
