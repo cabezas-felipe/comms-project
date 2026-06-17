@@ -1609,6 +1609,11 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       // so first paint isn't blocked on it; an async enrichment pass (scheduled
       // after the snapshot write below) upgrades the copy in place.
       deferWhyItMatters: isInteractiveRun,
+      // X ingestion (Step 1.5): when X is enabled for this run, the pipeline
+      // admits user-selected social handles at source selection (additive union
+      // with manifest matching) so `kind:"social"` items survive to clustering.
+      // Mirrors the gate that produced the merged X items above.
+      socialIngestionEnabled: xDiagnostics.enabled === true,
     });
 
     // Slice 7: fold the server-measured ingestionMs into the pipeline's

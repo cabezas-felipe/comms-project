@@ -314,6 +314,44 @@ export function buildMatchedFeedIdSet(matchedFeeds) {
   return set;
 }
 
+// ─── Social handle selection (X ingestion — additive, non-manifest) ──────────
+//
+// User-selected X handles are NOT manifest feeds — `resolveSelectedSources`
+// can't match them, so they would be dropped at source selection. These helpers
+// build a normalized handle identity used to admit social raw items as a true
+// UNION alongside manifest matching, WITHOUT minting synthetic `x:*` feed ids.
+
+/**
+ * Canonical social-handle identity: strip a leading `@`, trim, lowercase, then
+ * re-prefix `@`.  `"@PetroGustavo"`, `" petrogustavo "`, `"PETROGUSTAVO"` all
+ * collapse to `"@petrogustavo"`.  Returns `""` for nullish/blank/`@`-only input.
+ */
+export function normalizeSocialHandle(raw) {
+  if (raw == null) return "";
+  const username = String(raw).trim().replace(/^@+/, "").trim().toLowerCase();
+  return username ? `@${username}` : "";
+}
+
+/**
+ * Build a Set of canonical `@handle` identities from the user's selected social
+ * sources.  Blank/invalid entries are dropped; the result is the social half of
+ * the source-selection union.
+ */
+export function buildSelectedSocialHandleSet(socialSources) {
+  const set = new Set();
+  for (const s of socialSources ?? []) {
+    const handle = normalizeSocialHandle(s);
+    if (handle) set.add(handle);
+  }
+  return set;
+}
+
+// A raw item is "social" when its ingestion kind is the social connector kind.
+// X reader emits `kind: "social"`; normalizeSourceItem preserves it verbatim.
+function isSocialItem(item) {
+  return item?.kind === "social";
+}
+
 /**
  * Filter normalized items down to those that belong to one of the selected
  * feeds.  Two layered match strategies, applied per item:
@@ -328,14 +366,20 @@ export function buildMatchedFeedIdSet(matchedFeeds) {
  *      from before this fix (outlet "Reuters" matches feed
  *      "Reuters — World News" and vice versa).
  *
+ *   3. Social handle match — when `keys.socialHandles` is provided (X ingestion
+ *      enabled for the run), a `kind:"social"` item whose normalized outlet
+ *      handle is in the set passes.  This is the additive UNION that keeps
+ *      user-selected X handles alive through source selection without ever
+ *      contaminating the manifest feed-id index with synthetic `x:*` ids.
+ *
  * Backward-compat: when `keys` is a plain `Set`, treats it as the outlet set
  * and uses the legacy outlet-only path verbatim.  Existing tests and
  * external callers that still pass `buildMatchedOutletSet(...)` keep working
  * unchanged.
  *
- * Strict-empty: when both feed-id and outlet sets are empty (or the legacy
- * Set is empty), returns `[]` — caller distinguishes "strict empty" from
- * "no selection" via `selection.fallbackUsed` upstream.
+ * Strict-empty: when feed-id, outlet, AND social-handle sets are all empty (or
+ * the legacy Set is empty), returns `[]` — caller distinguishes "strict empty"
+ * from "no selection" via `selection.fallbackUsed` upstream.
  */
 export function filterItemsToMatchedFeeds(items, keys) {
   // Legacy signature: a plain Set means outlet-only matching (older tests
@@ -347,12 +391,16 @@ export function filterItemsToMatchedFeeds(items, keys) {
   }
   const feedIds = keys?.feedIds ?? null;
   const outlets = keys?.outlets ?? null;
+  const socialHandles = keys?.socialHandles ?? null;
   const hasFeedIds = feedIds && feedIds.size > 0;
   const hasOutlets = outlets && outlets.size > 0;
-  if (!hasFeedIds && !hasOutlets) return [];
+  const hasSocial = socialHandles && socialHandles.size > 0;
+  if (!hasFeedIds && !hasOutlets && !hasSocial) return [];
+  // Pure union: an item passes if it satisfies ANY selected path.
   return items.filter((it) => {
     if (hasFeedIds && it?.feedId && feedIds.has(String(it.feedId))) return true;
-    if (hasOutlets) return _itemOutletMatchesAny(it, outlets);
+    if (hasSocial && isSocialItem(it) && socialHandles.has(normalizeSocialHandle(it.outlet))) return true;
+    if (hasOutlets && _itemOutletMatchesAny(it, outlets)) return true;
     return false;
   });
 }

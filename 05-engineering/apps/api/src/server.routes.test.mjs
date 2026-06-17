@@ -1022,6 +1022,10 @@ test("refresh X wiring: success path merges social item and surfaces _meta.inges
           "merged social item handed to pipeline");
         // RSS continuity preserved alongside X
         assert.ok(handed.some((it) => it.kind === "traditional"), "RSS item still present");
+        // Step 1.5: server threads the social-selection gate so the pipeline
+        // admits social handles at source selection (not just merges raw items).
+        assert.equal(capture.runOpts?.socialIngestionEnabled, true,
+          "server passes socialIngestionEnabled=true to the pipeline when X is enabled");
 
         // persisted payload carries the social source evidence
         assert.ok(capturedPayload !== null);
@@ -1134,6 +1138,9 @@ test("refresh X wiring: disabled config makes no X call and reports baseline dia
         assert.equal(xReadCalls, 0, "X reader NOT called when disabled");
         const handed = capture.runOpts?.rawItems ?? [];
         assert.ok(!handed.some((it) => it.kind === "social"), "no social items when disabled");
+        // Step 1.5: social-selection gate stays inert when X is disabled.
+        assert.equal(capture.runOpts?.socialIngestionEnabled, false,
+          "server passes socialIngestionEnabled=false to the pipeline when X is disabled");
 
         const x = res.body._meta?.ingestion?.x;
         assert.ok(x && typeof x === "object", "_meta.ingestion.x present even when disabled");

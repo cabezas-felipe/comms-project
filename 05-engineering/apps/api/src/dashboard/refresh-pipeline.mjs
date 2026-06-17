@@ -24,6 +24,8 @@ import {
   resolveSelectedSources,
   buildMatchedOutletSet,
   buildMatchedFeedIdSet,
+  buildSelectedSocialHandleSet,
+  normalizeSocialHandle,
   filterItemsToMatchedFeeds,
   SELECTION_MODE,
   FALLBACK_REASON,
@@ -2067,6 +2069,12 @@ export async function runRefreshPipeline({
   // Trust is unchanged — no fabricated stories, only `whyItMatters` is
   // progressively enriched; clustering fail-closed continuity is untouched.
   deferWhyItMatters = false,
+  // X ingestion (Phase 1, Step 1.5): when true, user-selected social handles
+  // are admitted at source selection as an additive UNION alongside manifest
+  // matching, so `kind:"social"` items survive to relevance/clustering. The
+  // server passes `xConfig.enabled` here; default false keeps the social path
+  // inert (no behavior change for RSS-only / X-disabled runs).
+  socialIngestionEnabled = false,
 }) {
   const profile =
     refreshProfileOverrides && typeof refreshProfileOverrides === "object"
@@ -2160,11 +2168,48 @@ export async function runRefreshPipeline({
     //   - outlets (bidirectional substring) — legacy path used by fixture
     //     items that have only `outlet`.  Kept so existing tests and the
     //     fixture pipeline don't change behavior.
+    // Additive social selection (X ingestion): user-selected X handles are not
+    // manifest feeds, so `resolveSelectedSources` can't match them.  When X
+    // ingestion is enabled for this run AND the user selected ≥1 social source,
+    // admit `kind:"social"` items whose outlet matches a selected handle — a
+    // true UNION with the manifest match.  Inert when X is disabled or the user
+    // has no social sources (set stays empty → no items admitted via this path).
+    const socialSelectionApplied =
+      socialIngestionEnabled && (settings.socialSources ?? []).length > 0;
+    const selectedSocialHandles = socialSelectionApplied
+      ? buildSelectedSocialHandleSet(settings.socialSources)
+      : new Set();
+
     const matchedKeys = {
       feedIds: buildMatchedFeedIdSet(selection.matchedFeeds),
       outlets: buildMatchedOutletSet(selection.matchedFeeds),
+      socialHandles: selectedSocialHandles,
     };
     recentItems = filterItemsToMatchedFeeds(recentNormalizedItems, matchedKeys);
+
+    // Which selected social handles actually admitted ≥1 item this run — the
+    // truthful "matched social" surface.  Empty when X degraded / no social
+    // items arrived, so a selected handle is never falsely reported as matched.
+    const matchedSocialSet = new Set();
+    if (socialSelectionApplied) {
+      for (const it of recentItems) {
+        if (it?.kind !== "social") continue;
+        const handle = normalizeSocialHandle(it.outlet);
+        if (handle && selectedSocialHandles.has(handle)) matchedSocialSet.add(handle);
+      }
+    }
+    const matchedSocialSources = [...matchedSocialSet];
+
+    // The selected social handles are served via the social connector, NOT the
+    // RSS manifest — so they must not be reported as "unmatched manifest
+    // sources" (the original bug).  Drop them from the unmatched list when the
+    // social path is active.  Traditional unmatched names are untouched.
+    const unmatchedSelectedSources = socialSelectionApplied
+      ? selection.unmatchedSelectedSources.filter(
+          (name) => !selectedSocialHandles.has(normalizeSocialHandle(name))
+        )
+      : selection.unmatchedSelectedSources;
+
     // Low-noise diagnostic: when source-selection collapses a non-empty
     // input pool to zero despite matched feeds, log a small sample so
     // operators can see the mismatch shape without grepping per-item logs.
@@ -2187,21 +2232,28 @@ export async function runRefreshPipeline({
       sourceFallbackReason: selection.fallbackReason,
       matchedSourceCount: selection.matchedSourceCount,
       selectedSourceCount: selection.selectedSourceCount,
-      unmatchedSelectedSources: selection.unmatchedSelectedSources,
+      unmatchedSelectedSources,
       unavailableConnectorCount: selection.unavailableConnectorCount,
       unavailableConnectorSources: selection.unavailableConnectorSources,
       matchedFeedIds: selection.matchedFeeds.map((f) => f.id),
+      // Additive social-selection diagnostics (truthful — NOT folded into
+      // matchedFeedIds, which stays manifest-only / synthetic-id-free).
+      matchedSocialSourceCount: matchedSocialSources.length,
+      matchedSocialSources,
+      socialSelectionApplied,
     };
     // Low-noise diagnostic: counts always; the actual unmatched/unavailable
     // source NAMES only when non-zero, so a mismatch (e.g. the embassy
     // `matched=6/7`) names the culprit without grepping per-item logs. The
     // happy path (all matched) stays a single clean counts line.
-    const unmatchedNames = selection.unmatchedSelectedSources;
+    const unmatchedNames = unmatchedSelectedSources;
     const unavailableNames = selection.unavailableConnectorSources;
     console.log(
       `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${selection.matchedSourceCount}/${selection.selectedSourceCount} unmatched=${unmatchedNames.length} unavailable=${selection.unavailableConnectorCount} feeds=${selectionMeta.matchedFeedIds.length}` +
+        ` socialApplied=${socialSelectionApplied} matchedSocial=${matchedSocialSources.length}` +
         (unmatchedNames.length > 0 ? ` unmatchedSources=${JSON.stringify(unmatchedNames)}` : "") +
-        (unavailableNames.length > 0 ? ` unavailableSources=${JSON.stringify(unavailableNames)}` : "")
+        (unavailableNames.length > 0 ? ` unavailableSources=${JSON.stringify(unavailableNames)}` : "") +
+        (matchedSocialSources.length > 0 ? ` matchedSocialSources=${JSON.stringify(matchedSocialSources)}` : "")
     );
   } else {
     recentItems = selectSourcePool(recentNormalizedItems, settings);

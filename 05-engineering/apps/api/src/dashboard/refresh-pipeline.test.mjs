@@ -4459,6 +4459,182 @@ test("runRefreshPipeline regression: live WaPo items pass source-selection via f
   assert.equal(log.selection.sourceFallbackUsed, false);
 });
 
+// ─── X social-source selection union (Phase 1, Step 1.5) ─────────────────────
+
+// Reuters-only RSS manifest used across the social-union tests. It deliberately
+// has NO row for the X handle, so the social handle can only be admitted via the
+// additive social union — never via a (synthetic) manifest match.
+const SOCIAL_UNION_MANIFEST = [
+  { id: "reuters-world", name: "Reuters — World News", kind: "rss", url: "https://x/reuters", weight: 90, active: true },
+];
+
+function makeSocialItem(overrides = {}) {
+  return makeItem({
+    sourceId: "x-petro-1",
+    feedId: "x:petrogustavo",
+    outlet: "@petrogustavo",
+    kind: "social",
+    topic: "Diplomatic relations",
+    minutesAgo: 20,
+    headline: "Petro issues official diplomatic statement on US relations",
+    url: "https://x.com/petrogustavo/status/1",
+    ...overrides,
+  });
+}
+
+test("runRefreshPipeline: X social handle survives source selection (union) and reaches clustering + published story carries kind:social", async () => {
+  // The core bug fix: a user-selected X handle is NOT a manifest feed, so it
+  // would be dropped at source selection. With socialIngestionEnabled, the
+  // social item is admitted as a UNION alongside manifest matching, survives the
+  // funnel, reaches clustering, and grounds into a published story's sources.
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const socialItem = makeSocialItem();
+  let clusterInput = null;
+  const { payload, log } = await runRefreshPipeline({
+    settings,
+    rawItems: [socialItem],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async (items) => {
+      clusterInput = items;
+      return [
+        {
+          meta_story_id: "petro-diplomatic-statement",
+          title: "Petro Diplomatic Statement",
+          subtitle: "Official communication on US relations.",
+          source_item_ids: items.map((i) => i.sourceId),
+          summary: "Petro issued an official diplomatic statement on US relations.",
+          tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US", "Colombia"] },
+        },
+      ];
+    },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    clusterSplitConfig: SPLIT_HEALER_DISABLED,
+  });
+
+  // Funnel: the social item is NOT dropped at source selection (the bug).
+  assert.equal(log.funnel.totalNormalized, 1);
+  assert.equal(log.funnel.afterSourceSelection, 1, "social item survives source selection via the union");
+  assert.ok(clusterInput && clusterInput.some((i) => i.kind === "social"), "social item reaches clustering");
+
+  // Selection metadata: additive + truthful (no synthetic x:* feed ids).
+  assert.equal(log.selection.socialSelectionApplied, true);
+  assert.deepEqual(log.selection.matchedSocialSources, ["@petrogustavo"]);
+  assert.equal(log.selection.matchedSocialSourceCount, 1);
+  assert.deepEqual(log.selection.matchedFeedIds, [], "manifest feed-id index stays free of synthetic x:* ids");
+  assert.ok(
+    !log.selection.unmatchedSelectedSources.includes("@petrogustavo"),
+    "selected social handle is no longer reported as an unmatched manifest source"
+  );
+
+  // The published story carries a social source.
+  assert.equal(payload.stories.length, 1);
+  const kinds = payload.stories[0].sources.map((s) => s.kind);
+  assert.ok(kinds.includes("social"), "published story carries a kind:social source");
+});
+
+test("runRefreshPipeline: mixed traditional + social — both admitted, traditional matching unchanged, metadata reports both", async () => {
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: ["@petrogustavo"] };
+  const rssItem = makeItem({
+    sourceId: "reuters-1",
+    feedId: "reuters-world",
+    outlet: "Reuters",
+    kind: "traditional",
+    topic: "Diplomatic relations",
+    minutesAgo: 30,
+  });
+  const socialItem = makeSocialItem();
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [rssItem, socialItem],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  // Both outlets reach clustering.
+  const outlets = [...new Set(clusterInput.map((i) => i.outlet))].sort();
+  assert.deepEqual(outlets, ["@petrogustavo", "Reuters"]);
+  assert.equal(log.funnel.afterSourceSelection, 2);
+
+  // Traditional matching is exactly as before (strict, Reuters matched by id).
+  assert.equal(log.selection.sourceSelectionMode, "strict");
+  assert.deepEqual(log.selection.matchedFeedIds, ["reuters-world"]);
+  assert.equal(log.selection.matchedSourceCount, 1, "Reuters is the one matched traditional source");
+
+  // Social tracked in parallel — additive, not folded into the traditional counts.
+  assert.equal(log.selection.socialSelectionApplied, true);
+  assert.deepEqual(log.selection.matchedSocialSources, ["@petrogustavo"]);
+  assert.equal(log.selection.matchedSocialSourceCount, 1);
+  assert.ok(!log.selection.unmatchedSelectedSources.includes("@petrogustavo"));
+});
+
+test("runRefreshPipeline: X degraded (no social items) — RSS still flows, social not falsely reported as matched", async () => {
+  // X enabled but degraded → no social raw items arrive. RSS must still flow and
+  // the selected handle must NOT be reported as matched (no fabricated evidence).
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: ["@petrogustavo"] };
+  const rssItem = makeItem({
+    sourceId: "reuters-1",
+    feedId: "reuters-world",
+    outlet: "Reuters",
+    kind: "traditional",
+    topic: "Diplomatic relations",
+    minutesAgo: 30,
+  });
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [rssItem], // X degraded: no social items merged
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.ok(clusterInput.some((i) => i.outlet === "Reuters"), "RSS item still flows when X is degraded");
+  assert.equal(log.selection.socialSelectionApplied, true);
+  assert.deepEqual(log.selection.matchedSocialSources, [], "no social source falsely reported as matched");
+  assert.equal(log.selection.matchedSocialSourceCount, 0);
+});
+
+test("runRefreshPipeline: social path is inert when X ingestion is disabled (backward compatible)", async () => {
+  // socialIngestionEnabled defaults false. A stray social item must NOT be
+  // admitted via the social union, and the handle stays an unmatched manifest
+  // source — exactly the pre-X behavior.
+  const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: ["@petrogustavo"] };
+  const rssItem = makeItem({
+    sourceId: "reuters-1",
+    feedId: "reuters-world",
+    outlet: "Reuters",
+    kind: "traditional",
+    topic: "Diplomatic relations",
+    minutesAgo: 30,
+  });
+  const socialItem = makeSocialItem();
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [rssItem, socialItem],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    // socialIngestionEnabled omitted → default false (X disabled).
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  assert.ok(clusterInput.some((i) => i.outlet === "Reuters"), "RSS item flows");
+  assert.ok(!clusterInput.some((i) => i.kind === "social"), "social item NOT admitted when X disabled");
+  assert.equal(log.selection.socialSelectionApplied, false);
+  assert.deepEqual(log.selection.matchedSocialSources, []);
+  // Backward-compatible: the unmatched handle is reported as unmatched.
+  assert.ok(log.selection.unmatchedSelectedSources.includes("@petrogustavo"));
+});
+
 test("runRefreshPipeline regression: strict-empty preserved — items with no matching feedId AND no outlet match still drop", async () => {
   // Counterpart to the regression above: ensure the new feedId index does
   // not silently broaden matching.  Items whose feedId is outside
