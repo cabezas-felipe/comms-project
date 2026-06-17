@@ -198,6 +198,291 @@ describe("Phase 5: Dashboard load path selection", () => {
   });
 });
 
+// ─── Phase 2.1: mount-time staleness safety net ──────────────────────────────
+//
+// Background timers can be throttled/suspended, so a returning user may land
+// with the hourly heartbeat overdue.  On the DEFAULT (non-bootstrap) path, an
+// overdue anchor (`Date.now() - lastAttemptAt >= REFRESH_INTERVAL_MS`) replays
+// the missed heartbeat as a POST /refresh (bare endpoint = default profile)
+// instead of serving a stale GET snapshot.  Existing precedence is preserved:
+// retry / join / forceRefresh / bootstrap all still win, and a non-overdue
+// mount keeps the GET path unchanged.
+
+describe("Phase 2.1: mount-time staleness safety net", () => {
+  const OVERDUE_ANCHOR = () => Date.now() - REFRESH_INTERVAL_MS - 60 * 1000;
+
+  it("an overdue default mount replays the missed heartbeat via POST /refresh (bare/default endpoint)", async () => {
+    mockLastAttemptAt = OVERDUE_ANCHOR();
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null);
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
+    // Default profile: no `?interactive` / `?profile` override — this is the
+    // hourly heartbeat's own endpoint, called with no options.
+    const arg = refreshSpy.mock.calls[0][0] as { endpoint?: string } | undefined;
+    expect(arg?.endpoint).toBeUndefined();
+    // Not a GET, not a bootstrap.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(bootstrapSpy).not.toHaveBeenCalled();
+  });
+
+  it("the overdue-mount refresh counts as an attempt and advances the clock", async () => {
+    mockLastAttemptAt = OVERDUE_ANCHOR();
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null);
+    await screen.findByTestId("dashboard-empty");
+    // POST-style attempt → opens exactly one slot and settles it advancing.
+    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1));
+    const [, options] = recordAttemptFinishedSpy.mock.calls[0];
+    expect(options?.advanceClock).toBe(true);
+  });
+
+  it("a default mount within the refresh window keeps the GET path (no catch-up, not an attempt)", async () => {
+    mockLastAttemptAt = Date.now() - 20 * 60 * 1000; // 20m ago — well inside 60m
+    fetchSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null);
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
+    expect(refreshSpy).not.toHaveBeenCalled();
+    // GET is not a refresh attempt — the slot lifecycle must stay untouched.
+    expect(recordAttemptStartSpy).not.toHaveBeenCalled();
+  });
+
+  it("forceRefresh still wins over an overdue anchor (interactive endpoint, single POST)", async () => {
+    mockLastAttemptAt = OVERDUE_ANCHOR();
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt({ forceRefresh: true });
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
+    // The forceRefresh branch (interactive profile) is taken, not the bare
+    // overdue branch — and it fires exactly once (no double POST).
+    const arg = refreshSpy.mock.calls[0][0] as { endpoint?: string } | undefined;
+    expect(arg?.endpoint).toMatch(/\?interactive=1$/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("bootstrap route semantics survive an overdue anchor (bootstrap POST, no refresh, no GET)", async () => {
+    mockLastAttemptAt = OVERDUE_ANCHOR();
+    bootstrapSpy.mockResolvedValue({ ...OK_RESULT, decision: "served_fresh_snapshot" });
+    renderAt({ bootstrap: true });
+    await waitFor(() => expect(bootstrapSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Phase 2.2: overdue-refresh regression matrix ────────────────────────────
+//
+// Hardens the Phase 2.1 mount-time safety net so future loader edits cannot
+// silently break precedence, the attempt lifecycle, the endpoint/profile
+// contract, or the POST→GET silent-recovery leg.  The `run()` routing chain is
+// (in order): retry → join-resolved-to-GET → forceRefresh → bootstrap →
+// overdue-default catch-up → plain GET.  Every test below pins an overdue
+// anchor so the catch-up branch is "armed" and we can prove the higher paths
+// still win, and that the catch-up itself behaves like a real refresh attempt.
+
+describe("Phase 2.2: overdue-refresh regression matrix", () => {
+  // Just past the 60-min heartbeat boundary → catch-up is armed on the default
+  // path.  Read at call-time so it tracks fake timers when those are enabled.
+  const OVERDUE = () => Date.now() - REFRESH_INTERVAL_MS - 60 * 1000;
+
+  // ── Precedence + endpoint contract (nav-state-driven, table-driven) ────────
+  //
+  // Each row mounts with an OVERDUE anchor (catch-up armed) and asserts which
+  // loader call wins and on which endpoint.  `endpoint: undefined` means the
+  // winning helper was called with NO options object (bare default profile for
+  // refresh; no-arg for bootstrap).  All three are POST-style attempts, so each
+  // opens exactly one attempt slot.
+  type MatrixRow = {
+    label: string;
+    nav: Record<string, unknown> | null;
+    prime: () => void;
+    winner: () => ReturnType<typeof vi.fn>;
+    endpoint: string | undefined;
+    losers: () => ReturnType<typeof vi.fn>[];
+  };
+  const MATRIX: MatrixRow[] = [
+    {
+      label: "forceRefresh overrides overdue-default → POST ?interactive=1",
+      nav: { forceRefresh: true },
+      prime: () => refreshSpy.mockResolvedValue(OK_RESULT),
+      winner: () => refreshSpy,
+      endpoint: "/api/dashboard/refresh?interactive=1",
+      losers: () => [fetchSpy, bootstrapSpy],
+    },
+    {
+      label: "bootstrap overrides overdue-default → bootstrap POST (no endpoint arg)",
+      nav: { bootstrap: true },
+      prime: () => bootstrapSpy.mockResolvedValue({ ...OK_RESULT, decision: "served_fresh_snapshot" }),
+      winner: () => bootstrapSpy,
+      endpoint: undefined,
+      losers: () => [fetchSpy, refreshSpy],
+    },
+    {
+      label: "overdue-default fires when no higher path applies → bare POST /refresh",
+      nav: null,
+      prime: () => refreshSpy.mockResolvedValue(OK_RESULT),
+      winner: () => refreshSpy,
+      endpoint: undefined,
+      losers: () => [fetchSpy, bootstrapSpy],
+    },
+  ];
+
+  for (const row of MATRIX) {
+    it(`precedence: ${row.label}`, async () => {
+      mockLastAttemptAt = OVERDUE();
+      row.prime();
+      renderAt(row.nav);
+      await waitFor(() => expect(row.winner()).toHaveBeenCalledTimes(1));
+      await screen.findByTestId("dashboard-empty");
+      // Endpoint/profile contract: the winning helper used exactly the expected
+      // endpoint (or none for the bare/default + bootstrap cases).
+      const arg = row.winner().mock.calls[0][0] as { endpoint?: string } | undefined;
+      expect(arg?.endpoint).toBe(row.endpoint);
+      // No other loader path ran.
+      for (const loser of row.losers()) expect(loser).not.toHaveBeenCalled();
+      // All three rows are POST-style attempts → exactly one slot opened.
+      expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  // ── Precedence: retry wins over overdue (reloadCounter harness) ────────────
+  it("precedence: retry overrides overdue-default (retry keeps ?profile=default)", async () => {
+    // The anchor stays overdue across both loads (the context mock isn't
+    // mutated by the spy lifecycle).  First mount is overdue → bare catch-up
+    // POST; we make it surface a Refresh affordance, then the click routes
+    // through the RETRY branch — which must win over the still-overdue anchor.
+    mockLastAttemptAt = OVERDUE();
+    refreshSpy
+      .mockResolvedValueOnce({ ...OK_RESULT, clusteringFailed: true, clusteringFailureReason: "error" })
+      .mockResolvedValueOnce(OK_RESULT);
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-clustering-failed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+    await screen.findByTestId("dashboard-empty");
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+    // Call 0 = overdue catch-up (bare); call 1 = retry (?profile=default).
+    expect(refreshSpy.mock.calls[0][0]).toBeUndefined();
+    expect(refreshSpy.mock.calls[1][0]).toEqual({
+      endpoint: "/api/dashboard/refresh?profile=default",
+    });
+    // Retry never falls back to a GET.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  // ── Precedence: join-resolved-to-GET wins over overdue (timer harness) ─────
+  it("precedence: join-resolved-to-GET overrides overdue-default (serves GET, no catch-up POST)", async () => {
+    vi.useFakeTimers();
+    try {
+      mockLastAttemptAt = OVERDUE();
+      statusSpy
+        .mockResolvedValueOnce({ jobId: "u1", status: "running", phase: "clustering", storyCount: null, failureReason: null })
+        .mockResolvedValue({ jobId: "u1", status: "done", phase: "done", storyCount: 1, failureReason: null });
+      fetchSpy.mockResolvedValue({
+        ...OK_RESULT,
+        payload: {
+          contractVersion: CONTRACT_VERSION,
+          stories: [makeStoryDto({ id: "j1", title: "Joined Story" })],
+        },
+      });
+      // coldStartJobId alone arms JOIN mode (no bootstrap/forceRefresh) so the
+      // default → overdue branch would otherwise apply.
+      renderAt({ coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // running
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // done → load
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush GET render
+      expect(screen.getByText("Joined Story")).toBeInTheDocument();
+      // Join resolved to GET despite the overdue anchor — the catch-up POST
+      // must NOT fire (the prefetch already ran the refresh).
+      expect(fetchSpy).toHaveBeenCalled();
+      expect(refreshSpy).not.toHaveBeenCalled();
+      expect(bootstrapSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── Attempt lifecycle ──────────────────────────────────────────────────────
+  it("lifecycle: overdue catch-up opens one slot and settles it with advanceClock=true", async () => {
+    mockLastAttemptAt = OVERDUE();
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null);
+    await screen.findByTestId("dashboard-empty");
+    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1));
+    const [, options] = recordAttemptFinishedSpy.mock.calls[0];
+    expect(options?.advanceClock).toBe(true);
+  });
+
+  it("lifecycle: a within-window default mount serves GET and opens/settles NO attempt slot", async () => {
+    mockLastAttemptAt = Date.now() - 20 * 60 * 1000; // 20m ago — inside 60m
+    fetchSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null);
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
+    expect(refreshSpy).not.toHaveBeenCalled();
+    // GET is not a refresh attempt — neither side of the slot lifecycle fires.
+    expect(recordAttemptStartSpy).not.toHaveBeenCalled();
+    expect(recordAttemptFinishedSpy).not.toHaveBeenCalled();
+  });
+
+  it("lifecycle: a null anchor (no prior attempt) is NOT overdue → GET, no catch-up", async () => {
+    mockLastAttemptAt = null;
+    fetchSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null);
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    await screen.findByTestId("dashboard-empty");
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(recordAttemptStartSpy).not.toHaveBeenCalled();
+  });
+
+  // ── Failure / silent-recovery (overdue POST shares the POST→GET leg) ───────
+  it("recovery: an overdue catch-up POST that fails recovers silently via GET (recovered render, no error UI)", async () => {
+    mockLastAttemptAt = OVERDUE();
+    refreshSpy.mockRejectedValue(new MockDashboardFetchError("http", "503", 503));
+    recoverSpy.mockResolvedValue({
+      ...OK_RESULT,
+      payload: {
+        contractVersion: CONTRACT_VERSION,
+        stories: [makeStoryDto({ id: "rec", title: "Recovered Story" })],
+      },
+    });
+    renderAt(null);
+    // The recovered snapshot renders…
+    expect(await screen.findByText("Recovered Story")).toBeInTheDocument();
+    expect(recoverSpy).toHaveBeenCalledTimes(1);
+    // …with no full-page error and no toast (silent recovery).
+    expect(screen.queryByTestId("dashboard-error")).toBeNull();
+    expect(notifyErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("recovery: a failed overdue catch-up still settles exactly one attempt with advanceClock=true", async () => {
+    mockLastAttemptAt = OVERDUE();
+    refreshSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    recoverSpy.mockResolvedValue({ ...OK_RESULT, lastCheckedAt: "2026-05-11T14:00:00Z" });
+    renderAt(null);
+    await screen.findByTestId("dashboard-empty");
+    // No double-counting across the POST + recovery legs.
+    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(recordAttemptFinishedSpy).toHaveBeenCalledTimes(1));
+    const [, options] = recordAttemptFinishedSpy.mock.calls[0];
+    // A refresh was attempted (even though it failed) → the clock advances.
+    expect(options?.advanceClock).toBe(true);
+    expect(options?.result).toMatchObject({ lastCheckedAt: "2026-05-11T14:00:00Z" });
+  });
+
+  it("recovery: overdue catch-up POST fail + GET recovery fail → existing error UI remains", async () => {
+    mockLastAttemptAt = OVERDUE();
+    refreshSpy.mockRejectedValue(new MockDashboardFetchError("network", "boom"));
+    recoverSpy.mockResolvedValue(null); // GET recovery also failed
+    renderAt(null);
+    expect(await screen.findByTestId("dashboard-error")).toBeInTheDocument();
+    expect(recoverSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ─── Slice 2: forceRefresh routing + POST→GET silent recovery ────────────────
 // 1) Onboarding handoff (`forceRefresh: true`) routes straight to POST /refresh
 //    so the first view reflects freshly-saved settings (no stale-snapshot
@@ -1524,6 +1809,11 @@ describe("Next refresh footer (2-state)", () => {
     mockLastAttemptAt = Date.now() - REFRESH_INTERVAL_MS - 60 * 1000;
     mockIsRefreshing = false;
     fetchSpy.mockResolvedValue(OK_RESULT);
+    // Phase 2.1: a past-due anchor on the default mount now replays the missed
+    // heartbeat via POST /refresh — mock it so the catch-up settles cleanly.
+    // The footer math is unchanged (the mocked context anchor stays past-due),
+    // so the clamp still reads "~1m" once the attempt settles.
+    refreshSpy.mockResolvedValue(OK_RESULT);
 
     renderAt(null);
     await screen.findByTestId("dashboard-empty");
@@ -1760,6 +2050,10 @@ describe("Footer reads single attempt anchor (header + footer share state)", () 
     mockLastRefreshedAt = new Date(mockLastAttemptAt).toISOString();
     mockIsRefreshing = false;
     fetchSpy.mockResolvedValue(OK_RESULT);
+    // Phase 2.1: this past-due default mount now triggers the missed-heartbeat
+    // catch-up POST — mock it so the attempt settles; the footer clamp (driven
+    // by the mocked context anchor, unchanged here) still reads "~1m".
+    refreshSpy.mockResolvedValue(OK_RESULT);
 
     renderAt(null);
     await screen.findByTestId("dashboard-empty");
