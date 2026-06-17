@@ -86,6 +86,19 @@ test("resolveXConfig: maxResultsPerPage clamps to 5..100 and timeout min 1000", 
   assert.equal(resolveXConfig({ TEMPO_X_TIMEOUT_MS: "bad" }).timeoutMs, 12000);
 });
 
+test("resolveXConfig: TEMPO_X_FETCH_TIMEOUT_MS takes precedence over legacy TEMPO_X_TIMEOUT_MS", () => {
+  const cfg = resolveXConfig({ TEMPO_X_FETCH_TIMEOUT_MS: "15000", TEMPO_X_TIMEOUT_MS: "9000" });
+  assert.equal(cfg.timeoutMs, 15000);
+});
+
+test("resolveXConfig: legacy TEMPO_X_TIMEOUT_MS still applies when FETCH var is absent", () => {
+  assert.equal(resolveXConfig({ TEMPO_X_TIMEOUT_MS: "9000" }).timeoutMs, 9000);
+});
+
+test("resolveXConfig: TEMPO_X_FETCH_TIMEOUT_MS obeys the 1000ms minimum clamp", () => {
+  assert.equal(resolveXConfig({ TEMPO_X_FETCH_TIMEOUT_MS: "10" }).timeoutMs, 1000);
+});
+
 test("resolveXConfig: apiBase override and trimming", () => {
   assert.equal(resolveXConfig({ TEMPO_X_API_BASE: "https://api.twitter.com/2" }).apiBase, "https://api.twitter.com/2");
   assert.equal(resolveXConfig({ TEMPO_X_API_BASE: "   " }).apiBase, "https://api.x.com/2");

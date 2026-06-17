@@ -23,9 +23,11 @@
 
 import { SOURCE_NAME_ALIASES } from "../contracts-runtime/index.mjs";
 
-// Connector kinds that have an implemented ingestion path.  Extend this set
-// when new connectors land (e.g. social scraping in Phase 4).
-const IMPLEMENTED_CONNECTOR_KINDS = new Set(["rss"]);
+// Connector kinds that have an implemented ingestion path.  `social` joined
+// `rss` once the X ingestion path landed (Phase 1, Step 1.3 — handles are read
+// via `x-reader.mjs` and merged into the refresh pool); extend this set when
+// further connectors land.
+const IMPLEMENTED_CONNECTOR_KINDS = new Set(["rss", "social"]);
 
 export const FALLBACK_REASON = Object.freeze({
   NO_SELECTED_SOURCES: "no_selected_sources",

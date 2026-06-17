@@ -59,7 +59,7 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _refreshUpgrade, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _refreshUpgrade, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _xReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
 const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
@@ -795,6 +795,293 @@ test("refresh pipeline: old settings topic still matches item with the same old 
     _snapshotRepo.insertLocks = prevInsertLocks;
     _refreshPipeline.run = prevRun;
     await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+// ─── X ingestion wiring (Phase 1, Step 1.3) ─────────────────────────────────
+//
+// These exercise the server seam that merges X (social) items into the refresh
+// pool. The X reader (`_xReader.read`) and the pipeline (`_refreshPipeline.run`)
+// are both stubbed so the assertions are deterministic and offline: we verify
+// (a) social raw items reach the pipeline / persisted snapshot, (b) the route
+// stays fail-open when X throws (RSS still renders), and (c) the disabled path
+// makes no X call and reports baseline diagnostics. All go through the normal
+// "ran" publish branch (the pipeline stub returns one story).
+
+const X_ENV_KEYS = [
+  "TEMPO_X_INGESTION_ENABLED",
+  "TEMPO_X_BEARER_TOKEN",
+  "TEMPO_X_HANDLE_ALLOWLIST",
+];
+
+// Snapshot + restore the X env keys around a block so a test's config never
+// bleeds into siblings (afterEach only restores DATA_DIR / AI_MOCK_ONLY).
+async function withXEnv(vars, fn) {
+  const snapshot = {};
+  for (const k of X_ENV_KEYS) snapshot[k] = process.env[k];
+  for (const k of X_ENV_KEYS) {
+    if (vars[k] === undefined) delete process.env[k];
+    else process.env[k] = vars[k];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const k of X_ENV_KEYS) {
+      if (snapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = snapshot[k];
+    }
+  }
+}
+
+// Pipeline stub that echoes every rawItem (RSS + merged X) into the published
+// story's `sources`, so the persisted payload visibly carries social evidence
+// and the test can assert the merge actually reached the pipeline.
+function xMergePipelineStub(capture) {
+  return async (opts) => {
+    capture.runOpts = opts;
+    const items = Array.isArray(opts.rawItems) ? opts.rawItems : [];
+    return {
+      payload: {
+        contractVersion: opts.contractVersion,
+        stories: [
+          {
+            id: "x-test-story",
+            metaStoryId: "x-test-story",
+            title: "X Wiring Test Story",
+            subtitle: "Synthetic subtitle.",
+            geographies: ["US"],
+            topic: "Diplomatic relations",
+            summary: "Synthetic summary.",
+            whyItMatters: "Synthetic implication.",
+            whatChanged: "Synthetic delta.",
+            priority: "standard",
+            outletCount: items.length,
+            tags: { topics: [], keywords: [], geographies: ["US"] },
+            sources: items.map((it) => ({ outlet: it.outlet, kind: it.kind, url: it.url })),
+          },
+        ],
+      },
+      log: {
+        unchanged: false,
+        poolCount: items.length,
+        relevantCount: items.length,
+        usedFallbackClustering: false,
+        groundingFailures: 0,
+        droppedUngroundedStoryCount: 0,
+        groundingDropReasons: {},
+        watermark: "x-stub-watermark",
+        candidateCount: items.length,
+        selectedFeedCount: 1,
+        selection: { sourceSelectionMode: "test" },
+      },
+    };
+  };
+}
+
+const X_SOCIAL_ITEM = {
+  sourceId: "x:petrogustavo:deadbeefdeadbeef",
+  feedId: "x:petrogustavo",
+  outlet: "@petrogustavo",
+  kind: "social",
+  weight: 60,
+  url: "https://x.com/petrogustavo/status/1800000000000000001",
+  minutesAgo: 5,
+  headline: "Comunicado oficial sobre la frontera.",
+  body: ["Comunicado oficial sobre la frontera."],
+  lang: "es",
+  topic: "Diplomatic relations",
+  title: "",
+  geographies: [],
+  takeaway: "",
+  summary: "",
+  whyItMatters: "",
+  whatChanged: "",
+};
+
+test("refresh X wiring: success path merges social item and surfaces _meta.ingestion.x counts", async () => {
+  const ISOLATED_USER_ID = "test-user-x-success";
+  const capture = {};
+  let capturedPayload = null;
+
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+  let xReadCalls = 0;
+
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async (args) => {
+    xReadCalls += 1;
+    // server must pass the user's social handles + the resolved (enabled) config
+    assert.ok(Array.isArray(args.socialSources), "socialSources passed to reader");
+    assert.equal(args.config?.enabled, true, "reader receives enabled config");
+    return {
+      items: [X_SOCIAL_ITEM],
+      diagnostics: {
+        handlesRequested: 1,
+        handlesSelected: 1,
+        handlesFetched: 1,
+        tweetsReturned: 1,
+        errors: [],
+        degraded: false,
+      },
+    };
+  };
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app)
+          .put("/api/settings")
+          .send({ ...VALID_BODY })
+          .set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+
+        assert.equal(res.status, 200);
+        assert.equal(xReadCalls, 1, "X reader invoked once");
+
+        // social raw item reached the pipeline
+        const handed = capture.runOpts?.rawItems ?? [];
+        assert.ok(handed.some((it) => it.kind === "social" && it.outlet === "@petrogustavo"),
+          "merged social item handed to pipeline");
+        // RSS continuity preserved alongside X
+        assert.ok(handed.some((it) => it.kind === "traditional"), "RSS item still present");
+
+        // persisted payload carries the social source evidence
+        assert.ok(capturedPayload !== null);
+        const sources = capturedPayload.stories?.[0]?.sources ?? [];
+        assert.ok(sources.some((s) => s.kind === "social"), "persisted story carries social source");
+
+        // _meta.ingestion.x reflects fetched tweet counts
+        const x = res.body._meta?.ingestion?.x;
+        assert.ok(x && typeof x === "object", "_meta.ingestion.x present");
+        assert.equal(x.enabled, true);
+        assert.equal(x.handlesFetched, 1);
+        assert.equal(x.tweetsReturned, 1);
+        assert.equal(x.degraded, false);
+        // never leak the bearer token anywhere in the response
+        assert.doesNotMatch(JSON.stringify(res.body), /secret-bearer/);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh X wiring: reader throw is fail-open — 200 with RSS output and _meta.ingestion.x.degraded", async () => {
+  const ISOLATED_USER_ID = "test-user-x-throw";
+  const capture = {};
+  let capturedPayload = null;
+
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async () => { throw new Error("X upstream 503"); };
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app)
+          .put("/api/settings")
+          .send({ ...VALID_BODY })
+          .set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+
+        // route still succeeds with RSS-derived output
+        assert.equal(res.status, 200);
+        const handed = capture.runOpts?.rawItems ?? [];
+        assert.ok(handed.some((it) => it.kind === "traditional"), "RSS items unchanged after X throw");
+        assert.ok(!handed.some((it) => it.kind === "social"), "no social items merged when X throws");
+        assert.ok(capturedPayload !== null && capturedPayload.stories.length > 0,
+          "RSS-derived story still published");
+
+        // diagnostics record the failure additively
+        const x = res.body._meta?.ingestion?.x;
+        assert.ok(x && typeof x === "object", "_meta.ingestion.x present");
+        assert.equal(x.degraded, true);
+        assert.ok(Array.isArray(x.errors) && x.errors.length >= 1, "an error entry recorded");
+        assert.match(x.errors[0].message, /503/);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh X wiring: disabled config makes no X call and reports baseline diagnostics", async () => {
+  const ISOLATED_USER_ID = "test-user-x-disabled";
+  const capture = {};
+
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+  let xReadCalls = 0;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async () => { xReadCalls += 1; return { items: [], diagnostics: {} }; };
+
+  try {
+    // Flag unset (and token unset) → resolveXConfig.enabled === false.
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: undefined, TEMPO_X_BEARER_TOKEN: undefined, TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app)
+          .put("/api/settings")
+          .send({ ...VALID_BODY })
+          .set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+
+        assert.equal(res.status, 200);
+        assert.equal(xReadCalls, 0, "X reader NOT called when disabled");
+        const handed = capture.runOpts?.rawItems ?? [];
+        assert.ok(!handed.some((it) => it.kind === "social"), "no social items when disabled");
+
+        const x = res.body._meta?.ingestion?.x;
+        assert.ok(x && typeof x === "object", "_meta.ingestion.x present even when disabled");
+        assert.equal(x.enabled, false);
+        assert.equal(x.handlesRequested, 0);
+        assert.equal(x.handlesSelected, 0);
+        assert.equal(x.handlesFetched, 0);
+        assert.equal(x.tweetsReturned, 0);
+        assert.deepEqual(x.errors, []);
+        assert.equal(x.degraded, false);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
     await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
   }
 });
@@ -4060,10 +4347,10 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
   // Removes coupling to prior-test state and to whatever the suite-wide
   // FIXTURE_SOURCE_FEEDS happens to contain at the moment.
   //
-  // Scenario: one traditional source matches a row that has an implemented
-  // connector (strict mode preserved with matchedSourceCount=1), one social
-  // source matches a manifest row whose connector is not implemented yet
-  // (counted as unavailable, not strict-empty).
+  // Scenario: one traditional source and one social source each match a
+  // manifest row with an implemented connector (both `rss` and `social` are
+  // implemented as of Phase 1, Step 1.3), so strict mode is preserved with
+  // matchedSourceCount=2 and no unavailable connectors.
   const sourceFeedsPath = path.join(tmpDir, "source-feeds.json");
   const SELECTION_MANIFEST = {
     feeds: [
@@ -4075,8 +4362,8 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
         weight: 88,
         active: true,
       },
-      // Social row — matches by name but social has no implemented connector,
-      // so it's counted under `unavailableConnectorCount`.
+      // Social row — matches by name; `social` is now an implemented connector,
+      // so it resolves as a matched source (not unavailable).
       {
         id: "latamwatcher-2-4-test",
         name: "@latamwatcher",
@@ -4117,9 +4404,10 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
     assert.ok(sel);
     // Reuters matches the manifest row, so strict mode is preserved.
     assert.equal(sel.sourceSelectionMode, "strict");
-    // @latamwatcher matched social row only — counted as unavailable connector.
-    assert.equal(sel.unavailableConnectorCount, 1);
-    assert.equal(sel.matchedSourceCount, 1);
+    // @latamwatcher matches the social row, which now has an implemented
+    // connector — so both sources match and none are unavailable.
+    assert.equal(sel.unavailableConnectorCount, 0);
+    assert.equal(sel.matchedSourceCount, 2);
     assert.equal(sel.selectedSourceCount, 2);
     // Persisted snapshot carries the selection meta so GET can surface it too.
     assert.ok(writtenPayload?._selectionMeta, "selection meta must be persisted with snapshot");
@@ -4456,6 +4744,65 @@ test("POST /api/dashboard/refresh: watermark unchanged → re-serves prior snaps
     // Internal storage fields must NOT leak.
     assert.equal(res.body._watermark, undefined);
     assert.equal(res.body._selectionMeta, undefined);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+  }
+});
+
+test("POST /api/dashboard/refresh: watermark unchanged → _meta.ingestion.x present with baseline keys (Step 1.3 parity)", async () => {
+  // Regression for the Step 1.3 wiring contract: the X ingestion diagnostics
+  // container must be surfaced on the watermark-SKIP branch too, not only the
+  // full-run branch. X is disabled by default in these tests (no TEMPO_X env),
+  // so we expect the stable baseline shape (enabled:false, zeroed counts).
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  const PRIOR_SNAPSHOT = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _watermark: "wm-ingestion-x-skip",
+    _selectionMeta: { sourceSelectionMode: "strict", matchedFeedIds: ["nyt-politics"] },
+  };
+
+  _snapshotRepo.read = async () => PRIOR_SNAPSHOT;
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-ingestion-x-skip",
+      candidateCount: 3,
+      selectedFeedCount: 1,
+      selection: PRIOR_SNAPSHOT._selectionMeta,
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    // Confirm we actually took the watermark-skip branch.
+    assert.equal(res.body._meta.unchanged, true);
+    assert.equal(res.body._meta.refreshSkippedReason, "unchanged_watermark");
+
+    const x = res.body._meta?.ingestion?.x;
+    assert.ok(x && typeof x === "object", "_meta.ingestion.x present on watermark-skip branch");
+    assert.equal(x.enabled, false);
+    assert.equal(x.handlesRequested, 0);
+    assert.equal(x.handlesSelected, 0);
+    assert.equal(x.handlesFetched, 0);
+    assert.equal(x.tweetsReturned, 0);
+    assert.deepEqual(x.errors, []);
+    assert.equal(x.degraded, false);
   } finally {
     _refreshPipeline.run = prevRun;
     _snapshotRepo.read = prevRead;

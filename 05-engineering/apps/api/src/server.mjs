@@ -17,6 +17,8 @@ import { extractOnboarding, resolveTimeoutMs as resolveExtractionTimeoutMs } fro
 import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
+import { readXItems } from "./ingestion/x-reader.mjs";
+import { resolveXConfig } from "./ingestion/x-api-client.mjs";
 import {
   writeRecentItems as cacheWriteRecentItems,
   readRecentItems as cacheReadRecentItems,
@@ -409,6 +411,16 @@ export const _recentItemsCache = {
  */
 export const _feedReader = {
   read: readFeedItems,
+};
+
+/**
+ * Mutable X-reader seam (Phase 1, Step 1.3). Production reads `_xReader.read`
+ * (the `readXItems` reader from `x-reader.mjs`); tests override it to simulate
+ * X success / failure without a live X API call. Fail-open by contract — a
+ * throw here never blocks the RSS-derived refresh (see `executeRefreshFlow`).
+ */
+export const _xReader = {
+  read: readXItems,
 };
 
 /**
@@ -1427,6 +1439,56 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         });
     }
 
+    // ─── X ingestion merge (Phase 1, Step 1.3) ──────────────────────────────
+    // Additively fold X (social) items into the refresh pool AFTER the RSS
+    // recent-items cache write above — the Tier-A cache is RSS-feed-scoped, so
+    // X items must not be written into it. Fail-open is the contract: a config
+    // resolution error or a reader throw leaves the RSS `rawItems` untouched and
+    // only records degraded diagnostics, so RSS still renders. The bearer token
+    // lives inside `xConfig` and is only ever attached as an Authorization
+    // header by the client — it is never logged here.
+    const xDiagnostics = {
+      enabled: false,
+      handlesRequested: 0,
+      handlesSelected: 0,
+      handlesFetched: 0,
+      tweetsReturned: 0,
+      errors: [],
+      degraded: false,
+    };
+    try {
+      const xConfig = resolveXConfig(process.env);
+      xDiagnostics.enabled = xConfig.enabled === true;
+      if (xConfig.enabled) {
+        const { items: xItems, diagnostics } = await _xReader.read({
+          socialSources: settings.socialSources ?? [],
+          config: xConfig,
+        });
+        // Copy reader diagnostics onto the baseline shape (keeps the stable
+        // keys even if the reader omits one).
+        xDiagnostics.handlesRequested = diagnostics?.handlesRequested ?? 0;
+        xDiagnostics.handlesSelected = diagnostics?.handlesSelected ?? 0;
+        xDiagnostics.handlesFetched = diagnostics?.handlesFetched ?? 0;
+        xDiagnostics.tweetsReturned = diagnostics?.tweetsReturned ?? 0;
+        xDiagnostics.errors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
+        xDiagnostics.degraded = diagnostics?.degraded === true;
+        if (Array.isArray(xItems) && xItems.length > 0) {
+          rawItems = [...(rawItems ?? []), ...xItems];
+        }
+      }
+    } catch (err) {
+      // Fail-open: X failed entirely — keep RSS rawItems unchanged, mark
+      // degraded, record a single error entry, and continue the refresh.
+      xDiagnostics.degraded = true;
+      xDiagnostics.errors = [
+        ...xDiagnostics.errors,
+        { handle: null, message: err instanceof Error ? err.message : String(err) },
+      ];
+    }
+    console.log(
+      `[ingestion.x] enabled=${xDiagnostics.enabled} selected=${xDiagnostics.handlesSelected} fetched=${xDiagnostics.handlesFetched} tweets=${xDiagnostics.tweetsReturned} degraded=${xDiagnostics.degraded}`
+    );
+
     const priorWatermark = priorSnapshot?._watermark ?? null;
     // Story count drives the trap-guard inside the pipeline: when the prior
     // snapshot is empty AND the current run has candidates, the pipeline
@@ -1576,6 +1638,9 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       // response, so observability surfaces stay consistent across branches.
       if (log.outcomes) skipMeta.outcomes = log.outcomes;
       skipMeta.ingestionSource = ingestionSource;
+      // X ingestion diagnostics on the watermark-skip branch too, so the
+      // per-connector ingestion surface stays consistent across branches.
+      skipMeta.ingestion = { x: xDiagnostics };
       // Structured summary + SLO eval run on the skip settle too, so the gate
       // sees every settle.  But the attempt-only rolling windows
       // (cluster_timeout_rate / cluster_failure_rate) are sampled ONLY when
@@ -1701,6 +1766,7 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       if (log.decisionTrace) preservedMeta.decisionTrace = log.decisionTrace;
       if (log.outcomes) preservedMeta.outcomes = log.outcomes;
       preservedMeta.ingestionSource = ingestionSource;
+      preservedMeta.ingestion = { x: xDiagnostics };
 
       // Structured summary + SLO eval still run: clustering DID attempt and
       // fail, so this run must sample the cluster-timeout-rate window exactly
@@ -1989,6 +2055,11 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
           // clients ignore unknown _meta keys.
           outcomes: log.outcomes,
           ingestionSource,
+          // X ingestion diagnostics (Phase 1, Step 1.3). Additive container for
+          // per-connector ingestion status; `x` carries enabled/selected/fetched/
+          // tweet counts + degraded flag. Fail-open: present even when X is
+          // disabled (baseline defaults) or degraded. Clients ignore unknown keys.
+          ingestion: { x: xDiagnostics },
           // E2E determinism signal: whether this run's first-full-refresh override
           // was applied and whether it bypassed a matching watermark. Additive;
           // both false on normal (non-E2E) runs. Default-off behavior unchanged.

@@ -100,9 +100,14 @@ export function resolveXConfig(env = process.env) {
       MAX_RESULTS_MIN,
       MAX_RESULTS_MAX
     ),
+    // Accept the documented `TEMPO_X_FETCH_TIMEOUT_MS` (see .env.example) and
+    // fall back to the original `TEMPO_X_TIMEOUT_MS` alias.
     timeoutMs: Math.max(
       TIMEOUT_MIN_MS,
-      parsePositiveInt(env.TEMPO_X_TIMEOUT_MS, DEFAULT_TIMEOUT_MS)
+      parsePositiveInt(
+        env.TEMPO_X_FETCH_TIMEOUT_MS ?? env.TEMPO_X_TIMEOUT_MS,
+        DEFAULT_TIMEOUT_MS
+      )
     ),
     apiBase: String(env.TEMPO_X_API_BASE ?? "").trim() || DEFAULT_API_BASE,
   };
