@@ -229,6 +229,21 @@ A successful debounced settings save in the prototype now **triggers a dashboard
 
 ---
 
+## Dashboard load path precedence (client loader)
+
+The dashboard page ([`Dashboard.tsx`](../../04-prototype/src/pages/Dashboard.tsx)) routes its mount-time load through a fixed precedence chain — higher paths win, and each lower branch fires only once all paths above it are ruled out:
+
+1. **retry** (`reloadCounter > 0`, set by `handleRetry`) → `POST /api/dashboard/refresh?profile=default`.
+2. **join-resolved-to-GET** (a cold-start JOIN settled `done`/`failed`) → `GET /api/dashboard` — the prefetch already ran the refresh, so never a duplicate POST.
+3. **forceRefresh** (Onboarding handoff) → `POST /api/dashboard/refresh?interactive=1`.
+4. **bootstrap** (Landing/Onboarding entry, `state.bootstrap`) → `POST /api/dashboard/bootstrap`.
+5. **mount-time overdue catch-up** (Phase 2.1, below) → bare `POST /api/dashboard/refresh` (default profile).
+6. **otherwise** → `GET /api/dashboard` (cheap persisted snapshot for in-app nav).
+
+**Mount-time overdue catch-up (Phase 2.1).** Background timers can be throttled/suspended, so a returning user may land with the hourly heartbeat overdue — a stale snapshot *and* a stale "next refresh" badge. When the default path would otherwise serve a plain GET and the anchor is past due (`Date.now() - lastAttemptAt >= REFRESH_INTERVAL_MS`, read once at mount), the loader replays the missed heartbeat as a bare `POST /refresh` instead. It is a real refresh attempt: it opens one attempt slot, advances the clock on settle (success, no-op, or failure), and shares the POST→GET silent-recovery leg. The branch is armed strictly after retry / join / forceRefresh / bootstrap are ruled out, so the precedence above is preserved. Locked by the Phase 2.2 regression matrix in [`Dashboard.test.tsx`](../../04-prototype/src/pages/Dashboard.test.tsx).
+
+---
+
 ## Eval on change (**N3a**)
 
 1. Stage **unit tests** pass (`npm run test:api`).

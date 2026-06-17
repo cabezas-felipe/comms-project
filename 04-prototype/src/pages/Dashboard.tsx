@@ -365,17 +365,17 @@ export default function Dashboard() {
     // other routing path (join/forceRefresh/bootstrap).  A retry is always a
     // refresh attempt.
     const isRetry = reloadCounter > 0;
-    // Phase 2.1: mount-time staleness safety net.  Background timers can be
-    // throttled/suspended, so a returning user may land with the hourly
-    // heartbeat overdue — showing a stale snapshot AND a stale "next refresh"
-    // timestamp.  When the DEFAULT path would otherwise serve a plain GET and
-    // the clock is past due, replay the missed heartbeat as a POST /refresh.
-    // Read the anchor ONCE at mount: `lastAttemptAt` is intentionally NOT a dep
-    // (we don't want a subsequent anchor advance to re-trigger the loader).
+    // Phase 2.1: mount-time staleness safety net.  Throttled/suspended
+    // background timers can leave a returning user with the hourly heartbeat
+    // overdue — a stale snapshot AND a stale "next refresh" timestamp.  When the
+    // DEFAULT path would otherwise serve a plain GET past the due time, replay
+    // the missed heartbeat as a POST /refresh.  Read the anchor ONCE at mount:
+    // `lastAttemptAt` is deliberately NOT a dep, so a later anchor advance can't
+    // re-trigger the loader.
     const isDueOnMount =
       lastAttemptAt !== null && Date.now() - lastAttemptAt >= REFRESH_INTERVAL_MS;
-    // Only fires on the default path — strictly after retry / join / forceRefresh
-    // / bootstrap have all been ruled out, so existing precedence is preserved.
+    // Default path only — armed strictly after retry / join / forceRefresh /
+    // bootstrap are ruled out, so existing precedence holds.
     const isOverdueDefaultRefresh =
       !isRetry && !joinResolvedToGet && !forceRefresh && !useBootstrap && isDueOnMount;
     // POST-style attempts (retry, bootstrap, forceRefresh, OR an overdue-mount
@@ -510,12 +510,13 @@ export default function Dashboard() {
           // when present, falling back to client `now()`.
           //
           // Clock-advance rule:
-          //   forceRefresh → always advance (a /refresh attempt always ran).
-          //   bootstrap    → delegate to `shouldAdvanceClockForBootstrap`.  A
-          //     POST that failed (even when recovered via GET) reports
-          //     `failed: true`, which advances — the recovery doesn't undo the
-          //     fact that a refresh was attempted.  Only a successful
-          //     `served_fresh_snapshot` is a no-op.
+          //   retry / forceRefresh / overdue catch-up → always advance (a
+          //     /refresh attempt always ran).
+          //   bootstrap → delegate to `shouldAdvanceClockForBootstrap`.  A POST
+          //     that failed (even when recovered via GET) reports `failed: true`,
+          //     which advances — recovery doesn't undo the fact that a refresh
+          //     was attempted.  Only a successful `served_fresh_snapshot` is a
+          //     no-op.
           const advanceClock =
             isRetry || forceRefresh || isOverdueDefaultRefresh
               ? true
