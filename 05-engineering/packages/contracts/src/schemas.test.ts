@@ -170,6 +170,45 @@ describe("dashboardClusterCapMetaSchema", () => {
     expect(parsed.clusterDropped?.[0].electionGeoClass).toBe("crossCountryElection");
   });
 
+  it("validates a balanced-reservation payload with all five social fields", () => {
+    const parsed = dashboardClusterCapMetaSchema.parse({
+      ...legacyClusterCap,
+      clusterInputCapEffective: 15,
+      balancedReservationApplied: true,
+      socialQuotaEffective: 3,
+      socialReservedCount: 3,
+      socialInputCount: 3,
+      traditionalInputCount: 12,
+    });
+    expect(parsed.balancedReservationApplied).toBe(true);
+    expect(parsed.socialQuotaEffective).toBe(3);
+    expect(parsed.socialReservedCount).toBe(3);
+    expect(parsed.socialInputCount).toBe(3);
+    expect(parsed.traditionalInputCount).toBe(12);
+  });
+
+  it("accepts the zero/false balanced shape from a 0-social run", () => {
+    const parsed = dashboardClusterCapMetaSchema.parse({
+      ...legacyClusterCap,
+      balancedReservationApplied: false,
+      socialQuotaEffective: 0,
+      socialReservedCount: 0,
+      socialInputCount: 0,
+      traditionalInputCount: 15,
+    });
+    expect(parsed.balancedReservationApplied).toBe(false);
+    expect(parsed.socialInputCount).toBe(0);
+  });
+
+  it("rejects a negative or non-integer balanced count", () => {
+    expect(() =>
+      dashboardClusterCapMetaSchema.parse({ ...legacyClusterCap, socialInputCount: -1 })
+    ).toThrow();
+    expect(() =>
+      dashboardClusterCapMetaSchema.parse({ ...legacyClusterCap, socialQuotaEffective: 1.5 })
+    ).toThrow();
+  });
+
   it("accepts null component values and null nullable fields", () => {
     const parsed = dashboardClusterCapMetaSchema.parse({
       ...legacyClusterCap,

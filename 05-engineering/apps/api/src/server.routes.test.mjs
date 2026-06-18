@@ -1351,6 +1351,51 @@ test("GET /api/dashboard/refresh/meta surfaces persisted _meta.funnel.social", a
   }
 });
 
+test("GET /api/dashboard/refresh/meta surfaces persisted clusterCap + afterClusterInputCap parity", async () => {
+  // C1 balanced reservation: persist BOTH the social funnel (with the
+  // afterClusterInputCap stage) AND the cluster-cap diagnostics, then read them
+  // back through the live lift path. Operators diagnosing a pilot read this
+  // endpoint, not just the POST full-run response.
+  const LIFT_USER = "clustercap-meta-lift-user";
+  const payload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _lastRunMeta: {
+      ingestionSource: "live",
+      clusterCap: BALANCED_CLUSTER_CAP_BLOCK,
+      funnel: {
+        totalNormalized: 2, afterTimeWindow: 2, afterSourceSelection: 1, afterGeoFilter: 1,
+        afterTopicKeyword: 1, afterBeatFit: 1, afterDedupe: 1, finalStories: 0,
+        social: SOCIAL_FUNNEL_BLOCK,
+      },
+    },
+  };
+  const prevResolver = _auth.resolver;
+  _auth.resolver = async () => ({ userId: LIFT_USER, source: "bearer" });
+  await _snapshotRepo.write(LIFT_USER, payload);
+  try {
+    const res = await request(app).get("/api/dashboard/refresh/meta");
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    // clusterCap survives persistence + lift, with the balanced fields intact.
+    const cap = res.body.meta?.clusterCap;
+    assert.ok(cap && typeof cap === "object", "meta.clusterCap present on refresh/meta");
+    assert.deepEqual(cap, BALANCED_CLUSTER_CAP_BLOCK);
+    assert.equal(cap.balancedReservationApplied, true);
+    assert.equal(cap.socialInputCount, 3);
+    // afterClusterInputCap present on the funnel and aligned with the post-dedupe
+    // trace — the same single-source-of-truth invariant the pipeline guarantees.
+    const social = res.body.meta?.funnel?.social;
+    assert.ok("afterClusterInputCap" in social, "afterClusterInputCap present");
+    assert.equal(social.afterClusterInputCap, social.postDedupe.clusterInputSocialCount);
+    // Internal persistence field must never leak to clients.
+    assert.equal(res.body.meta?._lastRunMeta, undefined);
+    assert.equal(res.body._lastRunMeta, undefined);
+  } finally {
+    _auth.resolver = prevResolver;
+  }
+});
+
 // ─── E2E force-first-full-refresh (watermark bypass) ─────────────────────────
 //
 // `TEMPO_E2E_FORCE_FIRST_FULL_REFRESH=true` makes the FIRST refresh after a
@@ -2728,6 +2773,120 @@ test("C1 balanced: POST /api/dashboard/refresh surfaces _meta.clusterCap and per
     _snapshotRepo.insertLocks = prevInsertLocks;
     _refreshPipeline.run = prevRun;
     await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("C1 balanced: GET /api/dashboard lifts persisted clusterCap into _meta (read path)", async () => {
+  // Operators confirm a pilot via GET /api/dashboard after the refresh, so the
+  // balanced cap diagnostics must survive persistence and lift from
+  // _lastRunMeta.clusterCap → _meta.clusterCap exactly like the other C1 blocks.
+  const LIFT_USER = "c1-balanced-clustercap-lift";
+  const payload = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [{
+      id: "lift-cc", metaStoryId: "lift-cc", title: "T", subtitle: "sub",
+      geographies: ["US"], topic: "Diplomatic relations", summary: "Summary.",
+      whyItMatters: "Why.", whatChanged: "No material update since your last refresh.",
+      priority: "standard", outletCount: 1,
+      tags: { topics: ["Diplomatic relations"], keywords: [], geographies: ["US"] },
+      sources: [{ id: "src-1", outlet: "Reuters", kind: "traditional", weight: 75, url: "#", minutesAgo: 30, headline: "H", body: ["B"] }],
+    }],
+    _lastRunMeta: { clusterCap: BALANCED_CLUSTER_CAP_BLOCK },
+  };
+  const prevResolver = _auth.resolver;
+  _auth.resolver = async () => ({ userId: LIFT_USER, source: "bearer" });
+  await _snapshotRepo.write(LIFT_USER, payload);
+  try {
+    const res = await request(app).get("/api/dashboard");
+    assert.equal(res.status, 200);
+    const cap = res.body._meta?.clusterCap;
+    assert.ok(cap && typeof cap === "object", "_meta.clusterCap present on GET dashboard");
+    assert.deepEqual(cap, BALANCED_CLUSTER_CAP_BLOCK);
+    assert.equal(cap.balancedReservationApplied, true);
+    assert.equal(cap.socialQuotaEffective, 3);
+    assert.equal(cap.socialInputCount, 3);
+    assert.equal(cap.traditionalInputCount, 12);
+    assert.equal(cap.clusterInputCapEffective, 15);
+    // Internal persistence field must never leak to clients.
+    assert.equal(res.body._lastRunMeta, undefined);
+  } finally {
+    _auth.resolver = prevResolver;
+  }
+});
+
+test("C1 balanced: POST watermark-skip surfaces clusterCap with afterClusterInputCap=null parity", async () => {
+  // On the watermark short-circuit the cap allocator already ran (it executes
+  // before the watermark decision), so _meta.clusterCap is real — but clustering
+  // did NOT re-run, so funnel.social.afterClusterInputCap is null in lockstep
+  // with postDedupe.clusterInputSocialCount. This pins the skip-branch contract.
+  const prevRun = _refreshPipeline.run;
+  const prevRead = _snapshotRepo.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+
+  const PRIOR_SNAPSHOT = {
+    contractVersion: "2026-05-19-meta-story-fields",
+    stories: [],
+    _watermark: "wm-balanced-skip",
+    _selectionMeta: { sourceSelectionMode: "strict", matchedFeedIds: ["nyt-politics"], relevantItemCount: 0 },
+  };
+  // Social funnel as the SKIP branch emits it: pre-cluster stages ran (numbers),
+  // but the cluster-input stage is reported as not-run (null), in lockstep.
+  const SKIP_SOCIAL_BLOCK = {
+    ...SOCIAL_FUNNEL_BLOCK,
+    afterClusterInputCap: null,
+    dropsByStage: { ...SOCIAL_FUNNEL_BLOCK.dropsByStage, afterClusterInputCap: null },
+    postDedupe: { ...SOCIAL_FUNNEL_BLOCK.postDedupe, clusterInputSocialCount: null },
+  };
+
+  let writeCalls = 0;
+  _snapshotRepo.read = async () => PRIOR_SNAPSHOT;
+  _snapshotRepo.write = async () => { writeCalls++; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async () => ({
+    payload: null,
+    log: {
+      unchanged: true,
+      refreshSkippedReason: "unchanged_watermark",
+      watermark: "wm-balanced-skip",
+      candidateCount: 58,
+      selectedFeedCount: 1,
+      selection: PRIOR_SNAPSHOT._selectionMeta,
+      clusterCap: BALANCED_CLUSTER_CAP_BLOCK,
+      funnel: {
+        totalNormalized: 2, afterTimeWindow: 2, afterSourceSelection: 1, afterGeoFilter: 1,
+        afterTopicKeyword: 1, afterBeatFit: 1, afterDedupe: 1, finalStories: null,
+        social: SKIP_SOCIAL_BLOCK,
+      },
+    },
+  });
+
+  try {
+    const res = await request(app).post("/api/dashboard/refresh");
+    assert.equal(res.status, 200);
+    assert.equal(res.body._meta.unchanged, true);
+    // clusterCap is surfaced on the skip branch (the allocator ran).
+    const cap = res.body._meta?.clusterCap;
+    assert.ok(cap && typeof cap === "object", "_meta.clusterCap present on watermark-skip");
+    assert.equal(cap.balancedReservationApplied, true);
+    assert.equal(cap.socialInputCount, 3);
+    // But the funnel cap-stage count is null — clustering did not re-run — and
+    // stays in lockstep with the post-dedupe trace (no false cap count).
+    const social = res.body._meta?.funnel?.social;
+    assert.equal(social.afterClusterInputCap, null);
+    assert.equal(social.postDedupe.clusterInputSocialCount, null);
+    assert.equal(social.afterClusterInputCap, social.postDedupe.clusterInputSocialCount);
+    // Short-circuit idempotency preserved.
+    assert.equal(writeCalls, 0, "no snapshot write under short-circuit");
+    assert.equal(res.body._watermark, undefined);
+  } finally {
+    _refreshPipeline.run = prevRun;
+    _snapshotRepo.read = prevRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
   }
 });
 
