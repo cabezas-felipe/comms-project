@@ -1513,6 +1513,12 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         xDiagnostics.tweetsReturned = diagnostics?.tweetsReturned ?? 0;
         xDiagnostics.errors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
         xDiagnostics.degraded = diagnostics?.degraded === true;
+        // Phase 2 (additive): per-handle tweet counts for multi-handle E2E
+        // observability. Only surfaced when the reader provides it, so the
+        // baseline/disabled shape stays unchanged for older consumers.
+        if (diagnostics?.tweetsByHandle && typeof diagnostics.tweetsByHandle === "object") {
+          xDiagnostics.tweetsByHandle = diagnostics.tweetsByHandle;
+        }
         if (Array.isArray(xItems) && xItems.length > 0) {
           rawItems = [...(rawItems ?? []), ...xItems];
         }

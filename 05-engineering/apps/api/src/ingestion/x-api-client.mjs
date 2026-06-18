@@ -26,6 +26,13 @@ const DEFAULT_TIMEOUT_MS = 12000;
 const TIMEOUT_MIN_MS = 1000;
 const DEFAULT_API_BASE = "https://api.x.com/2";
 const DEFAULT_EXCLUDE = "retweets";
+// Phase 2: bounded parallelism for multi-handle ingestion. Default keeps a
+// conservative rate-limit posture (3 handles in flight); the env knob is clamped
+// to 1..5 so a misconfig can neither serialize unexpectedly to 0 nor stampede
+// the X user-lookup / timeline endpoints.
+const DEFAULT_HANDLE_CONCURRENCY = 3;
+const HANDLE_CONCURRENCY_MIN = 1;
+const HANDLE_CONCURRENCY_MAX = 5;
 
 // Process-wide cache of resolved username → user object. The X user-lookup
 // endpoint is rate-limited and the id of a handle is stable, so we resolve each
@@ -110,6 +117,12 @@ export function resolveXConfig(env = process.env) {
       )
     ),
     apiBase: String(env.TEMPO_X_API_BASE ?? "").trim() || DEFAULT_API_BASE,
+    // Phase 2: max handles fetched in parallel by the reader (clamped 1..5).
+    handleConcurrency: clamp(
+      parsePositiveInt(env.TEMPO_X_HANDLE_CONCURRENCY, DEFAULT_HANDLE_CONCURRENCY),
+      HANDLE_CONCURRENCY_MIN,
+      HANDLE_CONCURRENCY_MAX
+    ),
   };
 }
 

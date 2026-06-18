@@ -53,6 +53,18 @@ test("resolveXConfig: defaults from empty env", () => {
   assert.equal(cfg.maxResultsPerPage, 100);
   assert.equal(cfg.timeoutMs, 12000);
   assert.equal(cfg.apiBase, "https://api.x.com/2");
+  assert.equal(cfg.handleConcurrency, 3, "Phase 2 default handle concurrency");
+});
+
+test("resolveXConfig: TEMPO_X_HANDLE_CONCURRENCY parses and clamps to 1..5", () => {
+  assert.equal(resolveXConfig({ TEMPO_X_HANDLE_CONCURRENCY: "4" }).handleConcurrency, 4);
+  assert.equal(resolveXConfig({ TEMPO_X_HANDLE_CONCURRENCY: "1" }).handleConcurrency, 1);
+  // Above the ceiling clamps down; at/below the floor clamps up.
+  assert.equal(resolveXConfig({ TEMPO_X_HANDLE_CONCURRENCY: "99" }).handleConcurrency, 5);
+  assert.equal(resolveXConfig({ TEMPO_X_HANDLE_CONCURRENCY: "0" }).handleConcurrency, 3);
+  // Non-numeric / negative fall back to the default before clamping.
+  assert.equal(resolveXConfig({ TEMPO_X_HANDLE_CONCURRENCY: "abc" }).handleConcurrency, 3);
+  assert.equal(resolveXConfig({ TEMPO_X_HANDLE_CONCURRENCY: "-2" }).handleConcurrency, 3);
 });
 
 test("resolveXConfig: enabled only when flag truthy AND token present", () => {

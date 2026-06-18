@@ -376,3 +376,209 @@ test("readXItems: works without fetchImpl, falling back to globalThis.fetch", as
   assert.equal(diagnostics.tweetsReturned, 1);
   assert.equal(diagnostics.degraded, false);
 });
+
+// ─── Phase 2: multi-handle ingestion ─────────────────────────────────────────
+//
+// Build a mock seeded with one one-tweet page per handle, so a clean multi-handle
+// run yields exactly one item per handle.
+function multiHandleMock(usernames) {
+  const users = {};
+  const tweetPages = {};
+  for (const u of usernames) {
+    users[u] = { id: `u-${u}`, username: u };
+    tweetPages[`u-${u}`] = [
+      {
+        body: {
+          data: [{ id: `t-${u}`, text: `post from ${u}`, created_at: "2026-06-17T11:00:00Z" }],
+          meta: { result_count: 1 },
+        },
+      },
+    ];
+  }
+  return createXApiMock({ users, tweetPages });
+}
+
+test("Phase 2: empty allowlist ingests every handle in socialSources", async () => {
+  __clearUserCache();
+  const { fetchImpl, calls } = multiHandleMock(["petrogustavo", "statedept", "whitehouse"]);
+
+  const { items, diagnostics } = await readXItems({
+    socialSources: ["@PetroGustavo", "stateDept", "@WhiteHouse"],
+    config: baseConfig({ allowlist: [] }), // unset/empty → full ingest
+    fetchImpl,
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(diagnostics.handlesRequested, 3);
+  assert.equal(diagnostics.handlesSelected, 3, "no allowlist → all selected");
+  assert.equal(diagnostics.handlesFetched, 3, "all three fetched");
+  assert.equal(diagnostics.tweetsReturned, 3);
+  assert.equal(diagnostics.degraded, false);
+  assert.deepEqual(calls.lookups.sort(), ["petrogustavo", "statedept", "whitehouse"]);
+  assert.deepEqual(
+    items.map((i) => i.outlet).sort(),
+    ["@petrogustavo", "@statedept", "@whitehouse"]
+  );
+  // Additive per-handle tweet counts surface for E2E observability.
+  assert.deepEqual(diagnostics.tweetsByHandle, {
+    "@petrogustavo": 1,
+    "@statedept": 1,
+    "@whitehouse": 1,
+  });
+});
+
+test("Phase 2: non-empty allowlist still intersects (Phase 1 regression guard)", async () => {
+  __clearUserCache();
+  const { fetchImpl, calls } = multiHandleMock(["petrogustavo", "statedept", "whitehouse"]);
+
+  const { items, diagnostics } = await readXItems({
+    socialSources: ["@PetroGustavo", "stateDept", "@WhiteHouse"],
+    config: baseConfig({ allowlist: ["petrogustavo", "whitehouse"] }),
+    fetchImpl,
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(diagnostics.handlesRequested, 3);
+  assert.equal(diagnostics.handlesSelected, 2, "allowlist intersects socialSources");
+  assert.equal(diagnostics.handlesFetched, 2);
+  assert.deepEqual(calls.lookups.sort(), ["petrogustavo", "whitehouse"]);
+  assert.deepEqual(items.map((i) => i.outlet).sort(), ["@petrogustavo", "@whitehouse"]);
+  // statedept was selected out, never fetched.
+  assert.ok(!calls.lookups.includes("statedept"));
+});
+
+test("Phase 2: 3 handles, 1 fails — other two return items, degraded with one error", async () => {
+  __clearUserCache();
+  const base = multiHandleMock(["petrogustavo", "statedept", "whitehouse"]);
+  // Make the middle handle's lookup fail (404) — isolation must hold.
+  const { fetchImpl, calls } = createXApiMock({
+    users: {
+      petrogustavo: { id: "u-petrogustavo", username: "petrogustavo" },
+      whitehouse: { id: "u-whitehouse", username: "whitehouse" },
+    },
+    tweetPages: {
+      "u-petrogustavo": [
+        { body: { data: [{ id: "t-p", text: "ok p", created_at: "2026-06-17T11:00:00Z" }], meta: { result_count: 1 } } },
+      ],
+      "u-whitehouse": [
+        { body: { data: [{ id: "t-w", text: "ok w", created_at: "2026-06-17T11:00:00Z" }], meta: { result_count: 1 } } },
+      ],
+    },
+    errorStatusFor: { statedept: 404 },
+  });
+  void base;
+
+  const { items, diagnostics } = await readXItems({
+    socialSources: ["@PetroGustavo", "@stateDept", "@WhiteHouse"],
+    config: baseConfig(),
+    fetchImpl,
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(diagnostics.handlesSelected, 3);
+  assert.equal(diagnostics.handlesFetched, 2, "two handles succeed");
+  assert.equal(diagnostics.tweetsReturned, 2);
+  assert.equal(diagnostics.degraded, true);
+  assert.equal(diagnostics.errors.length, 1, "exactly one handle errored");
+  assert.equal(diagnostics.errors[0].handle, "@statedept");
+  assert.equal(diagnostics.errors[0].status, 404);
+  // Survivors' items still present; failed handle absent from items + tweetsByHandle.
+  assert.deepEqual(items.map((i) => i.outlet).sort(), ["@petrogustavo", "@whitehouse"]);
+  assert.deepEqual(Object.keys(diagnostics.tweetsByHandle).sort(), ["@petrogustavo", "@whitehouse"]);
+  // Token never leaks even on the degraded path.
+  assert.doesNotMatch(JSON.stringify(diagnostics), /test-token/);
+});
+
+// Concurrency-observing wrapper: tracks the max number of in-flight fetch calls.
+// Each worker runs lookup→tweets serially, so peak in-flight === active workers,
+// which pMap bounds to min(concurrency, handles).
+function concurrencyMock(usernames, delayMs = 5) {
+  const base = multiHandleMock(usernames);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fetchImpl = async (...args) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return await base.fetchImpl(...args);
+    } finally {
+      inFlight -= 1;
+    }
+  };
+  return { fetchImpl, calls: base.calls, getMaxInFlight: () => maxInFlight };
+}
+
+test("Phase 2: fetches run in parallel, bounded by config.handleConcurrency", async () => {
+  __clearUserCache();
+  const usernames = ["h1", "h2", "h3", "h4", "h5"];
+  const { fetchImpl, getMaxInFlight } = concurrencyMock(usernames);
+
+  const { diagnostics } = await readXItems({
+    socialSources: usernames.map((u) => `@${u}`),
+    config: baseConfig({ handleConcurrency: 2 }),
+    fetchImpl,
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(diagnostics.handlesFetched, 5, "all handles still fetched");
+  const peak = getMaxInFlight();
+  assert.ok(peak <= 2, `peak in-flight ${peak} must not exceed concurrency 2`);
+  assert.ok(peak >= 2, `peak in-flight ${peak} proves parallel, not serial`);
+});
+
+test("Phase 2: default concurrency is 3 when config omits the knob", async () => {
+  __clearUserCache();
+  const usernames = ["h1", "h2", "h3", "h4", "h5", "h6"];
+  const { fetchImpl, getMaxInFlight } = concurrencyMock(usernames);
+
+  await readXItems({
+    socialSources: usernames.map((u) => `@${u}`),
+    config: baseConfig(), // no handleConcurrency → reader default (3)
+    fetchImpl,
+    nowMs: NOW_MS,
+  });
+
+  const peak = getMaxInFlight();
+  assert.ok(peak <= 3, `peak in-flight ${peak} must not exceed default concurrency 3`);
+  assert.ok(peak >= 2, `peak in-flight ${peak} proves parallelism`);
+});
+
+test("Phase 2: concurrency=1 runs handles serially (peak in-flight 1)", async () => {
+  __clearUserCache();
+  const usernames = ["h1", "h2", "h3"];
+  const { fetchImpl, getMaxInFlight } = concurrencyMock(usernames);
+
+  await readXItems({
+    socialSources: usernames.map((u) => `@${u}`),
+    config: baseConfig({ handleConcurrency: 1 }),
+    fetchImpl,
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(getMaxInFlight(), 1, "concurrency=1 never overlaps fetches");
+});
+
+test("Phase 2: every fetched handle's outlet is the @-prefixed handle (source-selection match)", async () => {
+  __clearUserCache();
+  const { fetchImpl } = multiHandleMock(["petrogustavo", "statedept", "whitehouse"]);
+
+  const { items } = await readXItems({
+    // Mixed/odd casing in settings — the outlet must canonicalize to the
+    // @-prefixed handle so the social source-selection union can match it.
+    socialSources: ["@PetroGustavo", "STATEDEPT", "@WhiteHouse"],
+    config: baseConfig(),
+    fetchImpl,
+    nowMs: NOW_MS,
+  });
+
+  assert.equal(items.length, 3);
+  for (const item of items) {
+    assert.equal(item.kind, "social");
+    assert.match(item.outlet, /^@[a-z0-9_]+$/, "outlet is the @-prefixed canonical handle");
+  }
+  assert.deepEqual(
+    items.map((i) => i.outlet).sort(),
+    ["@petrogustavo", "@statedept", "@whitehouse"]
+  );
+});
