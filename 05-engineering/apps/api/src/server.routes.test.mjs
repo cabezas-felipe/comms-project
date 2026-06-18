@@ -1053,6 +1053,69 @@ test("refresh X wiring: success path merges social item and surfaces _meta.inges
   }
 });
 
+test("refresh X wiring (Phase 2): multi-handle diagnostics surface handlesFetched > 1 on _meta.ingestion.x", async () => {
+  const ISOLATED_USER_ID = "test-user-x-multi";
+  const capture = {};
+  let capturedPayload = null;
+
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+
+  const SOCIAL_2 = { ...X_SOCIAL_ITEM, sourceId: "x:whitehouse:cafe", feedId: "x:whitehouse", outlet: "@whitehouse", url: "https://x.com/whitehouse/status/2" };
+
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  // Allowlist unset (Phase 2 rollout) → reader ingests every selected handle.
+  _xReader.read = async () => ({
+    items: [X_SOCIAL_ITEM, SOCIAL_2],
+    diagnostics: {
+      handlesRequested: 2,
+      handlesSelected: 2,
+      handlesFetched: 2,
+      tweetsReturned: 2,
+      errors: [],
+      degraded: false,
+      tweetsByHandle: { "@petrogustavo": 1, "@whitehouse": 1 },
+    },
+  });
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app).put("/api/settings").send({ ...VALID_BODY }).set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+        assert.equal(res.status, 200);
+        const x = res.body._meta?.ingestion?.x;
+        assert.ok(x && typeof x === "object", "_meta.ingestion.x present");
+        assert.equal(x.handlesFetched, 2, "multi-handle fetch count surfaces");
+        assert.equal(x.tweetsReturned, 2);
+        assert.equal(x.degraded, false);
+        // Additive per-handle counts ride through untouched.
+        assert.deepEqual(x.tweetsByHandle, { "@petrogustavo": 1, "@whitehouse": 1 });
+        // Both handles' social items reached the pipeline.
+        const handed = capture.runOpts?.rawItems ?? [];
+        const outlets = handed.filter((it) => it.kind === "social").map((it) => it.outlet).sort();
+        assert.deepEqual(outlets, ["@petrogustavo", "@whitehouse"]);
+        assert.ok(capturedPayload !== null);
+        assert.doesNotMatch(JSON.stringify(res.body), /secret-bearer/);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
 test("refresh X wiring: reader throw is fail-open — 200 with RSS output and _meta.ingestion.x.degraded", async () => {
   const ISOLATED_USER_ID = "test-user-x-throw";
   const capture = {};

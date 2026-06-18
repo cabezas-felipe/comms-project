@@ -14,6 +14,7 @@
 
 import { createHash } from "node:crypto";
 import { lookupUserByUsername, fetchUserTweets } from "./x-api-client.mjs";
+import { pMap } from "../util/p-map.mjs";
 
 const MS_PER_24H = 24 * 60 * 60 * 1000;
 const DEFAULT_HANDLE_WEIGHT = 60;
@@ -21,6 +22,10 @@ const DEFAULT_HANDLE_WEIGHT = 60;
 // loop forever. The 24h boundary normally terminates pagination well before this.
 const MAX_PAGES_PER_HANDLE = 25;
 const UNTITLED = "(untitled)";
+// Phase 2: fallback handle-fetch concurrency when `config` predates the
+// `handleConcurrency` knob (e.g. older callers / minimal test configs). The
+// canonical value is resolved + clamped in `resolveXConfig`.
+const DEFAULT_HANDLE_CONCURRENCY = 3;
 
 /**
  * Normalize a raw handle string to its canonical forms.
@@ -181,57 +186,48 @@ export async function readXItems({
 
   const startTimeIso = computeStartTimeIso(nowMs);
   const startTimeMs = Date.parse(startTimeIso);
+
+  // Phase 2: fetch handles with bounded parallelism instead of a serial loop, so
+  // ~10 handles stay responsive while keeping a conservative rate-limit posture.
+  // `pMap` is index-aligned and never rejects the batch — per-handle failures
+  // surface as `{ status: "rejected" }` entries we attribute below, preserving
+  // Phase 1's per-handle isolation (one bad handle can't sink the run).
+  const concurrency =
+    Number.isInteger(config.handleConcurrency) && config.handleConcurrency > 0
+      ? config.handleConcurrency
+      : DEFAULT_HANDLE_CONCURRENCY;
+
+  const settled = await pMap(
+    selected,
+    ({ username, handle }) =>
+      fetchOneHandle({
+        username,
+        handle,
+        config,
+        fetchImpl,
+        startTimeIso,
+        startTimeMs,
+        nowMs,
+        perHandleWeight,
+      }),
+    concurrency
+  );
+
+  // Aggregate in INPUT order so diagnostics stay deterministic regardless of the
+  // order workers happened to finish in.
   const items = [];
-
-  for (const { username, handle } of selected) {
-    try {
-      const user = await lookupUserByUsername(username, { config, fetchImpl });
-      if (!user || !user.id) {
-        throw new Error(`lookup returned no id for ${handle}`);
-      }
-
-      let paginationToken;
-      let pages = 0;
-      let handleTweetCount = 0;
-
-      while (pages < MAX_PAGES_PER_HANDLE) {
-        const page = await fetchUserTweets(user.id, {
-          config,
-          fetchImpl,
-          startTime: startTimeIso,
-          exclude: "retweets",
-          paginationToken,
-        });
-        pages += 1;
-
-        for (const tweet of page.tweets ?? []) {
-          const item = mapTweetToRawItem({
-            tweet,
-            handle,
-            weight: perHandleWeight,
-            fetchedAtMs: nowMs,
-          });
-          if (item) {
-            items.push(item);
-            handleTweetCount += 1;
-          }
-        }
-
-        // Stop paginating once this page's oldest tweet predates the 24h window —
-        // older pages are entirely out of horizon. Also stop when there's no
-        // further cursor.
-        const oldestMs = oldestTweetMs(page);
-        if (Number.isFinite(oldestMs) && Number.isFinite(startTimeMs) && oldestMs < startTimeMs) {
-          break;
-        }
-        if (!page.nextToken) break;
-        paginationToken = page.nextToken;
-      }
-
+  const tweetsByHandle = {};
+  for (let i = 0; i < settled.length; i += 1) {
+    const { handle } = selected[i];
+    const result = settled[i];
+    if (result.status === "fulfilled") {
+      items.push(...result.value.items);
       diagnostics.handlesFetched += 1;
-      diagnostics.tweetsReturned += handleTweetCount;
-    } catch (err) {
+      diagnostics.tweetsReturned += result.value.tweetCount;
+      tweetsByHandle[handle] = result.value.tweetCount;
+    } else {
       // Per-handle isolation: one bad handle must not sink the whole run.
+      const err = result.reason;
       diagnostics.degraded = true;
       diagnostics.errors.push({
         handle,
@@ -240,8 +236,76 @@ export async function readXItems({
       });
     }
   }
+  // Additive (Phase 2): per-handle tweet counts for E2E observability. Only
+  // successful handles appear; absent for handles in `errors[]`. Backward
+  // compatible — consumers of `_meta.ingestion.x` ignore unknown keys.
+  diagnostics.tweetsByHandle = tweetsByHandle;
 
   return { items, diagnostics };
+}
+
+/**
+ * Fetch + map one handle's recent tweets (lookup → paginated timeline → raw
+ * items). Throws on lookup/pagination failure so the caller's `pMap` records a
+ * rejected slot for THIS handle only; siblings are unaffected.
+ *
+ * @returns {Promise<{ items: object[], tweetCount: number }>}
+ */
+async function fetchOneHandle({
+  username,
+  handle,
+  config,
+  fetchImpl,
+  startTimeIso,
+  startTimeMs,
+  nowMs,
+  perHandleWeight,
+}) {
+  const user = await lookupUserByUsername(username, { config, fetchImpl });
+  if (!user || !user.id) {
+    throw new Error(`lookup returned no id for ${handle}`);
+  }
+
+  const items = [];
+  let paginationToken;
+  let pages = 0;
+  let tweetCount = 0;
+
+  while (pages < MAX_PAGES_PER_HANDLE) {
+    const page = await fetchUserTweets(user.id, {
+      config,
+      fetchImpl,
+      startTime: startTimeIso,
+      exclude: "retweets",
+      paginationToken,
+    });
+    pages += 1;
+
+    for (const tweet of page.tweets ?? []) {
+      const item = mapTweetToRawItem({
+        tweet,
+        handle,
+        weight: perHandleWeight,
+        fetchedAtMs: nowMs,
+      });
+      if (item) {
+        items.push(item);
+        tweetCount += 1;
+      }
+    }
+
+    // Stop paginating once this page's oldest tweet predates the 24h window —
+    // older pages are entirely out of horizon. Also stop when there's no
+    // further cursor.
+    const oldestMs = oldestTweetMs(page);
+    if (Number.isFinite(oldestMs) && Number.isFinite(startTimeMs) && oldestMs < startTimeMs) {
+      break;
+    }
+    if (!page.nextToken) break;
+    paginationToken = page.nextToken;
+  }
+
+  return { items, tweetCount };
 }
 
 // Oldest tweet timestamp (ms) on a page. Prefer the explicit oldest tweet's

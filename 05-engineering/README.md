@@ -386,6 +386,8 @@ A tweet from `@petrogustavo` clustered into a meta-story confirms the full path 
 
 > **Pilot → full rollout:** `TEMPO_X_HANDLE_ALLOWLIST` is a pilot guardrail — when set, only those handles are fetched even if a user follows more. To expand from the pilot to **all** selected handles, **unset** `TEMPO_X_HANDLE_ALLOWLIST`.
 
+> **Phase 2 (multi-handle):** with the allowlist unset, the reader ingests **every** handle in `settings.socialSources`, fetched with bounded parallelism (`TEMPO_X_HANDLE_CONCURRENCY`, default 3, clamped 1..5) for a safe rate-limit posture. One bad handle is isolated — its tweets are dropped and `_meta.ingestion.x.degraded=true` with an `errors[]` entry, while every other handle still merges. Per-handle counts surface additively under `_meta.ingestion.x.tweetsByHandle`.
+
 Wiring: [`x-api-client.mjs`](apps/api/src/ingestion/x-api-client.mjs), [`x-reader.mjs`](apps/api/src/ingestion/x-reader.mjs), merge + `_meta.ingestion.x` in [`server.mjs`](apps/api/src/server.mjs); env reference in [`apps/api/.env.example`](apps/api/.env.example).
 
 ## Deployment
