@@ -1673,6 +1673,10 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       if (log.funnel) skipMeta.funnel = log.funnel;
       if (log.beatFit) skipMeta.beatFit = log.beatFit;
       if (log.timings) skipMeta.timings = log.timings;
+      // C1 balanced reservation: surface cluster-input cap diagnostics on the
+      // watermark-skip branch too, so `_meta.clusterCap` stays consistent across
+      // skip and full-run responses.
+      if (log.clusterCap) skipMeta.clusterCap = log.clusterCap;
       // E2E diagnostics on the watermark-skip branch too, so `_meta.e2e` is
       // present/consistent across skip and non-skip responses.
       if (log.e2e) skipMeta.e2e = log.e2e;
@@ -1969,6 +1973,10 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     // and individually optional for back-compat with older pipeline returns.
     if (log.clusterSplit !== undefined) lastRunMeta.clusterSplit = log.clusterSplit;
     if (log.overflowCap !== undefined) lastRunMeta.overflowCap = log.overflowCap;
+    // C1 balanced reservation: persist the cluster-input cap diagnostics
+    // (effective cap + social reservation counts) so GET /api/dashboard can
+    // confirm social items entered cluster input without replaying refresh.
+    if (log.clusterCap !== undefined) lastRunMeta.clusterCap = log.clusterCap;
     if (log.reclusterQueue !== undefined) lastRunMeta.reclusterQueue = log.reclusterQueue;
     if (log.reclusterQueueCount !== undefined) lastRunMeta.reclusterQueueCount = log.reclusterQueueCount;
     lastRunMeta.ingestionSource = ingestionSource;
@@ -2138,6 +2146,11 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
           // `_meta.reclusterExecution`. Additive; clients ignore unknown keys.
           clusterSplit: log.clusterSplit,
           overflowCap: log.overflowCap,
+          // C1 balanced reservation: cluster-input cap diagnostics (effective
+          // cap + social reservation counts) on the immediate refresh response,
+          // so an operator can confirm social items entered cluster input
+          // without a reload. Additive; clients ignore unknown keys.
+          clusterCap: log.clusterCap,
           reclusterQueue: log.reclusterQueue,
           reclusterQueueCount: log.reclusterQueueCount,
           funnel: log.funnel,

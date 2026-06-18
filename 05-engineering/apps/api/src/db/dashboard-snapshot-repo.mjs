@@ -187,6 +187,11 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // trimmed stories and which metaStoryIds were dropped. Optional for
     // backward compat with snapshots written before the cap.
     if (_lastRunMeta.overflowCap !== undefined) meta.overflowCap = _lastRunMeta.overflowCap;
+    // C1 — balanced reservation cluster-input cap diagnostics: effective cap +
+    // social reservation counts (quota/reserved/socialIn/tradIn), so GET
+    // /api/dashboard can confirm social items entered cluster input without a
+    // replay. Optional for backward compat with pre-balanced-reservation snapshots.
+    if (_lastRunMeta.clusterCap !== undefined) meta.clusterCap = _lastRunMeta.clusterCap;
     // C1 — deferred re-cluster QUEUE (B1): the ranked ≤2 candidates and the
     // queued/candidate counts. The companion EXECUTION outcome (B2) lands on
     // `reclusterExecution` after the deferred pass runs. Both optional.

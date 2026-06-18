@@ -11256,6 +11256,94 @@ test("C1 integration: no cap effect when dedupedItems <= 15", async () => {
   assert.deepEqual(log.clusterCap.clusterDroppedSourceIds, []);
 });
 
+test("C1 balanced integration: social items survive the cap that pure top-K would starve", async () => {
+  // 50 fresh on-beat traditional items would fill all 15 cap slots under pure
+  // top-K, dropping every (staler) social item. Balanced reservation guarantees
+  // a social floor inside the SAME cap.
+  const traditional = Array.from({ length: 50 }, (_, i) =>
+    makeItem({
+      sourceId: `trad-${String(i).padStart(2, "0")}`,
+      outlet: "Reuters",
+      minutesAgo: i,
+    })
+  );
+  const social = Array.from({ length: 8 }, (_, i) =>
+    makeItem({
+      sourceId: `soc-${i}`,
+      kind: "social",
+      outlet: "@latamwatcher",
+      minutesAgo: 1400 + i,
+    })
+  );
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, socialSources: ["@latamwatcher"] },
+    rawItems: [...traditional, ...social],
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+  assert.ok(clusterInput, "clusterFn must be invoked");
+  assert.equal(clusterInput.length, 15, "total cap unchanged at 15");
+  assert.equal(log.clusterCap.balancedReservationApplied, true);
+  assert.equal(log.clusterCap.socialQuotaEffective, 3);
+  assert.ok(log.clusterCap.socialInputCount >= 3, "social floor honored");
+  // The cluster input the model actually saw carries the social items.
+  const socialSeen = clusterInput.filter((i) => i.kind === "social").length;
+  assert.ok(socialSeen >= 3, "clusterFn input contains the reserved social items");
+});
+
+test("C1 balanced integration: cold_start reserves 2 social slots within the 10-item cap", async () => {
+  const traditional = Array.from({ length: 20 }, (_, i) =>
+    makeItem({
+      sourceId: `trad-${String(i).padStart(2, "0")}`,
+      outlet: "Reuters",
+      minutesAgo: i,
+    })
+  );
+  const social = Array.from({ length: 4 }, (_, i) =>
+    makeItem({
+      sourceId: `soc-${i}`,
+      kind: "social",
+      outlet: "@latamwatcher",
+      minutesAgo: 1400 + i,
+    })
+  );
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, socialSources: ["@latamwatcher"] },
+    rawItems: [...traditional, ...social],
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+    beatFitEnabled: false,
+  });
+  assert.ok(clusterInput, "clusterFn must be invoked");
+  assert.equal(log.clusterCap.clusterInputCapEffective, 10, "cold_start cap is 10");
+  assert.equal(log.clusterCap.balancedReservationApplied, true);
+  assert.equal(log.clusterCap.socialQuotaEffective, 2, "cold_start quota is 2");
+  assert.ok(log.clusterCap.socialInputCount >= 2, "social floor honored under cold_start");
+});
+
+test("C1 balanced integration: a 0-social run reports balancedReservationApplied=false", async () => {
+  const rawItems = Array.from({ length: 20 }, (_, i) =>
+    makeItem({ sourceId: `src-${String(i).padStart(2, "0")}`, minutesAgo: i * 10 })
+  );
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+  assert.equal(log.clusterCap.balancedReservationApplied, false);
+  assert.equal(log.clusterCap.socialInputCount, 0);
+  assert.equal(log.clusterCap.socialQuotaEffective, 0);
+});
+
 // ─── Slice 3: profile-aware cluster input cap ────────────────────────────────
 
 test("Slice 3: cold_start tightens the cluster cap to 10 (effective cap surfaced)", async () => {

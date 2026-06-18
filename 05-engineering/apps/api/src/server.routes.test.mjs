@@ -2653,6 +2653,73 @@ test("C1: GET /api/dashboard lifts persisted clusterSplit/overflowCap/reclusterE
   }
 });
 
+// ─── C1 balanced reservation: clusterCap on refresh response + persistence ─────
+
+const BALANCED_CLUSTER_CAP_BLOCK = {
+  dedupedCount: 58,
+  clusterInputCount: 15,
+  clusterDroppedCount: 43,
+  clusterDroppedSourceIds: ["trad-12", "trad-13"],
+  clusterInputCapEffective: 15,
+  balancedReservationApplied: true,
+  socialQuotaEffective: 3,
+  socialReservedCount: 3,
+  socialInputCount: 3,
+  traditionalInputCount: 12,
+};
+
+test("C1 balanced: POST /api/dashboard/refresh surfaces _meta.clusterCap and persists it", async () => {
+  const ISOLATED_USER_ID = "c1-balanced-clustercap-post";
+  let capturedPayload = null;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = async (opts) => ({
+    payload: {
+      contractVersion: opts.contractVersion,
+      stories: [{
+        id: "cc-story", metaStoryId: "cc-story", title: "Cluster Cap Story",
+        subtitle: "Sub.", geographies: ["US"], topic: "Diplomatic relations",
+        summary: "S.", whyItMatters: "W.", whatChanged: "C.", priority: "standard",
+        outletCount: 1, tags: { topics: [], keywords: [], geographies: ["US"] },
+        sources: [],
+      }],
+    },
+    log: {
+      unchanged: false, poolCount: 58, relevantCount: 58, usedFallbackClustering: false,
+      groundingFailures: 0, droppedUngroundedStoryCount: 0, groundingDropReasons: {},
+      watermark: "cc-watermark", candidateCount: 58, selectedFeedCount: 1,
+      selection: { sourceSelectionMode: "strict" },
+      clusterCap: BALANCED_CLUSTER_CAP_BLOCK,
+    },
+  });
+  try {
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      await request(app).put("/api/settings").send({ ...VALID_BODY }).set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      const cap = res.body._meta?.clusterCap;
+      assert.ok(cap && typeof cap === "object", "_meta.clusterCap present on POST refresh");
+      assert.equal(cap.balancedReservationApplied, true);
+      assert.equal(cap.socialQuotaEffective, 3);
+      assert.equal(cap.socialInputCount, 3);
+      assert.equal(cap.traditionalInputCount, 12);
+      assert.equal(cap.clusterInputCapEffective, 15);
+      assert.deepEqual(capturedPayload?._lastRunMeta?.clusterCap, BALANCED_CLUSTER_CAP_BLOCK);
+    });
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
 // ─── Slice 1: fail-closed clustering snapshot continuity ─────────────────────
 
 // Shared fail-closed pipeline stub: clustering failed on both attempts, so the

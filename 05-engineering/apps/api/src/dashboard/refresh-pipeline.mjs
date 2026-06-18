@@ -3352,12 +3352,16 @@ export async function runRefreshPipeline({
     ...clusterCapResult.diagnostics,
     clusterInputCapEffective,
   };
-  if (clusterCapDiagnostics.clusterDroppedCount > 0) {
+  if (clusterCapDiagnostics.clusterDroppedCount > 0 || clusterCapDiagnostics.balancedReservationApplied) {
     console.log(
       `[pipeline.cluster-cap] deduped=${clusterCapDiagnostics.dedupedCount} ` +
         `clusterInput=${clusterCapDiagnostics.clusterInputCount} ` +
         `dropped=${clusterCapDiagnostics.clusterDroppedCount} ` +
-        `cap=${clusterInputCapEffective}`
+        `cap=${clusterInputCapEffective} ` +
+        `balanced=${clusterCapDiagnostics.balancedReservationApplied} ` +
+        `socialIn=${clusterCapDiagnostics.socialInputCount} ` +
+        `tradIn=${clusterCapDiagnostics.traditionalInputCount} ` +
+        `quota=${clusterCapDiagnostics.socialQuotaEffective}`
     );
   }
   // Slice 7 (non-overlap): the pre-cluster stage is the two spans that bracket
