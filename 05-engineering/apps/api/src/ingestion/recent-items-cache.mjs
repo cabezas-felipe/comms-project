@@ -28,6 +28,18 @@ import { REFRESH_INTERVAL_MS } from "../contracts-runtime/index.mjs";
 const DEFAULT_TTL_MS = REFRESH_INTERVAL_MS;
 const SNIPPET_MAX_LEN = 500;
 const DEFAULT_WEIGHT = 50;
+// Per-handle weight for reconstructed X (social) cache rows — mirrors the
+// x-reader's DEFAULT_HANDLE_WEIGHT so a cache-hit social item scores the same
+// as a live-fetched one.
+const DEFAULT_X_HANDLE_WEIGHT = 60;
+
+// A cache row keyed `x:{username}` is a social handle item (the x-reader sets
+// `feedId: x:{username}`, lowercase). Handles never get manifest rows — social
+// selection is a UNION by outlet handle, not a manifest match — so these rows
+// must reconstruct as social directly from the feed id, NOT fall through to the
+// RSS/manifest defaults (which would mislabel them traditional and drop them at
+// source selection).
+const X_FEED_ID_RE = /^x:([a-z0-9_]+)$/;
 
 const RECENT_ITEMS_TABLE = "ingestion_recent_items";
 
@@ -185,13 +197,24 @@ export function cacheRowsToRawItems(rows, manifestFeeds = [], { now = Date.now()
       ? Math.max(0, Math.floor((now - baseMs) / 60_000))
       : 0;
 
+    // X-aware reconstruction: a row keyed `x:{username}` with no manifest entry
+    // rebuilds as a social item (outlet `@username`, kind "social", X handle
+    // weight) so source-selection's handle union admits it. Manifest-backed
+    // (RSS) rows keep the existing derivation verbatim — the `xMatch` guard only
+    // fires when there is genuinely no manifest match, so RSS behavior is
+    // unchanged.
+    const xMatch = manifest ? null : X_FEED_ID_RE.exec(typeof row.feed_id === "string" ? row.feed_id : "");
+
     // Outlet derivation mirrors mapEntry: manifest publisher wins, else strip
-    // the section suffix off the feed name, else fall through to the name.
+    // the section suffix off the feed name, else fall through to the name. For X
+    // rows the canonical `@username` handle is the outlet identity.
     const publisher = typeof manifest?.publisher === "string" && manifest.publisher.length > 0
       ? manifest.publisher
       : null;
     const derived = derivePublisherFromFeedName(typeof manifest?.name === "string" ? manifest.name : "");
-    const outlet = publisher ?? derived ?? (typeof manifest?.name === "string" ? manifest.name : "") ?? "";
+    const outlet = xMatch
+      ? `@${xMatch[1]}`
+      : (publisher ?? derived ?? (typeof manifest?.name === "string" ? manifest.name : "") ?? "");
 
     const item = {
       sourceId: row.source_id,
@@ -201,11 +224,14 @@ export function cacheRowsToRawItems(rows, manifestFeeds = [], { now = Date.now()
       body: typeof row.snippet === "string" && row.snippet.length > 0 ? [row.snippet] : [],
       minutesAgo,
       outlet,
-      // Map the manifest's INGESTION kind (`"rss"`) to the contract kind
-      // (`"traditional"`); a missing/unknown manifest kind also resolves to the
-      // safe default so cache-origin items never carry a schema-invalid kind.
-      kind: mapIngestionKindToContractKind(manifest?.kind),
-      weight: typeof manifest?.weight === "number" ? manifest.weight : DEFAULT_WEIGHT,
+      // X rows are social by construction; otherwise map the manifest's
+      // INGESTION kind (`"rss"`) to the contract kind (`"traditional"`). A
+      // missing/unknown manifest kind also resolves to the safe default so
+      // cache-origin items never carry a schema-invalid kind.
+      kind: xMatch ? "social" : mapIngestionKindToContractKind(manifest?.kind),
+      weight: xMatch
+        ? DEFAULT_X_HANDLE_WEIGHT
+        : (typeof manifest?.weight === "number" ? manifest.weight : DEFAULT_WEIGHT),
     };
     // Carry the manifest language tag through so cache-hit refreshes keep the
     // non-English signal that drives TEMPO_TRANSLATION_MODE=auto (mirrors

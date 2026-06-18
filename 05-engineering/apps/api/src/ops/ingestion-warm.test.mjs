@@ -280,6 +280,184 @@ test("normalizeErrorDetail: covers string / Error / PostgREST object / fallback 
   assert.doesNotMatch(normalizeErrorDetail({}), /\[object Object\]/);
 });
 
+// ─── X (social) warm (Phase 3, Step 3.1) ────────────────────────────────────
+//
+// After the RSS full-manifest warm, the warmer optionally warms a configured
+// list of X handles into the same Tier-A cache.  Gated on the X feature being
+// enabled (resolveXConfigFn().enabled) AND a non-empty TEMPO_X_WARM_HANDLES
+// list.  Failures once X warm is attempted are fatal (exit 1) like the RSS
+// write path; skipping X warm when unconfigured stays a clean success.  Both
+// the reader and config resolver are injected so these stay hermetic.
+
+const X_RAW_ITEMS = [
+  { sourceId: "x:petrogustavo:aa", feedId: "x:petrogustavo", outlet: "@petrogustavo", kind: "social", weight: 60, url: "https://x.com/petrogustavo/status/1", headline: "uno", body: ["uno"], minutesAgo: 3 },
+  { sourceId: "x:whitehouse:bb", feedId: "x:whitehouse", outlet: "@whitehouse", kind: "social", weight: 60, url: "https://x.com/whitehouse/status/2", headline: "two", body: ["two"], minutesAgo: 7 },
+];
+
+test("runIngestionWarm: X warm invoked when enabled + TEMPO_X_WARM_HANDLES set → handles fetched, items written", async () => {
+  const logger = makeLogger();
+  const writeBatches = [];
+  let xReadArgs = null;
+  const result = await runIngestionWarm({
+    readFeedItemsFn: async () => TWO_RAW_ITEMS,
+    writeRecentItemsFn: async ({ items }) => { writeBatches.push(items); return { written: items.length, error: null }; },
+    readXItemsFn: async (args) => { xReadArgs = args; return { items: X_RAW_ITEMS, diagnostics: {} }; },
+    resolveXConfigFn: () => ({ enabled: true, bearerToken: "secret-bearer", allowlist: [] }),
+    supabase: {},
+    logger: logger.log,
+    envGet: makeEnv({ TEMPO_X_WARM_HANDLES: "@PetroGustavo, whitehouse" }),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.reason, null);
+
+  // Reader received the parsed, normalized warm handles + the resolved config.
+  assert.ok(xReadArgs, "X reader must be invoked");
+  assert.deepEqual(xReadArgs.socialSources, ["petrogustavo", "whitehouse"], "warm handles parsed like the allowlist");
+  assert.equal(xReadArgs.config?.enabled, true, "reader receives the enabled X config");
+
+  // Two write batches: RSS first, then the X items.
+  assert.equal(writeBatches.length, 2, "RSS write then X write");
+  assert.deepEqual(writeBatches[1], X_RAW_ITEMS, "second write carries the X items verbatim");
+
+  const summary = logger.parseSummary();
+  assert.equal(summary.ok, true);
+  assert.equal(summary.xEnabled, true);
+  assert.equal(summary.xHandlesWarmed, 2);
+  assert.equal(summary.xItemCount, 2);
+  assert.equal(summary.xWritten, 2);
+  // RSS fields still present and unchanged.
+  assert.equal(summary.itemCount, 2);
+  assert.equal(summary.written, 2);
+  // bearer token must never leak into the log line.
+  assert.doesNotMatch(logger.lines[0], /secret-bearer/);
+});
+
+test("runIngestionWarm: X warm skipped when TEMPO_X_WARM_HANDLES unset → RSS-only success, reader never called", async () => {
+  const logger = makeLogger();
+  let xReadCalls = 0;
+  const result = await runIngestionWarm({
+    readFeedItemsFn: async () => TWO_RAW_ITEMS,
+    writeRecentItemsFn: async ({ items }) => ({ written: items.length, error: null }),
+    readXItemsFn: async () => { xReadCalls += 1; return { items: X_RAW_ITEMS, diagnostics: {} }; },
+    resolveXConfigFn: () => ({ enabled: true, bearerToken: "secret-bearer", allowlist: [] }),
+    supabase: {},
+    logger: logger.log,
+    envGet: makeEnv({ TEMPO_X_WARM_HANDLES: undefined }),
+  });
+
+  assert.equal(result.exitCode, 0, "no warm handles → clean RSS-only success");
+  assert.equal(xReadCalls, 0, "X reader must not be called when the warm list is empty");
+  const summary = logger.parseSummary();
+  assert.equal(summary.ok, true);
+  assert.equal(summary.xEnabled, true, "feature enabled, just no handles to warm");
+  assert.equal(summary.xHandlesWarmed, 0);
+  assert.equal(summary.xItemCount, 0);
+  assert.equal(summary.xWritten, 0);
+});
+
+test("runIngestionWarm: X warm skipped when feature disabled, even if TEMPO_X_WARM_HANDLES set", async () => {
+  const logger = makeLogger();
+  let xReadCalls = 0;
+  const result = await runIngestionWarm({
+    readFeedItemsFn: async () => TWO_RAW_ITEMS,
+    writeRecentItemsFn: async ({ items }) => ({ written: items.length, error: null }),
+    readXItemsFn: async () => { xReadCalls += 1; return { items: X_RAW_ITEMS, diagnostics: {} }; },
+    resolveXConfigFn: () => ({ enabled: false, bearerToken: "", allowlist: [] }),
+    supabase: {},
+    logger: logger.log,
+    envGet: makeEnv({ TEMPO_X_WARM_HANDLES: "petrogustavo" }),
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(xReadCalls, 0, "disabled feature → reader never called");
+  const summary = logger.parseSummary();
+  assert.equal(summary.ok, true);
+  assert.equal(summary.xEnabled, false);
+  assert.equal(summary.xHandlesWarmed, 0);
+});
+
+test("runIngestionWarm: X flag on but bearer token absent → real resolveXConfig disables X, RSS-only success", async () => {
+  // GHA posture: the workflow always passes TEMPO_X_INGESTION_ENABLED=true, and
+  // TEMPO_X_BEARER_TOKEN may be absent (secret not configured). The DEFAULT
+  // resolveXConfig (not injected here) must read that as disabled so the warmer
+  // succeeds RSS-only instead of attempting doomed authenticated reads.
+  const logger = makeLogger();
+  const prevFlag = process.env.TEMPO_X_INGESTION_ENABLED;
+  const prevToken = process.env.TEMPO_X_BEARER_TOKEN;
+  process.env.TEMPO_X_INGESTION_ENABLED = "true";
+  delete process.env.TEMPO_X_BEARER_TOKEN;
+  let xReadCalls = 0;
+  try {
+    const result = await runIngestionWarm({
+      readFeedItemsFn: async () => TWO_RAW_ITEMS,
+      writeRecentItemsFn: async ({ items }) => ({ written: items.length, error: null }),
+      readXItemsFn: async () => { xReadCalls += 1; return { items: X_RAW_ITEMS, diagnostics: {} }; },
+      // resolveXConfigFn intentionally NOT injected → exercises the real
+      // resolveXConfig(process.env) gate.
+      supabase: {},
+      logger: logger.log,
+      envGet: makeEnv({ TEMPO_X_WARM_HANDLES: "petrogustavo" }),
+    });
+    assert.equal(result.exitCode, 0, "missing bearer ⇒ X disabled ⇒ RSS-only success (no failure)");
+    assert.equal(xReadCalls, 0, "no doomed authenticated X read when the bearer is absent");
+    const summary = logger.parseSummary();
+    assert.equal(summary.ok, true);
+    assert.equal(summary.xEnabled, false);
+    assert.equal(summary.xHandlesWarmed, 0);
+  } finally {
+    if (prevFlag === undefined) delete process.env.TEMPO_X_INGESTION_ENABLED;
+    else process.env.TEMPO_X_INGESTION_ENABLED = prevFlag;
+    if (prevToken === undefined) delete process.env.TEMPO_X_BEARER_TOKEN;
+    else process.env.TEMPO_X_BEARER_TOKEN = prevToken;
+  }
+});
+
+test("runIngestionWarm: X read throws → exit 1, skippedReason=x_read_threw, RSS write already happened", async () => {
+  const logger = makeLogger();
+  let writeCalls = 0;
+  const result = await runIngestionWarm({
+    readFeedItemsFn: async () => TWO_RAW_ITEMS,
+    writeRecentItemsFn: async ({ items }) => { writeCalls += 1; return { written: items.length, error: null }; },
+    readXItemsFn: async () => { throw new Error("X timeline 503"); },
+    resolveXConfigFn: () => ({ enabled: true, bearerToken: "secret-bearer", allowlist: [] }),
+    supabase: {},
+    logger: logger.log,
+    envGet: makeEnv({ TEMPO_X_WARM_HANDLES: "petrogustavo" }),
+  });
+
+  assert.equal(result.exitCode, 1, "X warm failure once attempted is fatal");
+  assert.equal(result.reason, "x_read_threw");
+  assert.equal(writeCalls, 1, "RSS write ran before the X read failed");
+  const summary = logger.parseSummary();
+  assert.equal(summary.ok, false);
+  assert.equal(summary.skippedReason, "x_read_threw");
+  assert.match(summary.error, /X timeline 503/);
+});
+
+test("runIngestionWarm: X write returns an error envelope → exit 1, skippedReason=x_write_error", async () => {
+  const logger = makeLogger();
+  const result = await runIngestionWarm({
+    readFeedItemsFn: async () => TWO_RAW_ITEMS,
+    // RSS write succeeds; the X write (second call) returns an error envelope.
+    writeRecentItemsFn: async ({ items }) =>
+      items === X_RAW_ITEMS ? { written: 0, error: new Error("x upsert rejected") } : { written: items.length, error: null },
+    readXItemsFn: async () => ({ items: X_RAW_ITEMS, diagnostics: {} }),
+    resolveXConfigFn: () => ({ enabled: true, bearerToken: "secret-bearer", allowlist: [] }),
+    supabase: {},
+    logger: logger.log,
+    envGet: makeEnv({ TEMPO_X_WARM_HANDLES: "petrogustavo, whitehouse" }),
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.reason, "x_write_error");
+  const summary = logger.parseSummary();
+  assert.equal(summary.ok, false);
+  assert.equal(summary.skippedReason, "x_write_error");
+  assert.match(summary.error, /x upsert rejected/);
+  assert.equal(summary.xHandlesWarmed, 2, "warm-handle count still reported on a write error");
+});
+
 // ─── Log shape stability ─────────────────────────────────────────────────────
 
 test("runIngestionWarm: log line is a single JSON object prefixed with [ingestion-warm]", async () => {

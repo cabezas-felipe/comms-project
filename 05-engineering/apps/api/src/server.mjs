@@ -17,7 +17,7 @@ import { extractOnboarding, resolveTimeoutMs as resolveExtractionTimeoutMs } fro
 import { readSettings, writeSettings, hasSettings, DEFAULT_SETTINGS } from "./db/settings-repo.mjs";
 import { isSupabaseEnabled, getSupabaseClient } from "./db/client.mjs";
 import { readFeedItems } from "./ingestion/feed-reader.mjs";
-import { readXItems } from "./ingestion/x-reader.mjs";
+import { readXItems, normalizeHandle } from "./ingestion/x-reader.mjs";
 import { resolveXConfig } from "./ingestion/x-api-client.mjs";
 import {
   writeRecentItems as cacheWriteRecentItems,
@@ -603,6 +603,17 @@ function classifyExtractionError(err) {
   if (msg.includes("api key") || msg.includes("required for")) return "config_error";
   if (msg.includes("zod") || msg.includes("validation") || msg.includes("invalid")) return "schema_error";
   return "provider_error";
+}
+
+// Canonical `@handle` for a reconstructed X cache item — prefer the outlet
+// (already `@username` from cacheRowsToRawItems), else recover it from the
+// `x:{username}` feedId. Returns "" when neither is usable. Used to derive
+// per-handle tweet counts for cache-served X items (Phase 3.2 diagnostics).
+function canonicalXHandleOfItem(item) {
+  const outlet = typeof item?.outlet === "string" ? item.outlet : "";
+  if (outlet.startsWith("@") && outlet.length > 1) return outlet;
+  const m = /^x:([a-z0-9_]+)$/.exec(typeof item?.feedId === "string" ? item.feedId : "");
+  return m ? `@${m[1]}` : "";
 }
 
 // Trim, filter empties, and deduplicate (case-insensitive, first-occurrence wins).
@@ -1480,14 +1491,18 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         });
     }
 
-    // ─── X ingestion merge (Phase 1, Step 1.3) ──────────────────────────────
-    // Additively fold X (social) items into the refresh pool AFTER the RSS
-    // recent-items cache write above — the Tier-A cache is RSS-feed-scoped, so
-    // X items must not be written into it. Fail-open is the contract: a config
-    // resolution error or a reader throw leaves the RSS `rawItems` untouched and
-    // only records degraded diagnostics, so RSS still renders. The bearer token
-    // lives inside `xConfig` and is only ever attached as an Authorization
-    // header by the client — it is never logged here.
+    // ─── X ingestion merge (Phase 3, Step 3.1: cache-first) ─────────────────
+    // Additively fold X (social) items into the refresh pool. Phase 3 makes X
+    // cache-first, symmetric with the RSS path above: selected handles whose
+    // `x:{username}` rows are still fresh in the Tier-A cache are served from
+    // there, and only the miss handles are live-fetched. Live items are
+    // opportunistically written back (fire-and-forget) so the next refresh — and
+    // the hourly warmer — can serve them from cache. Fail-open is the contract
+    // end to end: a cache read/write error falls back to live fetch, and a
+    // reader throw leaves the RSS `rawItems` untouched while recording degraded
+    // diagnostics so RSS still renders. The bearer token lives inside `xConfig`
+    // and is only ever attached as an Authorization header by the client — it is
+    // never logged here.
     const xDiagnostics = {
       enabled: false,
       handlesRequested: 0,
@@ -1496,31 +1511,169 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       tweetsReturned: 0,
       errors: [],
       degraded: false,
+      // Phase 3 cache-first counters (additive). `source` is "cache" when every
+      // selected handle was served from the Tier-A cache, "live" when none were,
+      // "mixed" otherwise. `handlesFromCache` + `handlesLiveFetched` partition
+      // the selected handle set.
+      source: "live",
+      handlesFromCache: 0,
+      handlesLiveFetched: 0,
     };
     try {
       const xConfig = resolveXConfig(process.env);
       xDiagnostics.enabled = xConfig.enabled === true;
       if (xConfig.enabled) {
-        const { items: xItems, diagnostics } = await _xReader.read({
-          socialSources: settings.socialSources ?? [],
-          config: xConfig,
-        });
-        // Copy reader diagnostics onto the baseline shape (keeps the stable
-        // keys even if the reader omits one).
-        xDiagnostics.handlesRequested = diagnostics?.handlesRequested ?? 0;
-        xDiagnostics.handlesSelected = diagnostics?.handlesSelected ?? 0;
-        xDiagnostics.handlesFetched = diagnostics?.handlesFetched ?? 0;
-        xDiagnostics.tweetsReturned = diagnostics?.tweetsReturned ?? 0;
-        xDiagnostics.errors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
-        xDiagnostics.degraded = diagnostics?.degraded === true;
-        // Phase 2 (additive): per-handle tweet counts for multi-handle E2E
-        // observability. Only surfaced when the reader provides it, so the
-        // baseline/disabled shape stays unchanged for older consumers.
-        if (diagnostics?.tweetsByHandle && typeof diagnostics.tweetsByHandle === "object") {
-          xDiagnostics.tweetsByHandle = diagnostics.tweetsByHandle;
+        // Resolve the user's selected handles with the SAME allowlist ∩
+        // socialSources semantics the reader applies internally, so the cache
+        // lookup and the live-fetch miss set agree with what the reader would
+        // have fetched. Usernames are bare (no `@`); the reader re-normalizes.
+        const allowSet = new Set(Array.isArray(xConfig.allowlist) ? xConfig.allowlist : []);
+        const selectedUsernames = [];
+        const seenUsernames = new Set();
+        for (const raw of settings.socialSources ?? []) {
+          const norm = normalizeHandle(raw);
+          if (!norm || seenUsernames.has(norm.username)) continue;
+          if (allowSet.size > 0 && !allowSet.has(norm.username)) continue;
+          seenUsernames.add(norm.username);
+          selectedUsernames.push(norm.username);
         }
-        if (Array.isArray(xItems) && xItems.length > 0) {
-          rawItems = [...(rawItems ?? []), ...xItems];
+        const xFeedIds = selectedUsernames.map((u) => `x:${u}`);
+
+        // Cache-first read for the selected X feed ids. `cacheRowsToRawItems` is
+        // X-aware: an `x:{username}` row with no manifest entry reconstructs as
+        // a social item, so cached handles survive source selection.
+        let cachedXItems = [];
+        const cachedUsernames = new Set();
+        if (_recentItemsCache.enabled() && xFeedIds.length > 0) {
+          try {
+            const { rows, error } = await _recentItemsCache.read({
+              supabase: _recentItemsCache.client(),
+              feedIds: xFeedIds,
+            });
+            if (error) {
+              console.warn(
+                `[ingestion.x.cache] read failed (falling back to live): ${error.message ?? error}`
+              );
+            } else if (Array.isArray(rows) && rows.length > 0) {
+              cachedXItems = cacheRowsToRawItems(rows, manifestFeeds);
+              for (const it of cachedXItems) {
+                const m = /^x:([a-z0-9_]+)$/.exec(typeof it.feedId === "string" ? it.feedId : "");
+                if (m) cachedUsernames.add(m[1]);
+              }
+            }
+          } catch (err) {
+            console.warn(
+              `[ingestion.x.cache] read threw (falling back to live): ${err instanceof Error ? err.message : err}`
+            );
+          }
+        }
+
+        // Miss handles = selected handles with zero cached rows. Cached handles
+        // are never re-fetched; when there are no misses the reader is not
+        // called at all (full cache hit).
+        const missUsernames = selectedUsernames.filter((u) => !cachedUsernames.has(u));
+
+        // Live-fetch outcomes captured here and reconciled into the unified
+        // diagnostics block below — so a full/partial cache hit (reader not
+        // called) still reports meaningful selection/fetch/tweet totals.
+        let liveXItems = [];
+        let liveHandlesFetched = 0;
+        let liveTweetsByHandle = null;
+        if (missUsernames.length > 0) {
+          const { items: xItems, diagnostics } = await _xReader.read({
+            socialSources: missUsernames,
+            config: xConfig,
+          });
+          liveXItems = Array.isArray(xItems) ? xItems : [];
+          // Errors / degraded come straight from the reader (live-fetch
+          // outcomes). The cross-cutting count totals are reconciled below.
+          xDiagnostics.errors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
+          xDiagnostics.degraded = diagnostics?.degraded === true;
+          // Handles the reader ACTUALLY fetched (successes). Miss handles that
+          // errored are excluded here and surface in errors[]; this keeps the
+          // cache+live partition summing to selected only when there are no
+          // errors.
+          liveHandlesFetched = Number.isInteger(diagnostics?.handlesFetched) ? diagnostics.handlesFetched : 0;
+          // Phase 2 (additive): per-handle live tweet counts, merged with the
+          // cache-derived counts below.
+          if (diagnostics?.tweetsByHandle && typeof diagnostics.tweetsByHandle === "object") {
+            liveTweetsByHandle = diagnostics.tweetsByHandle;
+          }
+
+          // Opportunistic write-back of the live X items — fire-and-forget with
+          // the same non-fatal envelope as the RSS cache write above. Cache
+          // failures must never block the user's refresh.
+          if (_recentItemsCache.enabled() && liveXItems.length > 0) {
+            void Promise.resolve()
+              .then(() => _recentItemsCache.write({ supabase: _recentItemsCache.client(), items: liveXItems }))
+              .then((res) => {
+                if (res?.error) {
+                  console.warn(
+                    `[ingestion.x.cache] write failed (non-fatal): ${res.error.message ?? res.error}`
+                  );
+                }
+              })
+              .catch((err) => {
+                console.warn(
+                  `[ingestion.x.cache] write threw (non-fatal): ${err instanceof Error ? err.message : err}`
+                );
+              });
+          }
+        }
+
+        // Merge cached + live X items, dedupe by sourceId (the cache and live
+        // handle sets are disjoint by construction, but guard defensively).
+        const mergedXItems = [];
+        const seenSourceIds = new Set();
+        for (const it of [...cachedXItems, ...liveXItems]) {
+          const sid = typeof it?.sourceId === "string" ? it.sourceId : "";
+          if (sid && seenSourceIds.has(sid)) continue;
+          if (sid) seenSourceIds.add(sid);
+          mergedXItems.push(it);
+        }
+
+        // ── Unified X diagnostics (Phase 3.2) ──────────────────────────────
+        // Populate the cross-cutting counts ONCE, after the cache read + merge,
+        // regardless of whether the live reader ran. Before 3.2 these stayed 0
+        // on a full/partial cache hit (reader not called), which misled E2E and
+        // ops into thinking X returned nothing. `source`, `handlesFromCache`,
+        // `handlesLiveFetched`, `errors`, and `degraded` are preserved.
+        xDiagnostics.handlesRequested = selectedUsernames.length;
+        xDiagnostics.handlesSelected = selectedUsernames.length;
+        xDiagnostics.handlesFromCache = cachedUsernames.size;
+        xDiagnostics.handlesLiveFetched = liveHandlesFetched;
+        // Partition of the selected handle set: cache hits + successful live
+        // fetches. Sums to handlesSelected when no handle errored.
+        xDiagnostics.handlesFetched = xDiagnostics.handlesFromCache + xDiagnostics.handlesLiveFetched;
+        // Total tweets in the merged pool (cached + live), not just live.
+        xDiagnostics.tweetsReturned = mergedXItems.length;
+        xDiagnostics.source =
+          cachedUsernames.size > 0 && missUsernames.length > 0
+            ? "mixed"
+            : cachedUsernames.size > 0
+              ? "cache"
+              : "live";
+
+        // Per-handle tweet counts: derive cached-handle counts from the
+        // reconstructed cache items, then fold in the reader's live counts
+        // (cached wins on the unlikely overlap). Only attach when non-empty so
+        // the disabled/empty diagnostics shape stays unchanged.
+        const tweetsByHandle = {};
+        for (const it of cachedXItems) {
+          const handle = canonicalXHandleOfItem(it);
+          if (handle) tweetsByHandle[handle] = (tweetsByHandle[handle] ?? 0) + 1;
+        }
+        if (liveTweetsByHandle) {
+          for (const [handle, count] of Object.entries(liveTweetsByHandle)) {
+            if (!(handle in tweetsByHandle)) tweetsByHandle[handle] = count;
+          }
+        }
+        if (Object.keys(tweetsByHandle).length > 0) {
+          xDiagnostics.tweetsByHandle = tweetsByHandle;
+        }
+
+        if (mergedXItems.length > 0) {
+          rawItems = [...(rawItems ?? []), ...mergedXItems];
         }
       }
     } catch (err) {
@@ -1533,7 +1686,7 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       ];
     }
     console.log(
-      `[ingestion.x] enabled=${xDiagnostics.enabled} selected=${xDiagnostics.handlesSelected} fetched=${xDiagnostics.handlesFetched} tweets=${xDiagnostics.tweetsReturned} degraded=${xDiagnostics.degraded}`
+      `[ingestion.x] enabled=${xDiagnostics.enabled} source=${xDiagnostics.source} fromCache=${xDiagnostics.handlesFromCache} liveFetched=${xDiagnostics.handlesLiveFetched} selected=${xDiagnostics.handlesSelected} fetched=${xDiagnostics.handlesFetched} tweets=${xDiagnostics.tweetsReturned} degraded=${xDiagnostics.degraded}`
     );
 
     const priorWatermark = priorSnapshot?._watermark ?? null;
@@ -1986,6 +2139,13 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     if (log.reclusterQueue !== undefined) lastRunMeta.reclusterQueue = log.reclusterQueue;
     if (log.reclusterQueueCount !== undefined) lastRunMeta.reclusterQueueCount = log.reclusterQueueCount;
     lastRunMeta.ingestionSource = ingestionSource;
+    // Phase 3.2: persist the per-connector X ingestion diagnostics so the
+    // last-run X surface (source / handlesFromCache / tweetsReturned / …) is
+    // recoverable AFTER the fact via GET /api/dashboard/refresh/meta and GET
+    // /api/dashboard — `liftSnapshotMeta` promotes `_lastRunMeta.ingestion`
+    // back onto `_meta.ingestion` on subsequent reads. Additive container;
+    // absent on pre-3.2 snapshots so older reads simply omit the key.
+    lastRunMeta.ingestion = { x: xDiagnostics };
     // E2E: persist the forced-full-refresh marker so the NEXT load knows the
     // first forced run already happened (and resumes normal watermark behavior).
     // A data reset clears the snapshot — and this marker — so the post-reset
@@ -2285,6 +2445,10 @@ const _LAST_RUN_META_LIFTED_KEYS = Object.freeze([
   "clusteringLatencyMs", "tags", "whatChanged", "whyItMatters", "timings",
   "outcomes", "ingestionSource", "whyEnrichment", "profile", "reclusterExecution",
   "clusterSplit", "overflowCap", "reclusterQueue", "reclusterQueueCount",
+  // Phase 3.2: per-connector X ingestion diagnostics (`ingestion.x`). On the
+  // re-write merge so a deferred whyItMatters/recluster rewrite doesn't drop the
+  // persisted last-run X surface.
+  "ingestion",
   // B4: deterministic relevance-gated fallback (B2/B3) signals — keep them on the
   // enrichment re-write merge so a degraded rescue snapshot doesn't lose its
   // deterministic fields when the deferred whyItMatters pass rewrites it.

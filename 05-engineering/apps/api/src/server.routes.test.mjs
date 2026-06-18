@@ -1226,6 +1226,354 @@ test("refresh X wiring: disabled config makes no X call and reports baseline dia
   }
 });
 
+// ─── X ingestion cache-first (Phase 3, Step 3.1) ────────────────────────────
+//
+// Exercise the cache-first X path end to end through the refresh route. The
+// Tier-A cache (`_recentItemsCache`) is force-enabled and fully stubbed: X feed
+// ids hit a controllable row map while RSS feed ids read as a miss ([]), so the
+// RSS path keeps live-fetching the test fixtures unchanged. `_xReader.read` is
+// stubbed to assert exactly which handles are live-fetched — and to blow up if a
+// cached handle is ever re-fetched.
+
+function xCacheRow(username) {
+  return {
+    source_id: `x:${username}:deadbeefdeadbeef`,
+    feed_id: `x:${username}`,
+    url: `https://x.com/${username}/status/1800000000000000001`,
+    headline: `cached tweet from @${username}`,
+    snippet: `cached tweet from @${username}`,
+    published_at: "2026-06-18T11:30:00.000Z",
+    fetched_at: "2026-06-18T11:55:00.000Z",
+    // Far-future expiry so the row is always fresh regardless of test clock.
+    expires_at: "2999-01-01T00:00:00.000Z",
+  };
+}
+
+// Install a fully-stubbed, enabled recent-items cache. `xRowsByFeedId` maps an
+// `x:{username}` feed id to the rows it should return; RSS feed ids (and any
+// unmapped x ids) read as a miss ([]) so RSS keeps live-fetching the fixtures.
+// Returns { restore, writes, reads } — `writes` collects every write batch
+// (RSS + X), `reads` collects every feedIds array the read saw.
+function installXCache(xRowsByFeedId) {
+  const prev = {
+    enabled: _recentItemsCache.enabled,
+    client: _recentItemsCache.client,
+    read: _recentItemsCache.read,
+    write: _recentItemsCache.write,
+  };
+  const writes = [];
+  const reads = [];
+  _recentItemsCache.enabled = () => true;
+  _recentItemsCache.client = () => ({ tag: "x-cache-stub" });
+  _recentItemsCache.read = async ({ feedIds }) => {
+    reads.push(Array.isArray(feedIds) ? [...feedIds] : feedIds);
+    const rows = [];
+    for (const id of feedIds ?? []) {
+      if (xRowsByFeedId[id]) rows.push(...xRowsByFeedId[id]);
+    }
+    return { rows, error: null };
+  };
+  _recentItemsCache.write = async ({ items }) => { writes.push(items); return { written: items.length, error: null }; };
+  return {
+    writes,
+    reads,
+    restore() {
+      _recentItemsCache.enabled = prev.enabled;
+      _recentItemsCache.client = prev.client;
+      _recentItemsCache.read = prev.read;
+      _recentItemsCache.write = prev.write;
+    },
+  };
+}
+
+// Let fire-and-forget cache writes (RSS + X) flush before asserting on them.
+const flushAsync = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+test("refresh X cache HIT: cached handle served from cache, reader NOT called, source=cache", async () => {
+  const ISOLATED_USER_ID = "test-user-x-cache-hit";
+  const capture = {};
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+  const cache = installXCache({ "x:petrogustavo": [xCacheRow("petrogustavo")] });
+  let xReadCalls = 0;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async () => { xReadCalls += 1; throw new Error("reader must NOT be called on a full cache hit"); };
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app).put("/api/settings").send({ ...VALID_BODY, socialSources: ["@petrogustavo"] }).set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+        assert.equal(res.status, 200);
+        assert.equal(xReadCalls, 0, "live reader must not run when the handle is cached");
+
+        // cached social item reconstructed and handed to the pipeline
+        const handed = capture.runOpts?.rawItems ?? [];
+        assert.ok(handed.some((it) => it.kind === "social" && it.outlet === "@petrogustavo"),
+          "cached social item reached the pipeline");
+
+        const x = res.body._meta?.ingestion?.x;
+        assert.equal(x.enabled, true);
+        assert.equal(x.source, "cache");
+        assert.equal(x.handlesFromCache, 1);
+        assert.equal(x.handlesLiveFetched, 0);
+        // Phase 3.2: a full cache hit must still report meaningful selection +
+        // tweet totals even though the live reader never ran.
+        assert.equal(x.handlesSelected, 1, "selected count reflects the user's handle, not the (zero) live fetch");
+        assert.equal(x.handlesFetched, 1, "cache+live partition: 1 from cache + 0 live");
+        assert.ok(x.tweetsReturned > 0, "cached tweet counted in tweetsReturned");
+        assert.equal(x.tweetsByHandle?.["@petrogustavo"], 1, "per-handle count derived from the cached item");
+        assert.doesNotMatch(JSON.stringify(res.body), /secret-bearer/);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    cache.restore();
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh → GET /api/dashboard/refresh/meta round-trips persisted ingestion.x (Phase 3.2)", async () => {
+  // Genuine round-trip: a real POST refresh builds `_lastRunMeta.ingestion.x`
+  // from xDiagnostics and persists it via the real snapshot write; the
+  // follow-up GET reads it back through the live `liftSnapshotMeta` path. This
+  // proves the after-the-fact recovery contract — NOT a hand-stubbed snapshot
+  // carrying a pre-lifted `_meta`.
+  const ISOLATED_USER_ID = "test-user-x-meta-roundtrip";
+  const capture = {};
+  let capturedLastRunMeta = null;
+
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+
+  // Capture the persisted _lastRunMeta but STILL forward to the real write so
+  // the follow-up GET reads a genuinely-persisted snapshot through the lift.
+  _snapshotRepo.write = async (uid, payload) => {
+    capturedLastRunMeta = payload._lastRunMeta;
+    return prevWrite(uid, payload);
+  };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async () => ({
+    items: [X_SOCIAL_ITEM],
+    diagnostics: { handlesRequested: 1, handlesSelected: 1, handlesFetched: 1, tweetsReturned: 1, errors: [], degraded: false, tweetsByHandle: { "@petrogustavo": 1 } },
+  });
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app).put("/api/settings").send({ ...VALID_BODY, socialSources: ["@petrogustavo"] }).set("Content-Type", "application/json");
+        const refreshRes = await request(app).post("/api/dashboard/refresh");
+        assert.equal(refreshRes.status, 200);
+
+        // (1) server persisted ingestion.x into _lastRunMeta (not just _meta)
+        assert.ok(capturedLastRunMeta?.ingestion?.x, "_lastRunMeta.ingestion.x persisted on the snapshot write");
+        assert.equal(capturedLastRunMeta.ingestion.x.source, "live");
+        assert.equal(capturedLastRunMeta.ingestion.x.handlesSelected, 1);
+
+        // (2) GET refresh/meta lifts it back onto _meta.ingestion.x — no second POST
+        const metaRes = await request(app).get("/api/dashboard/refresh/meta");
+        assert.equal(metaRes.status, 200);
+        const x = metaRes.body.meta?.ingestion?.x;
+        assert.ok(x && typeof x === "object", "lifted _meta.ingestion.x present on GET refresh/meta");
+        assert.equal(x.enabled, true);
+        assert.equal(x.source, "live");
+        assert.equal(x.handlesSelected, 1);
+        assert.equal(x.tweetsReturned, 1);
+        assert.doesNotMatch(JSON.stringify(metaRes.body), /secret-bearer/);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+    await rm(path.join(tmpDir, `dashboard_snapshot_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh X cache MISS: reader fetches the handle, live items written back, source=live", async () => {
+  const ISOLATED_USER_ID = "test-user-x-cache-miss";
+  const capture = {};
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+  const cache = installXCache({}); // no X rows cached → miss
+  let xReadArgs = null;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async (args) => {
+    xReadArgs = args;
+    return {
+      items: [X_SOCIAL_ITEM],
+      diagnostics: { handlesRequested: 1, handlesSelected: 1, handlesFetched: 1, tweetsReturned: 1, errors: [], degraded: false },
+    };
+  };
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app).put("/api/settings").send({ ...VALID_BODY, socialSources: ["@petrogustavo"] }).set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+        assert.equal(res.status, 200);
+
+        assert.ok(xReadArgs, "reader invoked on a cache miss");
+        assert.deepEqual(xReadArgs.socialSources, ["petrogustavo"], "miss handle live-fetched");
+
+        const handed = capture.runOpts?.rawItems ?? [];
+        assert.ok(handed.some((it) => it.kind === "social" && it.outlet === "@petrogustavo"),
+          "live social item reached the pipeline");
+
+        const x = res.body._meta?.ingestion?.x;
+        assert.equal(x.source, "live");
+        assert.equal(x.handlesFromCache, 0);
+        assert.equal(x.handlesLiveFetched, 1);
+
+        // fire-and-forget write-back of the live X items
+        await flushAsync();
+        const wroteX = cache.writes.some((batch) => batch.some((it) => it.kind === "social" && it.outlet === "@petrogustavo"));
+        assert.ok(wroteX, "live X items written back to the cache");
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    cache.restore();
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh X cache PARTIAL: cached handle A + miss handle B → reader fetches only B, pool has both", async () => {
+  const ISOLATED_USER_ID = "test-user-x-cache-partial";
+  const capture = {};
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+  const cache = installXCache({ "x:petrogustavo": [xCacheRow("petrogustavo")] });
+  let xReadArgs = null;
+  const WHITEHOUSE_ITEM = { ...X_SOCIAL_ITEM, sourceId: "x:whitehouse:cafe", feedId: "x:whitehouse", outlet: "@whitehouse", url: "https://x.com/whitehouse/status/2" };
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async (args) => {
+    xReadArgs = args;
+    return {
+      items: [WHITEHOUSE_ITEM],
+      diagnostics: { handlesRequested: 1, handlesSelected: 1, handlesFetched: 1, tweetsReturned: 1, errors: [], degraded: false },
+    };
+  };
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app).put("/api/settings").send({ ...VALID_BODY, socialSources: ["@petrogustavo", "@whitehouse"] }).set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+        assert.equal(res.status, 200);
+
+        // reader fetched ONLY the miss handle
+        assert.ok(xReadArgs, "reader invoked for the miss handle");
+        assert.deepEqual(xReadArgs.socialSources, ["whitehouse"], "only the uncached handle is live-fetched");
+
+        // merged pool carries BOTH the cached and the live handle
+        const handed = capture.runOpts?.rawItems ?? [];
+        const outlets = handed.filter((it) => it.kind === "social").map((it) => it.outlet).sort();
+        assert.deepEqual(outlets, ["@petrogustavo", "@whitehouse"]);
+
+        const x = res.body._meta?.ingestion?.x;
+        assert.equal(x.source, "mixed");
+        assert.equal(x.handlesFromCache, 1);
+        assert.equal(x.handlesLiveFetched, 1);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    cache.restore();
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh X cache: X disabled → no x:* feed ids in any cache lookup, reader never called", async () => {
+  const ISOLATED_USER_ID = "test-user-x-cache-disabled";
+  const capture = {};
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+  const cache = installXCache({ "x:petrogustavo": [xCacheRow("petrogustavo")] });
+  let xReadCalls = 0;
+
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async () => { xReadCalls += 1; return { items: [], diagnostics: {} }; };
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: undefined, TEMPO_X_BEARER_TOKEN: undefined, TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app).put("/api/settings").send({ ...VALID_BODY, socialSources: ["@petrogustavo"] }).set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+        assert.equal(res.status, 200);
+        assert.equal(xReadCalls, 0, "reader never called when X is disabled");
+        // No x:* feed id ever reached the cache read (RSS lookups only).
+        const sawXFeedId = cache.reads.some((feedIds) => (feedIds ?? []).some((id) => typeof id === "string" && id.startsWith("x:")));
+        assert.equal(sawXFeedId, false, "X feed ids must not appear in the cache lookup when disabled");
+        const handed = capture.runOpts?.rawItems ?? [];
+        assert.ok(!handed.some((it) => it.kind === "social"), "no social items when X disabled");
+        const x = res.body._meta?.ingestion?.x;
+        assert.equal(x.enabled, false);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    cache.restore();
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
 // ─── Social funnel diagnostics route contract (_meta.funnel.social) ──────────
 
 // Representative social-funnel block as the pipeline emits it (additive nested

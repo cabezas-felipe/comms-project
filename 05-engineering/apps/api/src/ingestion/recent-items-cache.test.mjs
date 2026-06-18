@@ -336,3 +336,55 @@ test("cacheRowsToRawItems: no lang key when manifest lang is missing/blank/non-s
   const [orphanItem] = cacheRowsToRawItems([orphan], MANIFEST, { now: NOW });
   assert.equal("lang" in orphanItem, false);
 });
+
+// ─── cacheRowsToRawItems: X (social) reconstruction (Phase 3, Step 3.1) ──────
+//
+// A cache row keyed `x:{username}` with NO manifest entry must reconstruct as a
+// social item (outlet `@username`, kind "social", weight 60) so the social
+// handle UNION admits it at source selection.  Handles never get manifest rows,
+// so this path is the only thing standing between a cached tweet and the
+// "orphan → traditional/weight 50/outlet ''" default that would drop it.
+
+const X_CACHE_ROW = {
+  source_id: "x:petrogustavo:deadbeefdeadbeef",
+  feed_id: "x:petrogustavo",
+  url: "https://x.com/petrogustavo/status/1800000000000000001",
+  headline: "Comunicado oficial sobre la frontera.",
+  snippet: "Comunicado oficial sobre la frontera.",
+  published_at: "2026-05-27T11:30:00.000Z",
+  fetched_at: "2026-05-27T11:55:00.000Z",
+  expires_at: "2026-05-27T12:55:00.000Z",
+};
+
+test("cacheRowsToRawItems: x:{username} row with no manifest reconstructs as a social item", () => {
+  // MANIFEST has no `x:petrogustavo` entry — the X-aware branch must fire.
+  const [item] = cacheRowsToRawItems([X_CACHE_ROW], MANIFEST, { now: NOW });
+  assert.equal(item.sourceId, "x:petrogustavo:deadbeefdeadbeef");
+  assert.equal(item.feedId, "x:petrogustavo");
+  assert.equal(item.outlet, "@petrogustavo", "outlet is the canonical @handle");
+  assert.equal(item.kind, "social", "X cache rows reconstruct as social, never traditional");
+  assert.equal(item.weight, 60, "X handle weight (60), not the RSS orphan default (50)");
+  assert.equal(item.url, "https://x.com/petrogustavo/status/1800000000000000001");
+  assert.equal(item.headline, "Comunicado oficial sobre la frontera.");
+  assert.deepEqual(item.body, ["Comunicado oficial sobre la frontera."]);
+  // NOW = 12:00:00; published_at = 11:30:00 → 30 minutes ago.
+  assert.equal(item.minutesAgo, 30);
+});
+
+test("cacheRowsToRawItems: x:{username} reconstruction is independent of an empty manifest", () => {
+  const [item] = cacheRowsToRawItems([X_CACHE_ROW], [], { now: NOW });
+  assert.equal(item.outlet, "@petrogustavo");
+  assert.equal(item.kind, "social");
+  assert.equal(item.weight, 60);
+});
+
+test("cacheRowsToRawItems: a manifest entry that happens to match an x:{username} id wins (RSS path unchanged)", () => {
+  // Defensive: if some operator ever minted a manifest row at `x:petrogustavo`,
+  // the manifest-backed derivation takes precedence (xMatch only fires when
+  // there is genuinely no manifest match), so RSS semantics never regress.
+  const manifest = [{ id: "x:petrogustavo", name: "Petro (manual feed)", publisher: "Petro", kind: "rss", weight: 88 }];
+  const [item] = cacheRowsToRawItems([X_CACHE_ROW], manifest, { now: NOW });
+  assert.equal(item.kind, "traditional");
+  assert.equal(item.weight, 88);
+  assert.equal(item.outlet, "Petro");
+});
