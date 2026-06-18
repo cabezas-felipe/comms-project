@@ -605,6 +605,11 @@ function classifyExtractionError(err) {
   return "provider_error";
 }
 
+// Shape of a reconstructed X (social) cache feedId: `x:{username}` (lowercase),
+// minted by the x-reader and matched the same way by recent-items-cache's
+// X-aware reconstruction. Captures the bare username.
+const X_FEED_ID_RE = /^x:([a-z0-9_]+)$/;
+
 // Canonical `@handle` for a reconstructed X cache item — prefer the outlet
 // (already `@username` from cacheRowsToRawItems), else recover it from the
 // `x:{username}` feedId. Returns "" when neither is usable. Used to derive
@@ -612,7 +617,7 @@ function classifyExtractionError(err) {
 function canonicalXHandleOfItem(item) {
   const outlet = typeof item?.outlet === "string" ? item.outlet : "";
   if (outlet.startsWith("@") && outlet.length > 1) return outlet;
-  const m = /^x:([a-z0-9_]+)$/.exec(typeof item?.feedId === "string" ? item.feedId : "");
+  const m = X_FEED_ID_RE.exec(typeof item?.feedId === "string" ? item.feedId : "");
   return m ? `@${m[1]}` : "";
 }
 
@@ -1557,7 +1562,7 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
             } else if (Array.isArray(rows) && rows.length > 0) {
               cachedXItems = cacheRowsToRawItems(rows, manifestFeeds);
               for (const it of cachedXItems) {
-                const m = /^x:([a-z0-9_]+)$/.exec(typeof it.feedId === "string" ? it.feedId : "");
+                const m = X_FEED_ID_RE.exec(typeof it.feedId === "string" ? it.feedId : "");
                 if (m) cachedUsernames.add(m[1]);
               }
             }

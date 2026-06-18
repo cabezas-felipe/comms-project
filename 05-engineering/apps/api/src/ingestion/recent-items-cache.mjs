@@ -1,9 +1,10 @@
-// Tier-A ephemeral cache for recently-fetched + normalized RSS items.
+// Tier-A ephemeral cache for recently-fetched, normalized ingestion items —
+// both RSS feed items and X (social) handle items.
 //
 // Refresh writes upsert rows here at the end of each ingestion; the next
 // refresh reads still-fresh rows from this table and falls back to a live
-// feed-reader fetch when the cache is cold or expired (see the cache-first
-// branch in `server.mjs`).
+// fetch (feed-reader for RSS, x-reader for handles) when the cache is cold or
+// expired (see the cache-first branches in `server.mjs`).
 //
 // Design notes:
 //   - All public functions accept a supabase client as an argument so callers

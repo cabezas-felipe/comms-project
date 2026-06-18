@@ -4,17 +4,17 @@
 // `ingestion-warm.mjs` for scheduled pre-fetch.
 //
 // SCOPE: reusable reader layer — no HTTP surface of its own. All network I/O is
-// delegated to the client (`x-api-client.mjs`)
-// (`x-api-client.mjs`) and reaches the wire through an injectable `fetchImpl`,
-// so tests stay hermetic. The bearer token never appears here — it lives in
-// `config` and is only ever attached as an Authorization header by the client.
+// delegated to the client (`x-api-client.mjs`) and reaches the wire through an
+// injectable `fetchImpl`, so tests stay hermetic. The bearer token never appears
+// here — it lives in `config` and is only ever attached as an Authorization
+// header by the client.
 //
 // Output items match the raw-item shape `normalizeSourceItem` consumes and the
 // field conventions of feed-reader's `mapEntry` (narrative fields empty until
 // clustering assigns them; `kind` distinguishes the source family).
 
 import { createHash } from "node:crypto";
-import { lookupUserByUsername, fetchUserTweets } from "./x-api-client.mjs";
+import { lookupUserByUsername, fetchUserTweets, normalizeUsername } from "./x-api-client.mjs";
 import { pMap } from "../util/p-map.mjs";
 
 const MS_PER_24H = 24 * 60 * 60 * 1000;
@@ -37,8 +37,10 @@ const DEFAULT_HANDLE_CONCURRENCY = 3;
  *   Returns null for nullish/blank/`@`-only input.
  */
 export function normalizeHandle(raw) {
-  if (raw == null) return null;
-  const username = String(raw).trim().replace(/^@+/, "").trim().toLowerCase();
+  // Same canonicalization as the client's `normalizeUsername` (strip leading
+  // `@`, trim, lowercase); we only wrap it in the richer `{ username, handle }`
+  // shape the reader works in.
+  const username = normalizeUsername(raw);
   if (!username) return null;
   return { username, handle: `@${username}` };
 }
