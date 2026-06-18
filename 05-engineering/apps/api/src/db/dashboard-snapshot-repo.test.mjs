@@ -373,6 +373,45 @@ test("readSnapshot (B4): omits deterministic-fallback fields when the snapshot p
   assert.equal(result._meta?.deterministicClusteringDiagnostics, undefined);
 });
 
+test("readSnapshot (C1 balanced): lifts persisted _lastRunMeta.clusterCap into _meta.clusterCap", async () => {
+  // A social-mixed run persists the cluster-input cap diagnostics (effective cap
+  // + social reservation counts) on `_lastRunMeta`; the read boundary must
+  // surface them on `_meta` so GET /api/dashboard confirms social items entered
+  // cluster input without replaying refresh. Fails if clusterCap is not lifted.
+  const userId = "c1-clustercap-lift-user";
+  const clusterCap = {
+    dedupedCount: 58,
+    clusterInputCount: 15,
+    clusterDroppedCount: 43,
+    clusterDroppedSourceIds: ["trad-12", "trad-13"],
+    clusterInputCapEffective: 15,
+    balancedReservationApplied: true,
+    socialQuotaEffective: 3,
+    socialReservedCount: 3,
+    socialInputCount: 3,
+    traditionalInputCount: 12,
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: { clusterModel: "mock", clusterCap },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta?.clusterCap, clusterCap);
+  assert.equal(result._meta?.clusterCap?.balancedReservationApplied, true);
+  assert.equal(result._meta?.clusterCap?.socialInputCount, 3);
+  // Raw _lastRunMeta is still stripped at the boundary.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot (C1 balanced): omits _meta.clusterCap when the snapshot carries none", async () => {
+  const userId = "c1-clustercap-absent-user";
+  await writeSnapshot(userId, { ...SAMPLE_PAYLOAD, _lastRunMeta: { clusterModel: "mock" } });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta?.clusterCap, undefined);
+});
+
 test("writeSnapshot: overwrites existing snapshot on second call", async () => {
   const updated = { ...SAMPLE_PAYLOAD, stories: [] };
   await writeSnapshot(USER_ID, updated);
