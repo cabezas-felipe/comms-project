@@ -11306,24 +11306,18 @@ test("C1 integration: no cap effect when dedupedItems <= 15", async () => {
   assert.deepEqual(log.clusterCap.clusterDroppedSourceIds, []);
 });
 
-test("C1 balanced integration: social items survive the cap that pure top-K would starve", async () => {
-  // 50 fresh on-beat traditional items would fill all 15 cap slots under pure
-  // top-K, dropping every (staler) social item. Balanced reservation guarantees
-  // a social floor inside the SAME cap.
+test("C1 balanced CANONICAL: mixed pool — social reaches cluster input under the cap (all signals)", async () => {
+  // The full balanced-reservation contract in ONE run. 50 fresh on-beat
+  // traditional items would fill all 15 cap slots under pure top-K, dropping
+  // every (staler) social item; balanced reservation guarantees the social floor
+  // inside the SAME cap. Asserts every observable surface agrees end-to-end:
+  // allocator (clusterCap), the clusterFn input the model actually saw, the
+  // pre-dedupe funnel stage, and the post-dedupe trace.
   const traditional = Array.from({ length: 50 }, (_, i) =>
-    makeItem({
-      sourceId: `trad-${String(i).padStart(2, "0")}`,
-      outlet: "Reuters",
-      minutesAgo: i,
-    })
+    makeItem({ sourceId: `trad-${String(i).padStart(2, "0")}`, outlet: "Reuters", minutesAgo: i })
   );
   const social = Array.from({ length: 8 }, (_, i) =>
-    makeItem({
-      sourceId: `soc-${i}`,
-      kind: "social",
-      outlet: "@latamwatcher",
-      minutesAgo: 1400 + i,
-    })
+    makeItem({ sourceId: `soc-${i}`, kind: "social", outlet: "@latamwatcher", minutesAgo: 1400 + i })
   );
   let clusterInput = null;
   const { log } = await runRefreshPipeline({
@@ -11334,31 +11328,47 @@ test("C1 balanced integration: social items survive the cap that pure top-K woul
     contractVersion: "2026-05-19-meta-story-fields",
     beatFitEnabled: false,
   });
+
+  // 1) clusterFn saw exactly the capped set (default cap 15) with the social floor.
   assert.ok(clusterInput, "clusterFn must be invoked");
   assert.equal(clusterInput.length, 15, "total cap unchanged at 15");
+  const clusterSocial = clusterInput.filter((i) => i.kind === "social");
+  assert.ok(clusterSocial.length >= 3, "clusterFn input carries the reserved social floor");
+
+  // 2) Allocator diagnostics confirm the balanced path fired.
   assert.equal(log.clusterCap.balancedReservationApplied, true);
   assert.equal(log.clusterCap.socialQuotaEffective, 3);
-  assert.ok(log.clusterCap.socialInputCount >= 3, "social floor honored");
-  // The cluster input the model actually saw carries the social items.
-  const socialSeen = clusterInput.filter((i) => i.kind === "social").length;
-  assert.ok(socialSeen >= 3, "clusterFn input contains the reserved social items");
+  assert.ok(log.clusterCap.socialInputCount >= 3, "socialInputCount honors the floor");
+
+  // 3) Funnel stage + post-dedupe trace agree with the allocator and each other.
+  const sf = log.funnel.social;
+  assert.ok(sf.afterDedupe >= 5, "social survives dedupe under socialSources selection");
+  assert.ok(sf.afterClusterInputCap >= 3, "social entered cluster input");
+  assert.equal(sf.afterClusterInputCap, sf.postDedupe.clusterInputSocialCount,
+    "afterClusterInputCap === postDedupe.clusterInputSocialCount");
+  assert.equal(sf.afterClusterInputCap, log.clusterCap.socialInputCount,
+    "funnel stage === allocator socialInputCount (single source of truth)");
+  assert.equal(sf.afterClusterInputCap, clusterSocial.length,
+    "funnel stage === social count clusterFn actually received");
+
+  // 4) The cap is the real loss — attribution names it, not an earlier stage.
+  assert.equal(sf.primaryDropStageForSocial, "afterClusterInputCap");
+  assert.notEqual(sf.primaryDropStageForSocial, "afterTopicKeyword");
+
+  // 5) The admitted social items are REAL dedupe survivors, never phantoms.
+  const dedupedSocialIds = new Set(sf.postDedupe.socialSourceItemIdsAtDedupe);
+  for (const it of clusterSocial) {
+    assert.ok(dedupedSocialIds.has(it.sourceId),
+      `clusterInput social ${it.sourceId} must be a deduped social source id`);
+  }
 });
 
-test("C1 balanced integration: cold_start reserves 2 social slots within the 10-item cap", async () => {
+test("C1 balanced edge: cold_start cap (10) reserves a quota of 2 across every surface", async () => {
   const traditional = Array.from({ length: 20 }, (_, i) =>
-    makeItem({
-      sourceId: `trad-${String(i).padStart(2, "0")}`,
-      outlet: "Reuters",
-      minutesAgo: i,
-    })
+    makeItem({ sourceId: `trad-${String(i).padStart(2, "0")}`, outlet: "Reuters", minutesAgo: i })
   );
   const social = Array.from({ length: 4 }, (_, i) =>
-    makeItem({
-      sourceId: `soc-${i}`,
-      kind: "social",
-      outlet: "@latamwatcher",
-      minutesAgo: 1400 + i,
-    })
+    makeItem({ sourceId: `soc-${i}`, kind: "social", outlet: "@latamwatcher", minutesAgo: 1400 + i })
   );
   let clusterInput = null;
   const { log } = await runRefreshPipeline({
@@ -11375,9 +11385,13 @@ test("C1 balanced integration: cold_start reserves 2 social slots within the 10-
   assert.equal(log.clusterCap.balancedReservationApplied, true);
   assert.equal(log.clusterCap.socialQuotaEffective, 2, "cold_start quota is 2");
   assert.ok(log.clusterCap.socialInputCount >= 2, "social floor honored under cold_start");
+  const sf = log.funnel.social;
+  assert.equal(sf.afterClusterInputCap, 2, "cold_start admits the quota of 2");
+  assert.equal(sf.afterClusterInputCap, sf.postDedupe.clusterInputSocialCount);
+  assert.equal(sf.primaryDropStageForSocial, "afterClusterInputCap");
 });
 
-test("C1 balanced integration: a 0-social run reports balancedReservationApplied=false", async () => {
+test("C1 balanced edge: 0-social run is pure top-K (no balanced path, no false cap drop)", async () => {
   const rawItems = Array.from({ length: 20 }, (_, i) =>
     makeItem({ sourceId: `src-${String(i).padStart(2, "0")}`, minutesAgo: i * 10 })
   );
@@ -11392,83 +11406,47 @@ test("C1 balanced integration: a 0-social run reports balancedReservationApplied
   assert.equal(log.clusterCap.balancedReservationApplied, false);
   assert.equal(log.clusterCap.socialInputCount, 0);
   assert.equal(log.clusterCap.socialQuotaEffective, 0);
-});
-
-test("Step 3 funnel: afterClusterInputCap > 0 and matches clusterInputSocialCount under a mixed pool", async () => {
-  // 50 fresh traditional + 8 staler social: all 8 social survive dedupe, but the
-  // cap keeps only the reserved quota (3). The new stage makes that loss explicit
-  // and the cap becomes the PRIMARY social drop — not an earlier stage.
-  const traditional = Array.from({ length: 50 }, (_, i) =>
-    makeItem({ sourceId: `trad-${String(i).padStart(2, "0")}`, outlet: "Reuters", minutesAgo: i })
-  );
-  const social = Array.from({ length: 8 }, (_, i) =>
-    makeItem({ sourceId: `soc-${i}`, kind: "social", outlet: "@latamwatcher", minutesAgo: 1400 + i })
-  );
-  const { log } = await runRefreshPipeline({
-    settings: { ...BASE_SETTINGS, socialSources: ["@latamwatcher"] },
-    rawItems: [...traditional, ...social],
-    clusterFn: async () => [],
-    clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-05-19-meta-story-fields",
-    beatFitEnabled: false,
-  });
-  const sf = log.funnel.social;
-  assert.equal(sf.afterDedupe, 8, "all 8 social survive dedupe");
-  assert.equal(sf.afterClusterInputCap, 3, "only the reserved quota survives the cap");
-  assert.ok(sf.afterClusterInputCap > 0, "social entered cluster input");
-  // Alignment: the pre-dedupe stage and the post-dedupe trace count the SAME set.
-  assert.equal(
-    sf.postDedupe.clusterInputSocialCount,
-    sf.afterClusterInputCap,
-    "clusterInputSocialCount === funnel.social.afterClusterInputCap"
-  );
-  // The cap is the real loss — attribution no longer blames an earlier stage.
-  assert.equal(sf.dropsByStage.afterClusterInputCap, 5, "8 → 3 = 5 lost at the cap");
-  assert.equal(sf.primaryDropStageForSocial, "afterClusterInputCap");
-  assert.notEqual(sf.primaryDropStageForSocial, "afterTopicKeyword");
-});
-
-test("Step 3 funnel: cold_start cap (10) surfaces afterClusterInputCap === quota 2", async () => {
-  const traditional = Array.from({ length: 20 }, (_, i) =>
-    makeItem({ sourceId: `trad-${String(i).padStart(2, "0")}`, outlet: "Reuters", minutesAgo: i })
-  );
-  const social = Array.from({ length: 4 }, (_, i) =>
-    makeItem({ sourceId: `soc-${i}`, kind: "social", outlet: "@latamwatcher", minutesAgo: 1400 + i })
-  );
-  const { log } = await runRefreshPipeline({
-    settings: { ...BASE_SETTINGS, socialSources: ["@latamwatcher"] },
-    rawItems: [...traditional, ...social],
-    clusterFn: async () => [],
-    clusterModel: "mock-anthropic-sonnet",
-    contractVersion: "2026-05-19-meta-story-fields",
-    refreshProfile: "cold_start",
-    beatFitEnabled: false,
-  });
-  const sf = log.funnel.social;
-  assert.equal(sf.afterDedupe, 4, "all 4 social survive dedupe");
-  assert.equal(sf.afterClusterInputCap, 2, "cold_start quota is 2");
-  assert.equal(sf.postDedupe.clusterInputSocialCount, sf.afterClusterInputCap);
-  assert.equal(sf.primaryDropStageForSocial, "afterClusterInputCap");
-});
-
-test("Step 3 funnel: 0-social run leaves afterClusterInputCap at 0 with no false cap drop", async () => {
-  const rawItems = Array.from({ length: 20 }, (_, i) =>
-    makeItem({ sourceId: `src-${String(i).padStart(2, "0")}`, minutesAgo: i * 10 })
-  );
-  const { log } = await runRefreshPipeline({
-    settings: BASE_SETTINGS,
-    rawItems,
-    clusterFn: async () => [],
-    clusterModel: "mock-anthropic-haiku",
-    contractVersion: "2026-05-19-meta-story-fields",
-    beatFitEnabled: false,
-  });
   const sf = log.funnel.social;
   assert.equal(sf.afterDedupe, 0);
   assert.equal(sf.afterClusterInputCap, 0, "cap slice ran; zero social in it");
   assert.equal(sf.dropsByStage.afterClusterInputCap, 0, "no false drop");
   assert.equal(sf.postDedupe.clusterInputSocialCount, sf.afterClusterInputCap);
   assert.notEqual(sf.primaryDropStageForSocial, "afterClusterInputCap");
+});
+
+test("C1 balanced regression: X disabled — social cannot leak into cluster input", async () => {
+  // Same mixed pool, but the X/selection gate is OFF: socialIngestionEnabled is
+  // omitted and BASE_SETTINGS.socialSources is empty, so the social outlet
+  // matches no configured source. Balanced reservation must NOT manufacture a
+  // social floor out of items that never passed source selection.
+  const traditional = Array.from({ length: 50 }, (_, i) =>
+    makeItem({ sourceId: `trad-${String(i).padStart(2, "0")}`, outlet: "Reuters", minutesAgo: i })
+  );
+  const social = Array.from({ length: 8 }, (_, i) =>
+    makeItem({ sourceId: `soc-${i}`, kind: "social", outlet: "@latamwatcher", minutesAgo: 1400 + i })
+  );
+  let clusterInput = null;
+  const { log } = await runRefreshPipeline({
+    // No socialSources match, no socialIngestionEnabled, no SOCIAL_UNION_MANIFEST.
+    settings: BASE_SETTINGS,
+    rawItems: [...traditional, ...social],
+    clusterFn: async (items) => { clusterInput = items; return []; },
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+  assert.ok(clusterInput, "clusterFn must be invoked");
+  // Social is blocked at source selection — never reaches dedupe or the cap.
+  const sf = log.funnel.social;
+  assert.ok(sf.totalNormalized >= 8, "social items are present at ingestion");
+  assert.equal(sf.afterSourceSelection, 0, "no social survives the X/selection gate");
+  assert.equal(sf.afterDedupe, 0);
+  assert.equal(sf.afterClusterInputCap, 0);
+  // Allocator stays on the pure top-K path — no phantom social reservation.
+  assert.equal(log.clusterCap.balancedReservationApplied, false);
+  assert.equal(log.clusterCap.socialInputCount, 0);
+  // The model never sees a social item.
+  assert.equal(clusterInput.filter((i) => i.kind === "social").length, 0);
 });
 
 test("Step 3 funnel: watermark-skip reports afterClusterInputCap=null in lockstep with postDedupe", async () => {
