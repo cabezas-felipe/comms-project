@@ -4700,6 +4700,56 @@ test("buildSocialFunnel: edge cases — no social items / null published stories
   });
   assert.equal(noStories.afterDedupe, 1);
   assert.equal(noStories.inPublishedStories, null);
+  // No cluster-input slice provided → the cap stage is "not run" → null, and it
+  // is excluded from drop attribution (no false drop from afterDedupe → 0).
+  assert.equal(noStories.afterClusterInputCap, null);
+  assert.equal(noStories.dropsByStage.afterClusterInputCap, null);
+  assert.equal(noStories.primaryDropStageForSocial, null);
+});
+
+test("buildSocialFunnel (C1): afterClusterInputCap counts the post-cap slice and attributes cap losses", () => {
+  // 4 social survive dedupe, but the cap slice keeps only 2 → the largest drop is
+  // the cluster-input cap, NOT an earlier stage (the false-blame fix).
+  const social = (id) => ({ sourceId: id, kind: "social", outlet: "@petrogustavo" });
+  const trad = (id) => ({ sourceId: id, kind: "traditional", outlet: "Reuters" });
+  const deduped = [social("a"), social("b"), social("c"), social("d"), trad("t")];
+  const out = buildSocialFunnel({
+    normalizedItems: deduped,
+    recentNormalizedItems: deduped,
+    recentItems: deduped,
+    geoPassedItems: deduped,
+    recallItems: deduped,
+    relevantItems: deduped,
+    dedupedItems: deduped,
+    clusterInputItems: [social("a"), social("b"), trad("t")], // cap kept 2 social
+    publishedStories: [{ sources: [social("a")] }],
+  });
+  assert.equal(out.afterDedupe, 4);
+  assert.equal(out.afterClusterInputCap, 2, "counts social in the post-cap slice");
+  assert.equal(out.dropsByStage.afterClusterInputCap, 2, "2 social lost at the cap");
+  assert.equal(out.primaryDropStageForSocial, "afterClusterInputCap",
+    "cap loss is the primary drop, not an earlier stage");
+  assert.equal(out.largestDropCountForSocial, 2);
+});
+
+test("buildSocialFunnel (C1): no cap loss when all dedupe social survive the cap", () => {
+  const social = (id) => ({ sourceId: id, kind: "social", outlet: "@petrogustavo" });
+  const deduped = [social("a"), social("b")];
+  const out = buildSocialFunnel({
+    normalizedItems: deduped,
+    recentNormalizedItems: deduped,
+    recentItems: deduped,
+    geoPassedItems: deduped,
+    recallItems: deduped,
+    relevantItems: deduped,
+    dedupedItems: deduped,
+    clusterInputItems: deduped, // all social survive the cap
+    publishedStories: [{ sources: [social("a"), social("b")] }],
+  });
+  assert.equal(out.afterDedupe, 2);
+  assert.equal(out.afterClusterInputCap, 2);
+  assert.equal(out.dropsByStage.afterClusterInputCap, 0);
+  assert.equal(out.primaryDropStageForSocial, null, "no drop anywhere");
 });
 
 test("runRefreshPipeline: social funnel — survives to published stories (inPublishedStories > 0)", async () => {
@@ -11342,6 +11392,106 @@ test("C1 balanced integration: a 0-social run reports balancedReservationApplied
   assert.equal(log.clusterCap.balancedReservationApplied, false);
   assert.equal(log.clusterCap.socialInputCount, 0);
   assert.equal(log.clusterCap.socialQuotaEffective, 0);
+});
+
+test("Step 3 funnel: afterClusterInputCap > 0 and matches clusterInputSocialCount under a mixed pool", async () => {
+  // 50 fresh traditional + 8 staler social: all 8 social survive dedupe, but the
+  // cap keeps only the reserved quota (3). The new stage makes that loss explicit
+  // and the cap becomes the PRIMARY social drop — not an earlier stage.
+  const traditional = Array.from({ length: 50 }, (_, i) =>
+    makeItem({ sourceId: `trad-${String(i).padStart(2, "0")}`, outlet: "Reuters", minutesAgo: i })
+  );
+  const social = Array.from({ length: 8 }, (_, i) =>
+    makeItem({ sourceId: `soc-${i}`, kind: "social", outlet: "@latamwatcher", minutesAgo: 1400 + i })
+  );
+  const { log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, socialSources: ["@latamwatcher"] },
+    rawItems: [...traditional, ...social],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+  const sf = log.funnel.social;
+  assert.equal(sf.afterDedupe, 8, "all 8 social survive dedupe");
+  assert.equal(sf.afterClusterInputCap, 3, "only the reserved quota survives the cap");
+  assert.ok(sf.afterClusterInputCap > 0, "social entered cluster input");
+  // Alignment: the pre-dedupe stage and the post-dedupe trace count the SAME set.
+  assert.equal(
+    sf.postDedupe.clusterInputSocialCount,
+    sf.afterClusterInputCap,
+    "clusterInputSocialCount === funnel.social.afterClusterInputCap"
+  );
+  // The cap is the real loss — attribution no longer blames an earlier stage.
+  assert.equal(sf.dropsByStage.afterClusterInputCap, 5, "8 → 3 = 5 lost at the cap");
+  assert.equal(sf.primaryDropStageForSocial, "afterClusterInputCap");
+  assert.notEqual(sf.primaryDropStageForSocial, "afterTopicKeyword");
+});
+
+test("Step 3 funnel: cold_start cap (10) surfaces afterClusterInputCap === quota 2", async () => {
+  const traditional = Array.from({ length: 20 }, (_, i) =>
+    makeItem({ sourceId: `trad-${String(i).padStart(2, "0")}`, outlet: "Reuters", minutesAgo: i })
+  );
+  const social = Array.from({ length: 4 }, (_, i) =>
+    makeItem({ sourceId: `soc-${i}`, kind: "social", outlet: "@latamwatcher", minutesAgo: 1400 + i })
+  );
+  const { log } = await runRefreshPipeline({
+    settings: { ...BASE_SETTINGS, socialSources: ["@latamwatcher"] },
+    rawItems: [...traditional, ...social],
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-sonnet",
+    contractVersion: "2026-05-19-meta-story-fields",
+    refreshProfile: "cold_start",
+    beatFitEnabled: false,
+  });
+  const sf = log.funnel.social;
+  assert.equal(sf.afterDedupe, 4, "all 4 social survive dedupe");
+  assert.equal(sf.afterClusterInputCap, 2, "cold_start quota is 2");
+  assert.equal(sf.postDedupe.clusterInputSocialCount, sf.afterClusterInputCap);
+  assert.equal(sf.primaryDropStageForSocial, "afterClusterInputCap");
+});
+
+test("Step 3 funnel: 0-social run leaves afterClusterInputCap at 0 with no false cap drop", async () => {
+  const rawItems = Array.from({ length: 20 }, (_, i) =>
+    makeItem({ sourceId: `src-${String(i).padStart(2, "0")}`, minutesAgo: i * 10 })
+  );
+  const { log } = await runRefreshPipeline({
+    settings: BASE_SETTINGS,
+    rawItems,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+    beatFitEnabled: false,
+  });
+  const sf = log.funnel.social;
+  assert.equal(sf.afterDedupe, 0);
+  assert.equal(sf.afterClusterInputCap, 0, "cap slice ran; zero social in it");
+  assert.equal(sf.dropsByStage.afterClusterInputCap, 0, "no false drop");
+  assert.equal(sf.postDedupe.clusterInputSocialCount, sf.afterClusterInputCap);
+  assert.notEqual(sf.primaryDropStageForSocial, "afterClusterInputCap");
+});
+
+test("Step 3 funnel: watermark-skip reports afterClusterInputCap=null in lockstep with postDedupe", async () => {
+  // First run computes the watermark; second run with a matching priorWatermark
+  // short-circuits before clustering — the cap stage is reported as "not run".
+  const settings = { ...BASE_SETTINGS, traditionalSources: [], socialSources: ["@petrogustavo"] };
+  const baseOpts = {
+    settings,
+    rawItems: [makeSocialItem()],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    socialIngestionEnabled: true,
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  };
+  const first = await runRefreshPipeline(baseOpts);
+  const second = await runRefreshPipeline({ ...baseOpts, priorWatermark: first.log.watermark, priorStoryCount: 1 });
+  assert.equal(second.log.unchanged, true, "second run short-circuits on the watermark");
+  const sf = second.log.funnel.social;
+  assert.equal(sf.afterClusterInputCap, null, "cap reported as not-run on skip");
+  assert.equal(sf.dropsByStage.afterClusterInputCap, null);
+  assert.equal(sf.postDedupe.clusterInputSocialCount, null);
+  assert.equal(sf.postDedupe.clusterInputSocialCount, sf.afterClusterInputCap);
 });
 
 // ─── Slice 3: profile-aware cluster input cap ────────────────────────────────

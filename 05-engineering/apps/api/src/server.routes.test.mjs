@@ -1175,6 +1175,8 @@ const SOCIAL_FUNNEL_BLOCK = {
   afterTopicKeyword: 1,
   afterBeatFit: 1,
   afterDedupe: 1,
+  // C1 balanced reservation: social count in the post-cap slice clusterFn saw.
+  afterClusterInputCap: 1,
   inPublishedStories: 1,
   primaryDropStageForSocial: "afterSourceSelection",
   largestDropCountForSocial: 1,
@@ -1185,6 +1187,7 @@ const SOCIAL_FUNNEL_BLOCK = {
     afterTopicKeyword: 0,
     afterBeatFit: 0,
     afterDedupe: 0,
+    afterClusterInputCap: 0,
   },
   socialSelectionApplied: true,
   matchedSocialSourceCount: 1,
@@ -1214,6 +1217,10 @@ function assertSocialFunnelShape(social, label) {
   ]) {
     assert.equal(typeof social[k], "number", `${label}: ${k} is a number`);
   }
+  // C1 balanced reservation stage: present and surfaced intact (number when the
+  // cap ran this request, null on the watermark-skip branch).
+  assert.ok("afterClusterInputCap" in social, `${label}: afterClusterInputCap present`);
+  assert.ok("afterClusterInputCap" in social.dropsByStage, `${label}: dropsByStage.afterClusterInputCap present`);
   assert.ok("inPublishedStories" in social, `${label}: inPublishedStories present`);
   assert.ok("primaryDropStageForSocial" in social, `${label}: primaryDropStageForSocial present`);
   assert.equal(typeof social.largestDropCountForSocial, "number", `${label}: largestDropCountForSocial is a number`);
@@ -1288,6 +1295,10 @@ test("POST /api/dashboard/refresh surfaces _meta.funnel.social diagnostics", asy
       assert.equal(social.inPublishedStories, 1);
       assert.equal(social.primaryDropStageForSocial, "afterSourceSelection");
       assert.deepEqual(social.matchedSocialSources, ["@petrogustavo"]);
+      // C1 balanced reservation: the cluster-input-cap stage surfaces on _meta
+      // and stays in lockstep with the post-dedupe trace.
+      assert.equal(social.afterClusterInputCap, 1);
+      assert.equal(social.afterClusterInputCap, social.postDedupe.clusterInputSocialCount);
       // Post-dedupe trace surfaces nested under the social funnel.
       assertSocialPostDedupeShape(social.postDedupe, "POST refresh");
       assert.equal(social.postDedupe.publishedSocialSourceCount, 1);

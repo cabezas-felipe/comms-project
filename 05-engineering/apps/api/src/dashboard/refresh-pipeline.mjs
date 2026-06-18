@@ -1060,6 +1060,11 @@ const SOCIAL_FUNNEL_STAGE_ORDER = Object.freeze([
   "afterTopicKeyword",
   "afterBeatFit",
   "afterDedupe",
+  // C1 balanced reservation: the deterministic cluster-input cap runs right
+  // after dedupe and before clustering. Social items can survive dedupe yet be
+  // sliced off here under pure top-K — this stage makes that loss visible so
+  // the primary-drop attribution stops falsely blaming an earlier stage.
+  "afterClusterInputCap",
 ]);
 
 // Count `kind:"social"` items in an array (defensive: non-arrays → 0).
@@ -1097,6 +1102,7 @@ export function buildSocialFunnel({
   recallItems,
   relevantItems,
   dedupedItems,
+  clusterInputItems = null,
   publishedStories = null,
   socialSelectionApplied = false,
   matchedSocialSources = [],
@@ -1109,15 +1115,28 @@ export function buildSocialFunnel({
     afterTopicKeyword: countSocialItems(recallItems),
     afterBeatFit: countSocialItems(relevantItems),
     afterDedupe: countSocialItems(dedupedItems),
+    // C1 balanced reservation: social items in the post-cap slice that clusterFn
+    // actually saw. `null` when the slice was not provided (watermark-skip
+    // re-serves the prior snapshot rather than recomputing clustering) — kept in
+    // lockstep with `postDedupe.clusterInputSocialCount` (same item set, same
+    // counting rule), so the two surfaces never disagree.
+    afterClusterInputCap:
+      clusterInputItems == null ? null : countSocialItems(clusterInputItems),
   };
 
-  // Adjacent-stage deltas + the single largest drop (item stages only).
+  // Adjacent-stage deltas + the single largest drop (item stages only). A stage
+  // whose count is `null` did not run this request → no drop is attributed to it
+  // (the delta stays null and never competes for the primary-drop slot).
   const dropsByStage = {};
   let primaryDropStageForSocial = null;
   let largestDropCountForSocial = 0;
   for (let i = 1; i < SOCIAL_FUNNEL_STAGE_ORDER.length; i += 1) {
     const prevStage = SOCIAL_FUNNEL_STAGE_ORDER[i - 1];
     const curStage = SOCIAL_FUNNEL_STAGE_ORDER[i];
+    if (stages[prevStage] == null || stages[curStage] == null) {
+      dropsByStage[curStage] = null;
+      continue;
+    }
     const delta = Math.max(0, stages[prevStage] - stages[curStage]);
     dropsByStage[curStage] = delta;
     if (delta > largestDropCountForSocial) {
@@ -3449,6 +3468,11 @@ export async function runRefreshPipeline({
       recallItems,
       relevantItems,
       dedupedItems,
+      // Watermark-skip re-serves the prior snapshot rather than recomputing
+      // clustering, so the cluster-input slice is reported as "not run" here →
+      // `afterClusterInputCap` is null, in lockstep with the skip-branch
+      // `postDedupe.clusterInputSocialCount` (also null) below.
+      clusterInputItems: null,
       publishedStories: null,
       socialSelectionApplied: selectionMeta?.socialSelectionApplied,
       matchedSocialSources: selectionMeta?.matchedSocialSources,
@@ -4620,6 +4644,9 @@ export async function runRefreshPipeline({
     recallItems,
     relevantItems,
     dedupedItems,
+    // Post-cap slice clusterFn actually saw → `afterClusterInputCap`. Matches
+    // `postDedupe.clusterInputSocialCount` exactly (same array, same counter).
+    clusterInputItems,
     publishedStories: stories,
     socialSelectionApplied: selectionMeta?.socialSelectionApplied,
     matchedSocialSources: selectionMeta?.matchedSocialSources,
