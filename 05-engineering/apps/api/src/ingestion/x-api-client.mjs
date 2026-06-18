@@ -12,7 +12,10 @@
 //   - TEMPO_X_BEARER_TOKEN        — OAuth2 app-only bearer token. NEVER logged.
 //   - TEMPO_X_HANDLE_ALLOWLIST    — comma-separated usernames to ingest.
 //   - TEMPO_X_MAX_RESULTS_PER_PAGE — page size (default 100, clamp 5..100).
-//   - TEMPO_X_TIMEOUT_MS          — per-request timeout (default 12000, min 1000).
+//   - TEMPO_X_FETCH_TIMEOUT_MS    — per-request timeout (default 12000, min 1000;
+//                                   legacy alias TEMPO_X_TIMEOUT_MS still honored).
+//   - TEMPO_X_HANDLE_CONCURRENCY  — max handles fetched in parallel (default 3,
+//                                   clamp 1..5).
 //   - TEMPO_X_API_BASE            — override the API base (default api.x.com/2).
 //
 // SECURITY: the bearer token only ever appears in the Authorization header sent
