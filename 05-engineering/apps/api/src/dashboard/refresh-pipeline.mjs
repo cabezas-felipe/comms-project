@@ -436,6 +436,30 @@ export function resolveClusterEnvelopeBudgetMs({
 // DB, or model calls — every signal is an item-level proxy.
 export const CLUSTER_INPUT_CAP = 15;
 
+// ─── C1 balanced social reservation ──────────────────────────────────────────
+//
+// Pure global top-K ranking before clustering starves `kind:"social"` items:
+// traditional items dominate the pre-cluster relevance order, so social items
+// that survive to dedupe can be sliced off entirely (clusterInputSocialCount=0)
+// even when several were present.  Balanced reservation guarantees a small
+// social floor inside the SAME total cap: reserve up to `quota` top-ranked
+// social items, then fill the rest of the cap by global pre-cluster rank.
+//
+// Quota scales with the cap profile: the default cap (15) reserves up to 3
+// social slots; the cold_start cap (10) reserves up to 2.  The effective quota
+// is always clamped to the number of social items actually present, so unused
+// slots are released back to global fill (no traditional starvation, no padding
+// with absent social items).  When NO social items exist the legacy pure top-K
+// path runs verbatim — a strict regression guard.
+export const SOCIAL_CLUSTER_RESERVATION_DEFAULT = 3;
+export const SOCIAL_CLUSTER_RESERVATION_COLD_START = 2;
+
+// Resolve the social reservation quota for a given total cap.  Cold-start runs
+// use the smaller cap (<=10) and a smaller quota; everything else uses default.
+export function resolveSocialClusterQuota(cap) {
+  return cap <= 10 ? SOCIAL_CLUSTER_RESERVATION_COLD_START : SOCIAL_CLUSTER_RESERVATION_DEFAULT;
+}
+
 // Step 1.4 diagnostics bounds.  `clusterDropped` carries explainable per-item
 // drop reasons for `?debug=1`; both caps keep the payload bounded (no full
 // bodies, no unbounded lists) so the diagnostic can ride in `_meta` cheaply.
@@ -514,8 +538,59 @@ export function applyClusterInputCap(dedupedItems, settings = {}, cap = CLUSTER_
     key: computePreClusterRelevanceScore(item, settings, poolIndex),
   }));
   scored.sort((a, b) => comparePreClusterRank(a.key, b.key));
-  const clusterInputItems = scored.slice(0, cap).map((s) => s.item);
-  const dropped = scored.slice(cap);
+  // Stamp each record with its absolute 1-based global rank so dropped-entry
+  // ranks stay correct under balanced reservation (selected social items may
+  // sit below their globally-ranked traditional peers).
+  scored.forEach((s, i) => {
+    s.globalRank = i + 1;
+  });
+
+  // Partition the globally-ranked list by kind (order preserved).  Social
+  // reservation only engages when at least one social item survived dedupe;
+  // otherwise the legacy pure top-K slice runs verbatim (regression guard).
+  const socialScored = scored.filter((s) => s.item?.kind === "social");
+  const socialCount = socialScored.length;
+
+  let selected;
+  let balancedReservationApplied = false;
+  let socialQuotaEffective = 0;
+  let socialReservedCount = 0;
+
+  if (socialCount > 0) {
+    balancedReservationApplied = true;
+    socialQuotaEffective = Math.min(socialCount, resolveSocialClusterQuota(cap));
+    // Reserve the top-ranked social items (global rank order already applied).
+    const reserved = socialScored.slice(0, socialQuotaEffective);
+    socialReservedCount = reserved.length;
+    const reservedSet = new Set(reserved);
+    // Fill the rest of the cap from everything not reserved, by global rank.
+    // Unused quota (socialCount < quota) is implicitly released here because
+    // reserved.length < quota leaves more fill slots.
+    const remainder = scored.filter((s) => !reservedSet.has(s));
+    const fill = remainder.slice(0, Math.max(0, cap - reserved.length));
+    const selectedSet = new Set([...reserved, ...fill]);
+    // Final cluster input is re-sorted by pre-cluster rank (not reserved-first)
+    // for clustering consistency.
+    selected = scored.filter((s) => selectedSet.has(s));
+  } else {
+    selected = scored.slice(0, cap);
+  }
+
+  const selectedSet = new Set(selected);
+  const clusterInputItems = selected.map((s) => s.item);
+  // Dropped = every scored record not selected, in global drop-rank order.
+  const dropped = scored.filter((s) => !selectedSet.has(s));
+
+  const socialInputCount = clusterInputItems.filter((i) => i?.kind === "social").length;
+  const traditionalInputCount = clusterInputItems.length - socialInputCount;
+
+  if (balancedReservationApplied) {
+    console.log(
+      `[pipeline.cluster-cap.balanced] quota=${socialQuotaEffective} reserved=${socialReservedCount}` +
+        ` socialIn=${socialInputCount} tradIn=${traditionalInputCount} cap=${cap}`
+    );
+  }
+
   return {
     clusterInputItems,
     diagnostics: {
@@ -526,11 +601,17 @@ export function applyClusterInputCap(dedupedItems, settings = {}, cap = CLUSTER_
       clusterDroppedSourceIds: dropped
         .map((s) => s.item?.sourceId)
         .filter((id) => typeof id === "string"),
-      // Explainable, bounded drop detail (drop-rank order; absolute 1-based
-      // `rank` = cap + offset).  Same order as `clusterDroppedSourceIds`.
+      // Explainable, bounded drop detail (drop-rank order; `rank` is the
+      // absolute 1-based global rank).  Same order as `clusterDroppedSourceIds`.
       clusterDropped: dropped
         .slice(0, CLUSTER_DROPPED_DETAIL_MAX)
-        .map((s, i) => buildClusterDropEntry(s, cap + i + 1)),
+        .map((s) => buildClusterDropEntry(s, s.globalRank)),
+      // Balanced social reservation diagnostics (additive).
+      balancedReservationApplied,
+      socialQuotaEffective,
+      socialReservedCount,
+      socialInputCount,
+      traditionalInputCount,
     },
   };
 }

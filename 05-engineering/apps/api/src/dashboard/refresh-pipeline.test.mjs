@@ -62,6 +62,9 @@ import {
   resolveClusterEnvelopeBudgetMs,
   applyClusterInputCap,
   CLUSTER_INPUT_CAP,
+  SOCIAL_CLUSTER_RESERVATION_DEFAULT,
+  SOCIAL_CLUSTER_RESERVATION_COLD_START,
+  resolveSocialClusterQuota,
   topicKeywordMatchStrength,
   applyMetaStoryOverflowCap,
   MAX_META_STORIES,
@@ -10763,6 +10766,127 @@ test("C1 cap: applyClusterInputCap is a no-op when input is at/under the cap", (
   assert.equal(diagnostics.clusterInputCount, 10);
   assert.equal(diagnostics.clusterDroppedCount, 0);
   assert.deepEqual(diagnostics.clusterDroppedSourceIds, []);
+});
+
+// ─── C1 balanced social reservation ──────────────────────────────────────────
+
+// On-beat + fresh traditional items dominate the pre-cluster relevance order, so
+// pure top-K would slice every (off-beat, stale) social item out of the cap.
+function balancedTrad(n) {
+  return Array.from({ length: n }, (_, i) =>
+    makeItem({
+      sourceId: `trad-${String(i).padStart(2, "0")}`,
+      headline: "Colombia election results announced",
+      topic: "election",
+      geographies: ["Colombia"],
+      minutesAgo: i,
+    })
+  );
+}
+
+function balancedSocial(n) {
+  return Array.from({ length: n }, (_, i) =>
+    makeItem({
+      sourceId: `soc-${i}`,
+      kind: "social",
+      headline: "Tokyo weekend weather outlook",
+      topic: "weather",
+      geographies: ["Japan"],
+      minutesAgo: 9000 + i,
+    })
+  );
+}
+
+test("C1 balanced: resolveSocialClusterQuota maps cap to quota", () => {
+  assert.equal(resolveSocialClusterQuota(15), SOCIAL_CLUSTER_RESERVATION_DEFAULT);
+  assert.equal(resolveSocialClusterQuota(11), SOCIAL_CLUSTER_RESERVATION_DEFAULT);
+  assert.equal(resolveSocialClusterQuota(10), SOCIAL_CLUSTER_RESERVATION_COLD_START);
+  assert.equal(resolveSocialClusterQuota(5), SOCIAL_CLUSTER_RESERVATION_COLD_START);
+});
+
+test("C1 balanced: social items are not starved by global top-K (8 social + 50 traditional)", () => {
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(
+    [...balancedTrad(50), ...balancedSocial(8)],
+    C1_SETTINGS,
+    15
+  );
+  assert.equal(clusterInputItems.length, 15);
+  assert.equal(diagnostics.balancedReservationApplied, true);
+  assert.equal(diagnostics.socialQuotaEffective, 3);
+  assert.equal(diagnostics.socialReservedCount, 3);
+  // Pure top-K would have admitted zero social here; the floor is honored.
+  assert.ok(diagnostics.socialInputCount >= 3, "social floor honored");
+  assert.equal(diagnostics.socialInputCount, 3);
+  assert.equal(diagnostics.traditionalInputCount, 12);
+});
+
+test("C1 balanced: unused social quota is released to global fill", () => {
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(
+    [...balancedTrad(30), ...balancedSocial(1)],
+    C1_SETTINGS,
+    15
+  );
+  assert.equal(diagnostics.balancedReservationApplied, true);
+  assert.equal(diagnostics.socialQuotaEffective, 1);
+  assert.equal(diagnostics.socialReservedCount, 1);
+  assert.equal(diagnostics.socialInputCount, 1);
+  assert.equal(diagnostics.traditionalInputCount, 14);
+  assert.equal(diagnostics.clusterInputCount, 15);
+  assert.equal(clusterInputItems.length, 15);
+});
+
+test("C1 balanced: 0-social pool matches legacy pure top-K order exactly", () => {
+  const items = Array.from({ length: 20 }, (_, i) => ({
+    sourceId: `src-${String(i).padStart(2, "0")}`,
+    minutesAgo: i,
+  }));
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(items, {}, 15);
+  assert.deepEqual(
+    clusterInputItems.map((i) => i.sourceId),
+    Array.from({ length: 15 }, (_, i) => `src-${String(i).padStart(2, "0")}`)
+  );
+  // Regression guard: no social → legacy path, additive diagnostics inert.
+  assert.equal(diagnostics.balancedReservationApplied, false);
+  assert.equal(diagnostics.socialQuotaEffective, 0);
+  assert.equal(diagnostics.socialReservedCount, 0);
+  assert.equal(diagnostics.socialInputCount, 0);
+  assert.equal(diagnostics.traditionalInputCount, 15);
+  assert.deepEqual(diagnostics.clusterDroppedSourceIds, [
+    "src-15",
+    "src-16",
+    "src-17",
+    "src-18",
+    "src-19",
+  ]);
+});
+
+test("C1 balanced: all-social pool under the cap keeps every item", () => {
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(
+    balancedSocial(5),
+    {},
+    15
+  );
+  assert.equal(clusterInputItems.length, 5);
+  assert.equal(diagnostics.balancedReservationApplied, true);
+  assert.equal(diagnostics.socialQuotaEffective, 3);
+  assert.equal(diagnostics.socialReservedCount, 3);
+  assert.equal(diagnostics.socialInputCount, 5);
+  assert.equal(diagnostics.traditionalInputCount, 0);
+  assert.equal(diagnostics.clusterDroppedCount, 0);
+});
+
+test("C1 balanced: cold-start cap (10) reserves 2 social slots", () => {
+  const { clusterInputItems, diagnostics } = applyClusterInputCap(
+    [...balancedTrad(30), ...balancedSocial(4)],
+    C1_SETTINGS,
+    10
+  );
+  assert.equal(clusterInputItems.length, 10);
+  assert.equal(diagnostics.balancedReservationApplied, true);
+  assert.equal(diagnostics.socialQuotaEffective, 2);
+  assert.ok(diagnostics.socialInputCount >= 2);
+  assert.equal(diagnostics.socialInputCount, 2);
+  assert.equal(diagnostics.traditionalInputCount, 8);
 });
 
 test("C1 cap (Decision 5C): configured-geo election outranks cross-country at the cap", () => {
