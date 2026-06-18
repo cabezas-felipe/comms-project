@@ -1,9 +1,10 @@
 // X (Twitter) reader: turns selected social handles into normalized raw
 // ingestion items, mirroring how `feed-reader.mjs` turns RSS feeds into raw
-// items. This is the second half of the X ingestion path (Phase 1, Step 1.2).
+// items. Wired into `server.mjs` (cache-first as of Phase 3) and
+// `ingestion-warm.mjs` for scheduled pre-fetch.
 //
-// SCOPE: reusable reader layer only — NOT wired into `server.mjs` or the refresh
-// pipeline yet. All network I/O is delegated to the Step 1.1 client
+// SCOPE: reusable reader layer — no HTTP surface of its own. All network I/O is
+// delegated to the client (`x-api-client.mjs`)
 // (`x-api-client.mjs`) and reaches the wire through an injectable `fetchImpl`,
 // so tests stay hermetic. The bearer token never appears here — it lives in
 // `config` and is only ever attached as an Authorization header by the client.

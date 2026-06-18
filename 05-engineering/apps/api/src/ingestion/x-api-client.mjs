@@ -1,8 +1,7 @@
 // Standalone X (Twitter) API v2 client for the ingestion layer.
 //
-// SCOPE: this module is the reusable client primitive only — it is NOT wired
-// into the refresh pipeline or any server route yet (Phase 1, Step 1.1). It
-// mirrors the shape of the RSS path (`feed-reader.mjs`): config resolved from
+// SCOPE: reusable client primitive — consumed by `x-reader.mjs` (refresh +
+// warmer). It mirrors the shape of the RSS path (`feed-reader.mjs`): config resolved from
 // env at call time, all network I/O goes through an injectable `fetchImpl` so
 // tests stay hermetic, and a deterministic AbortController-based timeout wraps
 // every request.
