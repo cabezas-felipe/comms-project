@@ -19,6 +19,9 @@ const MANIFEST = [
   { id: "wapo-business", name: "The Washington Post — Business", kind: "rss", url: "https://wapo/biz", weight: 90, active: true },
   { id: "nyt-politics", name: "The New York Times — Politics", kind: "rss", url: "https://nyt/pol", weight: 95, active: true },
   { id: "social-x", name: "@latamwatcher", kind: "social", url: "https://twitter.com/latamwatcher", weight: 60, active: true },
+  // Genuinely-unimplemented connector kind — exercises the unavailable-connector
+  // path now that `social` has an implemented reader (Phase 1, Step 1.3).
+  { id: "podcast-x", name: "The Daily Briefing Podcast", kind: "podcast", url: "https://podcast/daily", weight: 50, active: true },
 ];
 
 // Snapshot mirroring the real data/source-feeds.json shape for the "embassy
@@ -233,17 +236,30 @@ test("resolveSelectedSources: name not in manifest → unmatchedSelectedSources"
   assert.equal(result.selectedSourceCount, 2);
 });
 
-test("resolveSelectedSources: source matched but only via unimplemented connector → unavailable", () => {
+test("resolveSelectedSources: social row now matches (social is an implemented connector — Step 1.3)", () => {
   const result = resolveSelectedSources({
-    selectedSources: ["@latamwatcher"], // matches social row only
+    selectedSources: ["@latamwatcher"], // matches the social row
     manifestFeeds: MANIFEST,
   });
-  // No RSS connector for @latamwatcher → empty matched, fallback path
+  // `social` joined `rss` as an implemented connector kind → strict match.
+  assert.equal(result.mode, SELECTION_MODE.STRICT);
+  assert.equal(result.fallbackUsed, false);
+  assert.deepEqual(result.matchedFeeds.map((f) => f.id), ["social-x"]);
+  assert.equal(result.unavailableConnectorCount, 0);
+  assert.deepEqual(result.unavailableConnectorSources, []);
+});
+
+test("resolveSelectedSources: source matched but only via unimplemented connector → unavailable", () => {
+  const result = resolveSelectedSources({
+    selectedSources: ["The Daily Briefing Podcast"], // matches the podcast row only
+    manifestFeeds: MANIFEST,
+  });
+  // No implemented connector for the `podcast` kind → empty matched, fallback path.
   assert.equal(result.mode, SELECTION_MODE.FALLBACK);
   assert.equal(result.fallbackUsed, true);
   assert.equal(result.fallbackReason, FALLBACK_REASON.ALL_UNAVAILABLE_CONNECTORS);
   assert.equal(result.unavailableConnectorCount, 1);
-  assert.deepEqual(result.unavailableConnectorSources, ["@latamwatcher"]);
+  assert.deepEqual(result.unavailableConnectorSources, ["The Daily Briefing Podcast"]);
 });
 
 // ─── resolveSelectedSources: fallback baseline ──────────────────────────────
@@ -288,11 +304,11 @@ test("resolveSelectedSources: fallback disabled → no fallback feeds, mode stri
   assert.equal(result.matchedFeeds.length, 0);
 });
 
-test("resolveSelectedSources: fallback list excludes non-RSS feed IDs", () => {
+test("resolveSelectedSources: fallback list excludes unimplemented-connector feed IDs", () => {
   const result = resolveSelectedSources({
     selectedSources: [],
     manifestFeeds: MANIFEST,
-    fallbackFeedIds: ["social-x", "wapo-politics"], // social-x is non-rss, must be excluded
+    fallbackFeedIds: ["podcast-x", "wapo-politics"], // podcast-x has no implemented connector, must be excluded
   });
   assert.deepEqual(result.matchedFeeds.map((f) => f.id), ["wapo-politics"]);
 });

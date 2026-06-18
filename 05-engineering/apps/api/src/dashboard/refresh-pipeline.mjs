@@ -24,6 +24,8 @@ import {
   resolveSelectedSources,
   buildMatchedOutletSet,
   buildMatchedFeedIdSet,
+  buildSelectedSocialHandleSet,
+  normalizeSocialHandle,
   filterItemsToMatchedFeeds,
   SELECTION_MODE,
   FALLBACK_REASON,
@@ -434,6 +436,30 @@ export function resolveClusterEnvelopeBudgetMs({
 // DB, or model calls — every signal is an item-level proxy.
 export const CLUSTER_INPUT_CAP = 15;
 
+// ─── C1 balanced social reservation ──────────────────────────────────────────
+//
+// Pure global top-K ranking before clustering starves `kind:"social"` items:
+// traditional items dominate the pre-cluster relevance order, so social items
+// that survive to dedupe can be sliced off entirely (clusterInputSocialCount=0)
+// even when several were present.  Balanced reservation guarantees a small
+// social floor inside the SAME total cap: reserve up to `quota` top-ranked
+// social items, then fill the rest of the cap by global pre-cluster rank.
+//
+// Quota scales with the cap profile: the default cap (15) reserves up to 3
+// social slots; the cold_start cap (10) reserves up to 2.  The effective quota
+// is always clamped to the number of social items actually present, so unused
+// slots are released back to global fill (no traditional starvation, no padding
+// with absent social items).  When NO social items exist the legacy pure top-K
+// path runs verbatim — a strict regression guard.
+export const SOCIAL_CLUSTER_RESERVATION_DEFAULT = 3;
+export const SOCIAL_CLUSTER_RESERVATION_COLD_START = 2;
+
+// Resolve the social reservation quota for a given total cap.  Cold-start runs
+// use the smaller cap (<=10) and a smaller quota; everything else uses default.
+export function resolveSocialClusterQuota(cap) {
+  return cap <= 10 ? SOCIAL_CLUSTER_RESERVATION_COLD_START : SOCIAL_CLUSTER_RESERVATION_DEFAULT;
+}
+
 // Step 1.4 diagnostics bounds.  `clusterDropped` carries explainable per-item
 // drop reasons for `?debug=1`; both caps keep the payload bounded (no full
 // bodies, no unbounded lists) so the diagnostic can ride in `_meta` cheaply.
@@ -512,8 +538,59 @@ export function applyClusterInputCap(dedupedItems, settings = {}, cap = CLUSTER_
     key: computePreClusterRelevanceScore(item, settings, poolIndex),
   }));
   scored.sort((a, b) => comparePreClusterRank(a.key, b.key));
-  const clusterInputItems = scored.slice(0, cap).map((s) => s.item);
-  const dropped = scored.slice(cap);
+  // Stamp each record with its absolute 1-based global rank so dropped-entry
+  // ranks stay correct under balanced reservation (selected social items may
+  // sit below their globally-ranked traditional peers).
+  scored.forEach((s, i) => {
+    s.globalRank = i + 1;
+  });
+
+  // Partition the globally-ranked list by kind (order preserved).  Social
+  // reservation only engages when at least one social item survived dedupe;
+  // otherwise the legacy pure top-K slice runs verbatim (regression guard).
+  const socialScored = scored.filter((s) => s.item?.kind === "social");
+  const socialCount = socialScored.length;
+
+  let selected;
+  let balancedReservationApplied = false;
+  let socialQuotaEffective = 0;
+  let socialReservedCount = 0;
+
+  if (socialCount > 0) {
+    balancedReservationApplied = true;
+    socialQuotaEffective = Math.min(socialCount, resolveSocialClusterQuota(cap));
+    // Reserve the top-ranked social items (global rank order already applied).
+    const reserved = socialScored.slice(0, socialQuotaEffective);
+    socialReservedCount = reserved.length;
+    const reservedSet = new Set(reserved);
+    // Fill the rest of the cap from everything not reserved, by global rank.
+    // Unused quota (socialCount < quota) is implicitly released here because
+    // reserved.length < quota leaves more fill slots.
+    const remainder = scored.filter((s) => !reservedSet.has(s));
+    const fill = remainder.slice(0, Math.max(0, cap - reserved.length));
+    const selectedSet = new Set([...reserved, ...fill]);
+    // Final cluster input is re-sorted by pre-cluster rank (not reserved-first)
+    // for clustering consistency.
+    selected = scored.filter((s) => selectedSet.has(s));
+  } else {
+    selected = scored.slice(0, cap);
+  }
+
+  const selectedSet = new Set(selected);
+  const clusterInputItems = selected.map((s) => s.item);
+  // Dropped = every scored record not selected, in global drop-rank order.
+  const dropped = scored.filter((s) => !selectedSet.has(s));
+
+  const socialInputCount = clusterInputItems.filter((i) => i?.kind === "social").length;
+  const traditionalInputCount = clusterInputItems.length - socialInputCount;
+
+  if (balancedReservationApplied) {
+    console.log(
+      `[pipeline.cluster-cap.balanced] quota=${socialQuotaEffective} reserved=${socialReservedCount}` +
+        ` socialIn=${socialInputCount} tradIn=${traditionalInputCount} cap=${cap}`
+    );
+  }
+
   return {
     clusterInputItems,
     diagnostics: {
@@ -524,11 +601,17 @@ export function applyClusterInputCap(dedupedItems, settings = {}, cap = CLUSTER_
       clusterDroppedSourceIds: dropped
         .map((s) => s.item?.sourceId)
         .filter((id) => typeof id === "string"),
-      // Explainable, bounded drop detail (drop-rank order; absolute 1-based
-      // `rank` = cap + offset).  Same order as `clusterDroppedSourceIds`.
+      // Explainable, bounded drop detail (drop-rank order; `rank` is the
+      // absolute 1-based global rank).  Same order as `clusterDroppedSourceIds`.
       clusterDropped: dropped
         .slice(0, CLUSTER_DROPPED_DETAIL_MAX)
-        .map((s, i) => buildClusterDropEntry(s, cap + i + 1)),
+        .map((s) => buildClusterDropEntry(s, s.globalRank)),
+      // Balanced social reservation diagnostics (additive).
+      balancedReservationApplied,
+      socialQuotaEffective,
+      socialReservedCount,
+      socialInputCount,
+      traditionalInputCount,
     },
   };
 }
@@ -958,6 +1041,300 @@ export function summarizeFunnel(funnel, settings = {}, opts = {}) {
     primaryDropStage: drop,
     topicKeywordRecallIsNoop: noTopics && noKeywords,
   };
+}
+
+// ─── Social-item funnel (X ingestion observability — additive) ───────────────
+//
+// Per-stage counts of `kind:"social"` items, mirroring the main funnel's stage
+// names, so operators can see EXACTLY where social (X) evidence is lost between
+// ingestion and published stories.  PURE COUNTING — it never changes which
+// items pass any stage, never relaxes a filter, and never touches ranking.
+
+// Item-funnel stages in pipeline order (published-stories is excluded — it
+// counts SOURCES, not items, so it is not part of the item-drop analysis).
+const SOCIAL_FUNNEL_STAGE_ORDER = Object.freeze([
+  "totalNormalized",
+  "afterTimeWindow",
+  "afterSourceSelection",
+  "afterGeoFilter",
+  "afterTopicKeyword",
+  "afterBeatFit",
+  "afterDedupe",
+  // C1 balanced reservation: the deterministic cluster-input cap runs right
+  // after dedupe and before clustering. Social items can survive dedupe yet be
+  // sliced off here under pure top-K — this stage makes that loss visible so
+  // the primary-drop attribution stops falsely blaming an earlier stage.
+  "afterClusterInputCap",
+]);
+
+// Count `kind:"social"` items in an array (defensive: non-arrays → 0).
+function countSocialItems(items) {
+  if (!Array.isArray(items)) return 0;
+  let n = 0;
+  for (const it of items) if (it?.kind === "social") n += 1;
+  return n;
+}
+
+// Count `kind:"social"` SOURCES across the final published stories.
+function countSocialSourcesInStories(stories) {
+  if (!Array.isArray(stories)) return 0;
+  let n = 0;
+  for (const s of stories) {
+    const sources = Array.isArray(s?.sources) ? s.sources : [];
+    for (const src of sources) if (src?.kind === "social") n += 1;
+  }
+  return n;
+}
+
+/**
+ * Build the additive `_meta.funnel.social` diagnostics block.  Stage inputs are
+ * the SAME arrays the main funnel measures, so the social counts are a strict
+ * subset view.  `publishedStories` is `null` when stories were not computed this
+ * run (e.g. the watermark-skip branch) → `inPublishedStories` is `null` then.
+ *
+ * @returns {object} stage counts + drop insight + selection context (all additive)
+ */
+export function buildSocialFunnel({
+  normalizedItems,
+  recentNormalizedItems,
+  recentItems,
+  geoPassedItems,
+  recallItems,
+  relevantItems,
+  dedupedItems,
+  clusterInputItems = null,
+  publishedStories = null,
+  socialSelectionApplied = false,
+  matchedSocialSources = [],
+} = {}) {
+  const stages = {
+    totalNormalized: countSocialItems(normalizedItems),
+    afterTimeWindow: countSocialItems(recentNormalizedItems),
+    afterSourceSelection: countSocialItems(recentItems),
+    afterGeoFilter: countSocialItems(geoPassedItems),
+    afterTopicKeyword: countSocialItems(recallItems),
+    afterBeatFit: countSocialItems(relevantItems),
+    afterDedupe: countSocialItems(dedupedItems),
+    // C1 balanced reservation: social items in the post-cap slice that clusterFn
+    // actually saw. `null` when the slice was not provided (watermark-skip
+    // re-serves the prior snapshot rather than recomputing clustering) — kept in
+    // lockstep with `postDedupe.clusterInputSocialCount` (same item set, same
+    // counting rule), so the two surfaces never disagree.
+    afterClusterInputCap:
+      clusterInputItems == null ? null : countSocialItems(clusterInputItems),
+  };
+
+  // Adjacent-stage deltas + the single largest drop (item stages only). A stage
+  // whose count is `null` did not run this request → no drop is attributed to it
+  // (the delta stays null and never competes for the primary-drop slot).
+  const dropsByStage = {};
+  let primaryDropStageForSocial = null;
+  let largestDropCountForSocial = 0;
+  for (let i = 1; i < SOCIAL_FUNNEL_STAGE_ORDER.length; i += 1) {
+    const prevStage = SOCIAL_FUNNEL_STAGE_ORDER[i - 1];
+    const curStage = SOCIAL_FUNNEL_STAGE_ORDER[i];
+    if (stages[prevStage] == null || stages[curStage] == null) {
+      dropsByStage[curStage] = null;
+      continue;
+    }
+    const delta = Math.max(0, stages[prevStage] - stages[curStage]);
+    dropsByStage[curStage] = delta;
+    if (delta > largestDropCountForSocial) {
+      largestDropCountForSocial = delta;
+      primaryDropStageForSocial = curStage;
+    }
+  }
+
+  const safeMatched = Array.isArray(matchedSocialSources) ? matchedSocialSources : [];
+  return {
+    ...stages,
+    // Count of social SOURCES that reached the final payload stories. `null`
+    // when stories were not computed this run (watermark-skip).
+    inPublishedStories:
+      publishedStories == null ? null : countSocialSourcesInStories(publishedStories),
+    primaryDropStageForSocial,
+    largestDropCountForSocial,
+    dropsByStage,
+    // Selection context (reuses the truth computed at source selection).
+    socialSelectionApplied: socialSelectionApplied === true,
+    matchedSocialSourceCount: safeMatched.length,
+    matchedSocialSources: safeMatched,
+  };
+}
+
+// One-line, grep-friendly social funnel summary for the [pipeline.funnel.social]
+// log tag.  No secrets — handles are public identifiers, counts are integers.
+function formatSocialFunnel(social) {
+  const stagePairs = SOCIAL_FUNNEL_STAGE_ORDER.map((k) => `${k}=${social[k]}`).join(" ");
+  return (
+    `${stagePairs} inPublishedStories=${social.inPublishedStories}` +
+    ` primary_drop=${social.primaryDropStageForSocial ?? "none"}` +
+    ` largest_drop=${social.largestDropCountForSocial}` +
+    ` applied=${social.socialSelectionApplied} matchedHandles=${social.matchedSocialSourceCount}`
+  );
+}
+
+// ─── Social POST-DEDUPE funnel (clustering → grounding → cap → publish) ───────
+//
+// The pre-dedupe social funnel (above) ends at `afterDedupe`. This block traces
+// kind:"social" evidence the rest of the way — cluster output, grounding, the
+// overflow cap, and final publish — so a `inPublishedStories===0` despite
+// `afterDedupe>0` can be attributed to the EXACT post-dedupe stage. PURE
+// COUNTING: it never changes clustering, grounding, or cap decisions.
+
+const SOCIAL_POST_DEDUPE_ID_CAP = 25;
+
+// Does a meta-story (carrying `source_item_ids`) reference >=1 social source
+// item? Resolves ids against the same `sourceItemsById` universe clustering saw.
+function metaStoryHasSocialSource(ms, sourceItemsById) {
+  if (!ms || !(sourceItemsById instanceof Map)) return false;
+  const ids = Array.isArray(ms.source_item_ids) ? ms.source_item_ids : [];
+  for (const id of ids) {
+    if (sourceItemsById.get(id)?.kind === "social") return true;
+  }
+  return false;
+}
+
+// Does a BUILT story (shaped `sources[]` with mapped contract kind) carry a
+// kind:"social" source?
+function builtStoryHasSocialSource(story) {
+  const sources = Array.isArray(story?.sources) ? story.sources : [];
+  return sources.some((s) => s?.kind === "social");
+}
+
+/**
+ * Build the additive `_meta.funnel.social.postDedupe` block.
+ *
+ * Pass `null` for any stage that did NOT run this request (e.g. the
+ * watermark-skip branch, where clustering/grounding/cap are skipped). Un-run
+ * stage counts are `null`, drop attribution is `null`/0, and the post-grounding
+ * id arrays are empty. `afterDedupe` + `socialSourceItemIdsAtDedupe` are always
+ * populated (dedupe runs on every non-error path).
+ *
+ * Unit note: `cluster_output` drop is in ITEM units (social items that entered
+ * clustering but produced zero social clusters); `grounding` / `overflow_cap`
+ * are STORY-level deltas. These never need cross-unit comparison because a
+ * non-zero `cluster_output` drop forces `clusterOutputClusterCount===0`, which
+ * pins the later story-stage social counts to 0.
+ *
+ * @returns {object} additive post-dedupe diagnostics (counts + attribution + capped ids)
+ */
+export function buildSocialPostDedupeFunnel({
+  dedupedItems = null,
+  clusterInputItems = null,
+  clusterOutputStories = null,
+  groundedStories = null,
+  cappedEntries = null,
+  publishedStories = null,
+  sourceItemsById = null,
+  idCap = SOCIAL_POST_DEDUPE_ID_CAP,
+} = {}) {
+  const afterDedupe = countSocialItems(dedupedItems);
+  const socialSourceItemIdsAtDedupe = (Array.isArray(dedupedItems) ? dedupedItems : [])
+    .filter((it) => it?.kind === "social")
+    .map((it) => it?.sourceId)
+    .filter((id) => typeof id === "string")
+    .slice(0, idCap);
+
+  // A stage "ran" iff its input array was provided (the skip branch passes null).
+  const clusterRan = Array.isArray(clusterInputItems) && Array.isArray(clusterOutputStories);
+  const groundingRan = Array.isArray(groundedStories);
+  const capRan = Array.isArray(cappedEntries);
+
+  const clusterInputSocialCount = Array.isArray(clusterInputItems)
+    ? countSocialItems(clusterInputItems)
+    : null;
+
+  const socialClusters = clusterRan
+    ? clusterOutputStories.filter((ms) => metaStoryHasSocialSource(ms, sourceItemsById))
+    : null;
+  const clusterOutputClusterCount = socialClusters ? socialClusters.length : null;
+
+  const groundedSocial = groundingRan
+    ? groundedStories.filter((ms) => metaStoryHasSocialSource(ms, sourceItemsById))
+    : null;
+  const afterGroundingSocialStoryCount = groundedSocial ? groundedSocial.length : null;
+  const socialMetaStoryIdsAfterGrounding = (groundedSocial ?? [])
+    .map((ms) => ms?.meta_story_id)
+    .filter((id) => typeof id === "string")
+    .slice(0, idCap);
+
+  const cappedSocial = capRan
+    ? cappedEntries.filter((e) => builtStoryHasSocialSource(e?.story))
+    : null;
+  const afterOverflowCapSocialStoryCount = cappedSocial ? cappedSocial.length : null;
+  const socialMetaStoryIdsAfterOverflowCap = (cappedSocial ?? [])
+    .map((e) => e?.sortKey?.metaStoryId ?? e?.story?.metaStoryId)
+    .filter((id) => typeof id === "string")
+    .slice(0, idCap);
+
+  const publishedSocialSourceCount = Array.isArray(publishedStories)
+    ? countSocialSourcesInStories(publishedStories)
+    : null;
+
+  // Drop attribution — only when the post-dedupe stages actually ran.
+  let dropsByPostDedupeStage;
+  let primaryPostDedupeDropStage;
+  let largestPostDedupeDropCount;
+  if (clusterRan && groundingRan && capRan) {
+    const clusterOutputDrop =
+      clusterInputSocialCount > 0 && clusterOutputClusterCount === 0 ? clusterInputSocialCount : 0;
+    const groundingDrop = Math.max(0, clusterOutputClusterCount - afterGroundingSocialStoryCount);
+    const overflowDrop = Math.max(0, afterGroundingSocialStoryCount - afterOverflowCapSocialStoryCount);
+    dropsByPostDedupeStage = {
+      cluster_output: clusterOutputDrop,
+      grounding: groundingDrop,
+      overflow_cap: overflowDrop,
+    };
+    // Largest drop wins; ties resolve to the EARLIEST stage; "none" when no drop.
+    largestPostDedupeDropCount = 0;
+    primaryPostDedupeDropStage = "none";
+    for (const [stage, delta] of [
+      ["cluster_output", clusterOutputDrop],
+      ["grounding", groundingDrop],
+      ["overflow_cap", overflowDrop],
+    ]) {
+      if (delta > largestPostDedupeDropCount) {
+        largestPostDedupeDropCount = delta;
+        primaryPostDedupeDropStage = stage;
+      }
+    }
+  } else {
+    // Skip branch / un-run stages: deterministic null/zero semantics.
+    dropsByPostDedupeStage = { cluster_output: null, grounding: null, overflow_cap: null };
+    primaryPostDedupeDropStage = null;
+    largestPostDedupeDropCount = 0;
+  }
+
+  return {
+    afterDedupe,
+    clusterInputSocialCount,
+    clusterOutputClusterCount,
+    afterGroundingSocialStoryCount,
+    afterOverflowCapSocialStoryCount,
+    publishedSocialSourceCount,
+    primaryPostDedupeDropStage,
+    largestPostDedupeDropCount,
+    dropsByPostDedupeStage,
+    socialSourceItemIdsAtDedupe,
+    socialMetaStoryIdsAfterGrounding,
+    socialMetaStoryIdsAfterOverflowCap,
+  };
+}
+
+// One-line, grep-friendly post-dedupe summary for [pipeline.funnel.social.post_dedupe].
+// No secrets — counts are integers, ids are non-secret meta-story / source ids.
+function formatSocialPostDedupeFunnel(pd) {
+  return (
+    `afterDedupe=${pd.afterDedupe}` +
+    ` clusterInput=${pd.clusterInputSocialCount}` +
+    ` clusters=${pd.clusterOutputClusterCount}` +
+    ` grounded=${pd.afterGroundingSocialStoryCount}` +
+    ` afterCap=${pd.afterOverflowCapSocialStoryCount}` +
+    ` published=${pd.publishedSocialSourceCount}` +
+    ` primary_drop=${pd.primaryPostDedupeDropStage ?? "none"}` +
+    ` largest_drop=${pd.largestPostDedupeDropCount}`
+  );
 }
 
 // ─── Decision-trace (Phase 2 lightweight diagnostics) ───────────────────────
@@ -2067,6 +2444,12 @@ export async function runRefreshPipeline({
   // Trust is unchanged — no fabricated stories, only `whyItMatters` is
   // progressively enriched; clustering fail-closed continuity is untouched.
   deferWhyItMatters = false,
+  // X ingestion (Phase 1, Step 1.5): when true, user-selected social handles
+  // are admitted at source selection as an additive UNION alongside manifest
+  // matching, so `kind:"social"` items survive to relevance/clustering. The
+  // server passes `xConfig.enabled` here; default false keeps the social path
+  // inert (no behavior change for RSS-only / X-disabled runs).
+  socialIngestionEnabled = false,
 }) {
   const profile =
     refreshProfileOverrides && typeof refreshProfileOverrides === "object"
@@ -2160,11 +2543,48 @@ export async function runRefreshPipeline({
     //   - outlets (bidirectional substring) — legacy path used by fixture
     //     items that have only `outlet`.  Kept so existing tests and the
     //     fixture pipeline don't change behavior.
+    // Additive social selection (X ingestion): user-selected X handles are not
+    // manifest feeds, so `resolveSelectedSources` can't match them.  When X
+    // ingestion is enabled for this run AND the user selected ≥1 social source,
+    // admit `kind:"social"` items whose outlet matches a selected handle — a
+    // true UNION with the manifest match.  Inert when X is disabled or the user
+    // has no social sources (set stays empty → no items admitted via this path).
+    const socialSelectionApplied =
+      socialIngestionEnabled && (settings.socialSources ?? []).length > 0;
+    const selectedSocialHandles = socialSelectionApplied
+      ? buildSelectedSocialHandleSet(settings.socialSources)
+      : new Set();
+
     const matchedKeys = {
       feedIds: buildMatchedFeedIdSet(selection.matchedFeeds),
       outlets: buildMatchedOutletSet(selection.matchedFeeds),
+      socialHandles: selectedSocialHandles,
     };
     recentItems = filterItemsToMatchedFeeds(recentNormalizedItems, matchedKeys);
+
+    // Which selected social handles actually admitted ≥1 item this run — the
+    // truthful "matched social" surface.  Empty when X degraded / no social
+    // items arrived, so a selected handle is never falsely reported as matched.
+    const matchedSocialSet = new Set();
+    if (socialSelectionApplied) {
+      for (const it of recentItems) {
+        if (it?.kind !== "social") continue;
+        const handle = normalizeSocialHandle(it.outlet);
+        if (handle && selectedSocialHandles.has(handle)) matchedSocialSet.add(handle);
+      }
+    }
+    const matchedSocialSources = [...matchedSocialSet];
+
+    // The selected social handles are served via the social connector, NOT the
+    // RSS manifest — so they must not be reported as "unmatched manifest
+    // sources" (the original bug).  Drop them from the unmatched list when the
+    // social path is active.  Traditional unmatched names are untouched.
+    const unmatchedSelectedSources = socialSelectionApplied
+      ? selection.unmatchedSelectedSources.filter(
+          (name) => !selectedSocialHandles.has(normalizeSocialHandle(name))
+        )
+      : selection.unmatchedSelectedSources;
+
     // Low-noise diagnostic: when source-selection collapses a non-empty
     // input pool to zero despite matched feeds, log a small sample so
     // operators can see the mismatch shape without grepping per-item logs.
@@ -2187,21 +2607,28 @@ export async function runRefreshPipeline({
       sourceFallbackReason: selection.fallbackReason,
       matchedSourceCount: selection.matchedSourceCount,
       selectedSourceCount: selection.selectedSourceCount,
-      unmatchedSelectedSources: selection.unmatchedSelectedSources,
+      unmatchedSelectedSources,
       unavailableConnectorCount: selection.unavailableConnectorCount,
       unavailableConnectorSources: selection.unavailableConnectorSources,
       matchedFeedIds: selection.matchedFeeds.map((f) => f.id),
+      // Additive social-selection diagnostics (truthful — NOT folded into
+      // matchedFeedIds, which stays manifest-only / synthetic-id-free).
+      matchedSocialSourceCount: matchedSocialSources.length,
+      matchedSocialSources,
+      socialSelectionApplied,
     };
     // Low-noise diagnostic: counts always; the actual unmatched/unavailable
     // source NAMES only when non-zero, so a mismatch (e.g. the embassy
     // `matched=6/7`) names the culprit without grepping per-item logs. The
     // happy path (all matched) stays a single clean counts line.
-    const unmatchedNames = selection.unmatchedSelectedSources;
+    const unmatchedNames = unmatchedSelectedSources;
     const unavailableNames = selection.unavailableConnectorSources;
     console.log(
       `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${selection.matchedSourceCount}/${selection.selectedSourceCount} unmatched=${unmatchedNames.length} unavailable=${selection.unavailableConnectorCount} feeds=${selectionMeta.matchedFeedIds.length}` +
+        ` socialApplied=${socialSelectionApplied} matchedSocial=${matchedSocialSources.length}` +
         (unmatchedNames.length > 0 ? ` unmatchedSources=${JSON.stringify(unmatchedNames)}` : "") +
-        (unavailableNames.length > 0 ? ` unavailableSources=${JSON.stringify(unavailableNames)}` : "")
+        (unavailableNames.length > 0 ? ` unavailableSources=${JSON.stringify(unavailableNames)}` : "") +
+        (matchedSocialSources.length > 0 ? ` matchedSocialSources=${JSON.stringify(matchedSocialSources)}` : "")
     );
   } else {
     recentItems = selectSourcePool(recentNormalizedItems, settings);
@@ -2944,12 +3371,16 @@ export async function runRefreshPipeline({
     ...clusterCapResult.diagnostics,
     clusterInputCapEffective,
   };
-  if (clusterCapDiagnostics.clusterDroppedCount > 0) {
+  if (clusterCapDiagnostics.clusterDroppedCount > 0 || clusterCapDiagnostics.balancedReservationApplied) {
     console.log(
       `[pipeline.cluster-cap] deduped=${clusterCapDiagnostics.dedupedCount} ` +
         `clusterInput=${clusterCapDiagnostics.clusterInputCount} ` +
         `dropped=${clusterCapDiagnostics.clusterDroppedCount} ` +
-        `cap=${clusterInputCapEffective}`
+        `cap=${clusterInputCapEffective} ` +
+        `balanced=${clusterCapDiagnostics.balancedReservationApplied} ` +
+        `socialIn=${clusterCapDiagnostics.socialInputCount} ` +
+        `tradIn=${clusterCapDiagnostics.traditionalInputCount} ` +
+        `quota=${clusterCapDiagnostics.socialQuotaEffective}`
     );
   }
   // Slice 7 (non-overlap): the pre-cluster stage is the two spans that bracket
@@ -3026,10 +3457,44 @@ export async function runRefreshPipeline({
       settings,
       { executionMode: FUNNEL_EXECUTION_MODE.WATERMARK_SKIP }
     );
+    // Additive social funnel on the skip branch too. Clustering never ran here,
+    // so `publishedStories` is null → `inPublishedStories` is null (the prior
+    // snapshot's social sources are re-served by the route, not recomputed).
+    skipFunnel.social = buildSocialFunnel({
+      normalizedItems,
+      recentNormalizedItems,
+      recentItems,
+      geoPassedItems,
+      recallItems,
+      relevantItems,
+      dedupedItems,
+      // Watermark-skip re-serves the prior snapshot rather than recomputing
+      // clustering, so the cluster-input slice is reported as "not run" here →
+      // `afterClusterInputCap` is null, in lockstep with the skip-branch
+      // `postDedupe.clusterInputSocialCount` (also null) below.
+      clusterInputItems: null,
+      publishedStories: null,
+      socialSelectionApplied: selectionMeta?.socialSelectionApplied,
+      matchedSocialSources: selectionMeta?.matchedSocialSources,
+    });
+    // Post-dedupe trace on the skip branch: clustering/grounding/cap NEVER ran,
+    // so all post-cluster counts are null (only `afterDedupe` + the dedupe id
+    // list are real). Keeps the shape present + parity with the full-run path.
+    skipFunnel.social.postDedupe = buildSocialPostDedupeFunnel({
+      dedupedItems,
+      clusterInputItems: null,
+      clusterOutputStories: null,
+      groundedStories: null,
+      cappedEntries: null,
+      publishedStories: null,
+      sourceItemsById: null,
+    });
     console.log(
       `[pipeline.watermark] unchanged (${watermarkInfo.watermark}) — skipping clustering, grounding, locks, rejections`
     );
     console.log(`[pipeline.funnel] ${formatFunnel(skipFunnel)}  execution_mode=${skipFunnel.executionMode}  primary_drop=${skipFunnel.primaryDropStage}`);
+    console.log(`[pipeline.funnel.social] ${formatSocialFunnel(skipFunnel.social)}`);
+    console.log(`[pipeline.funnel.social.post_dedupe] ${formatSocialPostDedupeFunnel(skipFunnel.social.postDedupe)}`);
     return {
       payload: null, // signals caller to re-serve prior snapshot
       log: {
@@ -4168,7 +4633,39 @@ export async function runRefreshPipeline({
     settings,
     { executionMode: FUNNEL_EXECUTION_MODE.FULL_RUN }
   );
+  // Additive social-item observability (X ingestion). Mirrors the funnel stages
+  // for `kind:"social"` items so operators can trace where social evidence is
+  // dropped. Pure counting — does not alter the funnel or any item set.
+  funnel.social = buildSocialFunnel({
+    normalizedItems,
+    recentNormalizedItems,
+    recentItems,
+    geoPassedItems,
+    recallItems,
+    relevantItems,
+    dedupedItems,
+    // Post-cap slice clusterFn actually saw → `afterClusterInputCap`. Matches
+    // `postDedupe.clusterInputSocialCount` exactly (same array, same counter).
+    clusterInputItems,
+    publishedStories: stories,
+    socialSelectionApplied: selectionMeta?.socialSelectionApplied,
+    matchedSocialSources: selectionMeta?.matchedSocialSources,
+  });
+  // Additive post-dedupe social trace (clustering → grounding → cap → publish).
+  // All stages ran on the full-run path, so every count is populated. Pure
+  // observability — never changes clustering/grounding/cap decisions.
+  funnel.social.postDedupe = buildSocialPostDedupeFunnel({
+    dedupedItems,
+    clusterInputItems,
+    clusterOutputStories: rawMetaStories,
+    groundedStories,
+    cappedEntries,
+    publishedStories: stories,
+    sourceItemsById,
+  });
   console.log(`[pipeline.funnel] ${formatFunnel(funnel)}  execution_mode=${funnel.executionMode}  primary_drop=${funnel.primaryDropStage}`);
+  console.log(`[pipeline.funnel.social] ${formatSocialFunnel(funnel.social)}`);
+  console.log(`[pipeline.funnel.social.post_dedupe] ${formatSocialPostDedupeFunnel(funnel.social.postDedupe)}`);
   if (stories.length === 0) {
     const noteParts = [];
     noteParts.push(`primary_drop=${funnel.primaryDropStage}`);

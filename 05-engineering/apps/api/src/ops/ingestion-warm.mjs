@@ -34,6 +34,8 @@ import { fileURLToPath } from "node:url";
 
 import { readFeedItems } from "../ingestion/feed-reader.mjs";
 import { writeRecentItems } from "../ingestion/recent-items-cache.mjs";
+import { readXItems } from "../ingestion/x-reader.mjs";
+import { resolveXConfig, parseAllowlist } from "../ingestion/x-api-client.mjs";
 import { getSupabaseClient } from "../db/client.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -128,6 +130,8 @@ function countDistinctFeeds(items) {
 export async function runIngestionWarm({
   readFeedItemsFn = readFeedItems,
   writeRecentItemsFn = writeRecentItems,
+  readXItemsFn = readXItems,
+  resolveXConfigFn = () => resolveXConfig(process.env),
   supabase,
   dataDir = DEFAULT_DATA_DIR,
   logger = (line) => console.log(line),
@@ -221,9 +225,97 @@ export async function runIngestionWarm({
   }
 
   const written = writeResult?.written ?? 0;
+
+  // ─── X (social) warm ────────────────────────────────────────────────────
+  // After the RSS full-manifest warm, opportunistically warm a configured list
+  // of X handles into the same Tier-A cache so interactive refreshes hit the
+  // cache instead of paying the live X-API latency. Two gates, both required:
+  //   1. The X feature is enabled (flag on AND bearer token present — encoded
+  //      in resolveXConfig.enabled).
+  //   2. TEMPO_X_WARM_HANDLES is a non-empty, comma-separated handle list
+  //      (parsed with the same normalization as the allowlist). This is a pilot
+  //      warm list, distinct from TEMPO_X_HANDLE_ALLOWLIST (which gates per-user
+  //      fetch in the refresh path).
+  // When either gate is off, X warm is skipped and the run stays an RSS-only
+  // success (xEnabled / xHandlesWarmed reflect that).
+  //
+  // Exit-code posture mirrors the RSS write path: once X warm is ATTEMPTED
+  // (enabled + handles present), a reader throw or a write failure is fatal
+  // (exit 1) so cron retries; skipping X warm when unconfigured is success.
+  const xConfig = resolveXConfigFn();
+  const xEnabled = xConfig?.enabled === true;
+  const warmHandles = parseAllowlist(envGet("TEMPO_X_WARM_HANDLES"));
+  let xHandlesWarmed = 0;
+  let xItemCount = 0;
+  let xWritten = 0;
+
+  if (xEnabled && warmHandles.length > 0) {
+    let xItems;
+    try {
+      const result = await readXItemsFn({ socialSources: warmHandles, config: xConfig });
+      xItems = Array.isArray(result?.items) ? result.items : [];
+    } catch (err) {
+      emit({
+        startedAt,
+        ok: false,
+        skippedReason: "x_read_threw",
+        error: normalizeErrorDetail(err),
+        itemCount,
+        feedCount,
+        written,
+        durationMs: Date.now() - startMs,
+      });
+      return { exitCode: 1, summary: null, reason: "x_read_threw" };
+    }
+    xHandlesWarmed = warmHandles.length;
+    xItemCount = xItems.length;
+
+    let xWriteResult;
+    try {
+      xWriteResult = await writeRecentItemsFn({ supabase: client, items: xItems });
+    } catch (err) {
+      emit({
+        startedAt,
+        ok: false,
+        skippedReason: "x_write_threw",
+        error: normalizeErrorDetail(err),
+        itemCount,
+        feedCount,
+        written,
+        xHandlesWarmed,
+        xItemCount,
+        durationMs: Date.now() - startMs,
+      });
+      return { exitCode: 1, summary: null, reason: "x_write_threw" };
+    }
+    // writeRecentItems returns an error envelope rather than throwing on a
+    // supabase failure — treat a non-null `error` as fatal so cron retries.
+    if (xWriteResult?.error) {
+      emit({
+        startedAt,
+        ok: false,
+        skippedReason: "x_write_error",
+        error: normalizeErrorDetail(xWriteResult.error),
+        itemCount,
+        feedCount,
+        written,
+        xHandlesWarmed,
+        xItemCount,
+        xWritten: xWriteResult.written ?? 0,
+        durationMs: Date.now() - startMs,
+      });
+      return { exitCode: 1, summary: { itemCount, feedCount, written, xHandlesWarmed, xItemCount }, reason: "x_write_error" };
+    }
+    xWritten = xWriteResult?.written ?? 0;
+  }
+
   const durationMs = Date.now() - startMs;
-  emit({ startedAt, ok: true, itemCount, feedCount, written, durationMs });
-  return { exitCode: 0, summary: { itemCount, feedCount, written, durationMs }, reason: null };
+  emit({ startedAt, ok: true, itemCount, feedCount, written, xEnabled, xHandlesWarmed, xItemCount, xWritten, durationMs });
+  return {
+    exitCode: 0,
+    summary: { itemCount, feedCount, written, xEnabled, xHandlesWarmed, xItemCount, xWritten, durationMs },
+    reason: null,
+  };
 }
 
 // Direct-invocation guard mirrors cadence-tick: only call `process.exit` when

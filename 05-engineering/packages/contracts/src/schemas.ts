@@ -142,6 +142,14 @@ export const dashboardClusterCapMetaSchema = z.object({
   clusterDroppedSourceIds: z.array(z.string()),
   clusterDropped: z.array(dashboardClusterDroppedEntrySchema).optional(),
   clusterInputCapEffective: z.number().int().positive().optional(),
+  // C1 balanced reservation (additive): whether the social-floor path engaged
+  // and the social/traditional split that entered cluster input, so operators
+  // can confirm social items were not starved by pure global top-K ranking.
+  balancedReservationApplied: z.boolean().optional(),
+  socialQuotaEffective: z.number().int().nonnegative().optional(),
+  socialReservedCount: z.number().int().nonnegative().optional(),
+  socialInputCount: z.number().int().nonnegative().optional(),
+  traditionalInputCount: z.number().int().nonnegative().optional(),
 });
 
 /**

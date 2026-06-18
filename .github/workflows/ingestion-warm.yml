@@ -17,24 +17,42 @@ name: Ingestion cache warmer
 #     fields: ok, startedAt, itemCount, feedCount, written, durationMs, and
 #     skippedReason (present only on failure).
 #
+# Phase 3 — X (social) warm (additive):
+#   - After the RSS warm, the script optionally warms a configured list of X
+#     handles into the SAME Tier-A cache so interactive refreshes serve social
+#     handles from cache too. Two gates, both required: (1) X is enabled
+#     (TEMPO_X_INGESTION_ENABLED=true AND a bearer token is present), and (2)
+#     TEMPO_X_WARM_HANDLES is a non-empty comma-separated handle list.
+#   - When either gate is off, X warm is skipped and the run stays an RSS-only
+#     success — so a missing bearer secret never fails the warmer.
+#   - Additive `[ingestion-warm]` summary fields: xEnabled, xHandlesWarmed,
+#     xItemCount, xWritten. Confirm a live X warm by grepping for xItemCount > 0.
+#
 # Exit-code semantics:
 #   - Exit `0` on success — including a clean warm of zero items (an empty
-#     manifest is not a failure).
-#   - Exit `1` on fatal errors only: missing env, supabase client construction
-#     failed, the live read threw, or the cache write threw / returned an error
-#     envelope.  `skippedReason` in the log names which one.
+#     manifest is not a failure) and an RSS-only run where X warm was skipped.
+#   - Exit `1` on fatal errors only: missing supabase env, supabase client
+#     construction failed, the live read threw, the cache write threw / returned
+#     an error envelope, OR — once X warm is ATTEMPTED (enabled + handles set) —
+#     the X read threw / the X write threw / the X write returned an error
+#     envelope. `skippedReason` in the log names which one (RSS:
+#     missing_supabase_env / supabase_client_failed / read_threw / write_threw /
+#     write_error; X: x_read_threw / x_write_threw / x_write_error).
 #
-# Secrets:
-#   - SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required (the warmer writes
-#     with the service role).  Configure them under repo Settings → Secrets and
-#     variables → Actions before enabling the schedule.  The warm exits `1` with
-#     skippedReason="missing_supabase_env" if either is absent, so the failure
-#     surface is loud.
+# Secrets / variables (repo Settings → Secrets and variables → Actions):
+#   - Secret  SUPABASE_URL              — required (service-role write target).
+#   - Secret  SUPABASE_SERVICE_ROLE_KEY — required (warmer writes as service role).
+#   - Secret  TEMPO_X_BEARER_TOKEN      — optional; enables X warm. Absent ⇒ RSS-only.
+#   - Variable TEMPO_X_WARM_HANDLES     — optional; comma-separated pilot handles
+#                                         (a repo VARIABLE, not a secret — it is
+#                                         not sensitive). Unset/empty ⇒ X warm skipped.
+#   The warm exits `1` with skippedReason="missing_supabase_env" if either
+#   SUPABASE_* is absent, so that failure surface stays loud.
 #
 # Troubleshooting:
-#   - On `skippedReason=write_error` (or any failure) the `[ingestion-warm]`
-#     line's `error` field carries the serialized supabase error
-#     (message/code/details/hint).  See the operator checklist in
+#   - On `skippedReason=write_error` / `x_write_error` (or any failure) the
+#     `[ingestion-warm]` line's `error` field carries the serialized supabase
+#     error (message/code/details/hint).  See the operator checklist in
 #     05-engineering/docs/runbook-ingestion-warm.md.
 
 on:
@@ -83,3 +101,11 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Phase 3 X (social) warm. Opt-in: X warm only runs when the bearer
+          # secret is present AND TEMPO_X_WARM_HANDLES (repo variable) is set.
+          # With the bearer secret absent the script reads X as disabled and
+          # warms RSS only (no failure). TEMPO_X_WARM_HANDLES is a repo VARIABLE
+          # (not a secret) — the pilot handle list is not sensitive.
+          TEMPO_X_INGESTION_ENABLED: "true"
+          TEMPO_X_BEARER_TOKEN: ${{ secrets.TEMPO_X_BEARER_TOKEN }}
+          TEMPO_X_WARM_HANDLES: ${{ vars.TEMPO_X_WARM_HANDLES }}

@@ -187,6 +187,11 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // trimmed stories and which metaStoryIds were dropped. Optional for
     // backward compat with snapshots written before the cap.
     if (_lastRunMeta.overflowCap !== undefined) meta.overflowCap = _lastRunMeta.overflowCap;
+    // C1 — balanced reservation cluster-input cap diagnostics: effective cap +
+    // social reservation counts (quota/reserved/socialIn/tradIn), so GET
+    // /api/dashboard can confirm social items entered cluster input without a
+    // replay. Optional for backward compat with pre-balanced-reservation snapshots.
+    if (_lastRunMeta.clusterCap !== undefined) meta.clusterCap = _lastRunMeta.clusterCap;
     // C1 — deferred re-cluster QUEUE (B1): the ranked ≤2 candidates and the
     // queued/candidate counts. The companion EXECUTION outcome (B2) lands on
     // `reclusterExecution` after the deferred pass runs. Both optional.
@@ -203,6 +208,12 @@ function liftSnapshotMeta(payload, refreshed_at) {
     // Optional for back-compat with snapshots written before Slice 3.
     if (_lastRunMeta.outcomes !== undefined) meta.outcomes = _lastRunMeta.outcomes;
     if (_lastRunMeta.ingestionSource !== undefined) meta.ingestionSource = _lastRunMeta.ingestionSource;
+    // Phase 3.2: per-connector ingestion diagnostics (currently `ingestion.x`:
+    // source / handlesFromCache / handlesLiveFetched / tweetsReturned / … ). Lift
+    // so GET /api/dashboard and GET /api/dashboard/refresh/meta can show the
+    // last-run X surface after the fact without a fresh refresh. Optional for
+    // backward compat with snapshots written before Phase 3.2.
+    if (_lastRunMeta.ingestion !== undefined) meta.ingestion = _lastRunMeta.ingestion;
     // E2E determinism marker. `_lastRunMeta` itself is stripped at this read
     // boundary, so the "first forced full refresh already happened" marker must
     // be lifted into `_meta` to survive into the next refresh's prior-snapshot

@@ -335,6 +335,7 @@ Background: Slice 3 added the [ingestion warmer](apps/api/src/ops/ingestion-warm
   - Exit `1` only on fatal errors: missing `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` (`skippedReason: "missing_supabase_env"`), supabase client construction failure (`"supabase_client_failed"`), the live read throwing (`"read_threw"`), or the cache write throwing (`"write_threw"`) / returning an error envelope (`"write_error"`).
 - **Where to inspect:** GitHub → Actions → "Ingestion cache warmer" → most recent run → `Run ingestion warm` step. The `[ingestion-warm]` line is the structured signal; the preceding `Run started at …` echo confirms the workflow reached the step.
 - **Secrets:** Configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (the same pair the cadence tick uses) under repo Settings → Secrets and variables → Actions before enabling the schedule. The warmer writes with the service role, so a service-role key is required — it exits `1` with `skippedReason: "missing_supabase_env"` if either is absent.
+- **X (social) warm (Phase 3):** After the RSS warm, the script also warms a pilot list of X handles into the same `ingestion_recent_items` cache. Opt-in via two GHA settings: secret **`TEMPO_X_BEARER_TOKEN`** (absent ⇒ X warm skipped, RSS-only success — never a failure) and repo **variable `vars.TEMPO_X_WARM_HANDLES`** (comma-separated pilot handles, e.g. `petrogustavo,whitehouse`; unset ⇒ skipped). The workflow pins `TEMPO_X_INGESTION_ENABLED=true`, so adding the bearer secret + the handles variable is all that's needed — no workflow edit. Additive log fields: `xEnabled`, `xHandlesWarmed`, `xItemCount`, `xWritten`; confirm a live warm by grepping for `xItemCount > 0`. New X failure reasons (`x_read_threw` / `x_write_threw` / `x_write_error`) are fatal only once X warm is attempted. Full secret/variable table + triage in [`runbook-ingestion-warm.md`](docs/runbook-ingestion-warm.md#x-warm-phase-3).
 
 **Local invocation** (for debugging — requires `apps/api/.env` with Supabase creds):
 
@@ -349,6 +350,50 @@ Operator-facing knobs and contracts that landed with source expansion. See [D-06
 - **Parallel why-it-matters concurrency.** The per-story implications writer runs in a bounded parallel pool sized by `TEMPO_AI_WHY_IT_MATTERS_CONCURRENCY` — **default `4`, clamped to `1..6`** (invalid values fall back to `4`). Raising it trades provider fan-out for lower refresh latency; keep it within the bounds. Response **story order stays deterministic (R1)** regardless of writer completion order.
 - **`_meta.timings` per-stage latency.** Refresh responses now carry `_meta.timings` (persisted via `_lastRunMeta.timings`) with both ingestion and pipeline stage wall-clocks: `ingestionMs`, `preClusterMs`, `recallMs`, `clusterMs`, `whatChangedMs`, `whyMs`, `pipelineMs`. This is the first surface for "why was this refresh slow?".
 - **Expansion-safe allowlist contract.** **Do** leave `TEMPO_RSS_ALLOWLIST` **unset** during source expansion so fetch scope derives from the active manifest feeds — newly-activated publishers ingest automatically. **Don't** carry a legacy narrow allowlist (e.g. `washington post,reuters`) into an expansion rollout: a stale env silently blocks new feeds (the "Reuters-class block"). Set it only to *intentionally* constrain fetch scope, as temporary/explicit narrowing. See [`apps/api/.env.example`](apps/api/.env.example).
+
+## X ingestion pilot validation (Phase 1)
+
+The X (Twitter) ingestion path reads recent tweets for handles in a user's `socialSources` and merges them into the refresh pool alongside RSS — fail-open, so RSS still renders if X fails. Use this checklist to validate the **@petrogustavo pilot** end-to-end.
+
+**1. Set env vars** (`apps/api/.env`; server-side only — never `VITE_*`):
+
+```sh
+TEMPO_X_INGESTION_ENABLED=true
+TEMPO_X_BEARER_TOKEN=...          # App-only Bearer; never logged
+TEMPO_X_HANDLE_ALLOWLIST=petrogustavo   # pilot gate (see note below)
+```
+
+**2. Save settings** for the pilot user with the social handle(s) under `socialSources` (e.g. `@petrogustavo`) via `PUT /api/settings`.
+
+**3. Trigger a refresh** — `POST /api/dashboard/refresh`.
+
+**4. Verify ingestion** via the read-only diagnostics endpoint `GET /api/dashboard/refresh/meta` (returns `{ ok, meta }`; `meta` is the last run's `_meta`, or `null` with no snapshot). On a healthy pilot run, assert under `meta.ingestion.x`:
+
+- `enabled === true`
+- `handlesFetched >= 1`
+- `tweetsReturned > 0`
+- `degraded === false`
+
+A tweet from `@petrogustavo` clustered into a meta-story confirms the full path (read → merge → cluster).
+
+**4a. Trace where social items are lost** via `meta.funnel.social` — an additive, per-stage count of `kind:"social"` items mirroring the main funnel (`totalNormalized`, `afterTimeWindow`, `afterSourceSelection`, `afterGeoFilter`, `afterTopicKeyword`, `afterBeatFit`, `afterDedupe`) plus `inPublishedStories` (count of social sources in the final stories; `null` on a watermark-skip), `primaryDropStageForSocial` / `largestDropCountForSocial` / `dropsByStage` (where the biggest social drop happened), and selection context (`socialSelectionApplied`, `matchedSocialSourceCount`, `matchedSocialSources`). Pure observability — it never changes selection/ranking. Grep the one-line `[pipeline.funnel.social]` log for the same counts. Example: `afterSourceSelection > 0` but `inPublishedStories === 0` isolates the loss to clustering/grounding, not source selection.
+
+**4b. Pinpoint the POST-DEDUPE stage** via `meta.funnel.social.postDedupe` — when `afterDedupe > 0` but `inPublishedStories === 0`, this block names the exact stage between the clustering candidate set and final publish: `clusterInputSocialCount`, `clusterOutputClusterCount` (clusters with >=1 social source), `afterGroundingSocialStoryCount`, `afterOverflowCapSocialStoryCount`, and `publishedSocialSourceCount` (mirrors `social.inPublishedStories`). Attribution: `primaryPostDedupeDropStage` (`cluster_output` | `grounding` | `overflow_cap` | `none`), `largestPostDedupeDropCount`, and `dropsByPostDedupeStage`. Small capped (<=25) id arrays — `socialSourceItemIdsAtDedupe`, `socialMetaStoryIdsAfterGrounding`, `socialMetaStoryIdsAfterOverflowCap` — make a specific dropped item/story traceable. On a watermark-skip the post-cluster counts are `null` (those stages didn't run). One-line log: `[pipeline.funnel.social.post_dedupe]`. Example: `clusterOutputClusterCount > 0` but `afterGroundingSocialStoryCount === 0` → grounding is dropping the social story.
+
+**5. Verify fail-open** — disable the token (unset/blank `TEMPO_X_BEARER_TOKEN`) or otherwise force an X failure, then refresh again. RSS continuity must hold:
+
+- the dashboard still returns stories derived from RSS
+- `meta.ingestion.x.degraded === true` (with an entry under `errors`)
+
+> **Pilot → full rollout:** `TEMPO_X_HANDLE_ALLOWLIST` is a pilot guardrail — when set, only those handles are fetched even if a user follows more. To expand from the pilot to **all** selected handles, **unset** `TEMPO_X_HANDLE_ALLOWLIST`.
+
+> **Phase 2 (multi-handle):** with the allowlist unset, the reader ingests **every** handle in `settings.socialSources`, fetched with bounded parallelism (`TEMPO_X_HANDLE_CONCURRENCY`, default 3, clamped 1..5) for a safe rate-limit posture. One bad handle is isolated — its tweets are dropped and `_meta.ingestion.x.degraded=true` with an `errors[]` entry, while every other handle still merges. Per-handle counts surface additively under `_meta.ingestion.x.tweetsByHandle`.
+
+> **Phase 3 (Tier-A cache):** X ingestion is now **cache-first**, symmetric with RSS. Each selected handle keys an `x:{username}` row in the same `ingestion_recent_items` cache (TTL bound to `REFRESH_INTERVAL_MS`, 1h). On refresh the server reads those rows first and only **live-fetches the miss handles**; the live items are written back fire-and-forget so the next refresh — and the hourly warmer — serve them from cache. A scheduled warm (`ingestion-warm.mjs`) pre-fetches the `TEMPO_X_WARM_HANDLES` pilot list after the RSS warm (skipped when unset; X warm failure is fatal so cron retries). Fail-open holds end to end: a cache read/write error falls back to live fetch, and a reader throw leaves RSS untouched. `_meta.ingestion.x` gains additive `source` (`"cache" | "live" | "mixed"`), `handlesFromCache`, and `handlesLiveFetched`; existing fields are unchanged. Cached `x:{username}` rows reconstruct as social items (outlet `@username`, kind `social`, weight 60) so they survive source selection without minting synthetic manifest feed ids.
+
+> **Phase 3.2 (diagnostics + persistence):** On a cache hit the live reader never runs, so the counts are reconciled once after the cache read + merge: `handlesSelected` / `handlesRequested` reflect the user's handles, `handlesFetched = handlesFromCache + handlesLiveFetched` (sums to selected when no handle errored), and `tweetsReturned` counts the merged pool (cached + live). **E2E note:** verify X worked by checking `source` / `handlesFromCache` / `tweetsReturned` — **not** `handlesFetched` alone, which on an all-cache run reflects the cache+live partition rather than a live API call. `_meta.ingestion.x` is now persisted to `_lastRunMeta.ingestion` and lifted back on read, so `GET /api/dashboard/refresh/meta` and `GET /api/dashboard` return the last run's X surface after the fact — no second `POST /api/dashboard/refresh` needed for diagnostics.
+
+Wiring: [`x-api-client.mjs`](apps/api/src/ingestion/x-api-client.mjs), [`x-reader.mjs`](apps/api/src/ingestion/x-reader.mjs), X-aware reconstruction in [`recent-items-cache.mjs`](apps/api/src/ingestion/recent-items-cache.mjs), cache-first merge + diagnostics + `_lastRunMeta.ingestion` persistence in [`server.mjs`](apps/api/src/server.mjs), `ingestion` lift in [`dashboard-snapshot-repo.mjs`](apps/api/src/db/dashboard-snapshot-repo.mjs), scheduled warm in [`ingestion-warm.mjs`](apps/api/src/ops/ingestion-warm.mjs); env reference in [`apps/api/.env.example`](apps/api/.env.example).
 
 ## Deployment
 

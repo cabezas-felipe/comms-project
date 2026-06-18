@@ -373,6 +373,87 @@ test("readSnapshot (B4): omits deterministic-fallback fields when the snapshot p
   assert.equal(result._meta?.deterministicClusteringDiagnostics, undefined);
 });
 
+test("readSnapshot (C1 balanced): lifts persisted _lastRunMeta.clusterCap into _meta.clusterCap", async () => {
+  // A social-mixed run persists the cluster-input cap diagnostics (effective cap
+  // + social reservation counts) on `_lastRunMeta`; the read boundary must
+  // surface them on `_meta` so GET /api/dashboard confirms social items entered
+  // cluster input without replaying refresh. Fails if clusterCap is not lifted.
+  const userId = "c1-clustercap-lift-user";
+  const clusterCap = {
+    dedupedCount: 58,
+    clusterInputCount: 15,
+    clusterDroppedCount: 43,
+    clusterDroppedSourceIds: ["trad-12", "trad-13"],
+    clusterInputCapEffective: 15,
+    balancedReservationApplied: true,
+    socialQuotaEffective: 3,
+    socialReservedCount: 3,
+    socialInputCount: 3,
+    traditionalInputCount: 12,
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: { clusterModel: "mock", clusterCap },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta?.clusterCap, clusterCap);
+  assert.equal(result._meta?.clusterCap?.balancedReservationApplied, true);
+  assert.equal(result._meta?.clusterCap?.socialInputCount, 3);
+  // Raw _lastRunMeta is still stripped at the boundary.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot (C1 balanced): omits _meta.clusterCap when the snapshot carries none", async () => {
+  const userId = "c1-clustercap-absent-user";
+  await writeSnapshot(userId, { ...SAMPLE_PAYLOAD, _lastRunMeta: { clusterModel: "mock" } });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta?.clusterCap, undefined);
+});
+
+test("readSnapshot (Phase 3.2): lifts persisted _lastRunMeta.ingestion into _meta.ingestion", async () => {
+  // A refresh persists the per-connector X ingestion diagnostics on
+  // `_lastRunMeta.ingestion`; the read boundary must surface them on
+  // `_meta.ingestion` so GET /api/dashboard and GET /api/dashboard/refresh/meta
+  // can show the last-run X surface after the fact. Fails if not lifted.
+  const userId = "phase32-ingestion-lift-user";
+  const ingestion = {
+    x: {
+      enabled: true,
+      source: "cache",
+      handlesRequested: 2,
+      handlesSelected: 2,
+      handlesFromCache: 2,
+      handlesLiveFetched: 0,
+      handlesFetched: 2,
+      tweetsReturned: 5,
+      tweetsByHandle: { "@petrogustavo": 3, "@whitehouse": 2 },
+      errors: [],
+      degraded: false,
+    },
+  };
+  await writeSnapshot(userId, {
+    ...SAMPLE_PAYLOAD,
+    _lastRunMeta: { clusterModel: "mock", ingestion },
+  });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.deepEqual(result._meta?.ingestion, ingestion);
+  assert.equal(result._meta?.ingestion?.x?.source, "cache");
+  assert.equal(result._meta?.ingestion?.x?.tweetsReturned, 5);
+  // Raw _lastRunMeta is still stripped at the boundary.
+  assert.equal(result._lastRunMeta, undefined);
+});
+
+test("readSnapshot (Phase 3.2): omits _meta.ingestion when the snapshot carries none", async () => {
+  const userId = "phase32-ingestion-absent-user";
+  await writeSnapshot(userId, { ...SAMPLE_PAYLOAD, _lastRunMeta: { clusterModel: "mock" } });
+  const result = await readSnapshot(userId);
+  assert.ok(result !== null);
+  assert.equal(result._meta?.ingestion, undefined);
+});
+
 test("writeSnapshot: overwrites existing snapshot on second call", async () => {
   const updated = { ...SAMPLE_PAYLOAD, stories: [] };
   await writeSnapshot(USER_ID, updated);
