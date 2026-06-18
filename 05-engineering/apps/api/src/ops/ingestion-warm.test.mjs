@@ -377,6 +377,42 @@ test("runIngestionWarm: X warm skipped when feature disabled, even if TEMPO_X_WA
   assert.equal(summary.xHandlesWarmed, 0);
 });
 
+test("runIngestionWarm: X flag on but bearer token absent → real resolveXConfig disables X, RSS-only success", async () => {
+  // GHA posture: the workflow always passes TEMPO_X_INGESTION_ENABLED=true, and
+  // TEMPO_X_BEARER_TOKEN may be absent (secret not configured). The DEFAULT
+  // resolveXConfig (not injected here) must read that as disabled so the warmer
+  // succeeds RSS-only instead of attempting doomed authenticated reads.
+  const logger = makeLogger();
+  const prevFlag = process.env.TEMPO_X_INGESTION_ENABLED;
+  const prevToken = process.env.TEMPO_X_BEARER_TOKEN;
+  process.env.TEMPO_X_INGESTION_ENABLED = "true";
+  delete process.env.TEMPO_X_BEARER_TOKEN;
+  let xReadCalls = 0;
+  try {
+    const result = await runIngestionWarm({
+      readFeedItemsFn: async () => TWO_RAW_ITEMS,
+      writeRecentItemsFn: async ({ items }) => ({ written: items.length, error: null }),
+      readXItemsFn: async () => { xReadCalls += 1; return { items: X_RAW_ITEMS, diagnostics: {} }; },
+      // resolveXConfigFn intentionally NOT injected → exercises the real
+      // resolveXConfig(process.env) gate.
+      supabase: {},
+      logger: logger.log,
+      envGet: makeEnv({ TEMPO_X_WARM_HANDLES: "petrogustavo" }),
+    });
+    assert.equal(result.exitCode, 0, "missing bearer ⇒ X disabled ⇒ RSS-only success (no failure)");
+    assert.equal(xReadCalls, 0, "no doomed authenticated X read when the bearer is absent");
+    const summary = logger.parseSummary();
+    assert.equal(summary.ok, true);
+    assert.equal(summary.xEnabled, false);
+    assert.equal(summary.xHandlesWarmed, 0);
+  } finally {
+    if (prevFlag === undefined) delete process.env.TEMPO_X_INGESTION_ENABLED;
+    else process.env.TEMPO_X_INGESTION_ENABLED = prevFlag;
+    if (prevToken === undefined) delete process.env.TEMPO_X_BEARER_TOKEN;
+    else process.env.TEMPO_X_BEARER_TOKEN = prevToken;
+  }
+});
+
 test("runIngestionWarm: X read throws → exit 1, skippedReason=x_read_threw, RSS write already happened", async () => {
   const logger = makeLogger();
   let writeCalls = 0;

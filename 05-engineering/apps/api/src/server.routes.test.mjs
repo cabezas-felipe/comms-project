@@ -1325,6 +1325,12 @@ test("refresh X cache HIT: cached handle served from cache, reader NOT called, s
         assert.equal(x.source, "cache");
         assert.equal(x.handlesFromCache, 1);
         assert.equal(x.handlesLiveFetched, 0);
+        // Phase 3.2: a full cache hit must still report meaningful selection +
+        // tweet totals even though the live reader never ran.
+        assert.equal(x.handlesSelected, 1, "selected count reflects the user's handle, not the (zero) live fetch");
+        assert.equal(x.handlesFetched, 1, "cache+live partition: 1 from cache + 0 live");
+        assert.ok(x.tweetsReturned > 0, "cached tweet counted in tweetsReturned");
+        assert.equal(x.tweetsByHandle?.["@petrogustavo"], 1, "per-handle count derived from the cached item");
         assert.doesNotMatch(JSON.stringify(res.body), /secret-bearer/);
       })
     );
@@ -1336,6 +1342,72 @@ test("refresh X cache HIT: cached handle served from cache, reader NOT called, s
     _xReader.read = prevXRead;
     cache.restore();
     await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh → GET /api/dashboard/refresh/meta round-trips persisted ingestion.x (Phase 3.2)", async () => {
+  // Genuine round-trip: a real POST refresh builds `_lastRunMeta.ingestion.x`
+  // from xDiagnostics and persists it via the real snapshot write; the
+  // follow-up GET reads it back through the live `liftSnapshotMeta` path. This
+  // proves the after-the-fact recovery contract — NOT a hand-stubbed snapshot
+  // carrying a pre-lifted `_meta`.
+  const ISOLATED_USER_ID = "test-user-x-meta-roundtrip";
+  const capture = {};
+  let capturedLastRunMeta = null;
+
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+
+  // Capture the persisted _lastRunMeta but STILL forward to the real write so
+  // the follow-up GET reads a genuinely-persisted snapshot through the lift.
+  _snapshotRepo.write = async (uid, payload) => {
+    capturedLastRunMeta = payload._lastRunMeta;
+    return prevWrite(uid, payload);
+  };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async () => ({
+    items: [X_SOCIAL_ITEM],
+    diagnostics: { handlesRequested: 1, handlesSelected: 1, handlesFetched: 1, tweetsReturned: 1, errors: [], degraded: false, tweetsByHandle: { "@petrogustavo": 1 } },
+  });
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: undefined },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app).put("/api/settings").send({ ...VALID_BODY, socialSources: ["@petrogustavo"] }).set("Content-Type", "application/json");
+        const refreshRes = await request(app).post("/api/dashboard/refresh");
+        assert.equal(refreshRes.status, 200);
+
+        // (1) server persisted ingestion.x into _lastRunMeta (not just _meta)
+        assert.ok(capturedLastRunMeta?.ingestion?.x, "_lastRunMeta.ingestion.x persisted on the snapshot write");
+        assert.equal(capturedLastRunMeta.ingestion.x.source, "live");
+        assert.equal(capturedLastRunMeta.ingestion.x.handlesSelected, 1);
+
+        // (2) GET refresh/meta lifts it back onto _meta.ingestion.x — no second POST
+        const metaRes = await request(app).get("/api/dashboard/refresh/meta");
+        assert.equal(metaRes.status, 200);
+        const x = metaRes.body.meta?.ingestion?.x;
+        assert.ok(x && typeof x === "object", "lifted _meta.ingestion.x present on GET refresh/meta");
+        assert.equal(x.enabled, true);
+        assert.equal(x.source, "live");
+        assert.equal(x.handlesSelected, 1);
+        assert.equal(x.tweetsReturned, 1);
+        assert.doesNotMatch(JSON.stringify(metaRes.body), /secret-bearer/);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+    await rm(path.join(tmpDir, `dashboard_snapshot_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
   }
 });
 
