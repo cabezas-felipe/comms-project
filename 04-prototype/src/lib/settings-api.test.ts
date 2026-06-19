@@ -537,5 +537,71 @@ describe("saveSettingsPayload — _meta pass-through", () => {
     // Extraction status is preserved alongside the job handle.
     expect(result._meta?.extractionStatus).toBe("succeeded");
   });
+
+  it("preserves Step 1 viability metadata (totalSourceCount + onboardingViable) when present", async () => {
+    // Viable onboarding shape: extraction succeeded, sources present, viable=true,
+    // plus the cold-start handle. All four _meta fields must survive the client
+    // pass-through unchanged (the client does no derivation — it trusts the API).
+    const apiResponse = {
+      contractVersion: CONTRACT_VERSION,
+      topics: ["Diplomatic relations"],
+      keywords: [],
+      geographies: ["US"],
+      traditionalSources: ["Reuters"],
+      socialSources: ["@latamwatcher"],
+      _meta: {
+        extractionStatus: "succeeded",
+        refreshJobId: "user-123",
+        totalSourceCount: 2,
+        onboardingViable: true,
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => apiResponse,
+    } as Response);
+
+    const result = await saveSettingsPayload(
+      { contractVersion: CONTRACT_VERSION, topics: ["Diplomatic relations"], keywords: [], geographies: ["US"], traditionalSources: ["Reuters"], socialSources: ["@latamwatcher"] },
+      { onboardingRawText: "Colombia diplomacy." }
+    );
+    expect(result._meta?.totalSourceCount).toBe(2);
+    expect(result._meta?.onboardingViable).toBe(true);
+    expect(result._meta?.extractionStatus).toBe("succeeded");
+    expect(result._meta?.refreshJobId).toBe("user-123");
+  });
+
+  it("preserves the non-viable viability shape (onboardingViable=false, totalSourceCount=0) — falsy values are not dropped", async () => {
+    // Regression guard: a `false`/`0` viability signal must pass through intact so
+    // the client routes to Settings rather than mis-reading absent-as-viable.
+    const apiResponse = {
+      contractVersion: CONTRACT_VERSION,
+      topics: [],
+      keywords: [],
+      geographies: [],
+      traditionalSources: [],
+      socialSources: [],
+      _meta: {
+        extractionStatus: "succeeded",
+        totalSourceCount: 0,
+        onboardingViable: false,
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => apiResponse,
+    } as Response);
+
+    const result = await saveSettingsPayload(
+      { contractVersion: CONTRACT_VERSION, topics: [], keywords: [], geographies: [], traditionalSources: [], socialSources: [] },
+      { onboardingRawText: "thin narrative" }
+    );
+    expect(result._meta?.totalSourceCount).toBe(0);
+    expect(result._meta?.onboardingViable).toBe(false);
+    // No cold-start handle on a non-viable save.
+    expect(result._meta?.refreshJobId).toBeUndefined();
+  });
 });
 

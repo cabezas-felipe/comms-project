@@ -2620,4 +2620,48 @@ describe("Step 4: onboarding empty-first-paint auto-retry", () => {
     // (reloadCounter > 0 excludes it): exactly the two calls above.
     expect(refreshSpy).toHaveBeenCalledTimes(2);
   });
+
+  // Integration: Step 3 escalation and Step 4 auto-retry compose on the join
+  // path. A join-resolved empty GET escalates (Step 3 interactive POST); if THAT
+  // is still empty, Step 4 fires exactly one more pass — which re-runs the same
+  // join-resolved GET + escalation — and then stops. Bounds: the join GET and
+  // the interactive escalation each run twice (first paint + one auto-retry),
+  // and never a third. advanceTimersByTimeAsync(0) is repeated past the settle
+  // point; once everything settles the ref guard makes further flushes no-ops,
+  // so the counts are deterministic rather than flush-count-sensitive.
+  it("Step 3 + Step 4: join-resolved empty whose escalation is also empty auto-retries exactly once, then stops", async () => {
+    vi.useFakeTimers();
+    try {
+      // Inline status fixtures (the Slice 9 describe's helpers are out of scope here).
+      const running = { jobId: "u1", status: "running" as const, phase: "clustering", storyCount: null, failureReason: null };
+      const done = { jobId: "u1", status: "done" as const, phase: "done", storyCount: 1, failureReason: null };
+      statusSpy
+        .mockResolvedValueOnce(running)
+        .mockResolvedValue(done);
+      fetchSpy.mockResolvedValue(OK_RESULT);   // join-resolved GET: always empty
+      refreshSpy.mockResolvedValue(OK_RESULT); // escalation + auto-retry: always empty
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });    // running
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // done → load
+      // Drain: GET → Step 3 escalation → settle → Step 4 → GET → escalation → settle → guard.
+      for (let i = 0; i < 8; i++) {
+        await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      }
+      // Exactly one auto-retry: join GET ran twice, interactive escalation ran twice.
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(refreshSpy).toHaveBeenCalledTimes(2);
+      expect(
+        refreshSpy.mock.calls.every(
+          (c) => (c[0] as { endpoint?: string } | undefined)?.endpoint === "/api/dashboard/refresh?interactive=1"
+        )
+      ).toBe(true);
+      // The escalation is not a counted attempt and neither is the auto-retry —
+      // the join path opens no attempt slot.
+      expect(recordAttemptStartSpy).not.toHaveBeenCalled();
+      // Settles empty with no loop.
+      expect(screen.getByTestId("dashboard-empty")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
