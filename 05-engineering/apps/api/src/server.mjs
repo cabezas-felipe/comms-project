@@ -827,17 +827,32 @@ app.put("/api/settings", async (req, res) => {
       sourceCount: (settingsToReturn.traditionalSources?.length ?? 0) + (settingsToReturn.socialSources?.length ?? 0),
       identitySource: identity.source,
     });
-    // Slice 6: cold-start prefetch kickoff. After a successful onboarding save +
-    // extraction, start (or join) a cold-start refresh so the dashboard's first
-    // paint can join the in-flight work. Fire-and-forget and fully non-fatal —
-    // any kickoff failure leaves the settings write/response untouched and just
-    // omits `_meta.refreshJobId`.
     const _meta = { extractionStatus };
+    // Step 1 (onboarding meta-stories): additive viability metadata so the client
+    // can route onboarding users without inferring viability from payload shape.
+    // Emitted ONLY when a narrative was provided — a normal settings PUT keeps
+    // `_meta` as just `{ extractionStatus }`. totalSourceCount/onboardingViable
+    // are derived from `settingsToReturn` (the merged post-extraction payload),
+    // matching the source counting used for analytics above. This viability gate
+    // also drives the cold-start prefetch kickoff below.
+    if (onboardingRawText) {
+      _meta.totalSourceCount =
+        (settingsToReturn.traditionalSources?.length ?? 0) + (settingsToReturn.socialSources?.length ?? 0);
+      _meta.onboardingViable = extractionStatus === "succeeded" && _meta.totalSourceCount > 0;
+    }
+    // Slice 6: cold-start prefetch kickoff. After a viable onboarding save (a
+    // narrative + succeeded extraction that yielded at least one source), start
+    // (or join) a cold-start refresh so the dashboard's first paint can join the
+    // in-flight work. Fire-and-forget and fully non-fatal — any kickoff failure
+    // leaves the settings write/response untouched and just omits
+    // `_meta.refreshJobId`. A non-viable onboarding (extraction failed, or zero
+    // sources) skips the kickoff: there is nothing to refresh against yet.
+    //
     // Slice 11: one targeted boundary line recording the prefetch decision —
     // started (new job) | joined (existing in-flight) | skipped (no narrative /
-    // extraction not succeeded) | error (kickoff threw). No payload/secret data.
+    // not viable) | error (kickoff threw). No payload/secret data.
     let prefetchOutcome = "skipped";
-    if (onboardingRawText && extractionStatus === "succeeded") {
+    if (onboardingRawText && _meta.onboardingViable) {
       const existing = getJob(identity.userId);
       const wasRunning = !!existing && existing.status === JOB_STATUS.RUNNING;
       try {

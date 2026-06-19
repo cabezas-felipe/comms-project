@@ -85,6 +85,13 @@ export type SaveSettingsResult = SettingsPayload & {
     // Slice 6/8: cold-start prefetch job handle (=== userId) returned when the
     // onboarding save kicked off a refresh; surfaced for the dashboard handoff.
     refreshJobId?: string;
+    // Step 1 (onboarding meta-stories): viability metadata emitted only when an
+    // onboarding narrative was provided. totalSourceCount is the merged
+    // post-extraction source count; onboardingViable === (extraction succeeded
+    // && totalSourceCount > 0). Lets the client route without inferring
+    // viability from payload shape.
+    totalSourceCount?: number;
+    onboardingViable?: boolean;
   };
 };
 
