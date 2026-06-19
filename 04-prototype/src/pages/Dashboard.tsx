@@ -459,6 +459,24 @@ export default function Dashboard() {
           renderedResult = await refreshDashboard({ endpoint: RETRY_DEFAULT_REFRESH_ENDPOINT });
         } else if (joinResolvedToGet) {
           renderedResult = await fetchDashboardWithMeta();
+          // Step 3 (Option B core): an onboarding first paint that JOINed an
+          // in-flight cold-start refresh has now settled (done/failed) and read
+          // the snapshot via GET. That GET can still land EMPTY — the prefetch
+          // finished (or fail-closed) before publishing any stories. Rather than
+          // accept an empty first view as final, escalate ONCE to the interactive
+          // refresh (the same POST the non-join onboarding path runs) so the user
+          // sees a real attempt instead of a blank/quiet beat. Scoped tightly:
+          //   • onboarding only          — `forceRefresh` (non-onboarding joins
+          //                                 and plain GET loads are untouched)
+          //   • join-resolved-to-GET only — this branch (active polling and the
+          //                                 timeout / 403-404 fallback are untouched,
+          //                                 they already route through forceRefresh)
+          //   • empty only               — a GET that returned stories keeps the
+          //                                 existing behavior, no extra POST
+          // NOTE: Step 4's one-time auto-retry is intentionally NOT added here.
+          if (!canceled && forceRefresh && renderedResult.payload.stories.length === 0) {
+            renderedResult = await refreshDashboard({ endpoint: INTERACTIVE_REFRESH_ENDPOINT });
+          }
         } else if (forceRefresh) {
           // Slice 4: request the interactive fast-path profile for the first
           // post-onboarding paint (server reads `?interactive=1`).

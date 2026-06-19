@@ -2255,24 +2255,114 @@ describe("Slice 9: cold-start JOIN mode", () => {
     }
   });
 
-  it("running → failed exits JOIN and routes into the clustering-failed empty path (no auto-retry)", async () => {
+  // ─── Step 3 (Option B core): JOIN-resolved-empty escalation on first paint ───
+
+  it("Step 3: running → failed with an EMPTY join-resolved GET escalates to the interactive refresh POST", async () => {
     vi.useFakeTimers();
     try {
       statusSpy
         .mockResolvedValueOnce(runningStatus("clustering"))
         .mockResolvedValue(failedStatus);
-      // The fail-closed snapshot the GET returns: 0 stories, clusteringFailed.
-      fetchSpy.mockResolvedValue({
+      // The join-resolved GET lands EMPTY (prefetch fail-closed before publishing).
+      fetchSpy.mockResolvedValue(OK_RESULT); // stories: []
+      // Escalation: the interactive refresh POST yields real stories.
+      refreshSpy.mockResolvedValue({
         ...OK_RESULT,
-        clusteringFailed: true,
-        clusteringFailureReason: "timeout",
+        payload: {
+          contractVersion: CONTRACT_VERSION,
+          stories: [makeStoryDto({ id: "esc", title: "Escalated Story" })],
+        },
       });
       renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
       await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // running
       await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // failed → load
-      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush GET render
-      expect(screen.getByTestId("dashboard-clustering-failed")).toBeInTheDocument();
-      // GET loaded the fail-closed snapshot; no duplicate refresh POST, no auto-retry.
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush GET
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush escalation POST
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush render
+      // GET ran first (join-resolved); the empty result escalated to the POST.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy).toHaveBeenCalledWith({
+        endpoint: "/api/dashboard/refresh?interactive=1",
+      });
+      expect(screen.getByText("Escalated Story")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Step 3: running → done with an EMPTY join-resolved GET escalates to the interactive refresh POST", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy
+        .mockResolvedValueOnce(runningStatus("clustering"))
+        .mockResolvedValue(doneStatus);
+      fetchSpy.mockResolvedValue(OK_RESULT); // empty GET
+      refreshSpy.mockResolvedValue({
+        ...OK_RESULT,
+        payload: {
+          contractVersion: CONTRACT_VERSION,
+          stories: [makeStoryDto({ id: "esc", title: "Escalated Story" })],
+        },
+      });
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // running
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // done → load
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush GET
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush escalation POST
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush render
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy).toHaveBeenCalledWith({
+        endpoint: "/api/dashboard/refresh?interactive=1",
+      });
+      expect(screen.getByText("Escalated Story")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Step 3: a NON-empty join-resolved GET does NOT escalate (no duplicate POST)", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy
+        .mockResolvedValueOnce(runningStatus("clustering"))
+        .mockResolvedValue(doneStatus);
+      fetchSpy.mockResolvedValue({
+        ...OK_RESULT,
+        payload: {
+          contractVersion: CONTRACT_VERSION,
+          stories: [makeStoryDto({ id: "j1", title: "Joined Story" })],
+        },
+      });
+      renderAt({ bootstrap: true, forceRefresh: true, coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // running
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // done → load
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush GET
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // (would-be escalation)
+      expect(screen.getByText("Joined Story")).toBeInTheDocument();
+      // Stories present → escalation guard short-circuits, no interactive POST.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Step 3: an EMPTY join-resolved GET does NOT escalate when forceRefresh is absent (non-onboarding)", async () => {
+    vi.useFakeTimers();
+    try {
+      statusSpy
+        .mockResolvedValueOnce(runningStatus("clustering"))
+        .mockResolvedValue(doneStatus);
+      fetchSpy.mockResolvedValue(OK_RESULT); // empty GET
+      refreshSpy.mockResolvedValue(OK_RESULT);
+      // JOIN armed by coldStartJobId alone — no onboarding forceRefresh handoff.
+      renderAt({ coldStartJobId: "u1" });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // running
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); }); // done → load
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // flush GET
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); }); // (no escalation)
+      // Empty result is accepted as final — the escalation is scoped to onboarding.
+      expect(screen.getByTestId("dashboard-empty")).toBeInTheDocument();
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(refreshSpy).not.toHaveBeenCalled();
     } finally {
