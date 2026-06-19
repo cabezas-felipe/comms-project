@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { Source, Story } from "@/data/stories";
 import { deriveSignals } from "@/lib/derive";
@@ -231,6 +231,20 @@ export default function Dashboard() {
   const [whyEnrichment, setWhyEnrichment] = useState<DashboardWhyEnrichmentMeta | null>(null);
   const [reloadCounter, setReloadCounter] = useState(0);
 
+  // Step 4: one-time auto-retry safety net for the onboarding first paint.
+  // `onboardingEmptyRetryUsedRef` makes the retry strictly once-per-mount (a
+  // persistently quiet beat can never loop). `autoRetryTick` is a dedicated
+  // loader trigger — bumping it re-runs the loader on its EXISTING interactive
+  // path (forceRefresh → POST ?interactive=1, or the Step 3 join-resolved
+  // escalation), deliberately NOT `reloadCounter` (which would switch to the
+  // manual-retry default profile). `autoRetryPendingRef` marks the next loader
+  // run as the auto-retry so it is treated as a best-effort extra refresh — not
+  // a counted attempt (it must not double-advance the refresh clock), mirroring
+  // the Step 3 escalation.
+  const onboardingEmptyRetryUsedRef = useRef(false);
+  const autoRetryPendingRef = useRef(false);
+  const [autoRetryTick, setAutoRetryTick] = useState(0);
+
   // Slice 9: cold-start JOIN lifecycle.  `active` while polling the prefetch
   // job; `done`/`failed` are terminal job outcomes; `timeout` means the 60s
   // budget elapsed and we fall back to the normal loader.  `inactive` when no
@@ -365,6 +379,12 @@ export default function Dashboard() {
     // other routing path (join/forceRefresh/bootstrap).  A retry is always a
     // refresh attempt.
     const isRetry = reloadCounter > 0;
+    // Step 4: consume the "this run is the auto-retry" marker set right before
+    // `autoRetryTick` was bumped. Read-and-reset here so exactly the tick-driven
+    // loader run is flagged; it routes through the same interactive path but is
+    // excluded from attempt accounting below.
+    const isAutoRetry = autoRetryPendingRef.current;
+    autoRetryPendingRef.current = false;
     // Phase 2.1: mount-time staleness safety net.  Throttled/suspended
     // background timers can leave a returning user with the hourly heartbeat
     // overdue — a stale snapshot AND a stale "next refresh" timestamp.  When the
@@ -385,8 +405,12 @@ export default function Dashboard() {
     // NOT a refresh attempt, so it must not toggle the in-flight flag and must
     // not advance the anchor (GET only seeds when nothing is set yet).  Local
     // `isLoading` covers the GET path's own loading copy.
+    // Step 4: the auto-retry is a best-effort extra refresh, not a counted
+    // attempt — it must not open a second attempt slot or advance the clock
+    // again (consistent with the Step 3 join-resolved escalation).
     const isPostAttempt =
-      isRetry || isOverdueDefaultRefresh || (!joinResolvedToGet && (useBootstrap || forceRefresh));
+      !isAutoRetry &&
+      (isRetry || isOverdueDefaultRefresh || (!joinResolvedToGet && (useBootstrap || forceRefresh)));
     const attemptToken = isPostAttempt ? recordAttemptStart() : null;
     // `bootstrapResult` is only set when the bootstrap POST resolves — used to
     // read its `decision` for the clock-advance rule.  `renderedResult` is
@@ -563,9 +587,51 @@ export default function Dashboard() {
     useBootstrap,
     forceRefresh,
     reloadCounter,
+    autoRetryTick,
     seedAnchorIfMissing,
     recordAttemptStart,
     recordAttemptFinished,
+  ]);
+
+  // ─── Step 4: one-time auto-retry when the onboarding first paint is empty ────
+  // After Step 3's escalation, the onboarding first view can still settle empty
+  // (a genuinely quiet beat at the moment the prefetch finished). As a final
+  // safety net, fire exactly ONE more interactive refresh before accepting the
+  // empty result. Strictly guarded:
+  //   1) onboarding path only            — `forceRefresh === true`
+  //   2) first-load context, not manual  — `reloadCounter === 0` (a manual
+  //                                          retry routes through `handleRetry`)
+  //   3) the load has fully settled and  — `!isLoading && hasLoadedOnce`
+  //      is not still JOIN-polling          and `joinState !== "active"`
+  //   4) the current render is empty     — `stories.length === 0`
+  //   5) NOT an explicit failure-empty   — `!loadError && !clusteringFailed`
+  //      state (those own their Retry UX)   and `refreshStatus !== "failed"`
+  //   6) the retry has not been used yet — `!onboardingEmptyRetryUsedRef`
+  // The ref guard makes this at-most-once per mount, so there is no loop.
+  useEffect(() => {
+    if (emptyMode) return;
+    if (onboardingEmptyRetryUsedRef.current) return;
+    if (!forceRefresh || reloadCounter > 0) return;
+    if (isLoading || joinState === "active" || !hasLoadedOnce) return;
+    if (stories.length > 0) return;
+    if (loadError || clusteringFailed || refreshFailsafe?.refreshStatus === "failed") return;
+    // Consume the single allowed retry and re-run the loader on its existing
+    // interactive path. `autoRetryPendingRef` flags that run so it is not
+    // counted as a fresh attempt.
+    onboardingEmptyRetryUsedRef.current = true;
+    autoRetryPendingRef.current = true;
+    setAutoRetryTick((n) => n + 1);
+  }, [
+    emptyMode,
+    forceRefresh,
+    reloadCounter,
+    isLoading,
+    joinState,
+    hasLoadedOnce,
+    stories.length,
+    loadError,
+    clusteringFailed,
+    refreshFailsafe,
   ]);
 
   // ─── Slice 9: poll the cold-start prefetch job while JOINed ─────────────────

@@ -275,7 +275,11 @@ describe("Phase 2.2: overdue-refresh regression matrix", () => {
       mockLastAttemptAt = OVERDUE();
       row.prime();
       renderAt(row.nav);
-      await waitFor(() => expect(row.winner()).toHaveBeenCalledTimes(1));
+      // `toHaveBeenCalled()` (not times(1)): the forceRefresh row settles empty
+      // and fires the Step 4 one-time auto-retry (a 2nd interactive POST). The
+      // "exactly one ATTEMPT slot" invariant is still pinned via
+      // recordAttemptStartSpy below (the auto-retry is not a counted attempt).
+      await waitFor(() => expect(row.winner()).toHaveBeenCalled());
       await screen.findByTestId("dashboard-empty");
       // Endpoint/profile contract: the winning helper used exactly the expected
       // endpoint (or none for the bare/default + bootstrap cases).
@@ -437,7 +441,10 @@ describe("Slice 2: forceRefresh routing + POST→GET silent recovery", () => {
     refreshSpy.mockResolvedValue(OK_RESULT);
     // Onboarding navigates with BOTH flags; forceRefresh must win.
     renderAt({ bootstrap: true, forceRefresh: true });
-    await waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
+    // `toHaveBeenCalled()` (not times(1)): an empty first paint triggers the
+    // Step 4 auto-retry (a 2nd interactive POST). Routing is still asserted via
+    // the not-called checks below.
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalled());
     await screen.findByTestId("dashboard-empty");
     expect(bootstrapSpy).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -447,7 +454,9 @@ describe("Slice 2: forceRefresh routing + POST→GET silent recovery", () => {
   it("Slice 4: forceRefresh requests the interactive fast-path profile (?interactive=1)", async () => {
     refreshSpy.mockResolvedValue(OK_RESULT);
     renderAt({ bootstrap: true, forceRefresh: true });
-    await waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
+    // `toHaveBeenCalled()` (not times(1)): empty first paint triggers the Step 4
+    // auto-retry. The first call's endpoint is what this test pins.
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalled());
     await screen.findByTestId("dashboard-empty");
     // The onboarding interactive entry must hit the interactive refresh endpoint
     // so the backend applies the balanced fast-path profile.
@@ -2515,5 +2524,100 @@ describe("Slice 9: cold-start JOIN mode", () => {
     expect(refreshSpy).not.toHaveBeenCalledWith({
       endpoint: "/api/dashboard/refresh?profile=default",
     });
+  });
+});
+
+// ─── Step 4: guarded one-time auto-retry for onboarding empty first paint ─────
+
+describe("Step 4: onboarding empty-first-paint auto-retry", () => {
+  it("onboarding + empty + no failure flags → auto-retries exactly once (interactive)", async () => {
+    refreshSpy.mockResolvedValue(OK_RESULT); // empty on every attempt
+    renderAt({ bootstrap: true, forceRefresh: true });
+    await screen.findByTestId("dashboard-empty");
+    // First interactive paint + exactly one auto-retry = two interactive POSTs.
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(2));
+    expect(refreshSpy.mock.calls[0][0]).toEqual({
+      endpoint: "/api/dashboard/refresh?interactive=1",
+    });
+    expect(refreshSpy.mock.calls[1][0]).toEqual({
+      endpoint: "/api/dashboard/refresh?interactive=1",
+    });
+    // The auto-retry is best-effort, NOT a counted attempt: only the first
+    // paint opened an attempt slot.
+    expect(recordAttemptStartSpy).toHaveBeenCalledTimes(1);
+    // No loop — still exactly two after the second empty settles.
+    await screen.findByTestId("dashboard-empty");
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("onboarding + empty + clusteringFailed → no auto-retry", async () => {
+    refreshSpy.mockResolvedValue({
+      ...OK_RESULT,
+      clusteringFailed: true,
+      clusteringFailureReason: "timeout",
+    });
+    renderAt({ bootstrap: true, forceRefresh: true });
+    await screen.findByTestId("dashboard-clustering-failed");
+    // Failure-empty state owns its dedicated copy + Retry control — no auto-retry.
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("onboarding + empty + refreshStatus 'failed' → no auto-retry", async () => {
+    refreshSpy.mockResolvedValue({
+      ...OK_RESULT,
+      refreshStatus: "failed",
+      refreshFailure: {
+        reason: "clustering_failure",
+        subtype: "timeout",
+        attempts: 2,
+        retryable: true,
+        retryAfterMs: null,
+        nextRetryAt: null,
+      },
+      usedPriorSnapshot: false,
+    });
+    renderAt({ bootstrap: true, forceRefresh: true });
+    await screen.findByTestId("dashboard-refresh-failed");
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("onboarding + empty + already auto-retried → no second auto-retry while still empty", async () => {
+    refreshSpy.mockResolvedValue(OK_RESULT); // always empty
+    renderAt({ bootstrap: true, forceRefresh: true });
+    await waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(2));
+    // Force extra re-renders; the ref guard must prevent any further auto-retry.
+    fireEvent.click(screen.getByTestId("pill-all"));
+    await screen.findByTestId("dashboard-empty");
+    fireEvent.click(screen.getByTestId("pill-all"));
+    await screen.findByTestId("dashboard-empty");
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("non-onboarding empty (GET) load → no auto-retry", async () => {
+    fetchSpy.mockResolvedValue(OK_RESULT);
+    refreshSpy.mockResolvedValue(OK_RESULT);
+    renderAt(null); // in-app nav / direct URL — no forceRefresh
+    await screen.findByTestId("dashboard-empty");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).not.toHaveBeenCalled();
+  });
+
+  it("manual retry path is unaffected (still routes to the default-profile refresh)", async () => {
+    refreshSpy
+      .mockResolvedValueOnce({ ...OK_RESULT, clusteringFailed: true, clusteringFailureReason: "timeout" })
+      .mockResolvedValue(OK_RESULT);
+    renderAt({ bootstrap: true, forceRefresh: true });
+    await screen.findByTestId("dashboard-clustering-failed");
+    // No auto-retry on the failure-empty state (guarded).
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    // Manual retry → handleRetry → default-profile refresh, untouched by Step 4.
+    fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+    await screen.findByTestId("dashboard-empty");
+    expect(refreshSpy).toHaveBeenCalledWith({
+      endpoint: "/api/dashboard/refresh?profile=default",
+    });
+    // The manual-retry empty render does NOT trigger the onboarding auto-retry
+    // (reloadCounter > 0 excludes it): exactly the two calls above.
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
   });
 });
