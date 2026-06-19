@@ -8842,6 +8842,102 @@ test("Slice 6 (E): a prefetch kickoff failure is non-fatal — settings still 20
   });
 });
 
+// ─── Step 1 (onboarding meta-stories): additive viability metadata ───────────
+// `_meta.totalSourceCount` / `_meta.onboardingViable` let the client route
+// onboarding users without inferring viability from payload shape. They appear
+// ONLY when a narrative was provided, and reuse the Slice 6 prefetch harness
+// (extraction stub + real kickoff) so prefetch behavior stays observable.
+// Viability also gates the cold-start prefetch: only a viable onboarding
+// (succeeded extraction + at least one source) kicks off a refresh.
+//
+// Tests derive the expected source count from the returned payload rather than
+// hard-coding a fixture count, so they stay correct if VALID_BODY changes.
+function sourceCountOf(payload) {
+  return (payload.traditionalSources?.length ?? 0) + (payload.socialSources?.length ?? 0);
+}
+
+test("Step 1 (viable): succeeded extraction with sources => onboardingViable true and prefetch kicks off", async () => {
+  await withSlice6PrefetchHarness({}, async () => {
+    await withIsolatedUser("step1-viable", async () => {
+      // Explicit multi-source payload so the viable count is self-evident here
+      // and not tied to VALID_BODY's fixture values.
+      const body = {
+        ...VALID_BODY,
+        traditionalSources: ["Reuters", "AP"],
+        socialSources: ["@latamwatcher"],
+        onboardingRawText: "narrative",
+      };
+      const res = await request(app)
+        .put("/api/settings")
+        .send(body)
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.extractionStatus, "succeeded");
+      const expectedCount = sourceCountOf(res.body);
+      assert.ok(expectedCount > 0, "returned payload carries sources");
+      assert.equal(res.body._meta?.totalSourceCount, expectedCount);
+      assert.equal(res.body._meta?.onboardingViable, true);
+      // Viable → prefetch runs (refreshJobId === userId).
+      assert.equal(res.body._meta?.refreshJobId, "step1-viable");
+    });
+  });
+});
+
+test("Step 1 (extraction failed): onboardingViable false and no prefetch", async () => {
+  await withSlice6PrefetchHarness({ extractionSucceeds: false }, async () => {
+    await withIsolatedUser("step1-extract-fail", async () => {
+      const res = await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, onboardingRawText: "narrative" })
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.extractionStatus, "failed");
+      // totalSourceCount still mirrors the returned payload, but a failed
+      // extraction is never viable regardless of source count.
+      assert.equal(res.body._meta?.totalSourceCount, sourceCountOf(res.body));
+      assert.equal(res.body._meta?.onboardingViable, false);
+      assert.equal(res.body._meta?.refreshJobId, undefined, "no prefetch on failed extraction");
+    });
+  });
+});
+
+test("Step 1 (succeeded, zero sources): onboardingViable false and no prefetch", async () => {
+  await withSlice6PrefetchHarness({}, async () => {
+    await withIsolatedUser("step1-zero-sources", async () => {
+      // Both the input body and the stubbed extraction carry no sources, so the
+      // merged post-extraction payload has zero — succeeded but not viable.
+      const res = await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, traditionalSources: [], socialSources: [], onboardingRawText: "narrative" })
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.extractionStatus, "succeeded");
+      assert.equal(sourceCountOf(res.body), 0, "returned payload has no sources");
+      assert.equal(res.body._meta?.totalSourceCount, 0);
+      assert.equal(res.body._meta?.onboardingViable, false, "succeeded but zero sources is not viable");
+      // Viability gates prefetch: a non-viable onboarding does NOT kick off a
+      // refresh, so no refreshJobId is returned.
+      assert.equal(res.body._meta?.refreshJobId, undefined, "no prefetch when not viable");
+      assert.equal(_getRefreshJob("step1-zero-sources"), null, "no job registered");
+    });
+  });
+});
+
+test("Step 1 (no narrative): _meta omits totalSourceCount and onboardingViable", async () => {
+  await withSlice6PrefetchHarness({}, async () => {
+    await withIsolatedUser("step1-no-narrative", async () => {
+      const res = await request(app)
+        .put("/api/settings")
+        .send(VALID_BODY) // no onboardingRawText
+        .set("Content-Type", "application/json");
+      assert.equal(res.status, 200);
+      assert.equal(res.body._meta?.extractionStatus, "not_attempted");
+      assert.equal(res.body._meta?.totalSourceCount, undefined, "no viability fields without a narrative");
+      assert.equal(res.body._meta?.onboardingViable, undefined);
+    });
+  });
+});
+
 // Poll the registry until the fire-and-forget prefetch settles the job to a
 // terminal state (or `maxTicks` flushes elapse). Deterministic enough for the
 // stubbed executor, which resolves immediately.
