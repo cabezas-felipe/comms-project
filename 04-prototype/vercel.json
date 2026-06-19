@@ -3,6 +3,10 @@
     {
       "source": "/api/:path*",
       "destination": "https://tempo-gray-psi.vercel.app/api/:path*"
+    },
+    {
+      "source": "/:path*",
+      "destination": "/index.html"
     }
   ]
 }
