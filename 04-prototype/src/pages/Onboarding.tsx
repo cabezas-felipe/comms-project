@@ -11,11 +11,31 @@ import { Textarea } from "@/components/ui/textarea";
 import { ArrowRight, Keyboard, Loader2, Mic } from "lucide-react";
 import { notifyWarning, notifyError, notifySuccess } from "@/lib/notify";
 import { transcribeAudio } from "@/lib/voice-upload";
-import { saveSettingsPayload, SaveSettingsError } from "@/lib/settings-api";
+import {
+  saveSettingsPayload,
+  SaveSettingsError,
+  type SaveSettingsResult,
+} from "@/lib/settings-api";
 import { CONTRACT_VERSION, settingsPayloadSchema } from "@tempo/contracts";
 
 type Mode = "type" | "voice";
 type RecordingState = "idle" | "recording" | "processing" | "ready" | "error";
+
+// Step 2: decide whether an onboarding save produced a viable dashboard.
+// Prefer the Step 1 backend signal (`_meta.onboardingViable`) when present.
+// When it's absent (older/degraded responses) fall back to deriving viability
+// from the returned payload: extraction must have succeeded AND the merged
+// payload must carry at least one source. A viable onboarding routes to the
+// dashboard; a non-viable one routes to Settings so the user can finish setup.
+function isOnboardingViable(result: SaveSettingsResult): boolean {
+  const meta = result._meta;
+  if (typeof meta?.onboardingViable === "boolean") {
+    return meta.onboardingViable;
+  }
+  const totalSourceCount =
+    (result.traditionalSources?.length ?? 0) + (result.socialSources?.length ?? 0);
+  return meta?.extractionStatus === "succeeded" && totalSourceCount > 0;
+}
 
 const EXAMPLE_TEXT =
   "I lead comms for a nonprofit working on migration between the US and Colombia. I read NYT and El Tiempo, and I follow the State Department on X. Mostly I brief US boards on what's happening in Colombia.";
@@ -169,6 +189,18 @@ export default function Onboarding() {
     trackOnboardingSucceeded();
     notifySuccess("Tempo set. Welcome.");
     setSubmitting(false);
+
+    // Step 2 (onboarding meta-stories): route on viability. A non-viable
+    // onboarding (extraction failed, or succeeded with zero sources) has nothing
+    // for the dashboard to render yet, so send the user to Settings to complete
+    // what they're monitoring — no bootstrap/refresh handoff state. The
+    // extraction-failed warning toast is intentionally gone: routing to Settings
+    // is now the recovery affordance, not a toast.
+    if (!isOnboardingViable(saveResult)) {
+      navigate("/settings");
+      return;
+    }
+
     // Phase 5: Onboarding → Dashboard post-submit is the second of the two
     // surfaces that should trigger backend-owned bootstrap freshness.
     //
@@ -206,13 +238,6 @@ export default function Onboarding() {
       import.meta.env.DEV ? "/dashboard?preview=1" : "/dashboard",
       { state: handoffState }
     );
-
-    // Surface backend extraction failure — save already committed, user can fix in Settings.
-    const extractionStatus = saveResult._meta?.extractionStatus;
-    if (extractionStatus === "failed") {
-      notifyWarning("We hit an issue on our side. You can keep going and complete what you're monitoring in Settings.");
-    }
-
   };
 
   return (

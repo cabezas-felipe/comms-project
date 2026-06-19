@@ -235,20 +235,24 @@ describe("Onboarding — extraction status toast", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows warning toast when _meta.extractionStatus is 'failed'", async () => {
+  // Step 2 removed the extraction-failed warning toast on the success path —
+  // routing to Settings is now the recovery affordance. These guard that the
+  // toast never fires regardless of extraction outcome.
+  it("never shows the extraction-failed warning toast, even when extraction failed", async () => {
     vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
       ...BASE_PAYLOAD,
-      _meta: { extractionStatus: "failed" },
+      _meta: { extractionStatus: "failed", onboardingViable: false },
     });
 
     renderOnboarding();
     await submitWithText("Colombia diplomacy.");
 
     await waitFor(() => {
-      expect(notify.notifyWarning).toHaveBeenCalledWith(
-        "We hit an issue on our side. You can keep going and complete what you're monitoring in Settings."
-      );
+      expect(mockNavigate).toHaveBeenCalled();
     });
+    expect(notify.notifyWarning).not.toHaveBeenCalledWith(
+      expect.stringContaining("issue on our side")
+    );
   });
 
   it("does not show extraction warning toast when _meta.extractionStatus is 'succeeded'", async () => {
@@ -294,7 +298,7 @@ describe("Onboarding — cold-start handoff (Slice 8)", () => {
   it("forwards coldStartJobId in navigate state when _meta.refreshJobId is present", async () => {
     vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
       ...BASE_PAYLOAD,
-      _meta: { extractionStatus: "succeeded", refreshJobId: "user-abc" },
+      _meta: { extractionStatus: "succeeded", onboardingViable: true, refreshJobId: "user-abc" },
     });
 
     renderOnboarding();
@@ -314,7 +318,7 @@ describe("Onboarding — cold-start handoff (Slice 8)", () => {
   it("trims surrounding whitespace from refreshJobId before forwarding", async () => {
     vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
       ...BASE_PAYLOAD,
-      _meta: { extractionStatus: "succeeded", refreshJobId: "  user-xyz  " },
+      _meta: { extractionStatus: "succeeded", onboardingViable: true, refreshJobId: "  user-xyz  " },
     });
 
     renderOnboarding();
@@ -330,7 +334,7 @@ describe("Onboarding — cold-start handoff (Slice 8)", () => {
   it("omits coldStartJobId from navigate state when _meta.refreshJobId is absent", async () => {
     vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
       ...BASE_PAYLOAD,
-      _meta: { extractionStatus: "succeeded" },
+      _meta: { extractionStatus: "succeeded", onboardingViable: true },
     });
 
     renderOnboarding();
@@ -347,7 +351,7 @@ describe("Onboarding — cold-start handoff (Slice 8)", () => {
   it("omits coldStartJobId when refreshJobId is blank/whitespace, navigating exactly as before", async () => {
     vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
       ...BASE_PAYLOAD,
-      _meta: { extractionStatus: "succeeded", refreshJobId: "   " },
+      _meta: { extractionStatus: "succeeded", onboardingViable: true, refreshJobId: "   " },
     });
 
     renderOnboarding();
@@ -365,7 +369,7 @@ describe("Onboarding — cold-start handoff (Slice 8)", () => {
       ...BASE_PAYLOAD,
       // Simulate malformed backend meta: a non-string truthy value that would
       // throw if `.trim()` were called on it directly.
-      _meta: { extractionStatus: "succeeded", refreshJobId: 123 as unknown as string },
+      _meta: { extractionStatus: "succeeded", onboardingViable: true, refreshJobId: 123 as unknown as string },
     });
 
     renderOnboarding();
@@ -381,8 +385,15 @@ describe("Onboarding — cold-start handoff (Slice 8)", () => {
     expect(opts.state).not.toHaveProperty("coldStartJobId");
   });
 
-  it("navigates normally (no coldStartJobId) when _meta is entirely absent", async () => {
-    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce(BASE_PAYLOAD);
+  it("navigates with handoff state (no coldStartJobId) for a viable save without refreshJobId", async () => {
+    // Fallback-viable: no onboardingViable flag, but extraction succeeded and the
+    // returned payload carries a source — so viability is derived and the user
+    // still lands on the dashboard, just without a cold-start job to join.
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      traditionalSources: ["Reuters"],
+      _meta: { extractionStatus: "succeeded" },
+    });
 
     renderOnboarding();
     await submitWithText("Colombia diplomacy.");
@@ -390,7 +401,110 @@ describe("Onboarding — cold-start handoff (Slice 8)", () => {
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalled();
     });
-    const [, opts] = mockNavigate.mock.calls[0];
+    const [dest, opts] = mockNavigate.mock.calls[0];
+    expect(String(dest)).toMatch(/^\/dashboard/);
+    expect(opts.state).toEqual({ bootstrap: true, forceRefresh: true });
+  });
+});
+
+describe("Onboarding — viability routing (Step 2)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockNavigate.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("routes to /dashboard with handoff state when onboarding is viable", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      _meta: { extractionStatus: "succeeded", onboardingViable: true, refreshJobId: "user-abc" },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalled();
+    });
+    const [dest, opts] = mockNavigate.mock.calls[0];
+    expect(String(dest)).toMatch(/^\/dashboard/);
+    expect(opts.state).toEqual({
+      bootstrap: true,
+      forceRefresh: true,
+      coldStartJobId: "user-abc",
+    });
+  });
+
+  it("routes to /settings (no handoff state) when _meta.onboardingViable === false", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      // refreshJobId present but viability false — the flag wins; no dashboard.
+      _meta: { extractionStatus: "succeeded", onboardingViable: false, refreshJobId: "user-abc" },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith("/settings");
+    });
+    // Exactly one navigation, to Settings, with no handoff state argument.
+    expect(mockNavigate).toHaveBeenCalledTimes(1);
+    const [dest, opts] = mockNavigate.mock.calls[0];
+    expect(dest).toBe("/settings");
+    expect(opts).toBeUndefined();
+  });
+
+  it("routes to /settings via fallback when onboardingViable is absent and extraction failed", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      traditionalSources: ["Reuters"], // sources present, but extraction failed
+      _meta: { extractionStatus: "failed" },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith("/settings");
+    });
+    expect(mockNavigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes to /settings via fallback when onboardingViable is absent and there are zero sources", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD, // zero sources
+      _meta: { extractionStatus: "succeeded" },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith("/settings");
+    });
+    expect(mockNavigate).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes to /dashboard via fallback when onboardingViable is absent but extraction succeeded with sources", async () => {
+    vi.mocked(settingsApi.saveSettingsPayload).mockResolvedValueOnce({
+      ...BASE_PAYLOAD,
+      traditionalSources: ["Reuters"],
+      socialSources: ["@latamwatcher"],
+      _meta: { extractionStatus: "succeeded" },
+    });
+
+    renderOnboarding();
+    await submitWithText("Colombia diplomacy.");
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalled();
+    });
+    const [dest, opts] = mockNavigate.mock.calls[0];
+    expect(String(dest)).toMatch(/^\/dashboard/);
     expect(opts.state).toEqual({ bootstrap: true, forceRefresh: true });
   });
 });
