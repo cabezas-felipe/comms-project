@@ -190,10 +190,10 @@ export default function Onboarding() {
     notifySuccess("Tempo set. Welcome.");
     setSubmitting(false);
 
-    // Step 2 (onboarding meta-stories): route on viability. A non-viable
-    // onboarding (extraction failed, or succeeded with zero sources) has nothing
-    // for the dashboard to render yet, so send the user to Settings to complete
-    // what they're monitoring — no bootstrap/refresh handoff state. The
+    // Viability routing (onboarding meta-stories): a non-viable onboarding
+    // (extraction failed, or succeeded with zero sources) has nothing for the
+    // dashboard to render yet, so send the user to Settings to complete what
+    // they're monitoring — no bootstrap/refresh handoff state. The
     // extraction-failed warning toast is intentionally gone: routing to Settings
     // is now the recovery affordance, not a toast.
     if (!isOnboardingViable(saveResult)) {

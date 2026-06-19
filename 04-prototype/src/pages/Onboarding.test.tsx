@@ -225,7 +225,7 @@ describe("Onboarding — payload construction (no seeded defaults)", () => {
   });
 });
 
-describe("Onboarding — extraction status toast", () => {
+describe("Onboarding — extraction-failed warning toast removed (Step 2)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockNavigate.mockClear();
