@@ -8766,6 +8766,12 @@ test("Slice 6 (A): successful onboarding save + extraction kicks off a cold_star
       assert.equal(res.body._meta?.extractionStatus, "succeeded");
       assert.equal(res.body._meta?.refreshJobId, "slice6-happy", "refreshJobId === userId");
       assert.equal(res.body.refreshJobId, undefined, "no top-level refreshJobId");
+      // Step 1 coexistence: the canonical happy path also surfaces viability
+      // metadata (no drift — the prefetch kickoff and the viability fields agree
+      // that this onboarding is viable).
+      assert.equal(res.body._meta?.onboardingViable, true, "viable narrative");
+      assert.ok(sourceCountOf(res.body) > 0, "merged payload carries sources");
+      assert.equal(res.body._meta?.totalSourceCount, sourceCountOf(res.body));
       // Executor invoked exactly once with the cold_start profile.
       assert.equal(calls.length, 1, "prefetch starts exactly one refresh");
       assert.equal(calls[0].userId, "slice6-happy");
@@ -8819,6 +8825,11 @@ test("Slice 6 (D): an in-flight refresh is JOINED — refreshJobId returned, no 
       assert.equal(res.status, 200);
       assert.equal(res.body._meta?.refreshJobId, "slice6-inflight", "joins the in-flight job id");
       assert.equal(calls.length, 0, "no second executor run while one is in flight");
+      // Step 1 regression guard: the viability gate (`onboardingRawText &&
+      // onboardingViable`) must still PERMIT the in-flight join. A viable
+      // narrative (sources present + extraction succeeded) joins; the gate
+      // didn't accidentally suppress the join path.
+      assert.equal(res.body._meta?.onboardingViable, true, "viable narrative still joins");
     });
   });
 });
@@ -8879,6 +8890,12 @@ test("Step 1 (viable): succeeded extraction with sources => onboardingViable tru
       assert.equal(res.body._meta?.onboardingViable, true);
       // Viable → prefetch runs (refreshJobId === userId).
       assert.equal(res.body._meta?.refreshJobId, "step1-viable");
+      // Contract: viability + job-handle metadata is namespaced under `_meta`
+      // ONLY — none of it leaks onto the top-level settings payload (which the
+      // client parses against the strict settings schema).
+      assert.equal(res.body.refreshJobId, undefined, "no top-level refreshJobId leak");
+      assert.equal(res.body.totalSourceCount, undefined, "no top-level totalSourceCount leak");
+      assert.equal(res.body.onboardingViable, undefined, "no top-level onboardingViable leak");
     });
   });
 });
