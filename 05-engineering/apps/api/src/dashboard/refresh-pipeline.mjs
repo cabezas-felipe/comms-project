@@ -2512,6 +2512,17 @@ export async function runRefreshPipeline({
     ...(settings.traditionalSources ?? []),
     ...(settings.socialSources ?? []),
   ];
+  // Prompt 2 (traditional vs social split): traditional and social sources are
+  // resolved by DIFFERENT mechanisms.  Only traditional names belong in manifest
+  // matching (`resolveSelectedSources`); social handles are resolved by the
+  // social/X selection logic below.  Feeding social handles into the manifest
+  // matcher made them surface in the traditional `unmatchedSelectedSources`
+  // diagnostic — and, when X was disabled, there was no post-filter to strip
+  // them — so e.g. `@petrogustavo` leaked into the traditional unmatched list.
+  // Splitting the inputs fixes that at the source.  `selectedNames` (combined)
+  // is still used for the C2 zero-source gate and the user-facing
+  // `selectedSourceCount`.
+  const traditionalSelectedNames = settings.traditionalSources ?? [];
   if (selectedNames.length === 0) {
     recentItems = [];
     selectionMeta = {
@@ -2530,7 +2541,7 @@ export async function runRefreshPipeline({
     );
   } else if (manifestFeeds) {
     const selection = resolveSelectedSources({
-      selectedSources: selectedNames,
+      selectedSources: traditionalSelectedNames,
       manifestFeeds,
       aliasMap,
       fallbackFeedIds,
@@ -2549,10 +2560,15 @@ export async function runRefreshPipeline({
     // admit `kind:"social"` items whose outlet matches a selected handle — a
     // true UNION with the manifest match.  Inert when X is disabled or the user
     // has no social sources (set stays empty → no items admitted via this path).
+    // Deduped canonical handle identities for the user's selected social
+    // sources.  Built unconditionally so `selectedSourceCount` can report the
+    // combined (traditional + social) selection even when X ingestion is off;
+    // only fed into item admission when the social path is actually active.
+    const selectedSocialHandleSet = buildSelectedSocialHandleSet(settings.socialSources);
     const socialSelectionApplied =
       socialIngestionEnabled && (settings.socialSources ?? []).length > 0;
     const selectedSocialHandles = socialSelectionApplied
-      ? buildSelectedSocialHandleSet(settings.socialSources)
+      ? selectedSocialHandleSet
       : new Set();
 
     const matchedKeys = {
@@ -2575,15 +2591,12 @@ export async function runRefreshPipeline({
     }
     const matchedSocialSources = [...matchedSocialSet];
 
-    // The selected social handles are served via the social connector, NOT the
-    // RSS manifest — so they must not be reported as "unmatched manifest
-    // sources" (the original bug).  Drop them from the unmatched list when the
-    // social path is active.  Traditional unmatched names are untouched.
-    const unmatchedSelectedSources = socialSelectionApplied
-      ? selection.unmatchedSelectedSources.filter(
-          (name) => !selectedSocialHandles.has(normalizeSocialHandle(name))
-        )
-      : selection.unmatchedSelectedSources;
+    // Prompt 2: social handles no longer enter the manifest matcher at all, so
+    // the traditional unmatched list is already free of them — no post-filter
+    // needed.  (Previously social handles were matched here and stripped only
+    // when X was enabled, leaking them into `unmatchedSelectedSources` whenever
+    // X was disabled.)  This now reflects ONLY unresolved traditional names.
+    const unmatchedSelectedSources = selection.unmatchedSelectedSources;
 
     // Low-noise diagnostic: when source-selection collapses a non-empty
     // input pool to zero despite matched feeds, log a small sample so
@@ -2601,19 +2614,47 @@ export async function runRefreshPipeline({
         `[pipeline.selection] source_selection drop-to-zero: input=${recentNormalizedItems.length} matchedFeeds=${selection.matchedFeeds.length} matchedFeedIds=${JSON.stringify([...matchedKeys.feedIds])} matchedOutlets=${JSON.stringify([...matchedKeys.outlets])} sampleItems=${JSON.stringify(sample)}`
       );
     }
+    // ── Prompt 3: coherent hybrid selection counts ──────────────────────────
+    // After the Prompt 2 split the manifest matcher only sees traditional names,
+    // so `selection.matchedSourceCount` / `selection.selectedSourceCount` are
+    // TRADITIONAL-only.  Report COMBINED (traditional + social) values for the
+    // headline `matchedSourceCount` / `selectedSourceCount` so they read
+    // consistently in `_meta.selection` and the log line, and add per-kind
+    // clarity fields so the breakdown is explicit:
+    //   matchedSourceCount  = matchedTraditional + matchedSocial   (combined)
+    //   selectedSourceCount = selectedTraditional + selectedSocial (combined)
+    // Truthfulness: social contributes to SELECTED counts whenever the user
+    // picked handles (even with X disabled), but to MATCHED counts only when X
+    // is enabled and social items actually flowed (`matchedSocialSources`).
+    const matchedTraditionalSourceCount = selection.matchedSourceCount;
+    const selectedTraditionalSourceCount = selection.selectedSourceCount;
+    const selectedSocialSourceCount = selectedSocialHandleSet.size;
+    const matchedSocialSourceCount = matchedSocialSources.length;
+    const combinedSelectedSourceCount =
+      selectedTraditionalSourceCount + selectedSocialSourceCount;
+    const combinedMatchedSourceCount =
+      matchedTraditionalSourceCount + matchedSocialSourceCount;
+
     selectionMeta = {
       sourceSelectionMode: selection.mode,
       sourceFallbackUsed: selection.fallbackUsed,
       sourceFallbackReason: selection.fallbackReason,
-      matchedSourceCount: selection.matchedSourceCount,
-      selectedSourceCount: selection.selectedSourceCount,
+      // Headline counts are COMBINED (traditional + social) so x/y reads
+      // coherently everywhere this is surfaced.
+      matchedSourceCount: combinedMatchedSourceCount,
+      selectedSourceCount: combinedSelectedSourceCount,
       unmatchedSelectedSources,
       unavailableConnectorCount: selection.unavailableConnectorCount,
       unavailableConnectorSources: selection.unavailableConnectorSources,
       matchedFeedIds: selection.matchedFeeds.map((f) => f.id),
-      // Additive social-selection diagnostics (truthful — NOT folded into
-      // matchedFeedIds, which stays manifest-only / synthetic-id-free).
-      matchedSocialSourceCount: matchedSocialSources.length,
+      // Additive per-kind clarity fields (truthful breakdown of the combined
+      // headline counts above).
+      matchedTraditionalSourceCount,
+      selectedTraditionalSourceCount,
+      selectedSocialSourceCount,
+      // Social-selection diagnostics (NOT folded into matchedFeedIds, which
+      // stays manifest-only / synthetic-id-free).
+      matchedSocialSourceCount,
       matchedSocialSources,
       socialSelectionApplied,
     };
@@ -2624,8 +2665,8 @@ export async function runRefreshPipeline({
     const unmatchedNames = unmatchedSelectedSources;
     const unavailableNames = selection.unavailableConnectorSources;
     console.log(
-      `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${selection.matchedSourceCount}/${selection.selectedSourceCount} unmatched=${unmatchedNames.length} unavailable=${selection.unavailableConnectorCount} feeds=${selectionMeta.matchedFeedIds.length}` +
-        ` socialApplied=${socialSelectionApplied} matchedSocial=${matchedSocialSources.length}` +
+      `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${combinedMatchedSourceCount}/${combinedSelectedSourceCount} unmatched=${unmatchedNames.length} unavailable=${selection.unavailableConnectorCount} feeds=${selectionMeta.matchedFeedIds.length}` +
+        ` trad=${matchedTraditionalSourceCount}/${selectedTraditionalSourceCount} socialApplied=${socialSelectionApplied} matchedSocial=${matchedSocialSourceCount}/${selectedSocialSourceCount}` +
         (unmatchedNames.length > 0 ? ` unmatchedSources=${JSON.stringify(unmatchedNames)}` : "") +
         (unavailableNames.length > 0 ? ` unavailableSources=${JSON.stringify(unavailableNames)}` : "") +
         (matchedSocialSources.length > 0 ? ` matchedSocialSources=${JSON.stringify(matchedSocialSources)}` : "")

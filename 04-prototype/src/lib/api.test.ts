@@ -1153,6 +1153,48 @@ describe("refreshDashboard", () => {
     expect(selection?.matchedSourceCount).toBe(2);
   });
 
+  it("Prompt 4: retains expanded selection fields (social, per-kind counts, blockedSocialSources)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        contractVersion: CONTRACT_VERSION,
+        stories: STORIES,
+        _meta: {
+          selection: {
+            sourceSelectionMode: "strict",
+            sourceFallbackUsed: false,
+            // Combined headline counts (Prompt 3).
+            matchedSourceCount: 2,
+            selectedSourceCount: 3,
+            unmatchedSelectedSources: ["Made-Up Outlet"],
+            unavailableConnectorCount: 0,
+            // Social diagnostics (Prompts 2–3).
+            socialSelectionApplied: true,
+            matchedSocialSourceCount: 1,
+            matchedSocialSources: ["@petrogustavo"],
+            // Per-kind breakdown (Prompt 3).
+            matchedTraditionalSourceCount: 1,
+            selectedTraditionalSourceCount: 2,
+            selectedSocialSourceCount: 1,
+            // Allowlist diagnostics (Prompt 4).
+            blockedSocialSources: ["@blockedhandle"],
+          },
+        },
+      }),
+    });
+    const { selection } = await refreshDashboard({ fetcher, retries: 0 });
+    expect(selection).not.toBeNull();
+    // The defensive parser must PRESERVE the new optional fields, not strip them.
+    expect(selection?.socialSelectionApplied).toBe(true);
+    expect(selection?.matchedSocialSourceCount).toBe(1);
+    expect(selection?.matchedSocialSources).toEqual(["@petrogustavo"]);
+    expect(selection?.matchedTraditionalSourceCount).toBe(1);
+    expect(selection?.selectedTraditionalSourceCount).toBe(2);
+    expect(selection?.selectedSocialSourceCount).toBe(1);
+    expect(selection?.blockedSocialSources).toEqual(["@blockedhandle"]);
+  });
+
   it("returns refreshedAt=null when _meta.refreshedAt is missing", async () => {
     const fetcher = vi.fn().mockResolvedValue({
       ok: true,

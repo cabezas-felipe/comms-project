@@ -59,7 +59,9 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _refreshUpgrade, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _xReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _sourceAliases, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _refreshUpgrade, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _xReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
+const { SOURCE_NAME_ALIASES } = await import("./contracts-runtime/index.mjs");
+const { resolveSelectedSources: _resolveSelectedSources } = await import("./ingestion/source-matcher.mjs");
 const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
@@ -869,6 +871,140 @@ test("refresh pipeline: old settings topic still matches item with the same old 
   }
 });
 
+// ─── Supabase alias map → refresh pipeline (end-to-end wiring) ───────────────
+//
+// Proves Prompt 1's blocker fix: operator-curated Supabase aliases loaded at
+// refresh time actually reach the refresh pipeline's source selection (not just
+// the cache feed-id scoping). We stub `_sourceAliases.read` to inject a Supabase
+// alias map and capture the opts handed to `_refreshPipeline.run`, then assert
+// the merged aliasMap (a) reaches the pipeline, (b) merges over the repo
+// fallback with Supabase winning on conflict, and (c) makes an otherwise-
+// unmatched source resolve when run through the real matcher.
+
+test("refresh: Supabase aliasMap reaches the pipeline, merges over fallback, and drives matching", async () => {
+  const ISOLATED_USER_ID = "test-user-supabase-aliasmap";
+
+  // A brand-new alias absent from the repo's static SOURCE_NAME_ALIASES, plus a
+  // deliberate override of an existing fallback key to prove Supabase precedence.
+  const SUPABASE_ALIASES = {
+    "acme wire": "Reuters",            // net-new operator alias
+    nyt: "Supabase Override Wins",     // collides with fallback "New York Times"
+  };
+
+  let capturedRunOpts = null;
+  const prevAliasRead = _sourceAliases.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _sourceAliases.read = async () => ({ ...SUPABASE_ALIASES });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  const baseStub = topicNormalizationPipelineStub();
+  _refreshPipeline.run = async (opts) => {
+    capturedRunOpts = opts;
+    return baseStub(opts);
+  };
+
+  try {
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, traditionalSources: ["ACME Wire"] })
+        .set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.ok(capturedRunOpts !== null, "pipeline must have been invoked");
+
+      // (a) The aliasMap reaches the pipeline. Before the wiring fix this opt was
+      // never passed → undefined → this assertion fails.
+      const aliasMap = capturedRunOpts.aliasMap;
+      assert.ok(aliasMap && typeof aliasMap === "object",
+        "refresh must pass a merged aliasMap into _refreshPipeline.run");
+
+      // (b) Merge semantics: net-new Supabase alias present; repo fallback
+      // entries preserved; Supabase wins on conflicting keys.
+      assert.equal(aliasMap["acme wire"], "Reuters",
+        "net-new Supabase alias must be present in the merged map");
+      assert.equal(aliasMap["wsj"], SOURCE_NAME_ALIASES["wsj"],
+        "untouched repo fallback aliases must survive the merge");
+      assert.equal(aliasMap["nyt"], "Supabase Override Wins",
+        "Supabase alias must take precedence over the repo fallback on conflict");
+
+      // (c) Behavioral proof: the exact map handed to the pipeline makes an
+      // otherwise-unmatched source ("ACME Wire") resolve via the real matcher.
+      const manifest = [
+        { id: "reuters-world", name: "Reuters — World", publisher: "Reuters", kind: "rss", url: "https://r/w", weight: 90, active: true },
+      ];
+      const withAlias = _resolveSelectedSources({
+        selectedSources: ["ACME Wire"],
+        manifestFeeds: manifest,
+        aliasMap,
+      });
+      assert.deepEqual(withAlias.matchedFeeds.map((f) => f.id), ["reuters-world"],
+        "ACME Wire must resolve to the Reuters feed via the injected Supabase alias");
+      // Control: without the alias map the same selection is unmatched.
+      const withoutAlias = _resolveSelectedSources({
+        selectedSources: ["ACME Wire"],
+        manifestFeeds: manifest,
+      });
+      assert.deepEqual(withoutAlias.unmatchedSelectedSources, ["ACME Wire"],
+        "ACME Wire must NOT match without the alias map (proves the map is what resolves it)");
+    });
+  } finally {
+    _sourceAliases.read = prevAliasRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh: alias load failure is fail-open — pipeline still gets the repo fallback map", async () => {
+  const ISOLATED_USER_ID = "test-user-aliasmap-failopen";
+
+  let capturedRunOpts = null;
+  const prevAliasRead = _sourceAliases.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _sourceAliases.read = async () => { throw new Error("supabase down"); };
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  const baseStub = topicNormalizationPipelineStub();
+  _refreshPipeline.run = async (opts) => {
+    capturedRunOpts = opts;
+    return baseStub(opts);
+  };
+
+  try {
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY })
+        .set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      // Refresh must not crash when the alias load throws.
+      assert.equal(res.status, 200);
+      assert.ok(capturedRunOpts !== null, "pipeline must have been invoked despite alias load failure");
+      // Falls back to the repo's static alias map (a known entry survives).
+      assert.equal(capturedRunOpts.aliasMap?.["nyt"], SOURCE_NAME_ALIASES["nyt"],
+        "alias load failure must fall open to the repo fallback alias map");
+    });
+  } finally {
+    _sourceAliases.read = prevAliasRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
 // ─── X ingestion wiring (Phase 1, Step 1.3) ─────────────────────────────────
 //
 // These exercise the server seam that merges X (social) items into the refresh
@@ -1102,6 +1238,88 @@ test("refresh X wiring (Phase 2): multi-handle diagnostics surface handlesFetche
         const handed = capture.runOpts?.rawItems ?? [];
         const outlets = handed.filter((it) => it.kind === "social").map((it) => it.outlet).sort();
         assert.deepEqual(outlets, ["@petrogustavo", "@whitehouse"]);
+        assert.ok(capturedPayload !== null);
+        assert.doesNotMatch(JSON.stringify(res.body), /secret-bearer/);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh X wiring (Prompt 4): allowlist-blocked handle surfaces on _meta.selection.blockedSocialSources", async () => {
+  // Allowlist permits only "petrogustavo"; the user also selected "@whitehouse",
+  // which the allowlist excludes. The excluded handle must surface on
+  // `_meta.selection.blockedSocialSources` (canonical @handle form) WITHOUT
+  // disturbing the rest of the selection diagnostics or the ingestion outcome.
+  const ISOLATED_USER_ID = "test-user-x-allowlist";
+  const capture = {};
+  let capturedPayload = null;
+
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+  let xReadArgs = null;
+
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async (args) => {
+    xReadArgs = args;
+    return {
+      items: [X_SOCIAL_ITEM],
+      diagnostics: {
+        handlesRequested: 1,
+        handlesSelected: 1,
+        handlesFetched: 1,
+        tweetsReturned: 1,
+        errors: [],
+        degraded: false,
+      },
+    };
+  };
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: "petrogustavo" },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app)
+          .put("/api/settings")
+          .send({ ...VALID_BODY, socialSources: ["@petrogustavo", "@whitehouse"] })
+          .set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+
+        assert.equal(res.status, 200);
+        // The allowlist filtered the reader's selected handle set down to the
+        // permitted handle only (ingestion semantics unchanged / fail-open).
+        assert.deepEqual(xReadArgs?.socialSources, ["petrogustavo"],
+          "only the allowlisted handle is handed to the reader");
+
+        const sel = res.body._meta?.selection;
+        assert.ok(sel && typeof sel === "object", "_meta.selection present");
+        // The excluded handle surfaces in canonical @handle form.
+        assert.deepEqual(sel.blockedSocialSources, ["@whitehouse"],
+          "allowlist-blocked handle surfaces on _meta.selection.blockedSocialSources");
+        // Existing selection diagnostics remain intact (merge is additive).
+        assert.equal(sel.sourceSelectionMode, "test",
+          "existing selection fields are preserved alongside blockedSocialSources");
+
+        // Ingestion outcome unchanged: X still enabled, allowed handle fetched.
+        const x = res.body._meta?.ingestion?.x;
+        assert.equal(x?.enabled, true);
+        assert.equal(x?.degraded, false);
+        // The allowed handle's social item still reached the pipeline.
+        const handed = capture.runOpts?.rawItems ?? [];
+        assert.ok(handed.some((it) => it.kind === "social" && it.outlet === "@petrogustavo"),
+          "allowed social item still flows to the pipeline");
         assert.ok(capturedPayload !== null);
         assert.doesNotMatch(JSON.stringify(res.body), /secret-bearer/);
       })
@@ -5249,10 +5467,14 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
   // Removes coupling to prior-test state and to whatever the suite-wide
   // FIXTURE_SOURCE_FEEDS happens to contain at the moment.
   //
-  // Scenario: one traditional source and one social source each match a
-  // manifest row with an implemented connector (both `rss` and `social` are
-  // implemented as of Phase 1, Step 1.3), so strict mode is preserved with
-  // matchedSourceCount=2 and no unavailable connectors.
+  // Scenario: one traditional source ("Reuters") and one social source
+  // ("@latamwatcher") are selected, each with a corresponding manifest row.
+  // Prompt 2 (traditional vs social split): only TRADITIONAL names go through
+  // the manifest matcher, so just Reuters counts toward matchedSourceCount (1).
+  // The social handle is resolved by the social/X path, not the manifest matcher
+  // — it no longer inflates matchedSourceCount. Strict mode is still preserved
+  // (Reuters matched), no unavailable connectors, and selectedSourceCount stays
+  // the combined (traditional + social) count of 2.
   const sourceFeedsPath = path.join(tmpDir, "source-feeds.json");
   const SELECTION_MANIFEST = {
     feeds: [
@@ -5306,11 +5528,29 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
     assert.ok(sel);
     // Reuters matches the manifest row, so strict mode is preserved.
     assert.equal(sel.sourceSelectionMode, "strict");
-    // @latamwatcher matches the social row, which now has an implemented
-    // connector — so both sources match and none are unavailable.
+    // Prompt 2: only the traditional source goes through the manifest matcher,
+    // so just Reuters is a matched manifest source; @latamwatcher is split off
+    // to the social path and no longer counts here (and nothing is unavailable).
     assert.equal(sel.unavailableConnectorCount, 0);
-    assert.equal(sel.matchedSourceCount, 2);
+    // Prompt 3: headline matchedSourceCount is COMBINED. No @latamwatcher social
+    // items flow in this refresh, so matchedSocial=0 → combined matched = 1.
+    assert.equal(sel.matchedSourceCount, 1);
+    // selectedSourceCount stays the combined (traditional + social) selection.
     assert.equal(sel.selectedSourceCount, 2);
+    // Additive per-kind clarity fields surface through `_meta.selection` and are
+    // internally consistent with the combined headline counts.
+    assert.equal(sel.matchedTraditionalSourceCount, 1);
+    assert.equal(sel.selectedTraditionalSourceCount, 1);
+    assert.equal(sel.selectedSocialSourceCount, 1);
+    assert.equal(sel.matchedSocialSourceCount, 0);
+    assert.equal(
+      sel.matchedSourceCount,
+      sel.matchedTraditionalSourceCount + sel.matchedSocialSourceCount
+    );
+    assert.equal(
+      sel.selectedSourceCount,
+      sel.selectedTraditionalSourceCount + sel.selectedSocialSourceCount
+    );
     // Persisted snapshot carries the selection meta so GET can surface it too.
     assert.ok(writtenPayload?._selectionMeta, "selection meta must be persisted with snapshot");
   } finally {

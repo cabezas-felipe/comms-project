@@ -4,6 +4,7 @@ import {
   dashboardPayloadSchema,
   dashboardClusterCapMetaSchema,
   dashboardRefreshFailsafeMetaSchema,
+  dashboardSelectionMetaSchema,
   refreshFailureSchema,
   settingsPayloadSchema,
   sourceSchema,
@@ -496,5 +497,72 @@ describe("dashboardRefreshFailsafeMetaSchema", () => {
     expect(parsed.refreshStatus).toBe("failed");
     expect(parsed.usedPriorSnapshot).toBe(false);
     expect(parsed.refreshFailure?.subtype).toBe("timeout");
+  });
+});
+
+describe("dashboardSelectionMetaSchema", () => {
+  // Legacy selection meta (predates X ingestion) must still validate — every new
+  // field is optional/additive.
+  it("accepts a legacy selection meta with none of the new optional fields", () => {
+    const parsed = dashboardSelectionMetaSchema.parse({
+      sourceSelectionMode: "strict",
+      sourceFallbackUsed: false,
+      sourceFallbackReason: null,
+      matchedSourceCount: 1,
+      selectedSourceCount: 1,
+      unmatchedSelectedSources: [],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: ["reuters-world"],
+    });
+    expect(parsed.sourceSelectionMode).toBe("strict");
+    expect(parsed.socialSelectionApplied).toBeUndefined();
+    expect(parsed.blockedSocialSources).toBeUndefined();
+  });
+
+  // Full hybrid selection meta: all Prompt 1–4 additive fields are accepted AND
+  // retained (z.object strips UNKNOWN keys, but these are now known — so a parsed
+  // payload preserves them rather than dropping them).
+  it("accepts + retains all social, per-kind, and allowlist diagnostics fields", () => {
+    const full = {
+      sourceSelectionMode: "strict" as const,
+      sourceFallbackUsed: false,
+      sourceFallbackReason: null,
+      // Combined headline counts (Prompt 3).
+      matchedSourceCount: 2,
+      selectedSourceCount: 3,
+      unmatchedSelectedSources: ["Made-Up Outlet"],
+      unavailableConnectorCount: 0,
+      unavailableConnectorSources: [],
+      matchedFeedIds: ["reuters-world"],
+      relevantItemCount: 4,
+      // Social diagnostics (Prompts 2–3).
+      socialSelectionApplied: true,
+      matchedSocialSourceCount: 1,
+      matchedSocialSources: ["@petrogustavo"],
+      // Per-kind breakdown (Prompt 3).
+      matchedTraditionalSourceCount: 1,
+      selectedTraditionalSourceCount: 2,
+      selectedSocialSourceCount: 1,
+      // Allowlist diagnostics (Prompt 4).
+      blockedSocialSources: ["@blockedhandle"],
+    };
+    const parsed = dashboardSelectionMetaSchema.parse(full);
+    expect(parsed.socialSelectionApplied).toBe(true);
+    expect(parsed.matchedSocialSourceCount).toBe(1);
+    expect(parsed.matchedSocialSources).toEqual(["@petrogustavo"]);
+    expect(parsed.matchedTraditionalSourceCount).toBe(1);
+    expect(parsed.selectedTraditionalSourceCount).toBe(2);
+    expect(parsed.selectedSocialSourceCount).toBe(1);
+    expect(parsed.blockedSocialSources).toEqual(["@blockedhandle"]);
+  });
+
+  it("rejects negative / non-integer per-kind counts", () => {
+    expect(() =>
+      dashboardSelectionMetaSchema.parse({ selectedSocialSourceCount: -1 })
+    ).toThrow();
+    expect(() =>
+      dashboardSelectionMetaSchema.parse({ matchedSocialSourceCount: 1.5 })
+    ).toThrow();
   });
 });

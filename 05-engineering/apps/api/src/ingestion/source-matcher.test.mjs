@@ -103,6 +103,32 @@ test("resolveSelectedSources: alias resolution → canonical name → match", ()
   assert.deepEqual(result.matchedFeeds.map((f) => f.id), ["nyt-politics"]);
 });
 
+test("resolveSelectedSources: source unmatched under defaults resolves only via injected aliasMap (operator-mapped alias)", () => {
+  // "WaPo" is NOT in the repo's static SOURCE_NAME_ALIASES, so it normalizes to
+  // "wapo" and substring-matches none of the section feed names → unmatched.
+  const without = resolveSelectedSources({
+    selectedSources: ["WaPo"],
+    manifestFeeds: MANIFEST,
+  });
+  assert.deepEqual(without.unmatchedSelectedSources, ["WaPo"]);
+  assert.equal(without.matchedFeeds.length, 0);
+
+  // A Supabase-loaded alias map mapping "wapo" → "Washington Post" makes the
+  // same selection resolve to every WaPo section feed — proving alias-driven
+  // matching works without changing the manifest or repo code.
+  const withAlias = resolveSelectedSources({
+    selectedSources: ["WaPo"],
+    manifestFeeds: MANIFEST,
+    aliasMap: { wapo: "Washington Post" },
+  });
+  assert.equal(withAlias.mode, SELECTION_MODE.STRICT);
+  assert.equal(withAlias.unmatchedSelectedSources.length, 0);
+  assert.deepEqual(
+    withAlias.matchedFeeds.map((f) => f.id).sort(),
+    ["wapo-business", "wapo-politics", "wapo-world"]
+  );
+});
+
 test("resolveSelectedSources: deduplicates feeds when multiple selections converge on same feed", () => {
   const result = resolveSelectedSources({
     selectedSources: ["Washington Post", "WaPo Politics", "Washington Post"],

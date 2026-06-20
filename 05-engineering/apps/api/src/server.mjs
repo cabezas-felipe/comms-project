@@ -75,7 +75,9 @@ import {
   stripKeywordsMatchingGeographies,
   dashboardPayloadSchema,
   settingsPayloadSchema,
+  SOURCE_NAME_ALIASES,
 } from "./contracts-runtime/index.mjs";
+import { readSourceAliasMap } from "./db/source-aliases-repo.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -331,6 +333,11 @@ export const _sourceRegistrySync = { record: recordSourceRegistryEventsFromSetti
  * skip Supabase writes without a live instance. Do not use in production code paths.
  */
 export const _narrativeRepo = { append: appendOnboardingNarrative, read: readCurrentOnboardingNarrative };
+
+// DI seam for operator-curated Supabase source aliases (mirrors _narrativeRepo).
+// Tests stub `_sourceAliases.read` to inject a Supabase alias map and prove it
+// flows into refresh-time source selection.
+export const _sourceAliases = { read: readSourceAliasMap };
 
 /**
  * Mutable atomic-save hook. Tests override _atomicSave.execute to simulate the RPC
@@ -1388,7 +1395,7 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
   }
 
   try {
-    const [rawSettings, manifestFeeds, priorSnapshot, narrative] = await Promise.all([
+    const [rawSettings, manifestFeeds, priorSnapshot, narrative, supabaseAliasMap] = await Promise.all([
       readSettings(identity.userId),
       loadManifestForSelection(),
       _snapshotRepo.read(identity.userId).catch(() => null),
@@ -1396,7 +1403,21 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       // embedding profile.  Read failures are non-fatal — we just lose some
       // signal and the recall stage falls through to settings-only profile.
       _narrativeRepo.read(identity.userId).catch(() => null),
+      // Operator-curated aliases loaded at refresh time so user-entered source
+      // names resolve without a redeploy.  Fail-open: a load failure falls back
+      // to the repo's static SOURCE_NAME_ALIASES below.
+      _sourceAliases.read().catch((err) => {
+        console.warn(
+          `[refresh] source alias load failed (using repo fallback): ${err instanceof Error ? err.message : err}`
+        );
+        return {};
+      }),
     ]);
+
+    // Merge: Supabase aliases take precedence over the repo's static fallback.
+    // Both use lowercased alias keys, so a plain spread resolves conflicts in
+    // Supabase's favor while preserving fallback entries for unmapped names.
+    const aliasMap = { ...SOURCE_NAME_ALIASES, ...supabaseAliasMap };
 
     // Slice 4: cold-start gating — the `cold_start` profile is only valid for a
     // brand-new user with no prior dashboard snapshot.  If a snapshot already
@@ -1427,14 +1448,19 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     //
     // The pipeline still does its own source-selection downstream — the
     // server-level resolution here is only used to scope the cache lookup.
-    const selectedNames = [
-      ...(settings.traditionalSources ?? []),
-      ...(settings.socialSources ?? []),
-    ];
-    const cacheFeedIds = (manifestFeeds && selectedNames.length > 0)
+    //
+    // Prompt 2 (traditional vs social split): this RSS recent-items cache is
+    // keyed by manifest feed ids, so only TRADITIONAL selections can scope it —
+    // social handles are not manifest feeds and are served from the X cache /
+    // reader below.  Passing social handles here matched manifest-resident
+    // social rows and mixed them into the RSS cache scope; resolve only
+    // traditional names so the cache key set stays manifest-RSS-clean.
+    const traditionalSelectedNames = settings.traditionalSources ?? [];
+    const cacheFeedIds = (manifestFeeds && traditionalSelectedNames.length > 0)
       ? resolveSelectedSources({
-          selectedSources: selectedNames,
+          selectedSources: traditionalSelectedNames,
           manifestFeeds,
+          aliasMap,
           fallbackFeedIds: parseFallbackFeedIdsEnv(process.env.TEMPO_FALLBACK_SOURCE_IDS),
           fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
         }).matchedFeeds.map((f) => f.id).filter((id) => typeof id === "string" && id.length > 0)
@@ -1539,6 +1565,12 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       handlesFromCache: 0,
       handlesLiveFetched: 0,
     };
+    // Prompt 4: selected social handles excluded by `TEMPO_X_HANDLE_ALLOWLIST`
+    // (canonical `@handle` form). Surfaced additively on `_meta.selection` so the
+    // frontend can explain "you selected this handle but the allowlist blocked
+    // it" without changing any ingestion success/failure semantics. Declared in
+    // request scope so it survives the fail-open catch below.
+    let blockedSocialSources = [];
     try {
       const xConfig = resolveXConfig(process.env);
       xDiagnostics.enabled = xConfig.enabled === true;
@@ -1550,13 +1582,20 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         const allowSet = new Set(Array.isArray(xConfig.allowlist) ? xConfig.allowlist : []);
         const selectedUsernames = [];
         const seenUsernames = new Set();
+        // Prompt 4: capture allowlist-blocked handles (deduped, canonical
+        // `@handle` form) so the route can surface them on `_meta.selection`.
+        const blockedUsernames = new Set();
         for (const raw of settings.socialSources ?? []) {
           const norm = normalizeHandle(raw);
           if (!norm || seenUsernames.has(norm.username)) continue;
-          if (allowSet.size > 0 && !allowSet.has(norm.username)) continue;
+          if (allowSet.size > 0 && !allowSet.has(norm.username)) {
+            blockedUsernames.add(norm.username);
+            continue;
+          }
           seenUsernames.add(norm.username);
           selectedUsernames.push(norm.username);
         }
+        blockedSocialSources = [...blockedUsernames].map((u) => `@${u}`);
         const xFeedIds = selectedUsernames.map((u) => `x:${u}`);
 
         // Cache-first read for the selected X feed ids. `cacheRowsToRawItems` is
@@ -1773,6 +1812,9 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       clusterModel,
       contractVersion: DEFAULT_SETTINGS.contractVersion,
       manifestFeeds,
+      // Operator-curated aliases (Supabase ∪ repo fallback) so user-entered
+      // source names resolve at refresh-time source selection without a redeploy.
+      aliasMap,
       fallbackFeedIds: parseFallbackFeedIdsEnv(process.env.TEMPO_FALLBACK_SOURCE_IDS),
       fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
       priorWatermark,
@@ -1801,6 +1843,15 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     // branch returns a log without `timings`, which is fine.
     if (log && typeof log === "object") {
       log.timings = { ingestionMs, ...(log.timings ?? {}) };
+    }
+
+    // Prompt 4: fold allowlist-blocked handles into the pipeline's selection
+    // diagnostics so they ride the SAME `_meta.selection` path as every other
+    // selection field (persisted snapshot + immediate response). Additive: only
+    // attached when the allowlist actually blocked ≥1 selected handle, so
+    // payloads are byte-identical when no blocking occurred.
+    if (log?.selection && typeof log.selection === "object" && blockedSocialSources.length > 0) {
+      log.selection.blockedSocialSources = blockedSocialSources;
     }
 
     // ─── Phase 4 short-circuit: watermark unchanged ─────────────────────────

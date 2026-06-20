@@ -4569,13 +4569,29 @@ test("runRefreshPipeline: mixed traditional + social — both admitted, traditio
   // Traditional matching is exactly as before (strict, Reuters matched by id).
   assert.equal(log.selection.sourceSelectionMode, "strict");
   assert.deepEqual(log.selection.matchedFeedIds, ["reuters-world"]);
-  assert.equal(log.selection.matchedSourceCount, 1, "Reuters is the one matched traditional source");
+  assert.equal(log.selection.matchedTraditionalSourceCount, 1, "Reuters is the one matched traditional source");
 
-  // Social tracked in parallel — additive, not folded into the traditional counts.
+  // Social tracked in parallel — additive per-kind counts.
   assert.equal(log.selection.socialSelectionApplied, true);
   assert.deepEqual(log.selection.matchedSocialSources, ["@petrogustavo"]);
   assert.equal(log.selection.matchedSocialSourceCount, 1);
   assert.ok(!log.selection.unmatchedSelectedSources.includes("@petrogustavo"));
+
+  // Prompt 3: headline counts are COMBINED and internally consistent —
+  // matchedSourceCount = matchedTraditional(1) + matchedSocial(1) = 2, and
+  // selectedSourceCount = selectedTraditional(1) + selectedSocial(1) = 2.
+  assert.equal(log.selection.matchedSourceCount, 2, "combined matched = traditional + social");
+  assert.equal(log.selection.selectedSourceCount, 2, "combined selected = traditional + social");
+  assert.equal(log.selection.selectedTraditionalSourceCount, 1);
+  assert.equal(log.selection.selectedSocialSourceCount, 1);
+  assert.equal(
+    log.selection.matchedSourceCount,
+    log.selection.matchedTraditionalSourceCount + log.selection.matchedSocialSourceCount
+  );
+  assert.equal(
+    log.selection.selectedSourceCount,
+    log.selection.selectedTraditionalSourceCount + log.selection.selectedSocialSourceCount
+  );
 });
 
 test("runRefreshPipeline: X degraded (no social items) — RSS still flows, social not falsely reported as matched", async () => {
@@ -4609,8 +4625,9 @@ test("runRefreshPipeline: X degraded (no social items) — RSS still flows, soci
 
 test("runRefreshPipeline: social path is inert when X ingestion is disabled (backward compatible)", async () => {
   // socialIngestionEnabled defaults false. A stray social item must NOT be
-  // admitted via the social union, and the handle stays an unmatched manifest
-  // source — exactly the pre-X behavior.
+  // admitted via the social union. Prompt 2: the handle is NOT passed to the
+  // manifest matcher at all, so it never appears in the traditional
+  // `unmatchedSelectedSources` even with X disabled (the bug this fixes).
   const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: ["@petrogustavo"] };
   const rssItem = makeItem({
     sourceId: "reuters-1",
@@ -4636,8 +4653,74 @@ test("runRefreshPipeline: social path is inert when X ingestion is disabled (bac
   assert.ok(!clusterInput.some((i) => i.kind === "social"), "social item NOT admitted when X disabled");
   assert.equal(log.selection.socialSelectionApplied, false);
   assert.deepEqual(log.selection.matchedSocialSources, []);
-  // Backward-compatible: the unmatched handle is reported as unmatched.
-  assert.ok(log.selection.unmatchedSelectedSources.includes("@petrogustavo"));
+  // Prompt 2: the social handle is split off BEFORE manifest matching, so it is
+  // never reported in the traditional unmatched list — even with X disabled.
+  assert.ok(
+    !log.selection.unmatchedSelectedSources.includes("@petrogustavo"),
+    "social handle must NOT pollute traditional unmatched even when X is disabled"
+  );
+  // Reuters resolves cleanly, so the traditional unmatched list is empty.
+  assert.deepEqual(log.selection.unmatchedSelectedSources, []);
+  // Prompt 3: X disabled → social contributes to SELECTED but never to MATCHED.
+  // selectedSourceCount = selectedTraditional(1) + selectedSocial(1) = 2, but
+  // matchedSourceCount = matchedTraditional(1) + matchedSocial(0) = 1, so
+  // combined selected (2) > combined matched (1).
+  assert.equal(log.selection.selectedSourceCount, 2);
+  assert.equal(log.selection.selectedTraditionalSourceCount, 1);
+  assert.equal(log.selection.selectedSocialSourceCount, 1);
+  assert.equal(log.selection.matchedSourceCount, 1);
+  assert.equal(log.selection.matchedTraditionalSourceCount, 1);
+  assert.equal(log.selection.matchedSocialSourceCount, 0);
+  assert.ok(
+    log.selection.selectedSourceCount > log.selection.matchedSourceCount,
+    "social selected but not matched when X disabled"
+  );
+});
+
+test("runRefreshPipeline: traditional unmatched reports ONLY real unresolved traditional names, never social handles (X disabled)", async () => {
+  // Prompt 2 acceptance: a genuinely unmatched traditional outlet must still be
+  // reported, while a selected social handle must NOT appear in the traditional
+  // unmatched list — proving the split isolates the two source kinds.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["Made-Up Outlet", "Reuters"],
+    socialSources: ["@petrogustavo"],
+  };
+  const rssItem = makeItem({
+    sourceId: "reuters-1",
+    feedId: "reuters-world",
+    outlet: "Reuters",
+    kind: "traditional",
+    topic: "Diplomatic relations",
+    minutesAgo: 30,
+  });
+  const socialItem = makeSocialItem();
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [rssItem, socialItem],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    // X disabled (socialIngestionEnabled omitted → false).
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  // Only the real unmatched traditional outlet is reported — case-preserved.
+  assert.deepEqual(log.selection.unmatchedSelectedSources, ["Made-Up Outlet"]);
+  assert.ok(
+    !log.selection.unmatchedSelectedSources.includes("@petrogustavo"),
+    "social handle must never appear in traditional unmatched"
+  );
+  // Reuters still matched; social tracked separately (none when X disabled).
+  assert.equal(log.selection.socialSelectionApplied, false);
+  // Prompt 3: combined selected = 2 traditional + 1 social = 3; combined matched
+  // = 1 traditional (Reuters; "Made-Up Outlet" unmatched) + 0 social = 1.
+  assert.equal(log.selection.selectedSourceCount, 3);
+  assert.equal(log.selection.selectedTraditionalSourceCount, 2);
+  assert.equal(log.selection.selectedSocialSourceCount, 1);
+  assert.equal(log.selection.matchedSourceCount, 1);
+  assert.equal(log.selection.matchedTraditionalSourceCount, 1);
+  assert.equal(log.selection.matchedSocialSourceCount, 0);
 });
 
 // ─── Social funnel observability (X ingestion — additive _meta.funnel.social) ─
