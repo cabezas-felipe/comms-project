@@ -45,6 +45,17 @@ export default defineConfig(({ mode }) => {
     VitePWA({
       registerType: "autoUpdate",
       devOptions: { enabled: false },
+      includeAssets: ["favicon.ico", "apple-touch-icon.png"],
+      workbox: {
+        globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest}"],
+        navigateFallback: "/index.html",
+        runtimeCaching: [
+          {
+            urlPattern: /\/api\//,
+            handler: "NetworkOnly",
+          },
+        ],
+      },
       manifest: {
         name: "Tempo · Stay in sync with what changed",
         short_name: "Tempo",
