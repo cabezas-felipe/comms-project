@@ -1565,6 +1565,12 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       handlesFromCache: 0,
       handlesLiveFetched: 0,
     };
+    // Prompt 4: selected social handles excluded by `TEMPO_X_HANDLE_ALLOWLIST`
+    // (canonical `@handle` form). Surfaced additively on `_meta.selection` so the
+    // frontend can explain "you selected this handle but the allowlist blocked
+    // it" without changing any ingestion success/failure semantics. Declared in
+    // request scope so it survives the fail-open catch below.
+    let blockedSocialSources = [];
     try {
       const xConfig = resolveXConfig(process.env);
       xDiagnostics.enabled = xConfig.enabled === true;
@@ -1576,13 +1582,20 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
         const allowSet = new Set(Array.isArray(xConfig.allowlist) ? xConfig.allowlist : []);
         const selectedUsernames = [];
         const seenUsernames = new Set();
+        // Prompt 4: capture allowlist-blocked handles (deduped, canonical
+        // `@handle` form) so the route can surface them on `_meta.selection`.
+        const blockedUsernames = new Set();
         for (const raw of settings.socialSources ?? []) {
           const norm = normalizeHandle(raw);
           if (!norm || seenUsernames.has(norm.username)) continue;
-          if (allowSet.size > 0 && !allowSet.has(norm.username)) continue;
+          if (allowSet.size > 0 && !allowSet.has(norm.username)) {
+            blockedUsernames.add(norm.username);
+            continue;
+          }
           seenUsernames.add(norm.username);
           selectedUsernames.push(norm.username);
         }
+        blockedSocialSources = [...blockedUsernames].map((u) => `@${u}`);
         const xFeedIds = selectedUsernames.map((u) => `x:${u}`);
 
         // Cache-first read for the selected X feed ids. `cacheRowsToRawItems` is
@@ -1830,6 +1843,15 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     // branch returns a log without `timings`, which is fine.
     if (log && typeof log === "object") {
       log.timings = { ingestionMs, ...(log.timings ?? {}) };
+    }
+
+    // Prompt 4: fold allowlist-blocked handles into the pipeline's selection
+    // diagnostics so they ride the SAME `_meta.selection` path as every other
+    // selection field (persisted snapshot + immediate response). Additive: only
+    // attached when the allowlist actually blocked ≥1 selected handle, so
+    // payloads are byte-identical when no blocking occurred.
+    if (log?.selection && typeof log.selection === "object" && blockedSocialSources.length > 0) {
+      log.selection.blockedSocialSources = blockedSocialSources;
     }
 
     // ─── Phase 4 short-circuit: watermark unchanged ─────────────────────────

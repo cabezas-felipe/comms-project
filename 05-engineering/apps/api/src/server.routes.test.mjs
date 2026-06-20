@@ -1252,6 +1252,88 @@ test("refresh X wiring (Phase 2): multi-handle diagnostics surface handlesFetche
   }
 });
 
+test("refresh X wiring (Prompt 4): allowlist-blocked handle surfaces on _meta.selection.blockedSocialSources", async () => {
+  // Allowlist permits only "petrogustavo"; the user also selected "@whitehouse",
+  // which the allowlist excludes. The excluded handle must surface on
+  // `_meta.selection.blockedSocialSources` (canonical @handle form) WITHOUT
+  // disturbing the rest of the selection diagnostics or the ingestion outcome.
+  const ISOLATED_USER_ID = "test-user-x-allowlist";
+  const capture = {};
+  let capturedPayload = null;
+
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  const prevXRead = _xReader.read;
+  let xReadArgs = null;
+
+  _snapshotRepo.write = async (_uid, payload) => { capturedPayload = payload; };
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  _refreshPipeline.run = xMergePipelineStub(capture);
+  _xReader.read = async (args) => {
+    xReadArgs = args;
+    return {
+      items: [X_SOCIAL_ITEM],
+      diagnostics: {
+        handlesRequested: 1,
+        handlesSelected: 1,
+        handlesFetched: 1,
+        tweetsReturned: 1,
+        errors: [],
+        degraded: false,
+      },
+    };
+  };
+
+  try {
+    await withXEnv(
+      { TEMPO_X_INGESTION_ENABLED: "true", TEMPO_X_BEARER_TOKEN: "secret-bearer", TEMPO_X_HANDLE_ALLOWLIST: "petrogustavo" },
+      () => withIsolatedUser(ISOLATED_USER_ID, async () => {
+        await request(app)
+          .put("/api/settings")
+          .send({ ...VALID_BODY, socialSources: ["@petrogustavo", "@whitehouse"] })
+          .set("Content-Type", "application/json");
+        const res = await request(app).post("/api/dashboard/refresh");
+
+        assert.equal(res.status, 200);
+        // The allowlist filtered the reader's selected handle set down to the
+        // permitted handle only (ingestion semantics unchanged / fail-open).
+        assert.deepEqual(xReadArgs?.socialSources, ["petrogustavo"],
+          "only the allowlisted handle is handed to the reader");
+
+        const sel = res.body._meta?.selection;
+        assert.ok(sel && typeof sel === "object", "_meta.selection present");
+        // The excluded handle surfaces in canonical @handle form.
+        assert.deepEqual(sel.blockedSocialSources, ["@whitehouse"],
+          "allowlist-blocked handle surfaces on _meta.selection.blockedSocialSources");
+        // Existing selection diagnostics remain intact (merge is additive).
+        assert.equal(sel.sourceSelectionMode, "test",
+          "existing selection fields are preserved alongside blockedSocialSources");
+
+        // Ingestion outcome unchanged: X still enabled, allowed handle fetched.
+        const x = res.body._meta?.ingestion?.x;
+        assert.equal(x?.enabled, true);
+        assert.equal(x?.degraded, false);
+        // The allowed handle's social item still reached the pipeline.
+        const handed = capture.runOpts?.rawItems ?? [];
+        assert.ok(handed.some((it) => it.kind === "social" && it.outlet === "@petrogustavo"),
+          "allowed social item still flows to the pipeline");
+        assert.ok(capturedPayload !== null);
+        assert.doesNotMatch(JSON.stringify(res.body), /secret-bearer/);
+      })
+    );
+  } finally {
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    _xReader.read = prevXRead;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
 test("refresh X wiring: reader throw is fail-open — 200 with RSS output and _meta.ingestion.x.degraded", async () => {
   const ISOLATED_USER_ID = "test-user-x-throw";
   const capture = {};

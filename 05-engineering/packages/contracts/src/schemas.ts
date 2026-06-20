@@ -86,6 +86,26 @@ export const dashboardSelectionMetaSchema = z.object({
   unavailableConnectorSources: z.array(z.string()).optional(),
   matchedFeedIds: z.array(z.string()).optional(),
   relevantItemCount: z.number().int().nonnegative().optional(),
+  // ── Social-selection diagnostics (X ingestion; Prompts 2–3) ───────────────
+  // Additive + optional so legacy snapshots that predate X ingestion still
+  // validate. `socialSelectionApplied` is true when X ingestion was enabled for
+  // the run AND the user selected ≥1 social handle; `matchedSocialSources` are
+  // the selected handles that actually admitted ≥1 item this run.
+  socialSelectionApplied: z.boolean().optional(),
+  matchedSocialSourceCount: z.number().int().nonnegative().optional(),
+  matchedSocialSources: z.array(z.string()).optional(),
+  // ── Prompt 3 per-kind count breakdown ─────────────────────────────────────
+  // The headline `matchedSourceCount` / `selectedSourceCount` are COMBINED
+  // (traditional + social); these expose the per-kind split so consumers can
+  // explain the combined totals. `selectedSocialSourceCount` counts selected
+  // handles even when X is disabled (they contribute to selected, not matched).
+  matchedTraditionalSourceCount: z.number().int().nonnegative().optional(),
+  selectedTraditionalSourceCount: z.number().int().nonnegative().optional(),
+  selectedSocialSourceCount: z.number().int().nonnegative().optional(),
+  // ── Allowlist diagnostics (Prompt 4) ──────────────────────────────────────
+  // Selected social handles excluded by `TEMPO_X_HANDLE_ALLOWLIST`. Present only
+  // when the allowlist is configured AND it filtered out ≥1 selected handle.
+  blockedSocialSources: z.array(z.string()).optional(),
 });
 
 /**
