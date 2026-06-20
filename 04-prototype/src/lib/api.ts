@@ -980,3 +980,105 @@ export async function fetchRefreshStatus(
   }
   return parsed;
 }
+
+// ─── Prompt 5: read-only last-refresh diagnostics (no new refresh) ────────────
+
+const DEFAULT_REFRESH_META_ENDPOINT = "/api/dashboard/refresh/meta";
+
+/**
+ * Parsed last-refresh diagnostics surface, lifted from the server's
+ * `GET /api/dashboard/refresh/meta` `{ ok, meta }` envelope. Read-only — reading
+ * this NEVER triggers a refresh. Today it carries the selection diagnostics; the
+ * shape is intentionally narrow and additive so future diagnostics can be lifted
+ * here without breaking callers.
+ */
+export interface DashboardRefreshMeta {
+  /**
+   * Selection diagnostics lifted from `_meta.selection` and validated against
+   * `dashboardSelectionMetaSchema`. PRESERVES every currently supported field —
+   * the headline counts, the Prompt 3 per-kind counts
+   * (`matchedTraditionalSourceCount` / `selectedTraditionalSourceCount` /
+   * `selectedSocialSourceCount`), the social diagnostics
+   * (`socialSelectionApplied` / `matchedSocialSourceCount` /
+   * `matchedSocialSources`), and the Prompt 4 `blockedSocialSources` — because
+   * the shared schema is a passthrough of known optional keys. Degrades to `null`
+   * on a missing/malformed selection object; never throws.
+   */
+  selection: DashboardSelectionMeta | null;
+}
+
+/**
+ * Successful result of {@link fetchDashboardRefreshMeta}. `ok` is always `true`
+ * on the resolved path (errors throw, mirroring the other helpers). `meta` is
+ * `null` when the user has no snapshot yet — a valid, non-error success shape.
+ */
+export interface DashboardRefreshMetaResult {
+  ok: true;
+  meta: DashboardRefreshMeta | null;
+}
+
+/**
+ * Defensive parse of the envelope's `meta` object. Returns `null` when `meta` is
+ * null/absent/non-object (e.g. no snapshot yet, or a forward/garbled shape),
+ * otherwise lifts the selection diagnostics via the shared, defensive
+ * `parseSelectionMetaSafe`. Never throws — a malformed `_meta` degrades to
+ * `{ selection: null }` rather than failing the read.
+ */
+function parseRefreshMetaSafe(rawMeta: unknown): DashboardRefreshMeta | null {
+  if (!rawMeta || typeof rawMeta !== "object") return null;
+  const m = rawMeta as Record<string, unknown>;
+  return {
+    selection: parseSelectionMetaSafe(m.selection),
+  };
+}
+
+/**
+ * Read the last refresh's diagnostics (`GET /api/dashboard/refresh/meta`) WITHOUT
+ * triggering a new refresh — for Settings to show last-run selection metadata.
+ * Single-shot (the caller drives any cadence); identity headers and error
+ * classification mirror {@link fetchRefreshStatus} / the other dashboard helpers.
+ *
+ * Resolves to `{ ok: true, meta }` where `meta` is the parsed diagnostics, or
+ * `null` when the user has no snapshot yet (a valid success, not an error).
+ * Throws `DashboardFetchError` on non-2xx (`kind: "http"`), transport failure
+ * (`kind: "network"`), or a non-JSON body (`kind: "contract"`). Malformed/legacy
+ * `_meta` or selection shapes never throw — they degrade to `null` fields.
+ */
+export async function fetchDashboardRefreshMeta(
+  options: { endpoint?: string; fetcher?: typeof fetch } = {}
+): Promise<DashboardRefreshMetaResult> {
+  const endpoint = options.endpoint ?? DEFAULT_REFRESH_META_ENDPOINT;
+  const fetcher = options.fetcher ?? fetch;
+  const identityHeaders = await buildIdentityHeaders();
+
+  let response: Response;
+  try {
+    response = await fetcher(endpoint, {
+      method: "GET",
+      headers: { Accept: "application/json", ...identityHeaders },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown refresh-meta error";
+    throw new DashboardFetchError("network", message);
+  }
+
+  if (!response.ok) {
+    throw new DashboardFetchError(
+      "http",
+      `Refresh meta API returned HTTP ${response.status}`,
+      response.status
+    );
+  }
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    throw new DashboardFetchError("contract", "Refresh meta response was not valid JSON.");
+  }
+
+  const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  // `meta` is `null` (no snapshot) or the server's `_meta` object; parse it
+  // defensively so a malformed shape degrades rather than throwing.
+  return { ok: true, meta: parseRefreshMetaSafe(body.meta) };
+}
