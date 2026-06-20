@@ -5385,10 +5385,14 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
   // Removes coupling to prior-test state and to whatever the suite-wide
   // FIXTURE_SOURCE_FEEDS happens to contain at the moment.
   //
-  // Scenario: one traditional source and one social source each match a
-  // manifest row with an implemented connector (both `rss` and `social` are
-  // implemented as of Phase 1, Step 1.3), so strict mode is preserved with
-  // matchedSourceCount=2 and no unavailable connectors.
+  // Scenario: one traditional source ("Reuters") and one social source
+  // ("@latamwatcher") are selected, each with a corresponding manifest row.
+  // Prompt 2 (traditional vs social split): only TRADITIONAL names go through
+  // the manifest matcher, so just Reuters counts toward matchedSourceCount (1).
+  // The social handle is resolved by the social/X path, not the manifest matcher
+  // — it no longer inflates matchedSourceCount. Strict mode is still preserved
+  // (Reuters matched), no unavailable connectors, and selectedSourceCount stays
+  // the combined (traditional + social) count of 2.
   const sourceFeedsPath = path.join(tmpDir, "source-feeds.json");
   const SELECTION_MANIFEST = {
     feeds: [
@@ -5442,10 +5446,12 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
     assert.ok(sel);
     // Reuters matches the manifest row, so strict mode is preserved.
     assert.equal(sel.sourceSelectionMode, "strict");
-    // @latamwatcher matches the social row, which now has an implemented
-    // connector — so both sources match and none are unavailable.
+    // Prompt 2: only the traditional source goes through the manifest matcher,
+    // so just Reuters is a matched manifest source; @latamwatcher is split off
+    // to the social path and no longer counts here (and nothing is unavailable).
     assert.equal(sel.unavailableConnectorCount, 0);
-    assert.equal(sel.matchedSourceCount, 2);
+    assert.equal(sel.matchedSourceCount, 1);
+    // selectedSourceCount stays the combined (traditional + social) selection.
     assert.equal(sel.selectedSourceCount, 2);
     // Persisted snapshot carries the selection meta so GET can surface it too.
     assert.ok(writtenPayload?._selectionMeta, "selection meta must be persisted with snapshot");

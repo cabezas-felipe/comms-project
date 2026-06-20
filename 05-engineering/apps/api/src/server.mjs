@@ -1448,13 +1448,17 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
     //
     // The pipeline still does its own source-selection downstream — the
     // server-level resolution here is only used to scope the cache lookup.
-    const selectedNames = [
-      ...(settings.traditionalSources ?? []),
-      ...(settings.socialSources ?? []),
-    ];
-    const cacheFeedIds = (manifestFeeds && selectedNames.length > 0)
+    //
+    // Prompt 2 (traditional vs social split): this RSS recent-items cache is
+    // keyed by manifest feed ids, so only TRADITIONAL selections can scope it —
+    // social handles are not manifest feeds and are served from the X cache /
+    // reader below.  Passing social handles here matched manifest-resident
+    // social rows and mixed them into the RSS cache scope; resolve only
+    // traditional names so the cache key set stays manifest-RSS-clean.
+    const traditionalSelectedNames = settings.traditionalSources ?? [];
+    const cacheFeedIds = (manifestFeeds && traditionalSelectedNames.length > 0)
       ? resolveSelectedSources({
-          selectedSources: selectedNames,
+          selectedSources: traditionalSelectedNames,
           manifestFeeds,
           aliasMap,
           fallbackFeedIds: parseFallbackFeedIdsEnv(process.env.TEMPO_FALLBACK_SOURCE_IDS),

@@ -4609,8 +4609,9 @@ test("runRefreshPipeline: X degraded (no social items) — RSS still flows, soci
 
 test("runRefreshPipeline: social path is inert when X ingestion is disabled (backward compatible)", async () => {
   // socialIngestionEnabled defaults false. A stray social item must NOT be
-  // admitted via the social union, and the handle stays an unmatched manifest
-  // source — exactly the pre-X behavior.
+  // admitted via the social union. Prompt 2: the handle is NOT passed to the
+  // manifest matcher at all, so it never appears in the traditional
+  // `unmatchedSelectedSources` even with X disabled (the bug this fixes).
   const settings = { ...BASE_SETTINGS, traditionalSources: ["Reuters"], socialSources: ["@petrogustavo"] };
   const rssItem = makeItem({
     sourceId: "reuters-1",
@@ -4636,8 +4637,56 @@ test("runRefreshPipeline: social path is inert when X ingestion is disabled (bac
   assert.ok(!clusterInput.some((i) => i.kind === "social"), "social item NOT admitted when X disabled");
   assert.equal(log.selection.socialSelectionApplied, false);
   assert.deepEqual(log.selection.matchedSocialSources, []);
-  // Backward-compatible: the unmatched handle is reported as unmatched.
-  assert.ok(log.selection.unmatchedSelectedSources.includes("@petrogustavo"));
+  // Prompt 2: the social handle is split off BEFORE manifest matching, so it is
+  // never reported in the traditional unmatched list — even with X disabled.
+  assert.ok(
+    !log.selection.unmatchedSelectedSources.includes("@petrogustavo"),
+    "social handle must NOT pollute traditional unmatched even when X is disabled"
+  );
+  // Reuters resolves cleanly, so the traditional unmatched list is empty.
+  assert.deepEqual(log.selection.unmatchedSelectedSources, []);
+  // selectedSourceCount still reports the combined (traditional + social) selection.
+  assert.equal(log.selection.selectedSourceCount, 2);
+});
+
+test("runRefreshPipeline: traditional unmatched reports ONLY real unresolved traditional names, never social handles (X disabled)", async () => {
+  // Prompt 2 acceptance: a genuinely unmatched traditional outlet must still be
+  // reported, while a selected social handle must NOT appear in the traditional
+  // unmatched list — proving the split isolates the two source kinds.
+  const settings = {
+    ...BASE_SETTINGS,
+    traditionalSources: ["Made-Up Outlet", "Reuters"],
+    socialSources: ["@petrogustavo"],
+  };
+  const rssItem = makeItem({
+    sourceId: "reuters-1",
+    feedId: "reuters-world",
+    outlet: "Reuters",
+    kind: "traditional",
+    topic: "Diplomatic relations",
+    minutesAgo: 30,
+  });
+  const socialItem = makeSocialItem();
+  const { log } = await runRefreshPipeline({
+    settings,
+    rawItems: [rssItem, socialItem],
+    manifestFeeds: SOCIAL_UNION_MANIFEST,
+    // X disabled (socialIngestionEnabled omitted → false).
+    clusterFn: async () => [],
+    clusterModel: "mock-anthropic-haiku",
+    contractVersion: "2026-05-19-meta-story-fields",
+  });
+
+  // Only the real unmatched traditional outlet is reported — case-preserved.
+  assert.deepEqual(log.selection.unmatchedSelectedSources, ["Made-Up Outlet"]);
+  assert.ok(
+    !log.selection.unmatchedSelectedSources.includes("@petrogustavo"),
+    "social handle must never appear in traditional unmatched"
+  );
+  // Reuters still matched; social tracked separately (none when X disabled).
+  assert.equal(log.selection.socialSelectionApplied, false);
+  // Combined selection count = 2 traditional + 1 social.
+  assert.equal(log.selection.selectedSourceCount, 3);
 });
 
 // ─── Social funnel observability (X ingestion — additive _meta.funnel.social) ─
