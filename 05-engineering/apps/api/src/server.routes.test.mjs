@@ -59,7 +59,9 @@ const FIXTURE_SOURCE_FEEDS = {
 };
 await writeFile(path.join(tmpDir, "source-feeds.json"), JSON.stringify(FIXTURE_SOURCE_FEEDS), "utf8");
 
-const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _refreshUpgrade, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _xReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
+const { app, _auth, _extraction, _emailLookup, _clearEmailCache, resolveIdentity, _sourceRegistrySync, _feedManifest, _narrativeRepo, _sourceAliases, _writeSettings, _atomicSave, _readSettings, _snapshotRepo, _refreshPipeline, _pipelineRunner, _refreshExecutor, _refreshPrefetch, _refreshUpgrade, _whyEnricher, _reclusterExecutor, _embeddings, _recentItemsCache, _feedReader, _xReader, _dueUserOrchestrator, _refreshSlo, buildRefreshFailsafeMeta } = await import("./server.mjs");
+const { SOURCE_NAME_ALIASES } = await import("./contracts-runtime/index.mjs");
+const { resolveSelectedSources: _resolveSelectedSources } = await import("./ingestion/source-matcher.mjs");
 const { createJob: _createRefreshJob, getJob: _getRefreshJob, setPhase: _setRefreshPhase, completeJob: _completeRefreshJob, _resetRefreshJobs } = await import("./dashboard/refresh-job.mjs");
 // Slice 6: the genuine cold-start prefetch kickoff. Captured once so the suite
 // can neutralize prefetch by default (below) — most route tests don't stub the
@@ -865,6 +867,140 @@ test("refresh pipeline: old settings topic still matches item with the same old 
     _snapshotRepo.insertLocks = prevInsertLocks;
     _refreshPipeline.run = prevRun;
     await writeFile(path.join(tmpDir, "source-items.json"), JSON.stringify(FIXTURE_SOURCE_ITEMS), "utf8");
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+// ─── Supabase alias map → refresh pipeline (end-to-end wiring) ───────────────
+//
+// Proves Prompt 1's blocker fix: operator-curated Supabase aliases loaded at
+// refresh time actually reach the refresh pipeline's source selection (not just
+// the cache feed-id scoping). We stub `_sourceAliases.read` to inject a Supabase
+// alias map and capture the opts handed to `_refreshPipeline.run`, then assert
+// the merged aliasMap (a) reaches the pipeline, (b) merges over the repo
+// fallback with Supabase winning on conflict, and (c) makes an otherwise-
+// unmatched source resolve when run through the real matcher.
+
+test("refresh: Supabase aliasMap reaches the pipeline, merges over fallback, and drives matching", async () => {
+  const ISOLATED_USER_ID = "test-user-supabase-aliasmap";
+
+  // A brand-new alias absent from the repo's static SOURCE_NAME_ALIASES, plus a
+  // deliberate override of an existing fallback key to prove Supabase precedence.
+  const SUPABASE_ALIASES = {
+    "acme wire": "Reuters",            // net-new operator alias
+    nyt: "Supabase Override Wins",     // collides with fallback "New York Times"
+  };
+
+  let capturedRunOpts = null;
+  const prevAliasRead = _sourceAliases.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _sourceAliases.read = async () => ({ ...SUPABASE_ALIASES });
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  const baseStub = topicNormalizationPipelineStub();
+  _refreshPipeline.run = async (opts) => {
+    capturedRunOpts = opts;
+    return baseStub(opts);
+  };
+
+  try {
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY, traditionalSources: ["ACME Wire"] })
+        .set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      assert.equal(res.status, 200);
+      assert.ok(capturedRunOpts !== null, "pipeline must have been invoked");
+
+      // (a) The aliasMap reaches the pipeline. Before the wiring fix this opt was
+      // never passed → undefined → this assertion fails.
+      const aliasMap = capturedRunOpts.aliasMap;
+      assert.ok(aliasMap && typeof aliasMap === "object",
+        "refresh must pass a merged aliasMap into _refreshPipeline.run");
+
+      // (b) Merge semantics: net-new Supabase alias present; repo fallback
+      // entries preserved; Supabase wins on conflicting keys.
+      assert.equal(aliasMap["acme wire"], "Reuters",
+        "net-new Supabase alias must be present in the merged map");
+      assert.equal(aliasMap["wsj"], SOURCE_NAME_ALIASES["wsj"],
+        "untouched repo fallback aliases must survive the merge");
+      assert.equal(aliasMap["nyt"], "Supabase Override Wins",
+        "Supabase alias must take precedence over the repo fallback on conflict");
+
+      // (c) Behavioral proof: the exact map handed to the pipeline makes an
+      // otherwise-unmatched source ("ACME Wire") resolve via the real matcher.
+      const manifest = [
+        { id: "reuters-world", name: "Reuters — World", publisher: "Reuters", kind: "rss", url: "https://r/w", weight: 90, active: true },
+      ];
+      const withAlias = _resolveSelectedSources({
+        selectedSources: ["ACME Wire"],
+        manifestFeeds: manifest,
+        aliasMap,
+      });
+      assert.deepEqual(withAlias.matchedFeeds.map((f) => f.id), ["reuters-world"],
+        "ACME Wire must resolve to the Reuters feed via the injected Supabase alias");
+      // Control: without the alias map the same selection is unmatched.
+      const withoutAlias = _resolveSelectedSources({
+        selectedSources: ["ACME Wire"],
+        manifestFeeds: manifest,
+      });
+      assert.deepEqual(withoutAlias.unmatchedSelectedSources, ["ACME Wire"],
+        "ACME Wire must NOT match without the alias map (proves the map is what resolves it)");
+    });
+  } finally {
+    _sourceAliases.read = prevAliasRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
+    await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
+  }
+});
+
+test("refresh: alias load failure is fail-open — pipeline still gets the repo fallback map", async () => {
+  const ISOLATED_USER_ID = "test-user-aliasmap-failopen";
+
+  let capturedRunOpts = null;
+  const prevAliasRead = _sourceAliases.read;
+  const prevWrite = _snapshotRepo.write;
+  const prevGetLocks = _snapshotRepo.getLocks;
+  const prevInsertLocks = _snapshotRepo.insertLocks;
+  const prevRun = _refreshPipeline.run;
+  _sourceAliases.read = async () => { throw new Error("supabase down"); };
+  _snapshotRepo.write = async () => {};
+  _snapshotRepo.getLocks = async () => new Map();
+  _snapshotRepo.insertLocks = async () => {};
+  const baseStub = topicNormalizationPipelineStub();
+  _refreshPipeline.run = async (opts) => {
+    capturedRunOpts = opts;
+    return baseStub(opts);
+  };
+
+  try {
+    await withIsolatedUser(ISOLATED_USER_ID, async () => {
+      await request(app)
+        .put("/api/settings")
+        .send({ ...VALID_BODY })
+        .set("Content-Type", "application/json");
+      const res = await request(app).post("/api/dashboard/refresh");
+      // Refresh must not crash when the alias load throws.
+      assert.equal(res.status, 200);
+      assert.ok(capturedRunOpts !== null, "pipeline must have been invoked despite alias load failure");
+      // Falls back to the repo's static alias map (a known entry survives).
+      assert.equal(capturedRunOpts.aliasMap?.["nyt"], SOURCE_NAME_ALIASES["nyt"],
+        "alias load failure must fall open to the repo fallback alias map");
+    });
+  } finally {
+    _sourceAliases.read = prevAliasRead;
+    _snapshotRepo.write = prevWrite;
+    _snapshotRepo.getLocks = prevGetLocks;
+    _snapshotRepo.insertLocks = prevInsertLocks;
+    _refreshPipeline.run = prevRun;
     await rm(path.join(tmpDir, `settings_user_${ISOLATED_USER_ID}.json`), { force: true }).catch(() => {});
   }
 });

@@ -75,7 +75,9 @@ import {
   stripKeywordsMatchingGeographies,
   dashboardPayloadSchema,
   settingsPayloadSchema,
+  SOURCE_NAME_ALIASES,
 } from "./contracts-runtime/index.mjs";
+import { readSourceAliasMap } from "./db/source-aliases-repo.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -331,6 +333,11 @@ export const _sourceRegistrySync = { record: recordSourceRegistryEventsFromSetti
  * skip Supabase writes without a live instance. Do not use in production code paths.
  */
 export const _narrativeRepo = { append: appendOnboardingNarrative, read: readCurrentOnboardingNarrative };
+
+// DI seam for operator-curated Supabase source aliases (mirrors _narrativeRepo).
+// Tests stub `_sourceAliases.read` to inject a Supabase alias map and prove it
+// flows into refresh-time source selection.
+export const _sourceAliases = { read: readSourceAliasMap };
 
 /**
  * Mutable atomic-save hook. Tests override _atomicSave.execute to simulate the RPC
@@ -1388,7 +1395,7 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
   }
 
   try {
-    const [rawSettings, manifestFeeds, priorSnapshot, narrative] = await Promise.all([
+    const [rawSettings, manifestFeeds, priorSnapshot, narrative, supabaseAliasMap] = await Promise.all([
       readSettings(identity.userId),
       loadManifestForSelection(),
       _snapshotRepo.read(identity.userId).catch(() => null),
@@ -1396,7 +1403,21 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       // embedding profile.  Read failures are non-fatal — we just lose some
       // signal and the recall stage falls through to settings-only profile.
       _narrativeRepo.read(identity.userId).catch(() => null),
+      // Operator-curated aliases loaded at refresh time so user-entered source
+      // names resolve without a redeploy.  Fail-open: a load failure falls back
+      // to the repo's static SOURCE_NAME_ALIASES below.
+      _sourceAliases.read().catch((err) => {
+        console.warn(
+          `[refresh] source alias load failed (using repo fallback): ${err instanceof Error ? err.message : err}`
+        );
+        return {};
+      }),
     ]);
+
+    // Merge: Supabase aliases take precedence over the repo's static fallback.
+    // Both use lowercased alias keys, so a plain spread resolves conflicts in
+    // Supabase's favor while preserving fallback entries for unmapped names.
+    const aliasMap = { ...SOURCE_NAME_ALIASES, ...supabaseAliasMap };
 
     // Slice 4: cold-start gating — the `cold_start` profile is only valid for a
     // brand-new user with no prior dashboard snapshot.  If a snapshot already
@@ -1435,6 +1456,7 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       ? resolveSelectedSources({
           selectedSources: selectedNames,
           manifestFeeds,
+          aliasMap,
           fallbackFeedIds: parseFallbackFeedIdsEnv(process.env.TEMPO_FALLBACK_SOURCE_IDS),
           fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
         }).matchedFeeds.map((f) => f.id).filter((id) => typeof id === "string" && id.length > 0)
@@ -1773,6 +1795,9 @@ async function executeRefreshFlow(identity, { refreshProfile = null, interactive
       clusterModel,
       contractVersion: DEFAULT_SETTINGS.contractVersion,
       manifestFeeds,
+      // Operator-curated aliases (Supabase ∪ repo fallback) so user-entered
+      // source names resolve at refresh-time source selection without a redeploy.
+      aliasMap,
       fallbackFeedIds: parseFallbackFeedIdsEnv(process.env.TEMPO_FALLBACK_SOURCE_IDS),
       fallbackEnabled: parseFallbackEnabledEnv(process.env.TEMPO_FALLBACK_ENABLED),
       priorWatermark,
