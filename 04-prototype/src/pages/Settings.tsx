@@ -15,9 +15,10 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { CONTRACT_VERSION } from "@tempo/contracts";
+import { CONTRACT_VERSION, type DashboardSelectionMeta } from "@tempo/contracts";
 import { defaultSettingsPayload, fetchSettingsPayload, saveSettingsPayload } from "@/lib/settings-api";
 import { useRefreshContext } from "@/lib/refresh-context";
+import { fetchDashboardRefreshMeta } from "@/lib/api";
 
 interface ListSectionProps {
   title: string;
@@ -127,6 +128,12 @@ export default function Settings() {
   const [traditional, setTraditional] = useState<string[]>(defaults.traditionalSources);
   const [social, setSocial] = useState<string[]>(defaults.socialSources);
   const [draftSource, setDraftSource] = useState("");
+
+  // Last-refresh selection diagnostics (read-only). Drives the non-blocking
+  // "Source coverage" panel below. `null` until the read resolves, and stays
+  // `null` if it fails or returns a malformed shape — so the panel simply stays
+  // hidden (fail-open: a diagnostics read must never break Settings).
+  const [coverage, setCoverage] = useState<DashboardSelectionMeta | null>(null);
 
   // After a successful debounced save we fire a manual dashboard refresh so
   // the user's next return to /dashboard reflects the new intent profile
@@ -265,6 +272,32 @@ export default function Settings() {
       canceled = true;
     };
   }, []);
+
+  // Read last-refresh diagnostics independently of the settings load so a slow
+  // or failed diagnostics read never delays or breaks the editable form. Runs
+  // once on mount; fail-open on any error (panel stays hidden).
+  useEffect(() => {
+    let canceled = false;
+    fetchDashboardRefreshMeta()
+      .then((result) => {
+        if (canceled) return;
+        setCoverage(result.meta?.selection ?? null);
+      })
+      .catch(() => {
+        // Fail-open: leave coverage null so the panel is simply not shown.
+      });
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  // Coverage gaps from the last refresh. All three arrays are optional on the
+  // selection meta; default to [] so the presence checks below are simple.
+  const unmatchedSources = coverage?.unmatchedSelectedSources ?? [];
+  const unavailableSources = coverage?.unavailableConnectorSources ?? [];
+  const blockedSources = coverage?.blockedSocialSources ?? [];
+  const hasCoverageGaps =
+    unmatchedSources.length > 0 || unavailableSources.length > 0 || blockedSources.length > 0;
 
   return (
     <div className="mx-auto max-w-[1400px]">
@@ -410,9 +443,69 @@ export default function Settings() {
                 </div>
               </div>
             </section>
+
+            {/*
+              Source coverage (non-blocking): explains, after the last refresh,
+              which selected sources didn't connect. Decision 4 — partial
+              coverage is fine; Tempo still builds from matched sources. No
+              warnings that imply failure, no redirects, no blocking. Rendered
+              only once the diagnostics read resolves (coverage !== null).
+            */}
+            {coverage !== null && (
+              <section
+                className="border-b border-rule/60 py-8 last:border-b-0"
+                aria-labelledby="source-coverage-heading"
+              >
+                <div className="grid grid-cols-1 gap-8 md:grid-cols-[260px_1fr]">
+                  <div>
+                    <h2
+                      id="source-coverage-heading"
+                      className="font-display text-xl font-semibold tracking-tight"
+                    >
+                      Source coverage
+                    </h2>
+                    <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
+                      {hasCoverageGaps
+                        ? "Some selected sources are not connected yet. Tempo will still build stories from matched sources."
+                        : "All selected sources connected."}
+                    </p>
+                  </div>
+                  {hasCoverageGaps && (
+                    <div className="space-y-6">
+                      <CoverageList heading="Not matched yet" items={unmatchedSources} />
+                      <CoverageList heading="Unavailable connectors" items={unavailableSources} />
+                      <CoverageList heading="Blocked by allowlist" items={blockedSources} />
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Read-only list of source names under a small caption. Renders nothing when
+// empty so the parent can compose the three coverage buckets unconditionally.
+function CoverageList({ heading, items }: { heading: string; items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <h3 className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+        {heading}
+      </h3>
+      <ul className="mt-2 flex flex-wrap gap-1.5">
+        {items.map((item) => (
+          <li
+            key={item}
+            className="inline-flex items-center rounded-sm border border-rule/60 bg-background px-2.5 py-1 text-[13px]"
+          >
+            {item}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

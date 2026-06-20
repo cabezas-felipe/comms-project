@@ -27,6 +27,14 @@ vi.mock("@/lib/notify", () => ({
   notifySuccess: vi.fn(),
 }));
 
+// Settings reads last-refresh diagnostics via `fetchDashboardRefreshMeta`.
+// Mock the module to the single export Settings uses so we don't pull in the
+// real api module (and its supabase/auth deps) at runtime.
+const fetchDashboardRefreshMetaSpy = vi.fn<[], Promise<unknown>>();
+vi.mock("@/lib/api", () => ({
+  fetchDashboardRefreshMeta: () => fetchDashboardRefreshMetaSpy(),
+}));
+
 // Settings imports `useRefreshContext` from `@/lib/refresh-context`; that mock
 // is set up above so we don't need to mount the real provider.  Importing
 // Settings after the mocks register so the component picks them up.
@@ -90,6 +98,10 @@ describe("Settings — debounced save → dashboard refresh trigger", () => {
     triggerDashboardRefreshSpy.mockImplementation(async () => null);
     fetchSettingsPayloadSpy.mockReset();
     saveSettingsPayloadSpy.mockReset();
+    // Default: no snapshot diagnostics → coverage panel hidden. Individual
+    // coverage tests override this before mounting.
+    fetchDashboardRefreshMetaSpy.mockReset();
+    fetchDashboardRefreshMetaSpy.mockResolvedValue({ ok: true, meta: null });
   });
 
   afterEach(() => {
@@ -184,5 +196,111 @@ describe("Settings — debounced save → dashboard refresh trigger", () => {
     await waitFor(() => expect(triggerDashboardRefreshSpy).toHaveBeenCalledTimes(2), {
       timeout: 2000,
     });
+  });
+});
+
+describe("Settings — source coverage panel (Prompt 6)", () => {
+  beforeEach(() => {
+    triggerDashboardRefreshSpy.mockClear();
+    triggerDashboardRefreshSpy.mockImplementation(async () => null);
+    fetchSettingsPayloadSpy.mockReset();
+    saveSettingsPayloadSpy.mockReset();
+    fetchDashboardRefreshMetaSpy.mockReset();
+    fetchDashboardRefreshMetaSpy.mockResolvedValue({ ok: true, meta: null });
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+  });
+
+  it("shows the panel and lists names under each section when coverage gaps exist", async () => {
+    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
+      ok: true,
+      meta: {
+        selection: {
+          sourceSelectionMode: "strict",
+          unmatchedSelectedSources: ["Made-Up Outlet"],
+          unavailableConnectorSources: ["Defunct Wire"],
+          blockedSocialSources: ["@blockedhandle"],
+        },
+      },
+    });
+    await mountWithSettings();
+
+    // Title + non-blocking body copy.
+    const heading = await screen.findByText("Source coverage");
+    expect(heading).toBeTruthy();
+    expect(
+      screen.getByText(/Tempo will still build stories from matched sources/i)
+    ).toBeTruthy();
+
+    // Each section header + its source name.
+    expect(screen.getByText("Not matched yet")).toBeTruthy();
+    expect(screen.getByText("Made-Up Outlet")).toBeTruthy();
+    expect(screen.getByText("Unavailable connectors")).toBeTruthy();
+    expect(screen.getByText("Defunct Wire")).toBeTruthy();
+    expect(screen.getByText("Blocked by allowlist")).toBeTruthy();
+    expect(screen.getByText("@blockedhandle")).toBeTruthy();
+  });
+
+  it("renders only the sections that have entries", async () => {
+    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
+      ok: true,
+      meta: {
+        selection: {
+          sourceSelectionMode: "strict",
+          unmatchedSelectedSources: ["Made-Up Outlet"],
+          // No unavailable / blocked sources this run.
+        },
+      },
+    });
+    await mountWithSettings();
+
+    await screen.findByText("Source coverage");
+    expect(screen.getByText("Not matched yet")).toBeTruthy();
+    expect(screen.queryByText("Unavailable connectors")).toBeNull();
+    expect(screen.queryByText("Blocked by allowlist")).toBeNull();
+  });
+
+  it("shows the neutral connected state when coverage arrays are empty", async () => {
+    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
+      ok: true,
+      meta: {
+        selection: {
+          sourceSelectionMode: "strict",
+          unmatchedSelectedSources: [],
+          unavailableConnectorSources: [],
+          blockedSocialSources: [],
+        },
+      },
+    });
+    await mountWithSettings();
+
+    expect(await screen.findByText("All selected sources connected.")).toBeTruthy();
+    // No gap sections rendered.
+    expect(screen.queryByText("Not matched yet")).toBeNull();
+    expect(screen.queryByText("Unavailable connectors")).toBeNull();
+    expect(screen.queryByText("Blocked by allowlist")).toBeNull();
+  });
+
+  it("hides the panel entirely when there is no snapshot (meta: null)", async () => {
+    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({ ok: true, meta: null });
+    await mountWithSettings();
+
+    // Let any pending diagnostics microtasks settle.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText("Source coverage")).toBeNull();
+  });
+
+  it("fails open: Settings still loads when the refresh-meta fetch rejects", async () => {
+    fetchDashboardRefreshMetaSpy.mockRejectedValueOnce(new Error("diagnostics down"));
+    // mountWithSettings asserts the editable form became interactive — i.e. the
+    // page rendered fine despite the diagnostics read failing.
+    await mountWithSettings();
+
+    await new Promise((r) => setTimeout(r, 20));
+    // The form is usable and the coverage panel is simply absent.
+    expect((screen.getByPlaceholderText("Add a topic") as HTMLInputElement).disabled).toBe(false);
+    expect(screen.queryByText("Source coverage")).toBeNull();
   });
 });
