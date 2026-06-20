@@ -696,7 +696,6 @@ export default function Dashboard() {
       canceled = true;
       if (timer) clearTimeout(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [joinState, coldStartJobId]);
 
   // App-scope heartbeat (lib/refresh-heartbeat) drives the 60-minute refresh
@@ -782,7 +781,6 @@ export default function Dashboard() {
       canceled = true;
       clearInterval(id);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [whyPending]);
 
   const handleRetry = useCallback(() => {
