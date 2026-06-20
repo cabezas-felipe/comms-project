@@ -2614,23 +2614,47 @@ export async function runRefreshPipeline({
         `[pipeline.selection] source_selection drop-to-zero: input=${recentNormalizedItems.length} matchedFeeds=${selection.matchedFeeds.length} matchedFeedIds=${JSON.stringify([...matchedKeys.feedIds])} matchedOutlets=${JSON.stringify([...matchedKeys.outlets])} sampleItems=${JSON.stringify(sample)}`
       );
     }
+    // ── Prompt 3: coherent hybrid selection counts ──────────────────────────
+    // After the Prompt 2 split the manifest matcher only sees traditional names,
+    // so `selection.matchedSourceCount` / `selection.selectedSourceCount` are
+    // TRADITIONAL-only.  Report COMBINED (traditional + social) values for the
+    // headline `matchedSourceCount` / `selectedSourceCount` so they read
+    // consistently in `_meta.selection` and the log line, and add per-kind
+    // clarity fields so the breakdown is explicit:
+    //   matchedSourceCount  = matchedTraditional + matchedSocial   (combined)
+    //   selectedSourceCount = selectedTraditional + selectedSocial (combined)
+    // Truthfulness: social contributes to SELECTED counts whenever the user
+    // picked handles (even with X disabled), but to MATCHED counts only when X
+    // is enabled and social items actually flowed (`matchedSocialSources`).
+    const matchedTraditionalSourceCount = selection.matchedSourceCount;
+    const selectedTraditionalSourceCount = selection.selectedSourceCount;
+    const selectedSocialSourceCount = selectedSocialHandleSet.size;
+    const matchedSocialSourceCount = matchedSocialSources.length;
+    const combinedSelectedSourceCount =
+      selectedTraditionalSourceCount + selectedSocialSourceCount;
+    const combinedMatchedSourceCount =
+      matchedTraditionalSourceCount + matchedSocialSourceCount;
+
     selectionMeta = {
       sourceSelectionMode: selection.mode,
       sourceFallbackUsed: selection.fallbackUsed,
       sourceFallbackReason: selection.fallbackReason,
-      matchedSourceCount: selection.matchedSourceCount,
-      // Combined (traditional + social) user selection count — preserves the
-      // pre-split contract even though the matcher now only sees traditional
-      // names.  Traditional half is deduped by the matcher; social half by the
-      // handle set.
-      selectedSourceCount: selection.selectedSourceCount + selectedSocialHandleSet.size,
+      // Headline counts are COMBINED (traditional + social) so x/y reads
+      // coherently everywhere this is surfaced.
+      matchedSourceCount: combinedMatchedSourceCount,
+      selectedSourceCount: combinedSelectedSourceCount,
       unmatchedSelectedSources,
       unavailableConnectorCount: selection.unavailableConnectorCount,
       unavailableConnectorSources: selection.unavailableConnectorSources,
       matchedFeedIds: selection.matchedFeeds.map((f) => f.id),
-      // Additive social-selection diagnostics (truthful — NOT folded into
-      // matchedFeedIds, which stays manifest-only / synthetic-id-free).
-      matchedSocialSourceCount: matchedSocialSources.length,
+      // Additive per-kind clarity fields (truthful breakdown of the combined
+      // headline counts above).
+      matchedTraditionalSourceCount,
+      selectedTraditionalSourceCount,
+      selectedSocialSourceCount,
+      // Social-selection diagnostics (NOT folded into matchedFeedIds, which
+      // stays manifest-only / synthetic-id-free).
+      matchedSocialSourceCount,
       matchedSocialSources,
       socialSelectionApplied,
     };
@@ -2641,8 +2665,8 @@ export async function runRefreshPipeline({
     const unmatchedNames = unmatchedSelectedSources;
     const unavailableNames = selection.unavailableConnectorSources;
     console.log(
-      `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${selection.matchedSourceCount}/${selectionMeta.selectedSourceCount} unmatched=${unmatchedNames.length} unavailable=${selection.unavailableConnectorCount} feeds=${selectionMeta.matchedFeedIds.length}` +
-        ` socialApplied=${socialSelectionApplied} matchedSocial=${matchedSocialSources.length}` +
+      `[pipeline.selection] mode=${selection.mode} fallback=${selection.fallbackUsed}${selection.fallbackReason ? ` reason=${selection.fallbackReason}` : ""} matched=${combinedMatchedSourceCount}/${combinedSelectedSourceCount} unmatched=${unmatchedNames.length} unavailable=${selection.unavailableConnectorCount} feeds=${selectionMeta.matchedFeedIds.length}` +
+        ` trad=${matchedTraditionalSourceCount}/${selectedTraditionalSourceCount} socialApplied=${socialSelectionApplied} matchedSocial=${matchedSocialSourceCount}/${selectedSocialSourceCount}` +
         (unmatchedNames.length > 0 ? ` unmatchedSources=${JSON.stringify(unmatchedNames)}` : "") +
         (unavailableNames.length > 0 ? ` unavailableSources=${JSON.stringify(unavailableNames)}` : "") +
         (matchedSocialSources.length > 0 ? ` matchedSocialSources=${JSON.stringify(matchedSocialSources)}` : "")

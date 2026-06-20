@@ -4569,13 +4569,29 @@ test("runRefreshPipeline: mixed traditional + social — both admitted, traditio
   // Traditional matching is exactly as before (strict, Reuters matched by id).
   assert.equal(log.selection.sourceSelectionMode, "strict");
   assert.deepEqual(log.selection.matchedFeedIds, ["reuters-world"]);
-  assert.equal(log.selection.matchedSourceCount, 1, "Reuters is the one matched traditional source");
+  assert.equal(log.selection.matchedTraditionalSourceCount, 1, "Reuters is the one matched traditional source");
 
-  // Social tracked in parallel — additive, not folded into the traditional counts.
+  // Social tracked in parallel — additive per-kind counts.
   assert.equal(log.selection.socialSelectionApplied, true);
   assert.deepEqual(log.selection.matchedSocialSources, ["@petrogustavo"]);
   assert.equal(log.selection.matchedSocialSourceCount, 1);
   assert.ok(!log.selection.unmatchedSelectedSources.includes("@petrogustavo"));
+
+  // Prompt 3: headline counts are COMBINED and internally consistent —
+  // matchedSourceCount = matchedTraditional(1) + matchedSocial(1) = 2, and
+  // selectedSourceCount = selectedTraditional(1) + selectedSocial(1) = 2.
+  assert.equal(log.selection.matchedSourceCount, 2, "combined matched = traditional + social");
+  assert.equal(log.selection.selectedSourceCount, 2, "combined selected = traditional + social");
+  assert.equal(log.selection.selectedTraditionalSourceCount, 1);
+  assert.equal(log.selection.selectedSocialSourceCount, 1);
+  assert.equal(
+    log.selection.matchedSourceCount,
+    log.selection.matchedTraditionalSourceCount + log.selection.matchedSocialSourceCount
+  );
+  assert.equal(
+    log.selection.selectedSourceCount,
+    log.selection.selectedTraditionalSourceCount + log.selection.selectedSocialSourceCount
+  );
 });
 
 test("runRefreshPipeline: X degraded (no social items) — RSS still flows, social not falsely reported as matched", async () => {
@@ -4645,8 +4661,20 @@ test("runRefreshPipeline: social path is inert when X ingestion is disabled (bac
   );
   // Reuters resolves cleanly, so the traditional unmatched list is empty.
   assert.deepEqual(log.selection.unmatchedSelectedSources, []);
-  // selectedSourceCount still reports the combined (traditional + social) selection.
+  // Prompt 3: X disabled → social contributes to SELECTED but never to MATCHED.
+  // selectedSourceCount = selectedTraditional(1) + selectedSocial(1) = 2, but
+  // matchedSourceCount = matchedTraditional(1) + matchedSocial(0) = 1, so
+  // combined selected (2) > combined matched (1).
   assert.equal(log.selection.selectedSourceCount, 2);
+  assert.equal(log.selection.selectedTraditionalSourceCount, 1);
+  assert.equal(log.selection.selectedSocialSourceCount, 1);
+  assert.equal(log.selection.matchedSourceCount, 1);
+  assert.equal(log.selection.matchedTraditionalSourceCount, 1);
+  assert.equal(log.selection.matchedSocialSourceCount, 0);
+  assert.ok(
+    log.selection.selectedSourceCount > log.selection.matchedSourceCount,
+    "social selected but not matched when X disabled"
+  );
 });
 
 test("runRefreshPipeline: traditional unmatched reports ONLY real unresolved traditional names, never social handles (X disabled)", async () => {
@@ -4685,8 +4713,14 @@ test("runRefreshPipeline: traditional unmatched reports ONLY real unresolved tra
   );
   // Reuters still matched; social tracked separately (none when X disabled).
   assert.equal(log.selection.socialSelectionApplied, false);
-  // Combined selection count = 2 traditional + 1 social.
+  // Prompt 3: combined selected = 2 traditional + 1 social = 3; combined matched
+  // = 1 traditional (Reuters; "Made-Up Outlet" unmatched) + 0 social = 1.
   assert.equal(log.selection.selectedSourceCount, 3);
+  assert.equal(log.selection.selectedTraditionalSourceCount, 2);
+  assert.equal(log.selection.selectedSocialSourceCount, 1);
+  assert.equal(log.selection.matchedSourceCount, 1);
+  assert.equal(log.selection.matchedTraditionalSourceCount, 1);
+  assert.equal(log.selection.matchedSocialSourceCount, 0);
 });
 
 // ─── Social funnel observability (X ingestion — additive _meta.funnel.social) ─

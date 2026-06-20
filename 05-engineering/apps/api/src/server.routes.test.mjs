@@ -5450,9 +5450,25 @@ test("POST /api/dashboard/refresh: selection metadata reports unmatched sources 
     // so just Reuters is a matched manifest source; @latamwatcher is split off
     // to the social path and no longer counts here (and nothing is unavailable).
     assert.equal(sel.unavailableConnectorCount, 0);
+    // Prompt 3: headline matchedSourceCount is COMBINED. No @latamwatcher social
+    // items flow in this refresh, so matchedSocial=0 → combined matched = 1.
     assert.equal(sel.matchedSourceCount, 1);
     // selectedSourceCount stays the combined (traditional + social) selection.
     assert.equal(sel.selectedSourceCount, 2);
+    // Additive per-kind clarity fields surface through `_meta.selection` and are
+    // internally consistent with the combined headline counts.
+    assert.equal(sel.matchedTraditionalSourceCount, 1);
+    assert.equal(sel.selectedTraditionalSourceCount, 1);
+    assert.equal(sel.selectedSocialSourceCount, 1);
+    assert.equal(sel.matchedSocialSourceCount, 0);
+    assert.equal(
+      sel.matchedSourceCount,
+      sel.matchedTraditionalSourceCount + sel.matchedSocialSourceCount
+    );
+    assert.equal(
+      sel.selectedSourceCount,
+      sel.selectedTraditionalSourceCount + sel.selectedSocialSourceCount
+    );
     // Persisted snapshot carries the selection meta so GET can surface it too.
     assert.ok(writtenPayload?._selectionMeta, "selection meta must be persisted with snapshot");
   } finally {
