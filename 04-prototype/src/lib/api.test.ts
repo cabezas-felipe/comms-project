@@ -4,6 +4,7 @@ import {
   bootstrapDashboard,
   DashboardFetchError,
   fetchDashboardPayload,
+  fetchDashboardRefreshMeta,
   fetchDashboardWithMeta,
   fetchRefreshStatus,
   refreshDashboard,
@@ -1443,6 +1444,151 @@ describe("fetchRefreshStatus", () => {
     const fetcher = vi.fn().mockRejectedValue(new Error("offline"));
     await expect(fetchRefreshStatus("user-1", { fetcher })).rejects.toMatchObject({
       kind: "network",
+    });
+  });
+});
+
+describe("Prompt 5: fetchDashboardRefreshMeta", () => {
+  it("happy path: parses populated meta.selection incl. Prompt 3/4 fields", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        meta: {
+          // Other diagnostics may ride alongside selection — they are ignored here.
+          ingestion: { x: { enabled: true } },
+          selection: {
+            sourceSelectionMode: "strict",
+            sourceFallbackUsed: false,
+            // Combined headline counts (Prompt 3).
+            matchedSourceCount: 2,
+            selectedSourceCount: 3,
+            unmatchedSelectedSources: ["Made-Up Outlet"],
+            unavailableConnectorCount: 0,
+            // Social diagnostics (Prompts 2–3).
+            socialSelectionApplied: true,
+            matchedSocialSourceCount: 1,
+            matchedSocialSources: ["@petrogustavo"],
+            // Per-kind breakdown (Prompt 3).
+            matchedTraditionalSourceCount: 1,
+            selectedTraditionalSourceCount: 2,
+            selectedSocialSourceCount: 1,
+            // Allowlist diagnostics (Prompt 4).
+            blockedSocialSources: ["@blockedhandle"],
+          },
+        },
+      }),
+    });
+    const result = await fetchDashboardRefreshMeta({ fetcher });
+    expect(result.ok).toBe(true);
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/dashboard/refresh/meta",
+      expect.objectContaining({ method: "GET" })
+    );
+    const sel = result.meta?.selection;
+    expect(sel).not.toBeNull();
+    // The parser must PRESERVE all currently supported selection fields.
+    expect(sel?.matchedSourceCount).toBe(2);
+    expect(sel?.selectedSourceCount).toBe(3);
+    expect(sel?.socialSelectionApplied).toBe(true);
+    expect(sel?.matchedSocialSourceCount).toBe(1);
+    expect(sel?.matchedSocialSources).toEqual(["@petrogustavo"]);
+    expect(sel?.matchedTraditionalSourceCount).toBe(1);
+    expect(sel?.selectedTraditionalSourceCount).toBe(2);
+    expect(sel?.selectedSocialSourceCount).toBe(1);
+    expect(sel?.blockedSocialSources).toEqual(["@blockedhandle"]);
+  });
+
+  it("no snapshot: { ok: true, meta: null } is a valid success shape", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, meta: null }),
+    });
+    const result = await fetchDashboardRefreshMeta({ fetcher });
+    expect(result).toEqual({ ok: true, meta: null });
+  });
+
+  it("legacy snapshot: selection missing the newer fields still parses (back-compat)", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        meta: {
+          selection: {
+            sourceSelectionMode: "fallback",
+            sourceFallbackUsed: true,
+            sourceFallbackReason: "no_selected_sources",
+            matchedSourceCount: 0,
+            selectedSourceCount: 0,
+          },
+        },
+      }),
+    });
+    const result = await fetchDashboardRefreshMeta({ fetcher });
+    expect(result.meta?.selection?.sourceSelectionMode).toBe("fallback");
+    // Newer optional fields are simply absent — not an error.
+    expect(result.meta?.selection?.blockedSocialSources).toBeUndefined();
+    expect(result.meta?.selection?.selectedSocialSourceCount).toBeUndefined();
+  });
+
+  it("malformed selection degrades to null without throwing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        meta: { selection: { sourceSelectionMode: "not-a-valid-mode" } },
+      }),
+    });
+    const result = await fetchDashboardRefreshMeta({ fetcher });
+    // meta object is present; the unparseable selection degrades to null.
+    expect(result.meta).not.toBeNull();
+    expect(result.meta?.selection).toBeNull();
+  });
+
+  it("malformed meta (non-object) degrades to meta:null without throwing", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, meta: "garbage" }),
+    });
+    const result = await fetchDashboardRefreshMeta({ fetcher });
+    expect(result.meta).toBeNull();
+  });
+
+  it("throws DashboardFetchError(http) with status on a non-2xx response", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => ({ message: "Unauthorized" }),
+    });
+    await expect(fetchDashboardRefreshMeta({ fetcher })).rejects.toMatchObject({
+      name: "DashboardFetchError",
+      kind: "http",
+      status: 401,
+    });
+  });
+
+  it("throws DashboardFetchError(network) when the fetch itself rejects", async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error("offline"));
+    await expect(fetchDashboardRefreshMeta({ fetcher })).rejects.toMatchObject({
+      kind: "network",
+    });
+  });
+
+  it("throws DashboardFetchError(contract) when the body is not valid JSON", async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new Error("invalid json");
+      },
+    });
+    await expect(fetchDashboardRefreshMeta({ fetcher })).rejects.toMatchObject({
+      kind: "contract",
     });
   });
 });
