@@ -292,10 +292,11 @@ export default function Settings() {
   }, []);
 
   // Coverage gaps from the last refresh. All three arrays are optional on the
-  // selection meta; default to [] so the presence checks below are simple.
-  const unmatchedSources = coverage?.unmatchedSelectedSources ?? [];
-  const unavailableSources = coverage?.unavailableConnectorSources ?? [];
-  const blockedSources = coverage?.blockedSocialSources ?? [];
+  // selection meta; coerce to [] (any non-array — absent or malformed — degrades
+  // to empty) so the presence checks and lists below stay crash-safe.
+  const unmatchedSources = asStringArray(coverage?.unmatchedSelectedSources);
+  const unavailableSources = asStringArray(coverage?.unavailableConnectorSources);
+  const blockedSources = asStringArray(coverage?.blockedSocialSources);
   const hasCoverageGaps =
     unmatchedSources.length > 0 || unavailableSources.length > 0 || blockedSources.length > 0;
 
@@ -485,6 +486,13 @@ export default function Settings() {
       </div>
     </div>
   );
+}
+
+// Coerce a possibly-malformed selection field to a string array. The helper's
+// parse should already guarantee arrays, but a non-array degrades to [] rather
+// than crashing the panel (e.g. `.map` on a string).
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? (value as string[]) : [];
 }
 
 // Read-only list of source names under a small caption. Renders nothing when

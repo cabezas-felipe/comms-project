@@ -213,7 +213,99 @@ describe("Settings — source coverage panel (Prompt 6)", () => {
     vi.clearAllTimers();
   });
 
-  it("shows the panel and lists names under each section when coverage gaps exist", async () => {
+  // Deterministically settle the diagnostics read: confirm the effect fired,
+  // then flush its resolved/rejected continuation + the resulting re-render.
+  // Used by the absence assertions (panel hidden) where there is no positive
+  // element to `findBy*` on, so we never rely on ad-hoc setTimeout timing.
+  async function settleCoverageRead() {
+    await waitFor(() => expect(fetchDashboardRefreshMetaSpy).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it("hides the panel when there is no snapshot (coverage = null via meta: null)", async () => {
+    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({ ok: true, meta: null });
+    await mountWithSettings();
+    await settleCoverageRead();
+
+    expect(screen.queryByText("Source coverage")).toBeNull();
+    expect(screen.queryByText("All selected sources connected.")).toBeNull();
+  });
+
+  it("shows the neutral connected state when coverage is present with no gaps", async () => {
+    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
+      ok: true,
+      meta: {
+        selection: {
+          sourceSelectionMode: "strict",
+          unmatchedSelectedSources: [],
+          unavailableConnectorSources: [],
+          blockedSocialSources: [],
+        },
+      },
+    });
+    await mountWithSettings();
+
+    // Title is always present once the panel renders; body shows the neutral copy.
+    expect(await screen.findByText("Source coverage")).toBeTruthy();
+    expect(await screen.findByText("All selected sources connected.")).toBeTruthy();
+    // No gap sections rendered, and the non-blocking gap copy is absent.
+    expect(screen.queryByText("Not matched yet")).toBeNull();
+    expect(screen.queryByText("Unavailable connectors")).toBeNull();
+    expect(screen.queryByText("Blocked by allowlist")).toBeNull();
+    expect(
+      screen.queryByText(/Tempo will still build stories from matched sources/i)
+    ).toBeNull();
+  });
+
+  // coverage present + ONE gap type only → exactly that section is shown.
+  const SINGLE_GAP_CASES = [
+    {
+      field: "unmatchedSelectedSources",
+      heading: "Not matched yet",
+      value: "Made-Up Outlet",
+      others: ["Unavailable connectors", "Blocked by allowlist"],
+    },
+    {
+      field: "unavailableConnectorSources",
+      heading: "Unavailable connectors",
+      value: "Defunct Wire",
+      others: ["Not matched yet", "Blocked by allowlist"],
+    },
+    {
+      field: "blockedSocialSources",
+      heading: "Blocked by allowlist",
+      value: "@blockedhandle",
+      others: ["Not matched yet", "Unavailable connectors"],
+    },
+  ] as const;
+
+  for (const c of SINGLE_GAP_CASES) {
+    it(`shows only the "${c.heading}" section when ${c.field} is the only gap`, async () => {
+      fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
+        ok: true,
+        meta: { selection: { sourceSelectionMode: "strict", [c.field]: [c.value] } },
+      });
+      await mountWithSettings();
+
+      // Gaps exist → non-blocking body copy + only the relevant section.
+      expect(await screen.findByText("Source coverage")).toBeTruthy();
+      expect(
+        screen.getByText(/Tempo will still build stories from matched sources/i)
+      ).toBeTruthy();
+      expect(screen.getByText(c.heading)).toBeTruthy();
+      expect(screen.getByText(c.value)).toBeTruthy();
+      for (const other of c.others) {
+        expect(screen.queryByText(other)).toBeNull();
+      }
+      // Not the neutral state.
+      expect(screen.queryByText("All selected sources connected.")).toBeNull();
+    });
+  }
+
+  it("shows all sections + names when multiple gap types are present", async () => {
     fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
       ok: true,
       meta: {
@@ -228,8 +320,7 @@ describe("Settings — source coverage panel (Prompt 6)", () => {
     await mountWithSettings();
 
     // Title + non-blocking body copy.
-    const heading = await screen.findByText("Source coverage");
-    expect(heading).toBeTruthy();
+    expect(await screen.findByText("Source coverage")).toBeTruthy();
     expect(
       screen.getByText(/Tempo will still build stories from matched sources/i)
     ).toBeTruthy();
@@ -243,64 +334,41 @@ describe("Settings — source coverage panel (Prompt 6)", () => {
     expect(screen.getByText("@blockedhandle")).toBeTruthy();
   });
 
-  it("renders only the sections that have entries", async () => {
-    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
-      ok: true,
-      meta: {
-        selection: {
-          sourceSelectionMode: "strict",
-          unmatchedSelectedSources: ["Made-Up Outlet"],
-          // No unavailable / blocked sources this run.
-        },
-      },
-    });
-    await mountWithSettings();
-
-    await screen.findByText("Source coverage");
-    expect(screen.getByText("Not matched yet")).toBeTruthy();
-    expect(screen.queryByText("Unavailable connectors")).toBeNull();
-    expect(screen.queryByText("Blocked by allowlist")).toBeNull();
-  });
-
-  it("shows the neutral connected state when coverage arrays are empty", async () => {
-    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
-      ok: true,
-      meta: {
-        selection: {
-          sourceSelectionMode: "strict",
-          unmatchedSelectedSources: [],
-          unavailableConnectorSources: [],
-          blockedSocialSources: [],
-        },
-      },
-    });
-    await mountWithSettings();
-
-    expect(await screen.findByText("All selected sources connected.")).toBeTruthy();
-    // No gap sections rendered.
-    expect(screen.queryByText("Not matched yet")).toBeNull();
-    expect(screen.queryByText("Unavailable connectors")).toBeNull();
-    expect(screen.queryByText("Blocked by allowlist")).toBeNull();
-  });
-
-  it("hides the panel entirely when there is no snapshot (meta: null)", async () => {
-    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({ ok: true, meta: null });
-    await mountWithSettings();
-
-    // Let any pending diagnostics microtasks settle.
-    await new Promise((r) => setTimeout(r, 20));
-    expect(screen.queryByText("Source coverage")).toBeNull();
-  });
-
-  it("fails open: Settings still loads when the refresh-meta fetch rejects", async () => {
+  it("fails open: Settings still loads and panel is hidden when the refresh-meta fetch rejects", async () => {
     fetchDashboardRefreshMetaSpy.mockRejectedValueOnce(new Error("diagnostics down"));
     // mountWithSettings asserts the editable form became interactive — i.e. the
     // page rendered fine despite the diagnostics read failing.
     await mountWithSettings();
+    await settleCoverageRead();
 
-    await new Promise((r) => setTimeout(r, 20));
     // The form is usable and the coverage panel is simply absent.
     expect((screen.getByPlaceholderText("Add a topic") as HTMLInputElement).disabled).toBe(false);
     expect(screen.queryByText("Source coverage")).toBeNull();
+  });
+
+  it("degrades safely (no crash) when a coverage field has a malformed non-array shape", async () => {
+    // A non-array slips past the mocked helper (the real helper's schema parse
+    // would reject this, but the panel must never crash if it ever did). The
+    // component coerces non-arrays to empty, so no gap sections render.
+    fetchDashboardRefreshMetaSpy.mockResolvedValueOnce({
+      ok: true,
+      meta: {
+        selection: {
+          sourceSelectionMode: "strict",
+          blockedSocialSources: "bad-type",
+        },
+      },
+    });
+    await mountWithSettings();
+
+    // Rendered without throwing; coverage is present but degrades to "no gaps".
+    expect(await screen.findByText("All selected sources connected.")).toBeTruthy();
+    expect(screen.queryByText("Blocked by allowlist")).toBeNull();
+    expect(screen.queryByText("Not matched yet")).toBeNull();
+    expect(screen.queryByText("Unavailable connectors")).toBeNull();
+    // The malformed raw value must never be rendered as a chip.
+    expect(screen.queryByText("bad-type")).toBeNull();
+    // Form remains fully usable.
+    expect((screen.getByPlaceholderText("Add a topic") as HTMLInputElement).disabled).toBe(false);
   });
 });
