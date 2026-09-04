@@ -30,23 +30,24 @@ jobs:
         with:
           node-version: '20'
 
-      # Build shared packages first — 04-prototype depends on them via file: references.
+      # Build shared packages first — 05-prototype depends on them via file: references.
       - name: Install workspace deps
         run: npm ci
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       - name: Build shared packages
         run: npm run build:packages
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       # Install prototype deps after packages are built so file: symlinks resolve.
       - name: Install prototype deps
         run: npm ci
-        working-directory: 04-prototype
+        working-directory: 05-prototype
 
-      # Vercel CLI steps run from repo root — the Vercel project already has Root Directory
-      # set to 04-prototype in project settings, so adding working-directory here would
-      # cause Vercel to resolve 04-prototype/04-prototype and fail.
+      # Vercel CLI steps run from repo root. tempo-web Root Directory must be
+      # `05-prototype` (repo-relative). Do not add working-directory here —
+      # Vercel would resolve 05-prototype/05-prototype and fail.
+      # tempo-api (tempo-gray-psi) Root Directory must be `06-engineering/apps/api`.
       # VERCEL_ORG_ID and VERCEL_PROJECT_ID_FRONTEND must be set as GitHub Actions secrets.
       - name: Pull Vercel project config
         run: npx vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}

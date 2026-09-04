@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Nature
 
-This is primarily a **product discovery research repository** (Markdown-first). Engineering for the Tempo prototype and shared packages lives under [`05-engineering`](05-engineering): run **`cd 05-engineering && npm install`** then **`npm run dev`**, **`npm run build`**, **`npm run test:packages`**, etc. See [`05-engineering/README.md`](05-engineering/README.md).
+This is primarily a **product discovery research repository** (Markdown-first). Product work lives under [`02-product`](02-product). Engineering for the Tempo prototype and shared packages lives under [`06-engineering`](06-engineering): run **`cd 06-engineering && npm install`** then **`npm run dev`**, **`npm run build`**, **`npm run test:packages`**, etc. See [`06-engineering/README.md`](06-engineering/README.md).
 
-Dashboard `story.whatChanged` is produced by the **3-state delta engine** — deterministic structural gate plus optional Haiku + Sonnet stages, **default off** until `TEMPO_AI_DELTA_ENABLED=true`. See [`what-changed-spec.md`](05-engineering/docs/what-changed-spec.md) and the [handoff](05-engineering/docs/what-changed-handoff.md).
+Vercel Git Root Directory (repo-relative): frontend `05-prototype` (`tempo-web`); API `06-engineering/apps/api` (`tempo-api` / `tempo-gray-psi`).
+
+Dashboard `story.whatChanged` is produced by the **3-state delta engine** — deterministic structural gate plus optional Haiku + Sonnet stages, **default off** until `TEMPO_AI_DELTA_ENABLED=true`. See [`what-changed-spec.md`](06-engineering/docs/what-changed-spec.md) and the [handoff](06-engineering/docs/what-changed-handoff.md).
 
 ## Linking Convention
 
@@ -36,16 +38,20 @@ Interview Guides → Sessions → Synthesis → Context Map → Backlog → Deci
 - `01-research/interview-guide--zero-to-one.md` — baseline workflow discovery protocol
 - `01-research/interview-guide--zero-to-one--monitoring.md` — monitoring deep-dive protocol
 
+## Product
+
+Product strategy, roadmap, and product decisions live under [`02-product`](02-product). PRDs and strategy specs live under [`04-prd`](04-prd).
+
 ## Design system (prototypes)
 
-When building or describing UI prototypes (Cursor, Claude Code, v0, etc.), use `02-design/` as the single source of truth:
+When building or describing UI prototypes (Cursor, Claude Code, v0, etc.), use `03-design/` as the single source of truth:
 
-- [Design system README](02-design/README.md) — entrypoint, foundations, components, tokens, AI usage
-- [Design tokens (JSON)](02-design/tokens/design-tokens.json) — canonical values
-- [Design tokens (CSS)](02-design/tokens/tokens.css) — CSS variables, including `prefers-reduced-motion` overrides
-- [Color preview](02-design/color-preview.html) — single visual artifact explaining final color decisions and rationale
+- [Design system README](03-design/README.md) — entrypoint, foundations, components, tokens, AI usage
+- [Design tokens (JSON)](03-design/tokens/design-tokens.json) — canonical values
+- [Design tokens (CSS)](03-design/tokens/tokens.css) — CSS variables, including `prefers-reduced-motion` overrides
+- [Color preview](03-design/color-preview.html) — single visual artifact explaining final color decisions and rationale
 
-Archive note: treat `02-design/archive/` as historical context only. Do not use archived files as implementation source unless explicitly requested.
+Archive note: treat `03-design/archive/` as historical context only. Do not use archived files as implementation source unless explicitly requested.
 
 ## Research State & Conventions
 

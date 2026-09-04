@@ -1,7 +1,7 @@
 .DS_Store
 node_modules/
 **/dist/
-04-prototype/node_modules/
+05-prototype/node_modules/
 
 # Secrets and local env files
 .env
@@ -14,8 +14,8 @@ node_modules/
 !*.env.example
 
 # Project-specific local env files
-05-engineering/apps/api/.env
-04-prototype/.env.local
+06-engineering/apps/api/.env
+05-prototype/.env.local
 
 # Vercel local project metadata
 **/.vercel/
@@ -25,9 +25,9 @@ node_modules/
 
 # Per-user file-adapter settings written by the API in dev (Supabase is the
 # real store; these are local dev artifacts only).
-05-engineering/apps/api/data/settings_user_*.json
+06-engineering/apps/api/data/settings_user_*.json
 
 # Generated eval artifacts (calibration JSON, quality-gate output). Re-creatable
 # by `npm run eval:dashboard-calibration:json` / `eval:dashboard-quality-gate`.
 **/.artifacts/
-05-engineering/apps/api/tmp/
+06-engineering/apps/api/tmp/

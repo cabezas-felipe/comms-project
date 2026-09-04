@@ -23,18 +23,18 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: 05-engineering/package-lock.json
+          cache-dependency-path: 06-engineering/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       - name: Run daily source digest
         run: |
           echo "[source-digest] Run started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           echo "[source-digest] Slack webhook configured: $( [ -n "$SOURCE_DIGEST_SLACK_WEBHOOK_URL" ] && echo yes || echo no — dry-run mode )"
           node apps/api/src/ops/source-delta-digest.mjs
-        working-directory: 05-engineering
+        working-directory: 06-engineering
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
