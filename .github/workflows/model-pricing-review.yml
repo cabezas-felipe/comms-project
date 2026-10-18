@@ -1,0 +1,44 @@
+name: Weekly model pricing review
+
+# Posts the ops price catalog to Slack for human review. Does not scrape providers
+# or open PRs automatically — update 07-ops/model-pricing.json when rates change,
+# then sync the API runtime copy.
+#
+# Slack: #ops-pricing-models (tempo-comms.slack.com) → Incoming Webhook → repo secret
+#   TEMPO_OPS_SLACK_WEBHOOK_URL
+# Omit the secret → dry-run to workflow logs.
+
+on:
+  schedule:
+    # Mondays 14:00 UTC (~09:00 US Eastern) — clear of source-digest 09:00 UTC.
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: model-pricing-review
+  cancel-in-progress: false
+
+jobs:
+  pricing-review:
+    name: Post pricing review to Slack
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Assert ops SoT and runtime copy match
+        run: node 07-ops/scripts/sync-model-pricing.mjs --check
+
+      - name: Format Slack message and post (or dry-run)
+        env:
+          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL }}
+        run: node 07-ops/scripts/post-model-pricing-review.mjs
