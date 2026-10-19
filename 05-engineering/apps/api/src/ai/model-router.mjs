@@ -1,9 +1,18 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { summarizeWithMockOpenAI } from "./providers/mock-openai.mjs";
 import { summarizeWithMockAnthropic } from "./providers/mock-anthropic.mjs";
 import { summarizeWithOpenAICompatible } from "./providers/openai-compatible.mjs";
 import { summarizeWithAnthropic } from "./providers/anthropic.mjs";
 import { heuristicSummary, withTimeout } from "./guardrails.mjs";
 import { buildSummaryPrompt, SUMMARY_PROMPT_VERSION } from "./prompts.mjs";
+
+// Runtime copy of 07-ops/model-pricing.json (ops SoT). Keep in sync via
+// `node 07-ops/scripts/sync-model-pricing.mjs` (or `npm run sync:model-pricing`).
+const MODEL_PRICES = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "pricing/model-prices.json"), "utf8")
+);
 
 // Reads env at call time so tests can set vars after import.
 function getCapabilityDefaults() {
@@ -55,13 +64,6 @@ export function resolveExtractionChain() {
   return { primary, fallback };
 }
 
-// Real Anthropic token pricing (USD per million tokens, as of 2026-04).
-const ANTHROPIC_COSTS = {
-  "claude-haiku-4-5-20251001": { inputPerMTok: 0.80, outputPerMTok: 4.00 },
-  "claude-sonnet-4-6": { inputPerMTok: 3.00, outputPerMTok: 15.00 },
-  "claude-opus-4-7": { inputPerMTok: 15.00, outputPerMTok: 75.00 },
-};
-
 export function providerFor(model) {
   if (process.env.TEMPO_AI_MOCK_ONLY === "true") {
     return model.startsWith("mock-anthropic") ? "mock-anthropic" : "mock-openai";
@@ -78,15 +80,19 @@ function resolveModelName(model) {
   return colonIdx !== -1 ? model.slice(colonIdx + 1) : model;
 }
 
-function estimateCostUsd(modelName, promptTokens, outputTokens) {
-  const rates = ANTHROPIC_COSTS[modelName];
-  if (rates) {
+/**
+ * Estimate USD cost from token counts × ops price table (stamped at call time).
+ * Unknown/mock model ids → deterministic stub (not null) for legacy callers.
+ */
+export function estimateCostUsd(modelName, promptTokens, outputTokens) {
+  const rates = MODEL_PRICES.models?.[modelName];
+  if (rates && Number.isFinite(rates.inputPerMTok) && Number.isFinite(rates.outputPerMTok)) {
     return Number(
       ((promptTokens * rates.inputPerMTok + outputTokens * rates.outputPerMTok) / 1_000_000).toFixed(6)
     );
   }
   // Deterministic stub for mock/unknown models.
-  const factor = modelName.includes("anthropic") ? 0.0000022 : 0.0000020;
+  const factor = String(modelName).includes("anthropic") ? 0.0000022 : 0.0000020;
   return Number(((promptTokens + outputTokens) * factor).toFixed(6));
 }
 
