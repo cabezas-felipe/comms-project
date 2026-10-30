@@ -1,0 +1,79 @@
+// Tempo — Summarization runs (design ERD)
+// Cloud: https://dbdiagram.io/d/6ae28ffced134e407e37a6d0
+// Title: Summarization runs
+//
+// Sibling to tempo.dbml (product Database library) and extraction-runs.dbml.
+// Intent: per-attempt LLM lineage for stage=summarization.
+// Not live Supabase until migrated. DBML is the design map.
+//
+// Grain: one row per LLM **attempt**. trigger_id groups ≤2 attempts for one invoke.
+// Skip / no-model paths (X; no body; already has article summary) do NOT insert rows.
+//
+// Forward compat:
+//   trigger_kind — varchar until Phase B2 locks a closed enum
+//   stage        — default 'summarization'; path toward shared ai_runs later
+//
+// Body / publisher text: never a column (note only). No output_json — product
+// tables are SoT (press article_summary). No eval_scores — offline gold.
+// No accepted_at (extraction-only).
+
+Project summarization_runs {
+  database_type: 'PostgreSQL'
+  Note: 'Per-attempt LLM lineage for stage=summarization. Sibling to product Database library. Never store publisher body.'
+}
+
+Enum summarization_run_status {
+  succeeded
+  failed
+}
+
+Enum summarization_error_kind {
+  timeout
+  provider_http_error
+  provider_error
+  config_error
+  schema_error
+  empty_response
+  unknown
+}
+
+TableGroup "Summarization runs" [color: #E8D5C4, note: 'One row per LLM attempt'] {
+  summarization_runs
+}
+
+TableGroup "Product stubs" [color: #E8E6E1, note: 'Canonical shapes: tempo.dbml → Supabase'] {
+  stories
+}
+
+Table stories {
+  story_id uuid [pk]
+
+  Note: 'STUB for FK visibility. Full table owned by tempo.dbml / Supabase (press keep-list via press_articles).'
+}
+
+Table summarization_runs {
+  run_id uuid [pk]
+  trigger_id uuid [not null, note: 'Shared by attempts for one invoke; primary + one retry (≤2)']
+  trigger_kind varchar(64) [not null, note: 'Provisional until B2 locks closed enum (e.g. clock | warm)']
+  stage varchar(64) [not null, default: 'summarization', note: 'Forward compat toward multi-stage ai_runs']
+  story_id uuid [not null, ref: > stories.story_id, note: 'Press story being summarized']
+  status summarization_run_status [not null]
+  model_provider varchar(64) [not null, note: 'e.g. anthropic — SKU locked in B2']
+  model_id varchar(128) [not null, note: 'Router SKU; filled at write time']
+  prompt_version varchar(64) [not null, note: 'e.g. summarization-v1']
+  input_hash varchar(64) [not null, note: 'SHA-256 hex of canonical model input (title + body fingerprint while in memory); excludes system prompt; never retain body bytes']
+  prompt_tokens int [null]
+  output_tokens int [null]
+  estimated_cost_usd decimal [null, note: 'tokens × 07-ops/model-pricing.json at write time; null if model_id missing from catalog']
+  error_kind summarization_error_kind [null, note: 'Set when status=failed — closed labels only']
+  started_at timestamptz [not null]
+  finished_at timestamptz [null, note: 'Null only while in flight']
+
+  indexes {
+    (trigger_id)
+    (story_id, started_at)
+    (prompt_version, started_at)
+  }
+
+  Note: 'No output_json (article_summary on press keep-list is SoT). No fallback_used. No eval_scores. Never store publisher body. Skip/no-model paths do not insert rows.'
+}

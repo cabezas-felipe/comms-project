@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "currency": "USD",
+  "updated": "2026-10-29",
+  "notes": "Ops SoT for ingestion vendor unit rates (NewsAPI.ai Stream, X poll/lookup/compliance). Used by daily spend digests with PostHog ingestion_job_completed facts. Do not fetch pricing on clock/warm/IR-14. Stamp price_as_of on each digest; updating this file does not rewrite past digests. SKU rates filled/verified at build — placeholders empty until then.",
+  "review_urls": {
+    "newsapi_ai_plans": "https://newsapi.ai/plans",
+    "x_api_pricing": "https://docs.x.com/x-api/getting-started/pricing"
+  },
+  "skus": {}
+}

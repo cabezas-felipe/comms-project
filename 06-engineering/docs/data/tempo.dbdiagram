@@ -1,0 +1,76 @@
+{
+  "version": "3.0.0",
+  "darkMode": false,
+  "gridEnabling": true,
+  "currentViewName": null,
+  "defaultView": {
+    "detailLevel": "All",
+    "relationshipMode": "All",
+    "tablePositions": [
+      { "name": "users", "schemaName": "public", "x": 40, "y": 80 },
+
+      { "name": "user_role_organization", "schemaName": "public", "x": 480, "y": 40 },
+      { "name": "functions", "schemaName": "public", "x": 480, "y": 420 },
+      { "name": "organizations", "schemaName": "public", "x": 480, "y": 680 },
+      { "name": "organization_aliases", "schemaName": "public", "x": 480, "y": 980 },
+      { "name": "industries", "schemaName": "public", "x": 480, "y": 1280 },
+
+      { "name": "user_priorities", "schemaName": "public", "x": 1000, "y": 40 },
+      { "name": "user_organization_priorities", "schemaName": "public", "x": 1000, "y": 300 },
+      { "name": "user_topics", "schemaName": "public", "x": 1000, "y": 560 },
+      { "name": "user_keywords", "schemaName": "public", "x": 1000, "y": 920 },
+      { "name": "user_geographies", "schemaName": "public", "x": 1000, "y": 1280 },
+
+      { "name": "topics", "schemaName": "public", "x": 1520, "y": 560 },
+      { "name": "keywords", "schemaName": "public", "x": 1520, "y": 920 },
+      { "name": "geographies", "schemaName": "public", "x": 1520, "y": 1280 },
+      { "name": "geography_aliases", "schemaName": "public", "x": 1520, "y": 1620 },
+
+      { "name": "user_stakeholders", "schemaName": "public", "x": 2040, "y": 40 },
+      { "name": "user_stakeholder_mentions", "schemaName": "public", "x": 2040, "y": 320 },
+
+      { "name": "user_sources", "schemaName": "public", "x": 2560, "y": 40 },
+      { "name": "user_press_sources", "schemaName": "public", "x": 2560, "y": 320 },
+      { "name": "user_social_accounts", "schemaName": "public", "x": 2560, "y": 640 },
+      { "name": "press_sources", "schemaName": "public", "x": 3080, "y": 320 },
+      { "name": "press_source_aliases", "schemaName": "public", "x": 3080, "y": 640 },
+      { "name": "social_accounts", "schemaName": "public", "x": 3080, "y": 960 },
+
+      { "name": "newsapi_drain_cursors", "schemaName": "public", "x": 40, "y": 2200 },
+      { "name": "x_word_search_cursor", "schemaName": "public", "x": 40, "y": 2560 },
+      { "name": "x_post_download_cursors", "schemaName": "public", "x": 40, "y": 2900 },
+      { "name": "x_compliance_jobs", "schemaName": "public", "x": 40, "y": 3240 },
+
+      { "name": "stories", "schemaName": "public", "x": 560, "y": 2200 },
+      { "name": "press_articles", "schemaName": "public", "x": 560, "y": 2620 },
+      { "name": "x_posts", "schemaName": "public", "x": 560, "y": 3480 },
+
+      { "name": "story_topics", "schemaName": "public", "x": 1520, "y": 2200 },
+      { "name": "story_keywords", "schemaName": "public", "x": 1520, "y": 2560 },
+      { "name": "story_geographies", "schemaName": "public", "x": 1520, "y": 2920 },
+
+      { "name": "story_embeddings", "schemaName": "public", "x": 2040, "y": 2200 },
+
+      { "name": "metastories", "schemaName": "public", "x": 2560, "y": 2200 },
+      { "name": "metastory_stories", "schemaName": "public", "x": 2560, "y": 2720 },
+
+      { "name": "user_feed_membership", "schemaName": "public", "x": 3080, "y": 2200 }
+    ],
+    "tableGroupCollapseStates": [
+      { "name": "1 · Account", "isCollapsed": false },
+      { "name": "2 · Identity (blurb 1)", "isCollapsed": false },
+      { "name": "3 · Priorities & retrieval (blurbs 2–3)", "isCollapsed": false },
+      { "name": "4 · Stakeholders (blurb 4)", "isCollapsed": false },
+      { "name": "5 · Sources (blurb 5)", "isCollapsed": false },
+      { "name": "6 · Shared stories", "isCollapsed": false },
+      { "name": "7 · Story chips", "isCollapsed": false },
+      { "name": "8 · Metastories", "isCollapsed": false },
+      { "name": "9 · Story embeddings", "isCollapsed": false },
+      { "name": "10 · Feed membership", "isCollapsed": false },
+      { "name": "11 · Ingest ops", "isCollapsed": false }
+    ],
+    "stickyNoteLayouts": [],
+    "referencePaths": []
+  },
+  "views": {}
+}

@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "metastory-gold-v1",
+  "promptVersion": "TBD",
+  "notes": "DEPRECATED path stub. Use metastory-boundary.gold.json and metastory-writer.gold.json. examples stays empty.",
+  "examples": []
+}

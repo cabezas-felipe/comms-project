@@ -6,9 +6,9 @@ name: Relevance path gate
 #
 # This COMPLEMENTS — it does not replace — `api-quality-gate.yml`:
 #   - api-quality-gate runs the FULL api suite + critical + hermetic quality
-#     gate, triggered on any `05-engineering/**` change.
+#     gate, triggered on any `06-engineering/**` change.
 #   - this gate adds focused relevance coverage that ALSO fires on
-#     `04-prototype/**` relevance surfaces (which api-quality-gate does not
+#     `05-prototype/**` relevance surfaces (which api-quality-gate does not
 #     watch), so a prototype-only change that drifts against the relevance
 #     diagnostics contract still gets caught.
 #
@@ -21,13 +21,13 @@ on:
     branches:
       - main
     paths:
-      - "05-engineering/apps/api/src/dashboard/**"
-      - "05-engineering/apps/api/src/ai/evals/**"
-      - "05-engineering/apps/api/package.json"
-      - "05-engineering/packages/contracts/src/**"
-      - "04-prototype/src/components/DashboardRunDiagnostics.tsx"
-      - "04-prototype/src/lib/api.ts"
-      - "04-prototype/src/pages/Dashboard.tsx"
+      - "06-engineering/apps/api/src/dashboard/**"
+      - "06-engineering/apps/api/src/ai/evals/**"
+      - "06-engineering/apps/api/package.json"
+      - "06-engineering/packages/contracts/src/**"
+      - "05-prototype/src/components/DashboardRunDiagnostics.tsx"
+      - "05-prototype/src/lib/api.ts"
+      - "05-prototype/src/pages/Dashboard.tsx"
       - ".github/workflows/relevance-path-gate.yml"
   workflow_dispatch:
 
@@ -59,17 +59,17 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: 05-engineering/package-lock.json
+          cache-dependency-path: 06-engineering/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       # Relevance tests import the built @tempo/contracts types/runtime, so the
       # shared packages must be built before the targeted suite runs.
       - name: Build shared packages
         run: npm run build:packages
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       # Checks are ordered fastest → most valuable. Output is tee'd to a log so a
       # failing run is debuggable from the uploaded artifact.
@@ -82,7 +82,7 @@ jobs:
         run: |
           npm run test:relevance-path --workspace=@tempo/api \
             2>&1 | tee relevance-path-gate-tests.log
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       # Hermetic acceptance eval for the relevance strategy (no provider keys, no
       # network) — fails closed on any assertion regression.
@@ -90,7 +90,7 @@ jobs:
         run: |
           npm run eval:dashboard-elections-colombia --workspace=@tempo/api \
             2>&1 | tee relevance-path-gate-elections.log
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       # Lightweight, failure-only diagnosis aid. Short retention — these logs are
       # only useful for the lifetime of the PR investigation.
@@ -99,6 +99,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: relevance-path-gate-logs
-          path: 05-engineering/relevance-path-gate-*.log
+          path: 06-engineering/relevance-path-gate-*.log
           retention-days: 7
           if-no-files-found: ignore

@@ -53,7 +53,7 @@ name: Ingestion cache warmer
 #   - On `skippedReason=write_error` / `x_write_error` (or any failure) the
 #     `[ingestion-warm]` line's `error` field carries the serialized supabase
 #     error (message/code/details/hint).  See the operator checklist in
-#     05-engineering/docs/runbook-ingestion-warm.md.
+#     06-engineering/docs/runbook-ingestion-warm.md.
 
 on:
   schedule:
@@ -87,17 +87,17 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: 05-engineering/package-lock.json
+          cache-dependency-path: 06-engineering/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       - name: Run ingestion warm
         run: |
           echo "[ingestion-warm] Run started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           node apps/api/src/ops/ingestion-warm.mjs
-        working-directory: 05-engineering
+        working-directory: 06-engineering
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

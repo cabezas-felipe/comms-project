@@ -1,0 +1,88 @@
+// Tempo — Metastory runs (design ERD)
+// Cloud: https://dbdiagram.io/d/6ae28fb1ed134e407e37a484
+// Title: Metastory runs
+//
+// Sibling to tempo.dbml (product Database library) and extraction-runs.dbml.
+// Intent: per-attempt LLM lineage for stage=metastory (boundary + writer).
+// Not live Supabase until migrated. DBML is the design map.
+//
+// Grain: one row per LLM **attempt**. call_kind separates boundary vs writer.
+//   One clock/warm tick may produce several rows (≤2 boundary + ≤2 writer).
+//   trigger_id groups attempts within one invoke (same call_kind).
+// Embed / cluster-propose are NOT rows here (embed SKU + vector math).
+//
+// Forward compat:
+//   trigger_kind — varchar until Phase B3 locks a closed enum
+//   stage        — default 'metastory'; path toward shared ai_runs later
+//
+// Body / publisher text: never a column (note only). No output_json — product
+// tables are SoT. No eval_scores — offline gold in evals/metastory-*.md.
+// No accepted_at (extraction-only).
+
+Project metastory_runs {
+  database_type: 'PostgreSQL'
+  Note: 'Per-attempt LLM lineage for stage=metastory (boundary + writer). Sibling to product Database library. Embed/cluster-propose out of this ERD.'
+}
+
+Enum metastory_run_call_kind {
+  boundary
+  writer
+}
+
+Enum metastory_run_status {
+  succeeded
+  failed
+}
+
+Enum metastory_error_kind {
+  timeout
+  provider_http_error
+  provider_error
+  config_error
+  schema_error
+  empty_response
+  unknown
+}
+
+TableGroup "Metastory runs" [color: #E8D5C4, note: 'One row per LLM attempt; call_kind = boundary | writer'] {
+  metastory_runs
+}
+
+TableGroup "Product stubs" [color: #E8E6E1, note: 'Canonical shapes: tempo.dbml → Supabase'] {
+  metastories
+}
+
+Table metastories {
+  metastory_id uuid [pk]
+
+  Note: 'STUB for FK visibility. Full table owned by tempo.dbml / Supabase.'
+}
+
+Table metastory_runs {
+  run_id uuid [pk]
+  trigger_id uuid [not null, note: 'Shared by attempts for one invoke (same call_kind); primary + retry']
+  trigger_kind varchar(64) [not null, note: 'Provisional until B3 locks closed enum (e.g. clock | warm)']
+  call_kind metastory_run_call_kind [not null, note: 'boundary = confirm/split/merge; writer = shared copy']
+  stage varchar(64) [not null, default: 'metastory', note: 'Forward compat toward multi-stage ai_runs']
+  metastory_id uuid [null, ref: >? metastories.metastory_id, note: 'NULL until mint (new event + no title yet); set when known']
+  status metastory_run_status [not null]
+  model_provider varchar(64) [not null, note: 'e.g. anthropic — SKU locked in B3']
+  model_id varchar(128) [not null, note: 'Router SKU; filled at write time']
+  prompt_version varchar(64) [not null, note: 'e.g. metastory-boundary-v1 | metastory-writer-v1']
+  input_hash varchar(64) [not null, note: 'SHA-256 hex of canonical model input for this call_kind; excludes system prompt; never hash/store publisher body bytes as retained payload']
+  prompt_tokens int [null]
+  output_tokens int [null]
+  estimated_cost_usd decimal [null, note: 'tokens × 07-ops/model-pricing.json at write time; null if model_id missing from catalog']
+  error_kind metastory_error_kind [null, note: 'Set when status=failed — closed labels only']
+  started_at timestamptz [not null]
+  finished_at timestamptz [null, note: 'Null only while in flight']
+
+  indexes {
+    (trigger_id)
+    (metastory_id, started_at)
+    (call_kind, started_at)
+    (prompt_version, started_at)
+  }
+
+  Note: 'No output_json (product tables are SoT). No fallback_used (same trigger_id + different model_id). No eval_scores. Never store publisher body. Skip/no-model paths do not insert rows.'
+}

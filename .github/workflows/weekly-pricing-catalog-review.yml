@@ -1,0 +1,51 @@
+name: Weekly pricing catalog review
+
+# Mondays 14:00 UTC — heartbeat (in_sync) or drift/fetch_fail for model + ingestion
+# rate-card SoTs. Does not auto-commit rates. Doc-diff parsers TBD at build.
+#
+# Slack:
+#   #ops-pricing-models     → TEMPO_OPS_SLACK_WEBHOOK_URL
+#   #ops-pricing-ingestion  → TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION
+# Omit a secret → dry-run that catalog to workflow logs.
+
+on:
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-pricing-catalog-review
+  cancel-in-progress: false
+
+jobs:
+  catalog-review:
+    name: Post catalog heartbeats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      PRICING_DIFF_STATUS: in_sync
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Assert model-pricing SoT matches runtime copy
+        run: node 07-ops/scripts/sync-model-pricing.mjs --check
+
+      - name: Post model catalog (#ops-pricing-models)
+        env:
+          CATALOG: model
+          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL }}
+        run: node 07-ops/scripts/post-pricing-catalog-review.mjs
+
+      - name: Post ingestion catalog (#ops-pricing-ingestion)
+        env:
+          CATALOG: ingestion
+          TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION }}
+        run: node 07-ops/scripts/post-pricing-catalog-review.mjs

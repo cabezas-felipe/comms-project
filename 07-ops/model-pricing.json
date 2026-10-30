@@ -3,7 +3,7 @@
   "currency": "USD",
   "unit": "per_million_tokens",
   "updated": "2026-10-17",
-  "notes": "Ops SoT for estimated_cost_usd. Runtime copy: 05-engineering/apps/api/src/ai/pricing/model-prices.json \u2014 keep in sync via npm run sync:model-pricing (from 05-engineering) or 07-ops/scripts/sync-model-pricing.mjs. Stamp costs at run write; updating this file does not rewrite history. After folder renumber (05\u219206), update sync dest once.",
+  "notes": "Ops SoT for estimated_cost_usd. Runtime copy: 06-engineering/apps/api/src/ai/pricing/model-prices.json — keep in sync via npm run sync:model-pricing (from 06-engineering) or 07-ops/scripts/sync-model-pricing.mjs. Stamp costs at run write; updating this file does not rewrite history.",
   "review_urls": {
     "anthropic": "https://docs.anthropic.com/en/docs/about-claude/pricing",
     "openai": "https://openai.com/api/pricing/"

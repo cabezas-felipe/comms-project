@@ -1,0 +1,699 @@
+// Tempo — exploratory ERD (DBML source of truth)
+// Cloud: https://dbdiagram.io/d/6ab4852e58694256127b2a37
+// Not the live app schema until deliberately reconciled.
+//
+// Two bands on one Postgres project:
+//   EXTRACTION / SCOPE (groups 1–5) — blurbs → user chips → catalogs (incl. vendor send keys)
+//   MONITORING (groups 6–11) — shared pool → story chips → metastories → embeddings
+//                              → feed membership (why / what-next) → ingest ops
+//
+// Layout (left → right; extraction then monitoring):
+//
+//   ┌─ 1 Account ─────────────────────────────────────────────────────────────┐
+//   │  users                                                                  │
+//   └────┬───────────────┬──────────────────┬──────────────────┬──────────────┘
+//        ▼               ▼                  ▼                  ▼
+//   2 Identity      3 Priorities      4 Stakeholders     5 Sources
+//   (blurb 1)       & retrieval       (blurb 4)          (blurb 5)
+//                   (blurbs 2–3)
+//        │               │                  │                  │
+//        │ prose         │ prose            │ prose            │ prose
+//        ▼               ▼                  ▼                  ▼
+//     extracts        extracts           mentions          membership
+//        │               │                  │                  │
+//        ▼               ▼                  │                  ▼
+//     catalogs        catalogs           (no shared        catalogs
+//     function*       T / K / G           catalog)         press + X
+//     org             (+ conceptUri)                       (+ sourceUri / x id)
+//
+//   * function (not job title) drives why-this-matters / what-comes-next.
+//     role_submitted is display-only; resolve goes submitted → function (no roles catalog in v1).
+//
+//   MONITORING (shared pool → event → per-user feed):
+//     6 stories ──► 7 story chips ──► 8 metastories (+ membership)
+//                └─► 9 embeddings          │
+//                                         ▼
+//                                   10 feed membership (why / what-next)
+//                                   11 ingest ops (cursors / compliance)
+//
+// Flow per extraction lane (read top → bottom inside each TableGroup):
+//   utterance (blurb) → extract / join → shared catalog (when one exists)
+//
+// Conventions:
+//   FK = foreign key (column pointing at another table's primary key).
+//   Match keys stored lowercase for uniqueness + resolve: catalog names,
+//   aliases, handles, emails, stakeholder mentions.
+//   Display utterances keep original casing: blurbs, *_submitted.
+//   Blurbs 1–5 are optional in v1 (UX highly suggests; do not block onboarding).
+//   Skip = no row, or row with NULL blurb. Weak dashboard until filled in account settings.
+//   Resolved FKs / submitted extracts on blurb-1 may be NULL if extraction fails.
+//   Timestamps: user-owned + correctable catalogs (orgs, press, social) → created_at + updated_at;
+//   near-enums / lexicon (functions, industries, topics, keywords, geographies)
+//   and aliases → created_at only.
+//   Scope memberships (T/K/G + press/X joins): created_at + deleted_at + end_reason.
+//   Active scope = deleted_at IS NULL. origin = extracted|user_added.
+//   end_reason (when deleted): user_removed (chip x). superseded stays in the enum
+//   for stakeholder mentions / later — unused on T/K/G + press/X in MVP.
+//   Re-extract does not auto-drop T/K/G + press/X. It may INSERT or resurrect
+//   origin=extracted. user_added untouched.
+//   User x is NOT sticky: if re-extract proposes again, clear deleted_at/end_reason (resurrect).
+//   Manual Add also clears deleted_at/end_reason on the same PK.
+//   Stakeholder mentions: extract-only (no Add/x). deleted_at only — ended always means re-extract drop.
+//   Publisher body: never a column. Press article_summary is Tempo-owned (source-reader snippet when present).
+//   press_articles.excerpt: reserved for future outlet/feed teaser; NewsAPI → NULL; never truncated body.
+//   Story chips ≠ user chips; metastory chips are roll-ups via membership (no metastory_chips table).
+//   Phase A CLOSED (D-085): A3 monitoring SoT + A4 runs stubs. Embed dims N stay TBD until embed SKU locks.
+//   Run lineage siblings: extraction / summarization / story-tagging / metastory / personalization *-runs.dbml.
+Project tempo {
+  database_type: 'PostgreSQL'
+  Note: 'Extraction lanes 1–5 + monitoring 6–11. Phase A closed (D-085). One Postgres project. Blurbs optional in v1. No publisher body. Run lineage → sibling *-runs.dbml.'
+}
+
+Enum facet_source {
+  personal_priorities
+  organization_priorities
+}
+
+Enum membership_origin {
+  extracted
+  user_added
+}
+
+Enum membership_end_reason {
+  user_removed
+  superseded
+}
+
+Enum social_fetch_mode {
+  word_search
+  post_download
+}
+
+Enum story_kind {
+  press
+  x
+}
+
+Enum story_removal_reason {
+  compliance_delete
+  compliance_protect
+  compliance_suspend
+  compliance_withhold
+  operator
+}
+// Tempo-normalized (not raw X action/reason strings). Mapped on compliance apply.
+// Press leaves the pool only via operator — NewsAPI has no batch-compliance reason enum.
+
+Enum feed_membership_end_reason {
+  left_join
+  operator
+}
+
+Enum newsapi_drain_kind {
+  concepts
+  keywords
+}
+
+Enum press_data_type {
+  news
+  pr
+}
+// Vendor article dataType. blog is out of v0 aperture — do not add to this enum until product opens blogs.
+
+Enum x_compliance_job_type {
+  tweets
+  users
+}
+
+Enum x_compliance_job_status {
+  created
+  in_progress
+  failed
+  complete
+  expired
+}
+
+// =============================================================================
+// 1 · Account — identity only; hub for every lane below
+// =============================================================================
+
+TableGroup "1 · Account" [color: #E8E6E1, note: 'Hub — identity only'] {
+  users
+}
+
+Table users {
+  uid uuid [pk]
+  email varchar(320) [unique, not null, note: 'Store lowercase']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Identity only — hub for lanes 2–5'
+}
+
+// =============================================================================
+// 2 · Identity (blurb 1) — who you are → function / org
+//     Flow: blurb → model emits role_submitted|organization_submitted|function_label
+//           post-model: function_label → functions.name → function_id  (no title catalog in v1)
+//           post-model: organization_submitted → aliases → organization_id
+// =============================================================================
+
+TableGroup "2 · Identity (blurb 1)" [color: #DCE8F5, note: 'blurb → model labels → post-model function/org FKs'] {
+  user_role_organization
+  functions
+  organizations
+  organization_aliases
+  industries
+}
+
+Table user_role_organization {
+  user_id uuid [pk, ref: - users.uid]
+  blurb text [null, note: 'Optional v1; NULL if skipped']
+  role_submitted varchar(300) [null, note: 'Utterance for display only; NOT a catalog key']
+  organization_submitted varchar(300) [null, note: 'As typed (display); NULL if extract failed or blurb skipped']
+  function_id uuid [ref: >? functions.function_id, note: 'Post-model resolve from function_label → functions.name; NULL if unresolved']
+  organization_id uuid [ref: >? organizations.organization_id, note: 'Post-model resolve from organization_submitted via aliases; NULL if unresolved']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Blurb 1 — optional v1; model never writes UUIDs; no roles table'
+}
+
+Table functions {
+  function_id uuid [pk]
+  name varchar(200) [unique, not null, note: 'Store lowercase — primary why-matters / next-steps signal']
+  created_at timestamptz [not null]
+
+  Note: 'Closed set. v1 seed: communications, policy, operations, partnerships. Insert these four lowercase rows at build. Do not hardcode the list in the extraction prompt. Near-enum — created_at only. Job titles not catalogued in v1.'
+}
+
+Table organizations {
+  organization_id uuid [pk]
+  name_normalized varchar(300) [unique, not null, note: 'Store lowercase']
+  industry_id uuid [ref: >? industries.industry_id]
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+}
+
+Table organization_aliases {
+  alias_id uuid [pk]
+  organization_id uuid [not null, ref: > organizations.organization_id]
+  alias varchar(300) [unique, not null, note: 'Store lowercase']
+  created_at timestamptz [not null]
+
+  Note: 'Synonyms (un → united nations)'
+}
+
+Table industries {
+  industry_id uuid [pk]
+  name varchar(200) [unique, not null, note: 'Store lowercase']
+  created_at timestamptz [not null]
+
+  Note: 'Near-enum — created_at only'
+}
+
+// =============================================================================
+// 3 · Priorities & retrieval (blurbs 2–3) — what you care about → T/K/G
+//     Flow: blurbs → user_topics|keywords|geographies (+ source) → catalogs
+// =============================================================================
+
+TableGroup "3 · Priorities & retrieval (blurbs 2–3)" [color: #E5F0E0, note: 'blurbs → T/K/G joins → catalogs'] {
+  user_priorities
+  user_organization_priorities
+  user_topics
+  user_keywords
+  user_geographies
+  topics
+  keywords
+  geographies
+  geography_aliases
+}
+
+Table user_priorities {
+  user_id uuid [pk, ref: - users.uid]
+  blurb text [null, note: 'Optional v1; NULL if skipped']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Blurb 2 — why-this-matters prose; optional v1; editable in account settings'
+}
+
+Table user_organization_priorities {
+  user_id uuid [pk, ref: - users.uid]
+  blurb text [null, note: 'Optional v1; NULL if skipped']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Blurb 3 — org voice; optional v1; facets still join as the user\'s'
+}
+
+Table user_topics {
+  user_id uuid [not null, ref: > users.uid]
+  topic_id uuid [not null, ref: > topics.topic_id]
+  source facet_source [not null]
+  origin membership_origin [not null, note: 'extracted from blurb vs user Add']
+  created_at timestamptz [not null]
+  deleted_at timestamptz [null, note: 'NULL = active']
+  end_reason membership_end_reason [null, note: 'Required when deleted_at set: user_removed | superseded']
+
+  indexes {
+    (user_id, topic_id, source) [pk]
+  }
+
+  Note: 'Active = deleted_at IS NULL. Eval reject = extracted + user_removed. Re-extract may resurrect.'
+}
+
+Table user_keywords {
+  user_id uuid [not null, ref: > users.uid]
+  keyword_id uuid [not null, ref: > keywords.keyword_id]
+  source facet_source [not null]
+  origin membership_origin [not null, note: 'extracted from blurb vs user Add']
+  created_at timestamptz [not null]
+  deleted_at timestamptz [null, note: 'NULL = active']
+  end_reason membership_end_reason [null, note: 'Required when deleted_at set: user_removed | superseded']
+
+  indexes {
+    (user_id, keyword_id, source) [pk]
+  }
+
+  Note: 'Active = deleted_at IS NULL. Eval reject = extracted + user_removed. Re-extract may resurrect.'
+}
+
+Table user_geographies {
+  user_id uuid [not null, ref: > users.uid]
+  geography_id uuid [not null, ref: > geographies.geography_id]
+  source facet_source [not null]
+  origin membership_origin [not null, note: 'extracted from blurb vs user Add']
+  created_at timestamptz [not null]
+  deleted_at timestamptz [null, note: 'NULL = active']
+  end_reason membership_end_reason [null, note: 'Required when deleted_at set: user_removed | superseded']
+
+  indexes {
+    (user_id, geography_id, source) [pk]
+  }
+
+  Note: 'Active = deleted_at IS NULL. Eval reject = extracted + user_removed. Re-extract may resurrect.'
+}
+
+Table topics {
+  topic_id uuid [pk]
+  name varchar(200) [unique, not null, note: 'Store lowercase']
+  vendor_concept_uri varchar(500) [null, note: 'NewsAPI Suggest concepts → Stream conceptUri; NULL until settings-time resolve']
+  created_at timestamptz [not null]
+
+  Note: 'Lexicon — created_at only; user remove soft-deletes the join, not this row. Send key = vendor_concept_uri when set.'
+}
+
+Table keywords {
+  keyword_id uuid [pk]
+  name varchar(200) [unique, not null, note: 'Store lowercase — also the Stream keyword string (no vendor URI)']
+  created_at timestamptz [not null]
+
+  Note: 'Lexicon — created_at only; user remove soft-deletes the join, not this row. Send as plain keyword; no Suggest call.'
+}
+
+Table geographies {
+  geography_id uuid [pk]
+  name_normalized varchar(200) [unique, not null, note: 'Store lowercase']
+  vendor_concept_uri varchar(500) [null, note: 'NewsAPI Suggest concepts → Stream conceptUri (place); NULL until settings-time resolve']
+  created_at timestamptz [not null]
+
+  Note: 'Lexicon — created_at only; user remove soft-deletes the join, not this row. Send key = vendor_concept_uri when set.'
+}
+
+Table geography_aliases {
+  alias_id uuid [pk]
+  geography_id uuid [not null, ref: > geographies.geography_id]
+  alias varchar(200) [unique, not null, note: 'Store lowercase']
+  created_at timestamptz [not null]
+
+  Note: 'Synonyms (us / usa)'
+}
+
+// =============================================================================
+// 4 · Stakeholders (blurb 4) — who you act for → what comes next
+//     Flow: blurb → per-user mention strings (no shared catalog)
+// =============================================================================
+
+TableGroup "4 · Stakeholders (blurb 4)" [color: #F5EBD8, note: 'blurb → per-user mentions (no shared catalog)'] {
+  user_stakeholders
+  user_stakeholder_mentions
+}
+
+Table user_stakeholders {
+  user_id uuid [pk, ref: - users.uid]
+  blurb text [null, note: 'Optional v1; NULL if skipped']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Blurb 4 — full prose for nuance; optional v1; editable in account settings'
+}
+
+Table user_stakeholder_mentions {
+  mention_id uuid [pk]
+  user_id uuid [not null, ref: > user_stakeholders.user_id]
+  mention varchar(300) [not null, note: 'Store lowercase for uniqueness']
+  created_at timestamptz [not null]
+  deleted_at timestamptz [null, note: 'NULL = active; set when blurb re-extract drops mention (always superseded)']
+
+  indexes {
+    (user_id, mention) [unique]
+  }
+
+  Note: 'Extract-only (no user Add/x). Active = deleted_at IS NULL. Re-extract may resurrect.'
+}
+
+// =============================================================================
+// 5 · Sources (blurb 5) — what you watch → press + X
+//     Flow: blurb → user_press_sources|user_social_accounts → catalogs (+ aliases)
+// =============================================================================
+
+TableGroup "5 · Sources (blurb 5)" [color: #F0E3EC, note: 'blurb → press/X membership → catalogs'] {
+  user_sources
+  user_press_sources
+  user_social_accounts
+  press_sources
+  press_source_aliases
+  social_accounts
+}
+
+Table user_sources {
+  user_id uuid [pk, ref: - users.uid]
+  blurb text [null, note: 'Optional v1; NULL if skipped']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Blurb 5 — Your sources; optional v1; editable in account settings'
+}
+
+Table user_press_sources {
+  user_id uuid [not null, ref: > users.uid]
+  press_source_id uuid [not null, ref: > press_sources.press_source_id]
+  origin membership_origin [not null, note: 'extracted from blurb vs user Add']
+  created_at timestamptz [not null]
+  deleted_at timestamptz [null, note: 'NULL = active']
+  end_reason membership_end_reason [null, note: 'Required when deleted_at set: user_removed | superseded']
+
+  indexes {
+    (user_id, press_source_id) [pk]
+  }
+
+  Note: 'Active = deleted_at IS NULL. Eval reject = extracted + user_removed. Re-extract may resurrect.'
+}
+
+Table user_social_accounts {
+  user_id uuid [not null, ref: > users.uid]
+  social_account_id uuid [not null, ref: > social_accounts.social_account_id]
+  origin membership_origin [not null, note: 'extracted from blurb vs user Add']
+  created_at timestamptz [not null]
+  deleted_at timestamptz [null, note: 'NULL = active']
+  end_reason membership_end_reason [null, note: 'Required when deleted_at set: user_removed | superseded']
+
+  indexes {
+    (user_id, social_account_id) [pk]
+  }
+
+  Note: 'Active = deleted_at IS NULL. Platforms on Review your scope. Re-extract may resurrect.'
+}
+
+Table press_sources {
+  press_source_id uuid [pk]
+  name_normalized varchar(300) [unique, not null, note: 'Store lowercase']
+  vendor_source_uri varchar(500) [null, note: 'NewsAPI Suggest sources → Stream sourceUri; NULL until settings-time resolve']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Canonical press/publisher e.g. the new york times. Send key = vendor_source_uri when set.'
+}
+
+Table press_source_aliases {
+  alias_id uuid [pk]
+  press_source_id uuid [not null, ref: > press_sources.press_source_id]
+  alias varchar(300) [unique, not null, note: 'Store lowercase']
+  created_at timestamptz [not null]
+
+  Note: 'Synonyms (nyt, ny times)'
+}
+
+Table social_accounts {
+  social_account_id uuid [pk]
+  handle_normalized varchar(100) [unique, not null, note: 'Store lowercase, no @']
+  x_user_id varchar(64) [null, note: 'X user id from Get users by usernames; required when fetch_mode = post_download']
+  fetch_mode social_fetch_mode [not null, default: 'word_search', note: 'word_search = shared term query. post_download = each new post on the shared clock. Operator sets it. Default word_search on insert.']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'X handle only in v1 (e.g. statedept). Add platform later if multi-network. fetch_mode is the handle’s X read path, shared by every user who watches it. MVP: operator sets it. Later a job may set it from a rolling 30-day post count. No reason column.'
+}
+
+// =============================================================================
+// MONITORING BAND — shared pool → chips → metastories → feed → ops
+// =============================================================================
+
+// =============================================================================
+// 6 · Shared stories — press + X keep-list (no publisher body)
+// =============================================================================
+
+TableGroup "6 · Shared stories" [color: #E8F4F8, note: 'Union pool; press vs X keep-lists; body never stored'] {
+  stories
+  press_articles
+  x_posts
+}
+
+Table stories {
+  story_id uuid [pk]
+  kind story_kind [not null, note: 'Must match subtype row: press → press_articles, x → x_posts']
+  created_at timestamptz [not null, note: 'Admitted to shared pool']
+  updated_at timestamptz [not null, note: 'Hub lifecycle only (admit / remove). Keep-list edits bump subtype updated_at, not this column']
+  removed_at timestamptz [null, note: 'NULL = in pool. Set on soft leave-pool']
+  removal_reason story_removal_reason [null, note: 'Required when removed_at set. Tempo-mapped from X compliance apply (not wire strings); press → operator only']
+  removed_by_job_id varchar(64) [null, ref: >? x_compliance_jobs.vendor_job_id, note: 'X compliance job that caused the drop; NULL when removal_reason = operator']
+
+  Note: 'Shared identity for chips, embeddings, metastory membership. Active pool = removed_at IS NULL. Invariant (app/trigger at build; not enforceable in DBML): exactly one subtype row — press_articles XOR x_posts — and it matches kind. Removals are almost always X compliance (+ rare operator); NewsAPI has no equivalent batch-compliance path on this hub.'
+}
+
+Table press_articles {
+  story_id uuid [pk, ref: - stories.story_id]
+  vendor_uri varchar(500) [unique, not null, note: 'NewsAPI article uri — dedupe key']
+  url text [not null, note: 'Permalink']
+  title text [not null]
+  excerpt text [null, note: 'Reserved for future outlet-/feed-provided teaser only. NewsAPI.ai has no excerpt field → NULL today. NEVER fill from truncated body / articleBodyLen.']
+  outlet_name varchar(300) [null, note: 'includeSourceTitle']
+  press_source_id uuid [ref: >? press_sources.press_source_id, note: 'Resolved catalog source for join; NULL if unresolved']
+  author_names text[] [null, note: 'includeArticleAuthors — display names in order']
+  published_at timestamptz [null, note: 'Vendor dateTime — UX published age (absolute in source reader; relative on Sources rail). Not created_at.']
+  lang varchar(16) [null]
+  data_type press_data_type [null, note: 'Vendor dataType; blog out of v0']
+  vendor_source_uri varchar(500) [null, note: 'NewsAPI source.uri when returned — join aid alongside press_source_id']
+  article_summary text [null, note: 'Tempo summarization; NULL if skipped/failed — never invent without body. Source-reader snippet when present (SR-07).']
+  shares jsonb [null, note: 'Wire shares object from includeArticleSocialScore (e.g. facebook, linkedIn, …). Soft prior derived in app — do not store a collapsed float here.']
+  sentiment float [null, note: 'Wire sentiment (−1…1); English-only when non-null']
+  importance_rank int [null, note: 'Wire source.ranking.importanceRank from includeSourceRanking. Soft prior derived in app — do not store a collapsed float here.']
+  created_at timestamptz [not null, note: 'Admitted to shared pool']
+  updated_at timestamptz [not null, note: 'Keep-list field updates']
+
+  Note: 'IR-05 keep-list. NO body column. article_summary = Tempo-owned; shown in source reader as labeled summary + Open original (not as the article). excerpt reserved / usually NULL. Soft social/prestige priors = derive from shares + importance_rank at rank time.'
+}
+
+Table x_posts {
+  story_id uuid [pk, ref: - stories.story_id]
+  post_id varchar(64) [unique, not null, note: 'X post id — dedupe + deeplink']
+  text text [not null, note: 'Post body is the record; no summarization. May be replaced by IR-14 edit re-read.']
+  published_at timestamptz [not null, note: 'Wire created_at — also IR-14 edit-window eligibility']
+  lang varchar(16) [null]
+  author_id varchar(64) [not null, note: 'X user id']
+  author_username varchar(100) [not null, note: 'Store lowercase, no @ — deeplink']
+  author_name varchar(300) [null]
+  social_account_id uuid [ref: >? social_accounts.social_account_id, note: 'Watched handle when attributable; aids join']
+  like_count int [null, note: 'Wire public_metrics.like_count']
+  retweet_count int [null, note: 'Wire public_metrics.retweet_count']
+  reply_count int [null, note: 'Wire public_metrics.reply_count']
+  quote_count int [null, note: 'Wire public_metrics.quote_count']
+  followers_count int [null, note: 'Wire user.public_metrics.followers_count — soft author-influence prior']
+  created_at timestamptz [not null, note: 'Admitted to shared pool']
+  updated_at timestamptz [not null, note: 'Keep-list field updates (incl. edit re-read text)']
+
+  Note: 'IR-06 keep-list. Compliance removals set stories.removed_at. Edit re-read (IR-14) is a short job over published_at — no edit_window / reread columns on this table.'
+}
+
+// =============================================================================
+// 7 · Story chips — shared vocabulary marks (story-tagging stage; IR-08 invoke)
+// =============================================================================
+
+TableGroup "7 · Story chips" [color: #D8EFE6, note: 'Replace-set by story-tagging; shared vocab only; ≠ user chips'] {
+  story_topics
+  story_keywords
+  story_geographies
+}
+
+Table story_topics {
+  story_id uuid [not null, ref: > stories.story_id]
+  topic_id uuid [not null, ref: > topics.topic_id]
+  created_at timestamptz [not null]
+
+  indexes {
+    (story_id, topic_id) [pk]
+    topic_id [name: 'story_topics_topic_id_idx', note: 'Reverse: stories marked with this topic']
+  }
+
+  Note: 'story-tagging replace-set. Full shared topics catalog aperture; no invented chips. Press: body-in-memory once; X: text; IR-14 re-tag.'
+}
+
+Table story_keywords {
+  story_id uuid [not null, ref: > stories.story_id]
+  keyword_id uuid [not null, ref: > keywords.keyword_id]
+  created_at timestamptz [not null]
+
+  indexes {
+    (story_id, keyword_id) [pk]
+    keyword_id [name: 'story_keywords_keyword_id_idx', note: 'Reverse: stories marked with this keyword']
+  }
+
+  Note: 'story-tagging replace-set. Full shared keywords catalog aperture; no invented chips. Keyword bar (ST-10) = text supports match term (stricter than topic/geo). Same one-call as topics/geos. Press: body-in-memory once; X: text; IR-14 re-tag.'
+}
+
+Table story_geographies {
+  story_id uuid [not null, ref: > stories.story_id]
+  geography_id uuid [not null, ref: > geographies.geography_id]
+  created_at timestamptz [not null]
+
+  indexes {
+    (story_id, geography_id) [pk]
+    geography_id [name: 'story_geographies_geography_id_idx', note: 'Reverse: stories marked with this geography']
+  }
+
+  Note: 'story-tagging replace-set. Full shared geographies catalog aperture; no invented chips. Press: body-in-memory once; X: text; IR-14 re-tag.'
+}
+
+// =============================================================================
+// 8 · Metastories — event grain + story membership (chips ≠ identity)
+// =============================================================================
+
+TableGroup "8 · Metastories" [color: #F5E6D8, note: 'Shared copy; M:N membership; no metastory_chips; no archive col in v0'] {
+  metastories
+  metastory_stories
+}
+
+Table metastories {
+  metastory_id uuid [pk, note: 'Stable across ticks when the event continues (MR-05). Mint only after writer produces title.']
+  title text [not null, note: 'Required. INSERT row only after successful title write — no untitled metastories.']
+  subtitle text [null, note: 'Optional shared line; null OK']
+  what_happened text [null, note: 'Last-good held on writer fail when prior copy exists (MR-10)']
+  what_changed text [null, note: 'Prior vs current shared run — not per-user last-seen (MR-09). Null on first successful write.']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'MR-06 shared fields (same for all viewers); English MVP (MR-07). New event + writer fail → no row / no membership (retry next tick). Partial success (membership + last-good copy) only when last-good already exists. No archive/ended column in v0; no copy-input hash until skip-if-unchanged locks. Lineage → metastory-runs (MR-13).'
+}
+
+Table metastory_stories {
+  metastory_id uuid [not null, ref: > metastories.metastory_id]
+  story_id uuid [not null, ref: > stories.story_id]
+  attached_at timestamptz [not null, note: 'Start of current membership spell; set on attach and on resurrect']
+  detached_at timestamptz [null, note: 'NULL = current member. Set on split/reassign/merge leave, or when stories.removed_at is set (pool leave). Re-attach to same pair = resurrect (clear detached_at; refresh attached_at) — no interval history in v0.']
+
+  indexes {
+    (metastory_id, story_id) [pk]
+    story_id [name: 'metastory_stories_story_id_idx', note: 'Reverse: metastories for this story']
+  }
+
+  Note: 'Soft M:N story↔metastory membership (MR-05). Current = detached_at IS NULL. Concurrent current membership in multiple metastories allowed. One row per pair; re-join resurrects. No end_reason in v0. Chip roll-up for filter UX via this join (no metastory_chips).'
+}
+
+// =============================================================================
+// 9 · Story embeddings — clustering input (not metastory identity)
+// =============================================================================
+
+TableGroup "9 · Story embeddings" [color: #EDE8F5, note: 'pgvector side table; async; 1:1 current embed; MR-04 hash'] {
+  story_embeddings
+}
+
+Table story_embeddings {
+  story_id uuid [pk, ref: - stories.story_id, note: '1:1 — overwrite on re-embed; no per-model history in v0']
+  embedding vector [not null, note: 'pgvector; dims N locked with embed SKU — do not invent N in this SoT']
+  model varchar(200) [not null, note: 'provider:model id used to produce embedding']
+  embedded_text_hash varchar(64) [not null, note: 'Hash of MR-04 canonical embed text (press: title+article_summary if present, else title+excerpt if present, else title; X: text). Not body.']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Clustering propose only — not metastory identity (membership is). Skip re-embed iff model AND embedded_text_hash both unchanged; re-embed when MR-04 input changes (e.g. summary lands, IR-14 text). Absent row = not yet embedded / failed. Separate table avoids HNSW cost on keep-list updates.'
+}
+
+// =============================================================================
+// 10 · Feed membership — join result + per-user why / what-next
+// =============================================================================
+
+TableGroup "10 · Feed membership" [color: #F8E8EC, note: 'Dashboard join + personalization; no admitted_at spell col in v0'] {
+  user_feed_membership
+}
+
+Table user_feed_membership {
+  user_id uuid [not null, ref: > users.uid]
+  metastory_id uuid [not null, ref: > metastories.metastory_id]
+  created_at timestamptz [not null, note: 'First-ever join admit for this user↔metastory. Keep on resurrect — no admitted_at / current-spell column in v0']
+  ended_at timestamptz [null, note: 'NULL = currently in feed (join SoT). Retain row when ended (PR-12). Re-join = resurrect: clear ended_at + end_reason; keep created_at + why/next + cache']
+  end_reason feed_membership_end_reason [null, note: 'Required when ended_at set: left_join | operator']
+  why_this_matters text [null, note: 'Per-user; last-good on writer fail. May be null while personalization lags join']
+  what_comes_next text [null, note: 'Per-user; last-good on writer fail. May be null while personalization lags join']
+  personalization_cache_key varchar(128) [null, note: 'Hash of PR-09 input classes; NULL until first success; skip regenerate when unchanged']
+  personalized_at timestamptz [null, note: 'Last successful personalization write (both why + what-next). UI feed/open requires this set — never show blank why/next']
+  updated_at timestamptz [not null]
+
+  indexes {
+    (user_id, metastory_id) [pk]
+    metastory_id [name: 'user_feed_membership_metastory_id_idx', note: 'Reverse: users with this metastory in membership history']
+  }
+
+  Note: 'Join = source ∧ ≥1 user chip (dashboard) — may INSERT before personalization. Personalization reads profile from lanes 1–4 — do not denormalize blurbs here. Current = ended_at IS NULL. UI lists/opens only when personalized_at IS NOT NULL (or retained last-good on resurrect); new member + personalization fail → hide from UI, retry later — no blank cards. No rank/rising columns.'
+}
+
+// =============================================================================
+// 11 · Ingest ops — vendor cursors + compliance (hour tick / warm = cron + handlers)
+// =============================================================================
+
+TableGroup "11 · Ingest ops" [color: #E6E6E6, note: 'Explicit vendor/job state — not a key/value bag. Clock/warm are schedulers, not tables.'] {
+  newsapi_drain_cursors
+  x_word_search_cursor
+  x_post_download_cursors
+  x_compliance_jobs
+}
+
+Table newsapi_drain_cursors {
+  drain_kind newsapi_drain_kind [pk, note: 'One row per Stream drain (concepts vs keywords)']
+  newest_uri_news varchar(500) [null, note: 'Last response newestUri.news; next poll → recentActivityArticlesNewsUpdatesAfterUri. NULL = bootstrap']
+  newest_uri_pr varchar(500) [null, note: 'Last response newestUri.pr; next poll → recentActivityArticlesPrUpdatesAfterUri. NULL = bootstrap']
+  updated_at timestamptz [not null]
+
+  Note: 'IR-02 two drains. Wire-faithful Stream watermarks (api-newsapi-ai.md): store response newestUri.*; send as *UpdatesAfterUri on the next call. dataType news+pr; blog out.'
+}
+
+Table x_word_search_cursor {
+  cursor_id int [pk, default: 1, note: 'Singleton — only row id = 1']
+  newest_id varchar(64) [null, note: 'Last response meta.newest_id; next steady poll → since_id. NULL = bootstrap with computed start_time (≤7d)']
+  updated_at timestamptz [not null]
+
+  Note: 'Search posts recent — one shared query for all fetch_mode=word_search handles (api-x.md). Do not store next_token (within-poll only). Bootstrap start_time is computed at call time, not persisted.'
+}
+
+Table x_post_download_cursors {
+  social_account_id uuid [pk, ref: - social_accounts.social_account_id, note: 'Handle with fetch_mode=post_download; needs x_user_id for path']
+  newest_id varchar(64) [null, note: 'Last response meta.newest_id for this handle; next steady poll → since_id. NULL = bootstrap with computed start_time']
+  updated_at timestamptz [not null]
+
+  Note: 'Get users posts — one watermark per post_download handle (api-x.md). Path id = social_accounts.x_user_id. Do not store pagination_token (within-poll only).'
+}
+
+Table x_compliance_jobs {
+  vendor_job_id varchar(64) [pk, note: 'X ComplianceJob.id from create/get']
+  type x_compliance_job_type [not null, note: 'Create body type: tweets | users']
+  status x_compliance_job_status [not null, note: 'Vendor status: created | in_progress | failed | complete | expired']
+  name varchar(200) [null, note: 'Optional vendor job name']
+  upload_url text [null, note: 'PUT id list here; expires per upload_expires_at']
+  upload_expires_at timestamptz [null]
+  download_url text [null, note: 'GET results when status=complete; expires per download_expires_at']
+  download_expires_at timestamptz [null]
+  vendor_created_at timestamptz [null, note: 'ComplianceJob.created_at']
+  results_applied_at timestamptz [null, note: 'Tempo: when download was applied to stories/pool; NULL until applied']
+  updated_at timestamptz [not null]
+
+  Note: 'IR-07 batch compliance (api-x.md Batch compliance jobs). Wire ComplianceJob: id/type/status/name/upload_*/download_*/created_at. Status includes expired (docs). Do not persist resumable, upload id lists, or NDJSON payloads. tweets=post ids; users=author/watched ids. delete(+reason)→stories.removed_*; rehydrate→IR-14 not this apply; scrub_geo no-op. Failure/expired keeps pool; retry next cadence.'
+}

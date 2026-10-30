@@ -54,17 +54,17 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: 05-engineering/package-lock.json
+          cache-dependency-path: 06-engineering/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       - name: Run cadence tick
         run: |
           echo "[cadence-tick] Run started at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           node apps/api/src/ops/cadence-tick.mjs
-        working-directory: 05-engineering
+        working-directory: 06-engineering
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

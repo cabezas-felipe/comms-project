@@ -4,8 +4,7 @@
  * Usage: node 07-ops/scripts/sync-model-pricing.mjs [--check]
  *   --check  exit 1 if runtime copy differs from ops SoT (CI)
  *
- * Live deploy root today: 05-engineering/apps/api.
- * After folder renumber lands, change destDir to 06-engineering/... once.
+ * Live deploy root: 06-engineering/apps/api (after 02-product folder renumber).
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -13,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const src = join(root, "07-ops/model-pricing.json");
-const destDir = join(root, "05-engineering/apps/api/src/ai/pricing");
+const destDir = join(root, "06-engineering/apps/api/src/ai/pricing");
 const dest = join(destDir, "model-prices.json");
 const checkOnly = process.argv.includes("--check");
 

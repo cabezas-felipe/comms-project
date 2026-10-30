@@ -3,7 +3,7 @@ name: Cluster reliability nightly
 # PR B / Step 3 — automated nightly guard for clustering reliability.
 #
 # Runs the existing live clustering reliability probe
-# (`05-engineering/apps/api/scripts/cluster-reliability-probe.mjs`, exposed as
+# (`06-engineering/apps/api/scripts/cluster-reliability-probe.mjs`, exposed as
 # `npm run cluster:probe`) against a deployed API for one invited user, then
 # uploads the probe log + an extracted summary JSON as artifacts. The job FAILS
 # whenever the probe exits non-zero — the probe owns the thresholds
@@ -11,7 +11,7 @@ name: Cluster reliability nightly
 # that gate logic.
 #
 # This is BACKGROUND MONITORING. It does NOT replace the manual pre-pilot gate:
-# see 05-engineering/docs/clustering-mvp-gate.md, which is still required before
+# see 06-engineering/docs/clustering-mvp-gate.md, which is still required before
 # pilots and before merging clustering-reliability changes.
 #
 # Cadence: 04:15 UTC daily. Minute 15 stays clear of the hourly cadence-tick
@@ -78,11 +78,11 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: 05-engineering/package-lock.json
+          cache-dependency-path: 06-engineering/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       - name: Verify required secrets
         env:
@@ -108,7 +108,7 @@ jobs:
           echo "All required secrets are present."
 
       - name: Run clustering reliability probe
-        working-directory: 05-engineering/apps/api
+        working-directory: 06-engineering/apps/api
         env:
           # The probe resolves --email → userId via Supabase admin and then
           # drives live refreshes at $BASE_URL using x-recognized-email.

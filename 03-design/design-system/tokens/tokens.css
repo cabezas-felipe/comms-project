@@ -1,0 +1,58 @@
+/*
+  Tempo — Gravel & Fire design system v1.2.6
+  Option-C semantic custom properties.
+  Colors are HSL triplets; apply as hsl(var(--token-name)).
+
+  NOTE ON NAMING:
+  This file uses the canonical Option-C names (--surface-page, --surface-chrome, --ink-primary, etc).
+  The prototype (05-prototype/src/index.css) uses shadcn-style names (--background,
+  --foreground, --ember, etc) for shadcn component compatibility.
+  See ds-mapping.md for the complete bridge between the two naming systems.
+*/
+
+:root {
+  /* ── Surfaces ─────────────────────────────────────────────── */
+  --surface-page:         0 0% 97%;    /* #F8F8F8 — cool near-white canvas      */
+  --surface-chrome:       0 0% 100%;   /* #FFFFFF — top bars, modal panels       */
+  --surface-raised:       38 21% 93%;  /* #F0EDE8 — warm-tinted recessed panel  */
+  --border:               30 8% 90%;   /* #E8E6E4 — main dividers and hairlines  */
+  --border-strong:        20 8% 86%;   /* #DEDAD8 — sidebar border / strong edge */
+
+  /* ── Ink (text hierarchy) ─────────────────────────────────── */
+  --ink-primary:          240 5% 8%;   /* #141416 — headlines, body, strong text */
+  --ink-secondary:        240 2% 32%;  /* #505054 — captions, outlet names       */
+  --ink-muted:            240 3% 55%;  /* #888890 — timestamps, metadata, labels  */
+
+  /* ── Story status ─────────────────────────────────────────── */
+  --status-rising:        22 64% 44%;  /* #B85C28 — narrative gaining traction    */
+  --status-rising-soft:   35 57% 88%;  /* #F2E4D0 — rising badge bg  */
+  --status-stable:        240 4% 42%;  /* #686870 — narrative holding steady      */
+  --status-stable-soft:   240 11% 89%; /* #E0E0E6 — stable badge bg  */
+  --status-falling:       240 4% 58%;  /* #909098 — narrative losing momentum     */
+  --status-falling-soft:  240 11% 93%; /* #EAEAEE — falling badge bg */
+
+  /* ── Operational signals ──────────────────────────────────── */
+  --signal-positive:      152 45% 32%;  /* confirmation / success states */
+  --signal-warning:       36 85% 42%;   /* caution — pair with icon + label */
+  --destructive:          0 70% 42%;    /* irreversible / error — pair with icon + label */
+
+  /* ── Interaction ──────────────────────────────────────────── */
+  --ring:                 22 64% 44%;   /* keyboard focus ring — same hue as Rising */
+
+  /* ── Shadows ──────────────────────────────────────────────── */
+  --shadow-paper:  0 1px 0 hsl(30 8% 90%), 0 1px 2px hsl(240 5% 8% / 0.04);
+  --shadow-raised: 0 1px 0 hsl(30 8% 86%), 0 8px 24px -12px hsl(240 5% 8% / 0.12);
+  --shadow-focus:  0 0 0 3px hsl(22 64% 44% / 0.18);
+
+  /* ── Radius ───────────────────────────────────────────────── */
+  --radius: 0.25rem;   /* Tailwind: lg=--radius · md=calc(--radius - 1px) · sm=calc(--radius - 2px) */
+
+  /* ── Motion ───────────────────────────────────────────────── */
+  --transition-base: 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-base: 0ms cubic-bezier(0.2, 0, 0, 1);
+  }
+}

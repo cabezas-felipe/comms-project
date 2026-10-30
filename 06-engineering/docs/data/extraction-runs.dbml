@@ -1,0 +1,87 @@
+// Tempo — Extraction runs (design ERD)
+// Cloud: https://dbdiagram.io/d/Extraction-runs-6ab952050f25a52d011d406d
+// Title: Extraction runs
+//
+// Sibling to tempo.dbml (product Database library). Not live Supabase until migrated.
+// Intent: define what we will build in Supabase for per-attempt extraction lineage.
+// Supabase schema may evolve; DBML is the design map.
+//
+// Forward compat:
+//   trigger_id — groups primary + fallback attempts for one Build/Rebuild/Retry
+//   stage      — default 'extraction'; path toward shared ai_runs later
+//
+// users stub: same entity as Database library / Supabase auth hub (uid + email).
+// Full users shape is owned by tempo.dbml → Supabase; do not fork identity here.
+//
+// Chip acceptance (kept / removed / added) is a PostHog event. Spec: 02-product/prds/model--extraction--v1.md.
+// A chip removed on first Review is not a membership row, so this delta cannot be joined from tempo.dbml.
+// Offline gold scores are separate eval artifacts — not columns here.
+
+Project extraction_runs {
+  database_type: 'PostgreSQL'
+  Note: 'Per-attempt LLM lineage for stage=extraction. Sibling to product Database library.'
+}
+
+Enum extraction_trigger_kind {
+  build
+  rebuild
+  retry
+}
+
+Enum extraction_run_status {
+  succeeded
+  failed
+}
+
+Enum extraction_error_kind {
+  timeout
+  provider_http_error
+  provider_error
+  config_error
+  schema_error
+  empty_response
+  unknown
+}
+
+TableGroup "Extraction runs" [color: #E8D5C4, note: 'One row per LLM attempt'] {
+  extraction_runs
+}
+
+TableGroup "Account stub" [color: #E8E6E1, note: 'Canonical users shape: tempo.dbml → Supabase'] {
+  users
+}
+
+Table users {
+  uid uuid [pk]
+  email varchar(320) [unique, not null, note: 'Store lowercase — mirrors Database library intent']
+
+  Note: 'STUB for FK visibility. Full table owned by tempo.dbml / Supabase (uid + email hub).'
+}
+
+Table extraction_runs {
+  run_id uuid [pk]
+  trigger_id uuid [not null, note: 'Shared by all attempts for one Build/Rebuild/Retry']
+  trigger_kind extraction_trigger_kind [not null]
+  stage varchar(64) [not null, default: 'extraction', note: 'Forward compat toward multi-stage ai_runs']
+  user_id uuid [not null, ref: > users.uid]
+  status extraction_run_status [not null]
+  model_provider varchar(64) [not null, note: 'e.g. anthropic']
+  model_id varchar(128) [not null, note: 'Router SKU e.g. anthropic:claude-opus-5-5']
+  prompt_version varchar(64) [not null, note: 'e.g. extraction-v1']
+  input_hash varchar(64) [not null, note: 'SHA-256 hex of canonical filled-blurb user payload (omit empty lanes); excludes system prompt']
+  prompt_tokens int [null]
+  output_tokens int [null]
+  estimated_cost_usd decimal [null, note: 'tokens × 07-ops/model-pricing.json at write time; null if model_id missing from catalog']
+  error_kind extraction_error_kind [null, note: 'Set when status=failed — closed labels only']
+  started_at timestamptz [not null]
+  finished_at timestamptz [null, note: 'Null only while in flight']
+  accepted_at timestamptz [null, note: 'Onboarding: Start monitoring warm-accept (scope confirmed). Account: successful merge after extract. Null if never entered live scope.']
+
+  indexes {
+    (trigger_id)
+    (user_id, started_at)
+    (prompt_version, started_at)
+  }
+
+  Note: 'No output_json (product tables are SoT). No fallback_used (same trigger_id + different model_id). No eval_scores (eval artifacts later).'
+}

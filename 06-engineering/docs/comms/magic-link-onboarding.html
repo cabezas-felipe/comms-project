@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Tempo — Magic Link (onboarding)
+      SoT design: Paper Tempo · 07 - Comms · c01 · Magic link
+        Desktop · Message canvas = 600px · Mobile · Check = 390px
+      Product: 02-product/prds/onboarding--v1.md
+      Eng: DECISIONS.md D-073 — set Email OTP expiration to 900 seconds (15 minutes)
+
+      Paste into Supabase → Authentication → Email Templates → Magic Link
+      (or auth.email.template.magic_link content_path for local CLI).
+
+      Subject (mailer_subjects_magic_link): Your Tempo link
+
+      Constraints (Supabase Auth mailer): Go-template HTML; inline styles;
+      use {{ .ConfirmationURL }} for CTA + plain-URL fallback. Omit Token /
+      TokenHash / SiteURL / RedirectTo / Email / Data from this body.
+    -->
+    <title>Your Tempo link</title>
+  </head>
+  <body style="margin: 0; padding: 0; background-color: #f8f8f8">
+    <!-- Preheader (inbox preview; hidden in many clients when opened) -->
+    <div style="display: none; max-height: 0; overflow: hidden; mso-hide: all">
+      One-time link. Expires in 15 minutes.
+    </div>
+    <table
+      role="presentation"
+      width="100%"
+      cellspacing="0"
+      cellpadding="0"
+      border="0"
+      style="background-color: #f8f8f8"
+    >
+      <tr>
+        <td align="center" style="padding: 40px 16px">
+          <table
+            role="presentation"
+            width="100%"
+            cellspacing="0"
+            cellpadding="0"
+            border="0"
+            style="max-width: 600px; background-color: #ffffff"
+          >
+            <tr>
+              <td style="padding: 48px 40px; font-family: Inter, Helvetica, Arial, sans-serif; color: #141416">
+                <p
+                  style="
+                    margin: 0 0 32px 0;
+                    font-family: Newsreader, Georgia, 'Times New Roman', serif;
+                    font-size: 20px;
+                    font-weight: 600;
+                    line-height: 28px;
+                    letter-spacing: -0.015em;
+                    color: #141416;
+                  "
+                >
+                  Tempo
+                </p>
+                <h1
+                  style="
+                    margin: 0 0 12px 0;
+                    font-family: Newsreader, Georgia, 'Times New Roman', serif;
+                    font-size: 32px;
+                    font-weight: 600;
+                    line-height: 40px;
+                    letter-spacing: -0.015em;
+                    color: #141416;
+                  "
+                >
+                  Continue in Tempo.
+                </h1>
+                <p
+                  style="
+                    margin: 0 0 28px 0;
+                    font-size: 15px;
+                    font-weight: 400;
+                    line-height: 24px;
+                    color: #888890;
+                  "
+                >
+                  Open the link to verify it's you. No password needed.
+                </p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td
+                      style="
+                        border: 1.5px solid #141416;
+                        border-radius: 2px;
+                        background-color: #ffffff;
+                      "
+                    >
+                      <a
+                        href="{{ .ConfirmationURL }}"
+                        style="
+                          display: inline-block;
+                          padding: 14px 20px;
+                          font-family: Inter, Helvetica, Arial, sans-serif;
+                          font-size: 14px;
+                          font-weight: 500;
+                          line-height: 18px;
+                          color: #141416;
+                          text-decoration: none;
+                        "
+                        >Continue in Tempo</a
+                      >
+                    </td>
+                  </tr>
+                </table>
+                <p
+                  style="
+                    margin: 28px 0 0 0;
+                    font-size: 13px;
+                    font-weight: 400;
+                    line-height: 20px;
+                    color: #888890;
+                  "
+                >
+                  This link works once and expires in 15 minutes.
+                </p>
+                <p
+                  style="
+                    margin: 16px 0 0 0;
+                    font-size: 12px;
+                    font-weight: 400;
+                    line-height: 18px;
+                    color: #888890;
+                    word-break: break-all;
+                  "
+                >
+                  <a href="{{ .ConfirmationURL }}" style="color: #505054; text-decoration: underline"
+                    >{{ .ConfirmationURL }}</a
+                  >
+                </p>
+                <p
+                  style="
+                    margin: 28px 0 0 0;
+                    font-size: 13px;
+                    font-weight: 400;
+                    line-height: 20px;
+                    color: #888890;
+                  "
+                >
+                  If you didn't ask for this, you can ignore this email.
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

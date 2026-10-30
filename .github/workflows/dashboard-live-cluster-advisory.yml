@@ -55,18 +55,18 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: 05-engineering/package-lock.json
+          cache-dependency-path: 06-engineering/package-lock.json
 
       - name: Install dependencies
         run: npm ci
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       - name: Build shared packages
         run: npm run build:packages
-        working-directory: 05-engineering
+        working-directory: 06-engineering
 
       - name: Run live-cluster advisory
-        working-directory: 05-engineering
+        working-directory: 06-engineering
         env:
           # Live model + key. If the key secret is unset the runner self-SKIPs
           # (exit 0) — no "verify secrets" gate needed for an advisory job.

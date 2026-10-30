@@ -1,0 +1,88 @@
+{
+  "meta": {
+    "name": "tempo-gravel-fire",
+    "version": "1.2.6",
+    "source": "03-design/design-system/tokens/ (docs) → 05-prototype/src/index.css (runtime)",
+    "note": "Palette layer uses Option-C semantic names (--surface-page, --surface-chrome, --ink-primary, --status-rising, etc). The prototype consumes shadcn-style names (--background, --foreground, --ember, etc) — see ds-mapping.md for the bridge. Color values are HSL triplets without the hsl() wrapper. v1.2.6: --surface-chrome for top bars / modal panels; palette otherwise unchanged from 1.1.0."
+  },
+  "color": {
+    "palette": {
+      "note": "Raw palette values. Never reference these directly in component code — use the semantic layer below.",
+      "gf-bg":               "0 0% 97%",
+      "gf-chrome":           "0 0% 100%",
+      "gf-surface":          "38 21% 93%",
+      "gf-border":           "30 8% 90%",
+      "gf-sidebar-border":   "20 8% 86%",
+      "gf-ink-900":          "240 5% 8%",
+      "gf-ink-600":          "240 2% 32%",
+      "gf-ink-400":          "240 3% 55%",
+      "gf-rising":           "22 64% 44%",
+      "gf-rising-soft":      "35 57% 88%",
+      "gf-stable":           "240 4% 42%",
+      "gf-stable-soft":      "240 11% 89%",
+      "gf-falling":          "240 4% 58%",
+      "gf-falling-soft":     "240 11% 93%",
+      "gf-positive":         "152 45% 32%",
+      "gf-warning":          "36 85% 42%",
+      "gf-destructive":      "0 70% 42%"
+    },
+    "semantic": {
+      "surface-page":          "0 0% 97%",
+      "surface-chrome":        "0 0% 100%",
+      "surface-raised":        "38 21% 93%",
+      "border":                "30 8% 90%",
+      "border-strong":         "20 8% 86%",
+      "ink-primary":           "240 5% 8%",
+      "ink-secondary":         "240 2% 32%",
+      "ink-muted":             "240 3% 55%",
+      "status-rising":         "22 64% 44%",
+      "status-rising-soft":    "35 57% 88%",
+      "status-stable":         "240 4% 42%",
+      "status-stable-soft":    "240 11% 89%",
+      "status-falling":        "240 4% 58%",
+      "status-falling-soft":   "240 11% 93%",
+      "signal-positive":       "152 45% 32%",
+      "signal-warning":        "36 85% 42%",
+      "destructive":           "0 70% 42%",
+      "ring":                  "22 64% 44%"
+    }
+  },
+  "font": {
+    "family": {
+      "display": "\"Newsreader\", Georgia, serif",
+      "sans":    "\"Inter\", system-ui, sans-serif",
+      "mono":    "\"JetBrains Mono\", ui-monospace, monospace"
+    },
+    "weight": {
+      "regular":  400,
+      "medium":   500,
+      "semibold": 600,
+      "bold":     700
+    },
+    "scale": {
+      "xs":   "12px",
+      "sm":   "14px",
+      "base": "16px",
+      "lg":   "18px",
+      "xl":   "20px",
+      "2xl":  "24px",
+      "note": "display uses optical-sizing (opsz). See typography.md for role mapping."
+    }
+  },
+  "radius": {
+    "base": "0.25rem",
+    "note": "Tailwind borderRadius: lg = --radius, md = calc(--radius - 1px), sm = calc(--radius - 2px). pill = rounded-full."
+  },
+  "shadow": {
+    "paper":  "0 1px 0 hsl(30 8% 90%), 0 1px 2px hsl(240 5% 8% / 0.04)",
+    "raised": "0 1px 0 hsl(30 8% 86%), 0 8px 24px -12px hsl(240 5% 8% / 0.12)",
+    "focus":  "0 0 0 3px hsl(22 64% 44% / 0.18)"
+  },
+  "motion": {
+    "transition-base":     "180ms cubic-bezier(0.2, 0, 0, 1)",
+    "easing-editorial":    "cubic-bezier(0.2, 0, 0, 1)",
+    "reducedMotion": {
+      "note": "In CSS, @media (prefers-reduced-motion: reduce) sets transition-base to 0ms. See tokens.css."
+    }
+  }
+}
