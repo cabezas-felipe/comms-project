@@ -9,7 +9,7 @@ import { heuristicSummary, withTimeout } from "./guardrails.mjs";
 import { buildSummaryPrompt, SUMMARY_PROMPT_VERSION } from "./prompts.mjs";
 
 // Runtime copy of 07-ops/model-pricing.json (ops SoT). Keep in sync via
-// `node 07-ops/scripts/sync-model-pricing.mjs`.
+// `node 07-ops/scripts/sync-model-pricing.mjs` (or `npm run sync:model-pricing`).
 const MODEL_PRICES = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "pricing/model-prices.json"), "utf8")
 );

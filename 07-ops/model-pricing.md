@@ -1,6 +1,6 @@
 # Model pricing (ops SoT)
 
-Canonical rates for Tempo `estimated_cost_usd` and cost reviews.
+Canonical rates for Tempo `estimated_cost_usd` / live `costUsd` and cost reviews.
 
 | Artifact | Role |
 | --- | --- |
@@ -9,12 +9,14 @@ Canonical rates for Tempo `estimated_cost_usd` and cost reviews.
 
 ## Rules
 
-- Compute cost at **run write** time: tokens × rates in the then-current table. Do not rewrite historical rows when rates change.
+- Compute cost at **call / run write** time: tokens × rates in the then-current table. Do not rewrite historical rows when rates change.
 - Do **not** fetch provider pricing pages on each LLM call.
 - After editing the SoT JSON, sync the runtime copy:
 
 ```bash
 node 07-ops/scripts/sync-model-pricing.mjs
+# or from 06-engineering:
+npm run sync:model-pricing
 ```
 
 - Price changes: update JSON → sync → short note in [`../06-engineering/DECISIONS.md`](../06-engineering/DECISIONS.md) → PR.

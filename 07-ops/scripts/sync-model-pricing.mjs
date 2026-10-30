@@ -3,6 +3,8 @@
  * Copy 07-ops/model-pricing.json → API runtime path (Vercel root = apps/api).
  * Usage: node 07-ops/scripts/sync-model-pricing.mjs [--check]
  *   --check  exit 1 if runtime copy differs from ops SoT (CI)
+ *
+ * Live deploy root: 06-engineering/apps/api (after 02-product folder renumber).
  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";

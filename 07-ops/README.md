@@ -4,7 +4,7 @@ Operational SoTs that are neither product requirements nor application code.
 
 | Doc | Purpose |
 | --- | --- |
-| [model-pricing.md](./model-pricing.md) · [model-pricing.json](./model-pricing.json) | LLM / embedding token rates for `estimated_cost_usd` |
+| [model-pricing.md](./model-pricing.md) · [model-pricing.json](./model-pricing.json) | LLM / embedding token rates for `estimated_cost_usd` / live `costUsd` |
 | [ingestion-pricing.md](./ingestion-pricing.md) · [ingestion-pricing.json](./ingestion-pricing.json) | NewsAPI.ai + X unit rates for ingestion spend digests |
 
 ## Slack (`tempo-comms.slack.com`)
@@ -30,7 +30,7 @@ Legacy alias: [model-pricing-review.yml](../.github/workflows/model-pricing-revi
 
 | Script | Role |
 | --- | --- |
-| [scripts/sync-model-pricing.mjs](./scripts/sync-model-pricing.mjs) | Sync / check model SoT ↔ API runtime copy |
+| [scripts/sync-model-pricing.mjs](./scripts/sync-model-pricing.mjs) | Sync / check model SoT ↔ API runtime copy (`06-engineering/apps/api/...`) |
 | [scripts/post-pricing-catalog-review.mjs](./scripts/post-pricing-catalog-review.mjs) | Weekly catalog post (`CATALOG=model\|ingestion`) |
 | [scripts/post-ingestion-spend-digest.mjs](./scripts/post-ingestion-spend-digest.mjs) | Daily ingestion $/day shell |
 | [scripts/post-model-spend-digest.mjs](./scripts/post-model-spend-digest.mjs) | Daily model $/day shell |

@@ -409,6 +409,24 @@ Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chr
 - Each AI stage should be annotated with its task class (simple / complex) and the rationale when the assignment is non-obvious.
 - When a stage is promoted from simple to complex (e.g. because errors become costly), it should be tracked as an explicit change here.
 
+### 2026-10-18 - D-074 - Live API reads ops model-pricing SoT
+
+#### Context
+
+- PR #166 added `07-ops/model-pricing.json`, a weekly Slack review Action, and a runtime JSON copy. While `main` still lived under `05-engineering/apps/api`, `estimateCostUsd` used hardcoded `ANTHROPIC_COSTS` — so catalog edits and `--check` did not affect production `costUsd` (Bugbot on #166).
+
+#### Decision
+
+- **Ops SoT:** [`07-ops/model-pricing.json`](../07-ops/model-pricing.json).
+- **Runtime copy:** [`apps/api/src/ai/pricing/model-prices.json`](apps/api/src/ai/pricing/model-prices.json) under the live Vercel API root (**`06-engineering` after folder renumber**; was `05-engineering` on #167). Sync via `node 07-ops/scripts/sync-model-pricing.mjs` / `npm run sync:model-pricing` / `check:model-pricing`.
+- **Estimator:** `estimateCostUsd` in [`model-router.mjs`](apps/api/src/ai/model-router.mjs) reads the runtime copy; `ANTHROPIC_COSTS` removed.
+- Do not dual-maintain two runtime copies.
+
+#### Consequences
+
+- Weekly Action `--check` guards the file the live API loads.
+- Price table edits require sync + deploy to change live `costUsd`; historical stamped values are not rewritten.
+
 ### 2026-06-09 - D-070 - Dashboard relevance phase 2: thin on-beat overflow + diagnostics contract
 
 #### Context
