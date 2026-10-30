@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "06-engineering/**"
+      - "07-ops/model-pricing.json"
       - ".github/workflows/api-quality-gate.yml"
   workflow_dispatch:
 
@@ -36,6 +37,10 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        working-directory: 06-engineering
+
+      - name: Assert model pricing ops SoT ↔ runtime copy
+        run: npm run check:model-pricing
         working-directory: 06-engineering
 
       - name: Build shared packages

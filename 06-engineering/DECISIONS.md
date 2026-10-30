@@ -2,6 +2,413 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-10-29 - D-086 - Ops pricing digests + weekly catalog heartbeat (amends D-074)
+
+#### Context
+
+- B1 ingestion pipeline locked spend observability ([pipelines/ingestion.md](docs/pipelines/ingestion.md) §9): PostHog facts × `ingestion-pricing`; daily $/day; weekly rate-card review with models.
+- D-074 weekly Slack was reminder-only (stamped JSON + “verify pages”); no stable provider price APIs for Anthropic/OpenAI unit catalogs.
+
+#### Decision
+
+- **Ingestion rate SoT:** [`07-ops/ingestion-pricing.json`](../07-ops/ingestion-pricing.json) (+ [ingestion-pricing.md](../07-ops/ingestion-pricing.md)); empty `skus` until build.
+- **Channels:** `#ops-pricing-models` (`TEMPO_OPS_SLACK_WEBHOOK_URL`) · `#ops-pricing-ingestion` (`TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION`).
+- **Daily 14:00 UTC:** spend digests — ingestion (PostHog facts when wired) + models (sum `*_runs.estimated_cost_usd` when wired). Shells post TBD until build. Workflow: [daily-ops-spend.yml](../.github/workflows/daily-ops-spend.yml).
+- **Monday 14:00 UTC:** unit catalogs for **both** SoTs; always post (`in_sync` heartbeat or later `drift` / `fetch_fail`). Workflow: [weekly-pricing-catalog-review.yml](../.github/workflows/weekly-pricing-catalog-review.yml). Target: auto doc-diff → human merge; **no** auto-commit rates; **no** price fetch on LLM/ingest hot path.
+- **X usage/credits:** later actuals reconcile — not the rate-card SoT.
+- D-074 reminder-only posture **superseded** for weekly UX; stamped SoT + human PR for rate edits remain.
+
+#### Why
+
+- One 14:00 UTC ops heartbeat; separate channels for LLM vs ingest burn; reproducible stamps without brittle silent scrapes.
+
+#### Consequences
+
+- Secrets required for live Slack; omit → dry-run in Actions logs.
+- Build must wire PostHog / runs queries and doc-diff parsers; fill ingestion SKUs.
+- Legacy [model-pricing-review.yml](../.github/workflows/model-pricing-review.yml) is `workflow_dispatch` alias only.
+
+### 2026-10-28 - D-085 - Phase A closed (extraction → metastory foundations)
+
+#### Context
+
+- Exit gate: contracts agree with each other; Database library ERD matches locked names; vendor SoTs ([api-newsapi-ai.md](docs/api-newsapi-ai.md), [api-x.md](docs/api-x.md)) match those locks; A4 runs stubs landed ([D-084](#2026-10-28---d-084---phase-a4-stub-llm-runs-pages)).
+
+#### Decision
+
+- **Phase A is closed** (including A3 monitoring SoT + A4 runs stubs).
+- **Verified exit:**
+  - Locked contracts agree on body custody (IR-05 / SR / ST / MR), story vs user chips, feed membership + `personalized_at` UI gate, metastory mint/membership, ingest invoke → summarization / story-tagging / metastory.
+  - [tempo.dbml](docs/data/tempo.dbml) field names match (`article_summary`, reserved `excerpt`, `story_*`, `user_feed_membership` why/next + cache + `personalized_at`, X `newest_id` / compliance).
+  - Vendor docs match: NewsAPI transient body / no vendor excerpt; X `since_id`←`newest_id`, compliance + IR-14 edit re-read.
+  - Runs siblings live on Tempo workspace dbdiagrams (extraction + four monitoring stages).
+- **Explicit carry-outs → Phase B (not Phase A reopen):** SKUs; closed `trigger_kind` enums; embed `vector(N)`; prompt/eval/gold **bodies**; story-tagging deepen; join/rising formula eng docs; Supabase migrations.
+
+#### Why
+
+- Design SoT is coherent enough to deepen vertically without more Phase A table/contract invention.
+
+#### Consequences
+
+- Next program: Phase B (B1 ingestion pipeline thicken → B2 summarization → story-tagging → B3 metastory → B4 personalization → B5 dashboard UX).
+- Treat Phase A artifacts as locked SoT until a deliberate reopen.
+
+### 2026-10-28 - D-084 - Phase A4 stub LLM runs pages
+
+#### Context
+
+- A3 closed product monitoring SoT; generative stages still needed attempt lineage for ops, cost, and eval join keys without stuffing runs into [tempo.dbml](docs/data/tempo.dbml).
+- Extraction pattern ([D-072](#2026-09-27---d-072---extraction-foundations-runs-schema--quality-first-model-defaults)) = sibling ERD, one row per attempt.
+
+#### Decision
+
+- Land A4 **stub** sibling DBMLs: [summarization-runs.dbml](docs/data/summarization-runs.dbml), [story-tagging-runs.dbml](docs/data/story-tagging-runs.dbml), [metastory-runs.dbml](docs/data/metastory-runs.dbml), [personalization-runs.dbml](docs/data/personalization-runs.dbml) (+ extraction already live).
+- Shared spine: `run_id`, `trigger_id`, provisional `trigger_kind` varchar, `stage`, subject FKs, `status`, `model_*`, `prompt_version`, `input_hash`, tokens, cost, `error_kind`, timestamps. **Omit** `output_json`, eval scores, `accepted_at`, body columns. **No row** on skip/no-model paths.
+- Metastory: one table + `call_kind` (`boundary` \| `writer`); embed/cluster-propose out of runs. Contract MR-10: boundary and writer each ≤2 attempts. Eng craft: one [pipelines/metastory.md](docs/pipelines/metastory.md); split prompts/evals by call kind.
+- SKUs and closed `trigger_kind` enums defer to each Phase B deepen. Ingestion has no runs page.
+- Index in [docs/data/README.md](docs/data/README.md).
+
+#### Why
+
+- Attribute attempts across the shared-pool → feed path; keep product tables as copy/chip SoT; avoid premature SKU locks.
+
+#### Consequences
+
+- Push each runs file to its own dbdiagram cloud doc; keep Database library settings pointed at `tempo.dbml`.
+- Thicken prompt/eval bodies and lock enums/SKUs in B2–B4 (and story-tagging deepen).
+
+### 2026-10-28 - D-083 - Phase A3 closed (Database library monitoring SoT)
+
+#### Context
+
+- [D-075](#2026-10-27---d-075---database-library-monitoring-tablegroups-a3) opened monitoring TableGroups 6–11 on [tempo.dbml](docs/data/tempo.dbml).
+- Follow-ons locked keep-lists, story-tagging stubs, metastory mint/membership, feed resurrect + UI gate, ingest cursors/compliance ([D-076](#2026-10-28---d-076---press-keep-list-no-truncated-body-article-summary--source-reader-snippet)–[D-082](#2026-10-28---d-082---user_feed_membership-resurrect-ui-gate-no-admitted_at)).
+
+#### Decision
+
+- **Phase A3 is closed.** Monitoring product SoT on the Database library ERD is complete for v0 design: shared stories → chips → embeddings → metastories → feed membership → ingest ops.
+- **Explicit carry-outs (not A3 blockers):** embed `vector(N)` dims until embed SKU; join/rising formulas stay dashboard-owned; LLM run lineage siblings (`summarization` / `story-tagging` / `metastory` / `personalization` runs) → **Phase A4**; story-tagging prompts/pipelines/evals when that model is in build focus.
+
+#### Why
+
+- Design map is contract-aligned and question-stable; remaining work is lineage diagrams, model stacks, or migrate-time SKU locks — not more product tables on this canvas.
+
+#### Consequences
+
+- Treat [tempo.dbml](docs/data/tempo.dbml) monitoring groups as landed SoT until a deliberate reopen.
+- Next DBML phase: A4 run-lineage siblings (extraction-runs already live).
+
+### 2026-10-28 - D-082 - user_feed_membership: resurrect, UI gate, no admitted_at
+
+#### Context
+
+- Soft feed membership needed re-join, personalization-lag, and “no blank why/next” rules without a speculative spell column.
+
+#### Decision
+
+- Resurrect on re-join (clear `ended_at` / `end_reason`; keep `created_at` + why/next + cache).
+- No `admitted_at` in v0 (no new/back-in-feed UX yet).
+- Reverse index on `metastory_id`.
+- UI shows feed/open only when `personalized_at` is set; DB may have membership before copy; personalization fail → hide, don’t blank.
+- Encoded in [tempo.dbml](docs/data/tempo.dbml) + [personalization.md](../02-product/contracts/personalization.md) PR-12.
+
+#### Why
+
+- Join SoT separate from display-ready personalization; YAGNI on spell timestamps.
+
+#### Consequences
+
+- Dashboard join + personalization writers must honor resurrect + UI filter; add `admitted_at` later if spell chrome lands.
+
+### 2026-10-28 - D-081 - metastory_stories: soft M:N, resurrect, concurrent current OK
+
+#### Context
+
+- Story↔metastory membership needed clear re-attach, concurrency, and pool-leave semantics under a composite PK.
+
+#### Decision
+
+- Keep PK `(metastory_id, story_id)` with soft `detached_at`; re-attach **resurrects** (no interval history in v0).
+- `attached_at` = start of **current** membership spell.
+- Concurrent current membership in multiple metastories **allowed**.
+- Reverse index on `story_id`; pool leave (`stories.removed_at`) sets `detached_at`; no `end_reason` in v0.
+- Encoded in [tempo.dbml](docs/data/tempo.dbml) + [metastory.md](../02-product/contracts/metastory.md) MR-05.
+
+#### Why
+
+- Matches other soft-membership joins; enough SoT for current members without over-building history.
+
+#### Consequences
+
+- Membership timeline / end reasons deferred to later runs or schema if product needs them.
+
+### 2026-10-28 - D-080 - metastories: title required; mint only after successful title write
+
+#### Context
+
+- Partial success (membership + last-good copy) conflicted with `title NOT NULL` on first mint when the writer failed and no prior copy existed.
+- Untitled metastories in the feed are unacceptable.
+
+#### Decision
+
+- Keep `title` NOT NULL; INSERT `metastories` only after a successful title write; subtitle remains nullable.
+- New event + writer fail both attempts → no row, no membership; retry next tick.
+- Partial success only when last-good already exists.
+- No archive/ended column and no copy-input hash in v0. Notes + [metastory.md](../02-product/contracts/metastory.md) MR-05/06/10 updated.
+
+#### Why
+
+- Display-ready rows by construction; durable feed SoT without nullable-title footguns.
+
+#### Consequences
+
+- Orchestration must sequence writer title success before mint on new events.
+
+### 2026-10-28 - D-079 - Story-tagging LLM stage (contract + model PRD stubs)
+
+#### Context
+
+- IR-08 required story chips from shared vocabulary but left apply method unspecified; deterministic match under-tags a growing open lexicon; press body is write-once.
+- Ingestion charter forbids `model--ingestion` / prompt ownership on the rules contract.
+
+#### Decision
+
+- Add LLM stage **story-tagging**: [story-tagging.md](../02-product/contracts/story-tagging.md) + [model--story-tagging--v1.md](../02-product/prds/model--story-tagging--v1.md) (stubs).
+- One constrained call → topics + keywords + geographies (catalog IDs only; no invented chips); full shared catalogs; press body-in-memory / X text; replace-set on `story_*`; re-tag on IR-14 text change.
+- **IR-08** becomes ingest **invoke only** (parallel to IR-11 summarization). Prompts / pipelines / evals / runs when that model is in build focus.
+
+#### Why
+
+- Evaluable, durable apply path without stuffing LLM ownership into ingestion or extraction.
+
+#### Consequences
+
+- Thicken contract + eng stack before trusting story chips in production join/filter; schema joins already valid.
+
+### 2026-10-28 - D-078 - x_posts wire metric names; edit re-read is IR-14 job (no column)
+
+#### Context
+
+- `x_posts` used Tempo-prefixed metric names and `edit_window_until` despite `edit_controls` being `out` and a 60‑min clock missing a ~30‑min edit window.
+- Charter: no `model--ingestion` PRD — ingest rules live in the product contract.
+
+#### Decision
+
+- Rename metrics to wire: `like_count`, `retweet_count`, `reply_count`, `quote_count`; `followers_count` from user public metrics.
+- **Drop** `edit_window_until` (and do not add `edit_reread_at`).
+- Stub **IR-14**: separate ~10–15 min edit-re-read job over recent `published_at`; Get posts by ids; idempotent text replace. Document in [ingestion.md](../02-product/contracts/ingestion.md) + [pipelines/ingestion.md](docs/pipelines/ingestion.md) — **not** a new PRD.
+
+#### Why
+
+- Facts on the row; schedule in the job. 60‑min clock cannot satisfy a 30‑min window.
+
+#### Consequences
+
+- Eng must schedule IR-14 separately from IR-09; thicken exact minutes/pricing at build.
+
+### 2026-10-28 - D-077 - press_articles wire-shaped soft priors + data_type enum
+
+#### Context
+
+- `social_score` / `source_rank` floats looked wire-faithful but collapsed NewsAPI `shares` and `source.ranking`.
+- `data_type` was a free `varchar` for a closed vendor set (`news` \| `pr`).
+
+#### Decision
+
+- Store **`shares jsonb`** (wire `shares` object) and **`importance_rank int`** (wire `source.ranking.importanceRank`); derive soft priors in app/rank code — do not persist collapsed floats.
+- Keep **`sentiment float`** (wire scalar).
+- **`data_type`** → enum `press_data_type` (`news` \| `pr`); blog stays out.
+- **`published_at`** remains the UX publish-age field (vendor `dateTime`); not `created_at`.
+
+#### Why
+
+- Durable SoT preserves vendor facts and lets ranking rules change without re-ingest archaeology.
+
+#### Consequences
+
+- Dashboard / source-order code must read `shares` / `importance_rank` (or a derived view), not `social_score` / `source_rank`.
+- Push [tempo.dbml](docs/data/tempo.dbml) after edit.
+
+### 2026-10-28 - D-076 - Press keep-list: no truncated body; article summary = source-reader snippet
+
+#### Context
+
+- NewsAPI.ai [Article data model](https://newsapi.ai/documentation?tab=data_models) has `body` only — no `excerpt`/`teaser` field; `articleBodyLen` truncates `body` in place.
+- Prior summarization **SR-07** kept article summary internal and assumed feed excerpt in UX.
+- Operators need in-app scan before acting; title-only source reader is too thin.
+
+#### Decision
+
+- **Do not** persist publisher `body` (full or truncated) or invent keep-list excerpt from `articleBodyLen`.
+- Keep nullable `press_articles.excerpt` for a **future** outlet-/feed-provided teaser only (NewsAPI → **NULL** today).
+- Persist Tempo **`article_summary`**; it is the **d08 / source-reader snippet** when present — labeled as Tempo’s summary (not the article) + **Open original** encouraged ([SR-07](../02-product/contracts/summarization.md) superseded 28 Oct 2026).
+- X unchanged: full post text is the record / snippet.
+- Contracts / PRDs / source-reader / api-newsapi-ai / `tempo.dbml` notes aligned to this lock.
+
+#### Why
+
+- No vendor excerpt to show; truncated body is still publisher prose; Tempo-owned summary is the only durable scannable stand-in under the keep-list.
+
+#### Consequences
+
+- Amend UI copy for disclosure; fail path = title + meta + Open original when summary missing.
+- Embed fallback without summary is title (+ excerpt only if a true teaser ever exists).
+- Counsel still owns production risk on transient body → model and derived display.
+
+### 2026-10-27 - D-075 - Database library monitoring TableGroups (A3)
+
+#### Context
+
+- Product contracts for ingestion, summarization, metastory, and personalization locked (A2).
+- [tempo.dbml](docs/data/tempo.dbml) / [Database library](https://dbdiagram.io/d/6ab4852e58694256127b2a37) held extraction lanes 1–5 only.
+- Phase A3: extend the same diagram with monitoring SoT (shared pool → feed), no publisher body, no LLM run lineage (A4 siblings).
+
+#### Decision
+
+- **Bands:** Extraction 1–5 · Monitoring 6–11 on one Postgres project.
+- **Shared stories:** `stories` + `press_articles` / `x_posts` keep-lists; `article_summary` on press; **no body column**. *(Amended 28 Oct 2026 by [D-076](#2026-10-28---d-076---press-keep-list-no-truncated-body-article-summary--source-reader-snippet): `excerpt` reserved/NULL; summary is source-reader snippet.)*
+- **Story chips** on shared catalogs; **no** `metastory_chips` (roll-up via `metastory_stories`).
+- **Feed membership** holds `why_this_matters` / `what_comes_next` + nullable `personalization_cache_key`; profile stays in lanes 1–4.
+- **Embeddings:** separate `story_embeddings` (pgvector); dims N noted until embed SKU locks.
+- **Send keys:** `vendor_source_uri` / `vendor_concept_uri` / `x_user_id` on catalogs; keywords send `name`.
+- **Ops:** explicit cursor + compliance tables — not a key/value bag. Hour tick / warm are cron + handlers (no `ingest_clock_state` table). X cursors split wire-faithfully: `x_word_search_cursor` (singleton `newest_id`) + `x_post_download_cursors` (per-handle `newest_id`); store response `meta.newest_id`, send next as `since_id`; no persisted bootstrap `start_time` / page tokens. `x_compliance_jobs` wire-faithful to ComplianceJob (`vendor_job_id` PK, `type` tweets|users, vendor statuses, upload/download URLs + expiry, `results_applied_at`); both job types in v0 SoT.
+- **`stories`:** thin hub; XOR subtype + kind match documented (enforce at build); Tempo `story_removal_reason` (not raw X strings; press → `operator` only); hub `updated_at` = admit/remove only; nullable `removed_by_job_id` → compliance job.
+- **Out of A3:** `summarization-runs` / `metastory-runs` / `personalization-runs` (A4).
+
+#### Why
+
+- Ground monitoring build on contract-aligned product data before migrations; keep lineage diagrams sibling to extraction-runs.
+
+#### Consequences
+
+- Push [tempo.dbml](docs/data/tempo.dbml) after edits (`dbdiagram push` from `docs/data/`).
+- Embed SKU must set `vector(N)` before migrate; until then design note stands.
+- Join / rising formulas remain dashboard-owned; this ERD stores membership + copy fields only.
+
+### 2026-10-03 - D-073 - Magic-link email TTL 15 minutes + template locks
+
+#### Context
+
+- Onboarding uses Supabase Auth magic links ([onboarding PRD](../02-product/prds/onboarding--v1.md)).
+- Supabase defaults Email OTP / magic-link expiry to **1 hour**; security guidance for magic links clusters around **10–15 minutes**.
+- Product locked onboarding Magic Link copy and template variables in Paper [07 - Comms](https://app.paper.design/file/01M22V20HEDY4VAA8Y5S3FSP9T/).
+
+#### Decision
+
+- Set **Email OTP expiration** to **900 seconds (15 minutes)** in Supabase (Dashboard → Authentication → Sign In / Providers → Email, or `auth.email.otp_expiry = 900` in local `config.toml`). This setting also governs magic links and other email auth links.
+- Magic Link **subject:** `Your Tempo link`.
+- Template uses **`{{ .ConfirmationURL }}`** for the CTA and plain-URL fallback. Omit `Token`, `TokenHash`, `SiteURL`, `RedirectTo`, `Email`, and `Data` from the onboarding template body.
+- HTML handoff for paste into Supabase: [docs/comms/magic-link-onboarding.html](docs/comms/magic-link-onboarding.html). Design SoT: Paper `c01 · Magic link`.
+
+#### Why
+
+- Aligns expiry copy with a security-appropriate TTL without waiting for abuse signal under a 1h default.
+- Keeps the email a single-job continue surface (no OTP dual path, no metadata personalization yet).
+
+#### Consequences
+
+- Build must set `otp_expiry` / Dashboard OTP expiration to **900** before shipping the branded template; otherwise “15 minutes” copy is false.
+- Account change-email template is a separate template; may use email variables later.
+- Shorter TTL may increase link-expired recoveries (`o02c`) — monitor after pilot.
+
+### 2026-10-17 - D-074 - Model pricing SoT in 07-ops + weekly Slack review
+
+#### Context
+
+- `extraction_runs.estimated_cost_usd` needs durable rates without scraping providers on each LLM call.
+- API Vercel root is `06-engineering/apps/api`, so ops JSON alone is not deployable.
+
+#### Decision
+
+- **Ops SoT:** [`07-ops/model-pricing.json`](../07-ops/model-pricing.json) (+ [`model-pricing.md`](../07-ops/model-pricing.md)).
+- **Runtime copy:** `apps/api/src/ai/pricing/model-prices.json`; sync via `node 07-ops/scripts/sync-model-pricing.mjs` (`npm run sync:model-pricing` / `check:model-pricing`).
+- **Estimator:** `estimateCostUsd` in `model-router.mjs` reads the runtime copy.
+- **Updates:** event-driven human PR (not per-run web fetch). Weekly Action [`.github/workflows/model-pricing-review.yml`](../.github/workflows/model-pricing-review.yml) posts catalog to Slack (`TEMPO_OPS_SLACK_WEBHOOK_URL`); channel **`#ops-pricing-models`** (`tempo-comms.slack.com`).
+- Billing reconcile vs stamped estimates — later.
+
+#### Why
+
+- Reproducible cost stamps; ops altitude for rate cards; eng only consumes.
+
+#### Consequences
+
+- Incoming Webhook on `#ops-pricing-models` + repo secret required for live Slack posts (Action dry-runs without secret).
+- API quality gate fails if ops SoT and runtime copy drift.
+
+### 2026-10-17 - D-073 - Extraction model defaults: Sonnet 5.5 fallback
+
+#### Context
+
+- D-072 locked quality-first extraction defaults as Opus 5.5 → Sonnet 5, and deferred a revisit when Sonnet 5.5 shipped.
+- Sonnet 5.5 is now the current Sonnet API SKU (`claude-sonnet-5-5`); Sonnet 5 remains available as previous-generation.
+
+#### Decision
+
+- **Target chain for `extraction-v1`:** primary `anthropic:claude-opus-5-5`, fallback `anthropic:claude-sonnet-5-5` (see [prompts/extraction.md](docs/prompts/extraction.md)).
+- **No change** to live code defaults or deploy env until gold is run on this chain and build adopts the SoT. Legacy runtime remains Opus 4.7 → Sonnet 4.6.
+
+#### Why
+
+- Keep the rare/trust-critical path on current quality tiers without jumping to Fable or Haiku without evidence.
+- Close the D-072 Sonnet 5.5 revisit in the design SoT before the PRD / build train.
+
+#### Consequences
+
+- Prompt SoT + this decision are the target; `model-router.mjs`, Vercel env, and local `.env` stay on legacy until an explicit cutover with eval evidence.
+
+### 2026-09-27 - D-072 - Extraction foundations: runs schema + quality-first model defaults
+
+#### Context
+
+- Onboarding extraction is being re-founded for five blurbs / one multi-lane call (`extraction-v1`), with product contract, prompt SoT, and pipeline SoT locked in Sessions A–C.
+- Need durable design for per-attempt LLM lineage without stuffing ops tables into the product Database library ERD.
+- Live defaults still reference legacy Opus 4.7 / Sonnet 4.6; Anthropic’s current lineup favors newer SKUs for a rare, trust-critical path.
+
+#### Decision
+
+- **Sibling ERD:** [extraction-runs.dbml](docs/data/extraction-runs.dbml) + cloud [Extraction runs](https://dbdiagram.io/d/Extraction-runs-6ab952050f25a52d011d406d), separate from [tempo.dbml](docs/data/tempo.dbml) / [Database library](https://dbdiagram.io/d/6ab4852e58694256127b2a37). DBML = design intent for Supabase; Supabase runtime may evolve.
+- **Grain:** one table `extraction_runs`, one row per LLM **attempt**; `trigger_id` groups attempts; `stage` defaults to `extraction` (forward path to jobs / shared `ai_runs`).
+- **Columns (v1):** identity/trigger, status (`succeeded`\|`failed`), model_provider + model_id, prompt_version, input_hash, token counts, estimated_cost_usd, error_kind, timestamps, accepted_at. **Omit** output_json, fallback_used, eval_scores, input_blurb_lanes.
+- **users stub** on the runs diagram for FK visibility; canonical users (`uid` + email) owned by Database library → Supabase.
+- **Model defaults for `extraction-v1`:** quality-first — primary `anthropic:claude-opus-5-5`, fallback `anthropic:claude-sonnet-5` (see [prompts/extraction.md](docs/prompts/extraction.md)). Rare/critical path; chip efficacy and judge scores are **later eval artifacts**, not this table. **Amended by [D-073](#2026-10-17---d-073---extraction-model-defaults-sonnet-55-fallback):** fallback is now `anthropic:claude-sonnet-5-5`.
+- **Task-class note vs D-071:** Onboarding extraction is treated as **high-stakes / quality-first** despite being structured JSON — errors poison user scope. Do not default it to the cheapest tier without eval evidence.
+
+#### Why
+
+- Agents/humans can open the right canvas (product vs runs).
+- Lineage answers “which model/prompt produced this attempt?”; product memberships answer “did the user accept chips?”
+- Forward-compatible without building jobs/`ai_runs` before a second consumer exists.
+
+#### Consequences
+
+- Build must persist a run row per attempt once migrated; pipeline SoT already requires it ([pipelines/extraction.md](docs/pipelines/extraction.md)).
+- Push/pull dbdiagram for **both** diagram ids when editing (see [docs/data/README.md](docs/data/README.md)).
+- ~~Revisit SKUs when Sonnet 5.5 (or successors) ship — with gold evidence.~~ **Closed by D-073** (Sonnet 5.5 fallback locked in design SoT; live cutover still needs gold).
+
+### 2026-09-08 - D-071 - Model routing principle: cheaper models for simple tasks, capable models for complex tasks
+
+#### Context
+
+- Tempo calls multiple AI stages across the monitoring pipeline (clustering, relevance scoring, delta detection, why-this-matters generation, etc.). These stages vary significantly in reasoning complexity and output sensitivity.
+- No explicit principle existed for how to select models across stages — decisions were made ad hoc.
+
+#### Decision
+
+- **Route by task complexity.** Simple, well-scoped tasks (e.g. classification, extraction, formatting) use cheaper, faster models that are effective for those tasks. Complex, reasoning-intensive, or analytically sensitive tasks (e.g. synthesis, narrative delta, why-this-matters) use more capable models commensurate with the stakes.
+- **Effectiveness is the constraint.** Cheaper is not the goal — appropriate capability is. A model is right-sized when it reliably produces correct output for its task class; over-provisioning wastes cost, under-provisioning produces errors the user cannot recover from.
+- **Task class, not model name, is the stable anchor.** Specific model versions change; the classification of tasks into simple vs. complex is the durable principle. Model assignments should be revisited when a task class changes or a new model tier becomes available.
+
+#### Why
+
+- Reduces inference cost without degrading output quality for high-stakes stages.
+- Forces explicit classification of task complexity — a useful design discipline that surfaces ambiguity in what a stage is actually doing.
+- Keeps the system economically viable as call volume grows.
+
+#### Consequences
+
+- Each AI stage should be annotated with its task class (simple / complex) and the rationale when the assignment is non-obvious.
+- When a stage is promoted from simple to complex (e.g. because errors become costly), it should be tracked as an explicit change here.
+
 ### 2026-06-09 - D-070 - Dashboard relevance phase 2: thin on-beat overflow + diagnostics contract
 
 #### Context
@@ -150,7 +557,7 @@ See [README § Refresh latency & expansion-safe ingestion](README.md#refresh-lat
 
 #### Context
 
-`story.whatChanged` shipped as `` `Latest update ${freshestMinutesAgo} min ago.` `` — a freshness restatement, not a change signal. It told the user **when** the freshest source landed but never **whether** the narrative had moved. The Mercedes Osma sessions ([interview synthesis](../01-research/interview-synthesis--zero-to-one--mercedes-osma.md)) flagged this as the top monitoring-first pain: comms leads constantly self-interrupt drafting to check if the story changed before they can finalize a response. A line labeled `whatChanged` that only reports freshness creates expectation of delta semantics it cannot deliver — a trust leak on the dashboard's most monitoring-shaped affordance.
+`story.whatChanged` shipped as `` `Latest update ${freshestMinutesAgo} min ago.` `` — a freshness restatement, not a change signal. It told the user **when** the freshest source landed but never **whether** the narrative had moved. The Mercedes Osma sessions ([synthesis](../01-research/synthesis--personas-and-pains-discovery.md)) flagged this as the top monitoring-first pain: comms leads constantly self-interrupt drafting to check if the story changed before they can finalize a response. A line labeled `whatChanged` that only reports freshness creates expectation of delta semantics it cannot deliver — a trust leak on the dashboard's most monitoring-shaped affordance.
 
 #### Decision
 

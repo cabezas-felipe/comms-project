@@ -2,6 +2,8 @@
 
 All Node workspace tooling for Tempo lives here: `package.json`, `package-lock.json`, `apps/web`, and `packages/*`. Engineering decisions: [`DECISIONS.md`](DECISIONS.md).
 
+Exploratory data modeling (DBML + dbdiagram preview, blank slate — not the live app schema): [`docs/data/`](docs/data/).
+
 The Lovable reference UI stays in [`../05-prototype`](../05-prototype) and depends on shared packages via `file:../06-engineering/packages/...`.
 
 ## Key behaviors (canonical sources)

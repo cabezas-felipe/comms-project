@@ -1,83 +1,98 @@
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600;6..72,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /* ============================================================
-   COMMS · Editorial newsroom monitoring system
-   Warm paper background, ink foreground, single ember accent.
+   TEMPO · Gravel & Fire design system v1.1.0
+   Cool near-white canvas · Copper Rising accent · Newsreader + Inter
+   Shadcn-style variable names preserved for component compatibility.
+   Option-C semantic names and 2-layer architecture documented in
+   03-design/design-system/tokens/ — see ds-mapping.md for bridge.
    All colors HSL.
    ============================================================ */
 
 @layer base {
   :root {
     /* Paper + ink */
-    --background: 38 30% 96%;        /* warm off-white paper */
-    --foreground: 222 25% 12%;       /* deep ink */
+    --background: 0 0% 97%;           /* #F8F8F8 — cool near-white (--surface-page) */
+    --foreground: 240 5% 8%;          /* #141416 — near-neutral dark ink (--ink-primary) */
 
-    --surface: 36 24% 93%;           /* slightly recessed paper */
-    --surface-raised: 0 0% 100%;     /* raised cards */
+    --surface: 38 21% 93%;            /* #F0EDE8 — warm-tinted recessed panel (--surface-raised) */
+    --surface-raised: 38 21% 93%;     /* same — explicit alias */
 
-    --card: 0 0% 100%;
-    --card-foreground: 222 25% 12%;
+    --card: 38 21% 93%;               /* #F0EDE8 — card surface */
+    --card-foreground: 240 5% 8%;     /* #141416 */
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 222 25% 12%;
+    --popover: 38 21% 93%;
+    --popover-foreground: 240 5% 8%;
 
-    /* Ink / brand */
-    --primary: 222 30% 14%;
-    --primary-foreground: 38 30% 96%;
+    /* Ink / brand action */
+    --primary: 240 5% 8%;             /* #141416 — same as ink; actions use ink */
+    --primary-foreground: 0 0% 97%;
 
-    --secondary: 36 18% 88%;
-    --secondary-foreground: 222 25% 18%;
+    /* Cool neutrals */
+    --secondary: 240 11% 89%;         /* #E0E0E6 — stable-soft / selection (--status-stable-soft) */
+    --secondary-foreground: 240 2% 32%; /* #505054 — ink secondary */
 
-    --muted: 36 18% 90%;
-    --muted-foreground: 222 10% 40%;
+    --muted: 240 11% 89%;
+    --muted-foreground: 240 3% 55%;   /* #888890 — ink muted (--ink-muted) */
 
-    --accent: 36 22% 87%;
-    --accent-foreground: 222 25% 14%;
+    --accent: 240 11% 89%;
+    --accent-foreground: 240 2% 32%;
 
-    /* Ember — single emphasis accent for priority + "what changed" */
-    --ember: 14 80% 48%;
-    --ember-foreground: 38 30% 97%;
-    --ember-soft: 18 70% 94%;
+    /* Rising — single expressive accent for story urgency */
+    --ember: 22 64% 44%;              /* #B85C28 — Rising copper (--status-rising) */
+    --ember-foreground: 0 0% 97%;
+    --ember-soft: 35 57% 88%;         /* #F2E4D0 — Rising soft (--status-rising-soft) */
 
-    /* Trust / signal */
+    /* Story status tokens */
+    --status-rising: 22 64% 44%;          /* #B85C28 */
+    --status-rising-soft: 35 57% 88%;     /* #F2E4D0 */
+    --status-stable: 240 4% 42%;          /* #686870 */
+    --status-stable-soft: 240 11% 89%;    /* #E0E0E6 */
+    --status-falling: 240 4% 58%;         /* #909098 */
+    --status-falling-soft: 240 11% 93%;   /* #EAEAEE */
+
+    /* Operational signals */
     --signal-positive: 152 45% 32%;
     --signal-warning: 36 85% 42%;
 
+    /* Destructive */
     --destructive: 0 70% 42%;
-    --destructive-foreground: 38 30% 97%;
+    --destructive-foreground: 0 0% 97%;
 
-    --border: 36 14% 82%;
-    --rule: 222 12% 70%;             /* hairline rule */
-    --input: 36 14% 82%;
-    --ring: 222 30% 14%;
+    /* Chrome */
+    --border: 30 8% 90%;             /* #E8E6E4 — main dividers */
+    --rule: 20 8% 86%;               /* #DEDAD8 — sidebar border / stronger hairline */
+    --input: 30 8% 90%;
+    --ring: 22 64% 44%;              /* Rising copper — focus ring unified with accent */
 
     --radius: 0.25rem;
 
-    /* Editorial gradients + shadows */
-    --gradient-paper: linear-gradient(180deg, hsl(38 32% 97%) 0%, hsl(36 24% 93%) 100%);
-    --gradient-ember: linear-gradient(135deg, hsl(14 80% 48%), hsl(22 85% 55%));
-    --shadow-paper: 0 1px 0 hsl(36 14% 82%), 0 1px 2px hsl(222 25% 12% / 0.04);
-    --shadow-raised: 0 1px 0 hsl(36 14% 78%), 0 8px 24px -12px hsl(222 25% 12% / 0.12);
-    --shadow-focus: 0 0 0 3px hsl(14 80% 48% / 0.18);
+    /* Shadows */
+    --shadow-paper: 0 1px 0 hsl(30 8% 90%), 0 1px 2px hsl(240 5% 8% / 0.04);
+    --shadow-raised: 0 1px 0 hsl(30 8% 86%), 0 8px 24px -12px hsl(240 5% 8% / 0.12);
+    --shadow-focus: 0 0 0 3px hsl(22 64% 44% / 0.18);
 
     --transition-base: 180ms cubic-bezier(0.2, 0, 0, 1);
 
-    /* Sidebar (unused but defined) */
-    --sidebar-background: 36 24% 94%;
-    --sidebar-foreground: 222 25% 18%;
-    --sidebar-primary: 222 30% 14%;
-    --sidebar-primary-foreground: 38 30% 96%;
-    --sidebar-accent: 36 18% 88%;
-    --sidebar-accent-foreground: 222 25% 14%;
-    --sidebar-border: 36 14% 82%;
-    --sidebar-ring: 14 80% 48%;
+    /* Sidebar */
+    --sidebar-background: 38 21% 93%;
+    --sidebar-foreground: 240 2% 32%;
+    --sidebar-primary: 240 5% 8%;
+    --sidebar-primary-foreground: 0 0% 97%;
+    --sidebar-accent: 240 11% 89%;
+    --sidebar-accent-foreground: 240 2% 32%;
+    --sidebar-border: 20 8% 86%;
+    --sidebar-ring: 22 64% 44%;
   }
 
   .dark {
+    /* Dark mode not yet tuned to Gravel & Fire equivalents.
+       Retained from v0.3.0; will be addressed in a future pass
+       when dark mode is actively used. See ds-mapping.md. */
     --background: 222 28% 8%;
     --foreground: 38 24% 92%;
     --surface: 222 25% 11%;
@@ -94,9 +109,15 @@
     --muted-foreground: 222 10% 62%;
     --accent: 222 20% 18%;
     --accent-foreground: 38 24% 92%;
-    --ember: 14 85% 58%;
+    --ember: 18 80% 58%;
     --ember-foreground: 222 28% 10%;
-    --ember-soft: 14 40% 18%;
+    --ember-soft: 18 40% 18%;
+    --status-rising: 18 80% 58%;
+    --status-rising-soft: 18 40% 18%;
+    --status-stable: 37 10% 55%;
+    --status-stable-soft: 37 12% 22%;
+    --status-falling: 40 10% 45%;
+    --status-falling-soft: 40 10% 18%;
     --signal-positive: 152 45% 55%;
     --signal-warning: 36 85% 60%;
     --destructive: 0 70% 55%;
@@ -104,7 +125,7 @@
     --border: 222 18% 22%;
     --rule: 222 15% 32%;
     --input: 222 18% 22%;
-    --ring: 14 85% 58%;
+    --ring: 18 80% 58%;
   }
 }
 
@@ -119,19 +140,20 @@
     @apply bg-background text-foreground antialiased;
     font-family: 'Inter', system-ui, sans-serif;
     background-image:
-      radial-gradient(hsl(222 25% 12% / 0.025) 1px, transparent 1px);
+      radial-gradient(hsl(240 5% 8% / 0.02) 1px, transparent 1px);
     background-size: 24px 24px;
     background-position: 0 0;
   }
   ::selection {
-    background: hsl(var(--ember) / 0.22);
+    background: hsl(var(--ember) / 0.18);
     color: hsl(var(--foreground));
   }
 }
 
 @layer components {
+  /* Display / editorial — Newsreader */
   .font-display {
-    font-family: 'Fraunces', Georgia, serif;
+    font-family: 'Newsreader', Georgia, serif;
     font-optical-sizing: auto;
     letter-spacing: -0.015em;
   }
@@ -139,7 +161,7 @@
     font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
 
-  /* Editorial label — small caps tracker */
+  /* Editorial eyebrow label — small caps tracker */
   .eyebrow {
     @apply text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground;
   }
@@ -155,18 +177,46 @@
     box-shadow: var(--shadow-paper);
   }
 
-  /* Ember underline for priority items */
-  .ember-tick {
+  /* Rising left rail for narrative rows and cards */
+  .rising-rail {
     position: relative;
   }
-  .ember-tick::before {
+  .rising-rail::before {
     content: '';
     position: absolute;
-    left: -1rem;
-    top: 0.6rem;
-    width: 4px;
-    height: calc(100% - 1.2rem);
-    background: hsl(var(--ember));
+    left: 0;
+    top: 0;
+    width: 3px;
+    height: 100%;
+    background: hsl(var(--status-rising));
+  }
+
+  /* Stable left rail */
+  .stable-rail {
+    position: relative;
+  }
+  .stable-rail::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 3px;
+    height: 100%;
+    background: hsl(var(--status-stable));
+  }
+
+  /* Falling left rail */
+  .falling-rail {
+    position: relative;
+  }
+  .falling-rail::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 3px;
+    height: 100%;
+    background: hsl(var(--status-falling));
   }
 
   /* Subtle ticker animation for live indicator */

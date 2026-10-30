@@ -1,5 +1,7 @@
 # What changed — engineer spec (v1, implemented)
 
+> **Product SoT for meaning:** [metastory.md](../../02-product/contracts/metastory.md). This eng doc is the **prototype delta-engine** implementation note. Do not dual-maintain product rules here. **28 Oct 2026:** keep-list / UI evidence for press is Tempo **article summary** (not a persisted 400-char body excerpt); see [D-076](../DECISIONS.md) and [summarization SR-07](../../02-product/contracts/summarization.md). Mentions of “400-char excerpt” below describe the **legacy prototype** evidence bundle only.
+
 **Status:** **Implemented (v1).** Shipped across five commits on branch `feat/what-changed-delta-engine`:
 
 | Commit | Phase | What landed |

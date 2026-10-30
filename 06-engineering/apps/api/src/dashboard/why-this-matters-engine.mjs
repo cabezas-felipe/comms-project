@@ -1,5 +1,5 @@
 // Why-this-matters writer engine.
-// Spec: docs/why-this-matters-spec.md (locked), prd: 04-prd/why-this-matters--strategy-spec.md.
+// Spec: docs/why-this-matters-spec.md (locked), product (archive): 02-product/contracts/archive/why-this-matters--field-doctrine.md.
 //
 // Two surfaces:
 //   1. Deterministic helpers and a rubric validator that are pure / sync — no

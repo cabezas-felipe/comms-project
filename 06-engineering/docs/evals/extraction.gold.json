@@ -1,0 +1,487 @@
+{
+  "schemaVersion": "extraction-gold-v1",
+  "promptVersion": "extraction-v1",
+  "notes": "24 of 24 locked. Felipe confirmed expected JSON. Previous draft examples removed from this file. MVP function list on identity cases: communications, policy, operations, partnerships.",
+  "examples": [
+    {
+      "id": "unit-omit-01",
+      "kind": "unit",
+      "lane": "personalPriorities",
+      "bucket": "omit",
+      "blurbs": {
+        "personalPriorities": "I want Tempo to tell me what matters. I read a lot and I need help knowing what to pay attention to."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": [],
+          "keywords": [],
+          "geographies": []
+        }
+      },
+      "rubric_notes": "Your priorities. No theme, place, or name. Empty is correct. Stored later with source personal_priorities."
+    },
+    {
+      "id": "unit-omit-02",
+      "kind": "unit",
+      "lane": "organizationPriorities",
+      "bucket": "omit",
+      "blurbs": {
+        "organizationPriorities": "Tenemos que estar preparados y responder rápido cuando pase algo importante. La idea es no quedarnos atrás."
+      },
+      "expected": {
+        "organizationPriorities": {
+          "topics": [],
+          "keywords": [],
+          "geographies": []
+        }
+      },
+      "rubric_notes": "Your organization's priorities. No theme, place, or name. Empty is correct. Stored later with source organization_priorities."
+    },
+    {
+      "id": "unit-role-01",
+      "kind": "unit",
+      "lane": "identity",
+      "bucket": "role",
+      "blurbs": {
+        "identity": "I run communications for the Colombian embassy in Washington."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "",
+          "organization_submitted": "Colombian embassy in Washington",
+          "function_label": "communications"
+        }
+      },
+      "rubric_notes": "No formal title was stated, so role_submitted stays empty. Do not upgrade 'I run communications' into Head of Communications. Organization stays as written."
+    },
+    {
+      "id": "unit-role-02",
+      "kind": "unit",
+      "lane": "identity",
+      "bucket": "role",
+      "blurbs": {
+        "identity": "Soy la jefa de comunicaciones del consulado de Colombia en Miami."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "Head of Communications",
+          "organization_submitted": "consulado de Colombia en Miami",
+          "function_label": "communications"
+        }
+      },
+      "rubric_notes": "jefa de comunicaciones becomes Head of Communications. Organization stays as written, including Spanish."
+    },
+    {
+      "id": "unit-organization-01",
+      "kind": "unit",
+      "lane": "identity",
+      "bucket": "organization",
+      "blurbs": {
+        "identity": "Press lead at Colombia's foreign ministry."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "Press Lead",
+          "organization_submitted": "Colombia's foreign ministry",
+          "function_label": "communications"
+        }
+      },
+      "rubric_notes": "Organization stays as written. Press work maps to the broad function communications. press is not a functions.name in the MVP."
+    },
+    {
+      "id": "unit-organization-02",
+      "kind": "unit",
+      "lane": "identity",
+      "bucket": "organization",
+      "blurbs": {
+        "identity": "Trabajo en la Cancillería como encargada de prensa."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "Press Lead",
+          "organization_submitted": "Cancillería",
+          "function_label": "communications"
+        }
+      },
+      "rubric_notes": "Cancillería stays as written. encargada de prensa becomes Press Lead. Function is communications, not a narrower press label."
+    },
+    {
+      "id": "unit-function-01",
+      "kind": "unit",
+      "lane": "identity",
+      "bucket": "function",
+      "blurbs": {
+        "identity": "I draft the embassy's policy positions on migration and trade."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "",
+          "organization_submitted": "",
+          "function_label": "policy"
+        }
+      },
+      "rubric_notes": "No title and no named organization. Drafting policy positions is the function policy."
+    },
+    {
+      "id": "unit-function-02",
+      "kind": "unit",
+      "lane": "identity",
+      "bucket": "function",
+      "blurbs": {
+        "identity": "Soy la agregada cultural del consulado de Colombia en Nueva York."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "Cultural Attaché",
+          "organization_submitted": "consulado de Colombia en Nueva York",
+          "function_label": "partnerships"
+        }
+      },
+      "rubric_notes": "agregada cultural becomes Cultural Attaché. Organization stays as written. The kind of job is partnerships, not communications, policy, or operations."
+    },
+    {
+      "id": "unit-topic-01",
+      "kind": "unit",
+      "lane": "personalPriorities",
+      "bucket": "topic",
+      "blurbs": {
+        "personalPriorities": "I need to watch the presidential election and the congressional elections, and how both campaigns talk about immigration enforcement."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": ["elections", "immigration"],
+          "keywords": [],
+          "geographies": []
+        }
+      },
+      "rubric_notes": "Presidential and congressional elections collapse to elections. Immigration enforcement collapses to immigration. That word is the topic, so it is not also a keyword. congress and president are not in the blurb. No place is named. source personal_priorities."
+    },
+    {
+      "id": "unit-topic-02",
+      "kind": "unit",
+      "lane": "personalPriorities",
+      "bucket": "topic",
+      "blurbs": {
+        "personalPriorities": "Quiero seguir la relación comercial y los aranceles, y también las sanciones que estén sobre la mesa."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": ["trade"],
+          "keywords": ["sanctions", "tariffs"],
+          "geographies": []
+        }
+      },
+      "rubric_notes": "relación comercial and aranceles are one topic, trade. aranceles and sanciones are tools, so keywords tariffs and sanctions. No place is named. source personal_priorities."
+    },
+    {
+      "id": "unit-keyword-01",
+      "kind": "unit",
+      "lane": "personalPriorities",
+      "bucket": "keyword",
+      "blurbs": {
+        "personalPriorities": "I want the clips where Petro mentions deportation flights."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": [],
+          "keywords": ["deportation", "Petro"],
+          "geographies": []
+        }
+      },
+      "rubric_notes": "deportation flights becomes deportation. The name stays Petro. Do not infer immigration or Gustavo Petro. No place is named. source personal_priorities."
+    },
+    {
+      "id": "unit-keyword-02",
+      "kind": "unit",
+      "lane": "personalPriorities",
+      "bucket": "keyword",
+      "blurbs": {
+        "personalPriorities": "Necesito lo que diga la Cancillería sobre el proceso de paz."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": ["peace process"],
+          "keywords": ["Cancillería"],
+          "geographies": []
+        }
+      },
+      "rubric_notes": "proceso de paz becomes peace process. Cancillería stays a keyword as written. Do not widen to peace and conflict resolution, and do not drop the named institution. No place is named. source personal_priorities."
+    },
+    {
+      "id": "unit-geography-01",
+      "kind": "unit",
+      "lane": "personalPriorities",
+      "bucket": "geography",
+      "blurbs": {
+        "personalPriorities": "I care about what is happening in Bogotá."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": [],
+          "keywords": [],
+          "geographies": ["Bogotá"]
+        }
+      },
+      "rubric_notes": "The city stays Bogotá. Do not also emit Colombia. No topic or keyword. source personal_priorities."
+    },
+    {
+      "id": "unit-geography-02",
+      "kind": "unit",
+      "lane": "personalPriorities",
+      "bucket": "geography",
+      "blurbs": {
+        "personalPriorities": "Quiero seguir las noticias de Nueva York."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": [],
+          "keywords": [],
+          "geographies": ["New York"]
+        }
+      },
+      "rubric_notes": "Nueva York becomes New York. Do not narrow to New York City or also emit the United States. No topic or keyword. source personal_priorities."
+    },
+    {
+      "id": "unit-lane-separation-01",
+      "kind": "integration",
+      "lane": null,
+      "bucket": "lane-separation",
+      "blurbs": {
+        "personalPriorities": "I track visa delays for the meetings I personally run.",
+        "organizationPriorities": "The embassy has to keep a steady public line when election results come in."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": [],
+          "keywords": ["visa"],
+          "geographies": []
+        },
+        "organizationPriorities": {
+          "topics": ["elections"],
+          "keywords": [],
+          "geographies": []
+        }
+      },
+      "rubric_notes": "visa stays on personal_priorities. election results is the topic elections on organization_priorities. Do not copy either onto the other lane."
+    },
+    {
+      "id": "unit-lane-separation-02",
+      "kind": "integration",
+      "lane": null,
+      "bucket": "lane-separation",
+      "blurbs": {
+        "personalPriorities": "Sigo los casos consulares de mi propia cartera.",
+        "organizationPriorities": "La embajada tiene que explicar la cifra comercial cada vez que sale en la prensa."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": [],
+          "keywords": [],
+          "geographies": []
+        },
+        "organizationPriorities": {
+          "topics": ["trade"],
+          "keywords": [],
+          "geographies": []
+        }
+      },
+      "rubric_notes": "casos consulares de mi propia cartera is the user's own docket, not a public keyword. cifra comercial is the topic trade on organization_priorities only. en la prensa is the medium, not a keyword."
+    },
+    {
+      "id": "unit-stakeholder-01",
+      "kind": "unit",
+      "lane": "stakeholders",
+      "bucket": "stakeholder",
+      "blurbs": {
+        "stakeholders": "I brief the ambassador and the Senate Foreign Relations Committee, and I take calls from foreign correspondents."
+      },
+      "expected": {
+        "stakeholders": {
+          "mentions": ["ambassador", "congress", "foreign correspondents"]
+        }
+      },
+      "rubric_notes": "Senate Foreign Relations Committee becomes the class congress. ambassador and foreign correspondents are classes. Not a person's name."
+    },
+    {
+      "id": "unit-stakeholder-02",
+      "kind": "unit",
+      "lane": "stakeholders",
+      "bucket": "stakeholder",
+      "blurbs": {
+        "stakeholders": "Respondo al ministro y a los corresponsales extranjeros, y coordino con la mesa de prensa de la Cancillería."
+      },
+      "expected": {
+        "stakeholders": {
+          "mentions": ["minister", "foreign correspondents", "foreign ministry"]
+        }
+      },
+      "rubric_notes": "ministro becomes minister. corresponsales extranjeros becomes foreign correspondents. mesa de prensa de la Cancillería becomes the class foreign ministry, not the long office name."
+    },
+    {
+      "id": "unit-sources-01",
+      "kind": "unit",
+      "lane": "sources",
+      "bucket": "sources",
+      "blurbs": {
+        "sources": "I read The New York Times and the NYT politics desk, and I follow @StateDept on X."
+      },
+      "expected": {
+        "sources": {
+          "traditionalSources": ["The New York Times"],
+          "socialSources": ["@StateDept"]
+        }
+      },
+      "rubric_notes": "Official name keeps The. The NYT politics desk is the same paper, not a second outlet. @StateDept stays a handle."
+    },
+    {
+      "id": "unit-sources-02",
+      "kind": "unit",
+      "lane": "sources",
+      "bucket": "sources",
+      "blurbs": {
+        "sources": "Leo La Silla Vacía y Semana, y sigo a @CancilleriaCol."
+      },
+      "expected": {
+        "sources": {
+          "traditionalSources": ["La Silla Vacía", "Semana"],
+          "socialSources": ["@CancilleriaCol"]
+        }
+      },
+      "rubric_notes": "Spanish outlet names stay as written. @CancilleriaCol stays a handle."
+    },
+    {
+      "id": "int-full-01",
+      "kind": "integration",
+      "lane": null,
+      "bucket": "integration-full",
+      "blurbs": {
+        "identity": "Deputy spokesperson at Colombia's consulate in Boston.",
+        "personalPriorities": "I watch visa delays and what local reporters ask about them.",
+        "organizationPriorities": "We have to explain the appointment backlog when it shows up in the local papers.",
+        "stakeholders": "I answer the consul and the Boston reporters who call.",
+        "sources": "The Boston Globe, and @BostonGlobe on X."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "Deputy Spokesperson",
+          "organization_submitted": "Colombia's consulate in Boston",
+          "function_label": "communications"
+        },
+        "personalPriorities": {
+          "topics": [],
+          "keywords": ["visa"],
+          "geographies": ["Boston"]
+        },
+        "organizationPriorities": {
+          "topics": [],
+          "keywords": [],
+          "geographies": ["Boston"]
+        },
+        "stakeholders": {
+          "mentions": ["consul", "boston reporters"]
+        },
+        "sources": {
+          "traditionalSources": ["The Boston Globe"],
+          "socialSources": ["@BostonGlobe"]
+        }
+      },
+      "rubric_notes": "visa stays on personal priorities only. appointment is not a keyword. Boston is a geography on each priorities blurb that says local, because the role blurb names Boston. Do not also emit Massachusetts or the United States. Stakeholders are consul and boston reporters. Press is The Boston Globe."
+    },
+    {
+      "id": "int-partial-01",
+      "kind": "integration",
+      "lane": null,
+      "bucket": "integration-partial",
+      "blurbs": {
+        "identity": "Press officer at the Embassy of Colombia in Ottawa.",
+        "personalPriorities": "I follow tariff announcements that affect exporters.",
+        "sources": "I read The Globe and Mail."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "Press Officer",
+          "organization_submitted": "Embassy of Colombia in Ottawa",
+          "function_label": "communications"
+        },
+        "personalPriorities": {
+          "topics": ["trade"],
+          "keywords": ["tariffs"],
+          "geographies": []
+        },
+        "sources": {
+          "traditionalSources": ["The Globe and Mail"],
+          "socialSources": []
+        }
+      },
+      "rubric_notes": "Organization priorities and stakeholders are empty and must be omitted. Do not infer Canada or Ottawa as a geography. tariff announcements are topic trade and keyword tariffs. Press is The Globe and Mail."
+    },
+    {
+      "id": "int-full-02",
+      "kind": "integration",
+      "lane": null,
+      "bucket": "integration-full",
+      "blurbs": {
+        "identity": "Soy la vocera del consulado de Colombia en Quito.",
+        "personalPriorities": "Quiero seguir las sanciones y lo que publique Petro al respecto.",
+        "organizationPriorities": "La embajada tiene que explicar la cifra de remesas.",
+        "stakeholders": "Atiendo a la cónsul y a la prensa extranjera.",
+        "sources": "Leo El Comercio y sigo a @CancilleriaCol."
+      },
+      "function_list": ["communications", "policy", "operations", "partnerships"],
+      "expected": {
+        "identity": {
+          "role_submitted": "Spokesperson",
+          "organization_submitted": "consulado de Colombia en Quito",
+          "function_label": "communications"
+        },
+        "personalPriorities": {
+          "topics": [],
+          "keywords": ["sanctions", "Petro"],
+          "geographies": []
+        },
+        "organizationPriorities": {
+          "topics": ["remittances"],
+          "keywords": [],
+          "geographies": []
+        },
+        "stakeholders": {
+          "mentions": ["consul", "foreign press"]
+        },
+        "sources": {
+          "traditionalSources": ["El Comercio"],
+          "socialSources": ["@CancilleriaCol"]
+        }
+      },
+      "rubric_notes": "vocera is Spokesperson. Organization stays as written. sanctions and Petro stay keywords on personal priorities, with no trade topic. remittances is the organization topic, not trade and not also a keyword. Quito is not a geography. Stakeholders are consul and foreign press. Press is El Comercio."
+    },
+    {
+      "id": "int-name-boundary-01",
+      "kind": "integration",
+      "lane": null,
+      "bucket": "name-boundary",
+      "blurbs": {
+        "personalPriorities": "I want the clips where Cancillería explains the visa backlog.",
+        "stakeholders": "I brief the ambassador and I take calls from foreign correspondents."
+      },
+      "expected": {
+        "personalPriorities": {
+          "topics": [],
+          "keywords": ["Cancillería", "visa"],
+          "geographies": []
+        },
+        "stakeholders": {
+          "mentions": ["ambassador", "foreign correspondents"]
+        }
+      },
+      "rubric_notes": "Cancillería and visa stay keywords on personal priorities. No topic. Do not copy Cancillería into stakeholders as foreign ministry. Stakeholders are ambassador and foreign correspondents. Identity, organization priorities, and sources were not filled and must be omitted."
+    }
+  ]
+}

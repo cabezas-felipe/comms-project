@@ -4,8 +4,8 @@
 **Owner:** Felipe  
 **Last updated:** 20 May 26  
 
-**Product source:** [Why this matters — strategy spec](../../04-prd/why-this-matters--strategy-spec.md)  
-**Eval set:** [why-this-matters-eval-set-v0.json](../../04-prd/why-this-matters-eval-set-v0.json) (18 cases, locked)
+**Product source (archive):** [Why this matters — field doctrine](../../02-product/contracts/archive/why-this-matters--field-doctrine.md)
+**Eval set:** [why-this-matters.gold.json](evals/why-this-matters.gold.json) (18 cases, locked)
 
 **Phases:** §1–12 locked (planning complete)
 
@@ -397,7 +397,7 @@ On per-call timeout, provider error, or missing API key → Phase 3d safe fallba
 - **Do not** use subtitle echo in any environment.
 - **`TEMPO_AI_MOCK_ONLY` is not deprecated** — it still forces mock providers via [`providerFor`](../apps/api/src/ai/model-router.mjs). Use for CI safety / no-key smoke only; **unset for DC/prototype hand-testing** (same as what-changed handoff).
 - When mock-only or provider not ready: treat as LLM failure → deterministic template (not a separate product mode).
-- **Eval job** (`npm run eval:why-this-matters`, TBD): runs the locked [18-case set](../../04-prd/why-this-matters-eval-set-v0.json) with real or injected writer; may set `ENABLED=true` explicitly.
+- **Eval job** (`npm run eval:why-this-matters`, TBD): runs the locked [18-case set](evals/why-this-matters.gold.json) with real or injected writer; may set `ENABLED=true` explicitly.
 
 ### Rollback
 
@@ -409,7 +409,7 @@ On per-call timeout, provider error, or missing API key → Phase 3d safe fallba
 
 ### Dataset
 
-[why-this-matters-eval-set-v0.json](../../04-prd/why-this-matters-eval-set-v0.json) — **18 locked cases** (A:6 goldens, B:4 edges, C:4 failure probes, D:4 ops paths). Synthetic inputs; Group A = release blocker.
+[why-this-matters.gold.json](evals/why-this-matters.gold.json) — **18 locked cases** (A:6 goldens, B:4 edges, C:4 failure probes, D:4 ops paths). Synthetic inputs; Group A = release blocker.
 
 ### Runner
 

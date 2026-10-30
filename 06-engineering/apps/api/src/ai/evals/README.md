@@ -5,7 +5,8 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 | Harness | What it measures | Run | Gates release? |
 |---|---|---|---|
 | **Critical hard-fail suite (Phase 5b)** | 8 E2E presence-first scenarios; deterministic + advisory hybrid layers | `npm run eval:critical` | **Yes** — non-zero exit on any critical scenario failure |
-| Onboarding extraction | Per-field precision / recall / F1 / exact-match across 23 gold examples | `npm run eval:onboarding-extraction` | No — advisory, drift only |
+| Onboarding extraction (legacy) | Per-field P/R on single-blob gold (`extract-v8`) | `npm run eval:onboarding-extraction` | No — advisory |
+| **Extraction (five-lane) — locked, not wired** | Unit + integration gold for `extraction-v1`. 24 cases. Advisory precision and recall. Identity cases pass that case’s `function_list` | See [docs/evals/extraction.md](../../docs/evals/extraction.md) · [extraction.gold.json](../../docs/evals/extraction.gold.json) | Not wired — **BUILD MUST** promote gold to `apps/api/src/ai/evals/` and retire or quarantine `eval:onboarding-extraction`. Do not import `ex-01`–`ex-23` |
 | Cluster shape smoke (M8) | Contract-shape guard: clustering output conforms to `metaStoryOutputSchema` on a 3-item fixture | `npm run eval:cluster-smoke` | Smoke gate (non-zero on contract violation) |
 | **Dashboard refresh golden (Slice 2)** | Hermetic E2E regression guard: fail-closed clustering, no degraded titles, liveblog dedupe, recall floor, healthy 2+ stories | `npm run eval:dashboard-refresh-golden` | Smoke gate (non-zero on any scenario failure) |
 | **Dashboard dual-beat (recall-widening)** | Hermetic regression: one profile (Colombia elections + Kenya Ebola) surfaces BOTH beats as distinct meta-stories in one refresh; geo lexical gate admits geo-only items | `npm run eval:dashboard-dual-beat` | Smoke gate (non-zero on any assertion failure) |
@@ -25,6 +26,8 @@ Lightweight, local eval harnesses for AI pipeline components. Version-controlled
 ---
 
 ## Onboarding Extraction Evals
+
+> **Superseded design (foundations):** five-lane eval SoT + draft gold live at [`docs/evals/extraction.md`](../../docs/evals/extraction.md). **BUILD MUST** promote draft gold into this folder and retire this legacy harness when `extraction-v1` ships. Until then, the commands below still target **single-blob `extract-v8`**.
 
 ## What it measures
 

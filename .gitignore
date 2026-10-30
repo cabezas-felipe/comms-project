@@ -31,3 +31,8 @@ node_modules/
 # by `npm run eval:dashboard-calibration:json` / `eval:dashboard-quality-gate`.
 **/.artifacts/
 06-engineering/apps/api/tmp/
+
+# Raw interview transcripts (local backup of Granola source recordings). Kept
+# out of git even after light redaction — rawer than any tracked research
+# artifact; the interview synthesis and session log are the citable sources.
+01-research/interviews/

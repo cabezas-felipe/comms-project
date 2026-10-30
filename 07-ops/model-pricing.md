@@ -18,12 +18,19 @@ node 07-ops/scripts/sync-model-pricing.mjs
 ```
 
 - Price changes: update JSON → sync → short note in [`../06-engineering/DECISIONS.md`](../06-engineering/DECISIONS.md) → PR.
+- Weekly **intent:** auto doc-fetch → **diff** vs SoT → Slack (`in_sync` or `drift` / `fetch_fail`) → **human merge**. No silent auto-commit of rates. Parsers land at build; until then Monday posts a stamped-catalog **heartbeat**.
 
-## Weekly review
+## Cadence (Slack `#ops-pricing-models`)
 
-GitHub Action [`.github/workflows/model-pricing-review.yml`](../.github/workflows/model-pricing-review.yml) posts to Slack (`TEMPO_OPS_SLACK_WEBHOOK_URL`) every Monday with the stamped catalog and provider review links. Channel: **`#ops-pricing-models`** (`tempo-comms.slack.com`) — Incoming Webhook → repo secret.
+| When | What | Workflow / secret |
+| --- | --- | --- |
+| **Daily 14:00 UTC** | Spend digest ($/day from `*_runs.estimated_cost_usd`) | [daily-ops-spend.yml](../.github/workflows/daily-ops-spend.yml) · `TEMPO_OPS_SLACK_WEBHOOK_URL` |
+| **Monday 14:00 UTC** | Unit-price catalog heartbeat / diff | [weekly-pricing-catalog-review.yml](../.github/workflows/weekly-pricing-catalog-review.yml) · same secret |
+
+Sibling ingestion rates: [ingestion-pricing.md](./ingestion-pricing.md).
 
 ## Related
 
 - Extraction runs: [`../06-engineering/docs/data/extraction-runs.dbml`](../06-engineering/docs/data/extraction-runs.dbml)
 - Model PRD: [`../02-product/prds/model--extraction--v1.md`](../02-product/prds/model--extraction--v1.md)
+- Ops index: [README.md](./README.md)

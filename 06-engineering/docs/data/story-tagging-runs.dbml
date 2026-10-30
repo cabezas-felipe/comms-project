@@ -1,0 +1,79 @@
+// Tempo — Story-tagging runs (design ERD)
+// Cloud: https://dbdiagram.io/d/6ae28fe9ed134e407e37a621
+// Title: Story-tagging runs
+//
+// Sibling to tempo.dbml (product Database library) and extraction-runs.dbml.
+// Intent: per-attempt LLM lineage for stage=story-tagging.
+// Not live Supabase until migrated. DBML is the design map.
+//
+// Grain: one row per LLM **attempt**. trigger_id groups ≤2 attempts for one invoke.
+// Triggers (product): admit (IR-08) or IR-14 X text replace — closed enum in B deepen.
+// Skip / no-model (IR-14 no text change) do NOT insert rows. Title-only press still runs.
+//
+// Forward compat:
+//   trigger_kind — varchar until deepen locks closed enum (e.g. admit | ir14_re_tag)
+//   stage        — default 'story-tagging'; path toward shared ai_runs later
+//
+// Body / publisher text: never a column (note only). No output_json — story_* joins are SoT.
+// No eval_scores. No accepted_at (extraction-only).
+
+Project story_tagging_runs {
+  database_type: 'PostgreSQL'
+  Note: 'Per-attempt LLM lineage for stage=story-tagging. Sibling to product Database library. Never store publisher body.'
+}
+
+Enum story_tagging_run_status {
+  succeeded
+  failed
+}
+
+Enum story_tagging_error_kind {
+  timeout
+  provider_http_error
+  provider_error
+  config_error
+  schema_error
+  empty_response
+  unknown
+}
+
+TableGroup "Story-tagging runs" [color: #E8D5C4, note: 'One row per LLM attempt'] {
+  story_tagging_runs
+}
+
+TableGroup "Product stubs" [color: #E8E6E1, note: 'Canonical shapes: tempo.dbml → Supabase'] {
+  stories
+}
+
+Table stories {
+  story_id uuid [pk]
+
+  Note: 'STUB for FK visibility. Full table owned by tempo.dbml / Supabase.'
+}
+
+Table story_tagging_runs {
+  run_id uuid [pk]
+  trigger_id uuid [not null, note: 'Shared by attempts for one invoke; primary + one retry (≤2)']
+  trigger_kind varchar(64) [not null, note: 'Provisional until deepen locks closed enum (e.g. admit | ir14_re_tag)']
+  stage varchar(64) [not null, default: 'story-tagging', note: 'Forward compat toward multi-stage ai_runs']
+  story_id uuid [not null, ref: > stories.story_id]
+  status story_tagging_run_status [not null]
+  model_provider varchar(64) [not null, note: 'e.g. anthropic — SKU locked when model in build focus']
+  model_id varchar(128) [not null, note: 'Router SKU; filled at write time']
+  prompt_version varchar(64) [not null, note: 'e.g. story-tagging-v1']
+  input_hash varchar(64) [not null, note: 'SHA-256 hex of canonical model input (text + catalog snapshot ids/labels); excludes system prompt; never retain body bytes']
+  prompt_tokens int [null]
+  output_tokens int [null]
+  estimated_cost_usd decimal [null, note: 'tokens × 07-ops/model-pricing.json at write time; null if model_id missing from catalog']
+  error_kind story_tagging_error_kind [null, note: 'Set when status=failed — closed labels only']
+  started_at timestamptz [not null]
+  finished_at timestamptz [null, note: 'Null only while in flight']
+
+  indexes {
+    (trigger_id)
+    (story_id, started_at)
+    (prompt_version, started_at)
+  }
+
+  Note: 'No output_json (story_topics|keywords|geographies replace-set is SoT). No eval_scores. Never store publisher body. Fail-open for pool still records failed attempts. Skip/no-model paths do not insert rows.'
+}

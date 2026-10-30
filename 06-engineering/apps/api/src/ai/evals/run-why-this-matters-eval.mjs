@@ -2,7 +2,7 @@
  * Why-this-matters eval runner — locked 18-case regression set.
  *
  * Spec: docs/why-this-matters-spec.md §10 (release gates) + §12.4 (rubric-only).
- * Dataset: 04-prd/why-this-matters-eval-set-v0.json (18 cases, locked).
+ * Dataset: 06-engineering/docs/evals/why-this-matters.gold.json (18 cases, locked).
  *
  * Usage:
  *   npm run eval:why-this-matters --workspace=@tempo/api      # stub writer (default)
@@ -42,9 +42,9 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Eval dataset lives in the product spec tree.  Six `..` segments traverse:
-// `apps/api/src/ai/evals/` -> ai -> src -> api -> apps -> 06-engineering ->
-// repo root, then descend into `04-prd/`.
+// Eval dataset lives under eng docs.  Five `..` segments traverse:
+// `apps/api/src/ai/evals/` -> ai -> src -> api -> apps -> 06-engineering,
+// then descend into `docs/evals/`.
 const DEFAULT_DATASET_PATH = path.resolve(
   __dirname,
   "..",
@@ -52,9 +52,9 @@ const DEFAULT_DATASET_PATH = path.resolve(
   "..",
   "..",
   "..",
-  "..",
-  "04-prd",
-  "why-this-matters-eval-set-v0.json"
+  "docs",
+  "evals",
+  "why-this-matters.gold.json"
 );
 
 const FROZEN_GENERATED_AT = "2026-05-20T00:00:00.000Z";

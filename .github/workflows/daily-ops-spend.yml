@@ -1,0 +1,45 @@
+name: Daily ops spend digests
+
+# Every day 14:00 UTC — estimated $/day shells for ingestion + models.
+# Wire PostHog / *_runs queries at build; until then posts TBD placeholders.
+#
+# Slack:
+#   #ops-pricing-ingestion → TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION
+#   #ops-pricing-models    → TEMPO_OPS_SLACK_WEBHOOK_URL
+# Omit a secret → dry-run that digest to workflow logs.
+
+on:
+  schedule:
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: daily-ops-spend
+  cancel-in-progress: false
+
+jobs:
+  spend-digests:
+    name: Post spend digests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Ingestion spend (#ops-pricing-ingestion)
+        env:
+          TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION }}
+        run: node 07-ops/scripts/post-ingestion-spend-digest.mjs
+
+      - name: Model spend (#ops-pricing-models)
+        env:
+          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL }}
+        run: node 07-ops/scripts/post-model-spend-digest.mjs
