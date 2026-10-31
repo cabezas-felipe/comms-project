@@ -13,6 +13,8 @@ Operational SoTs that are neither product requirements nor application code.
 | --- | --- | --- |
 | **`#ops-pricing-models`** | Weekly model unit catalog + **daily** model spend | `TEMPO_OPS_SLACK_WEBHOOK_URL` |
 | **`#ops-pricing-ingestion`** | Weekly ingestion unit catalog + **daily** ingestion spend | `TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION` |
+
+**31 Oct 2026:** those two secrets were cross-wired in GitHub (wrong channel). Workflows temporarily map around it ([D-087](../06-engineering/DECISIONS.md#2026-10-31---d-087---ops-pricing-slack-webhooks-were-cross-wired-workaround)). Prefer swapping the secret values in GitHub, then restoring 1:1 bindings.
 | **`#model-extraction-organization`** / **`-function`** / **`-role`** / **`-geography`** / **`-source`** | Extraction resolve queues | `TEMPO_OPS_SLACK_WEBHOOK_URL_EXTRACTION_{ORG,FUNCTION,ROLE,GEOGRAPHY,SOURCE}` |
 
 `#model-extraction-source` is a new press alias or a new X handle. See [model--extraction--v1.md](../02-product/prds/model--extraction--v1.md).

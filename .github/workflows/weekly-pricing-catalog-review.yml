@@ -3,10 +3,13 @@ name: Weekly pricing catalog review
 # Mondays 14:00 UTC — heartbeat (in_sync) or drift/fetch_fail for model + ingestion
 # rate-card SoTs. Does not auto-commit rates. Doc-diff parsers TBD at build.
 #
-# Slack:
+# Slack (intended):
 #   #ops-pricing-models     → TEMPO_OPS_SLACK_WEBHOOK_URL
 #   #ops-pricing-ingestion  → TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION
 # Omit a secret → dry-run that catalog to workflow logs.
+#
+# 31 Oct 2026: same cross-wired secrets as daily-ops-spend.yml — map to the secret
+# that currently targets the correct channel until GitHub secret values are swapped.
 
 on:
   schedule:
@@ -41,11 +44,11 @@ jobs:
       - name: Post model catalog (#ops-pricing-models)
         env:
           CATALOG: model
-          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL }}
+          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION }}
         run: node 07-ops/scripts/post-pricing-catalog-review.mjs
 
       - name: Post ingestion catalog (#ops-pricing-ingestion)
         env:
           CATALOG: ingestion
-          TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION }}
+          TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL }}
         run: node 07-ops/scripts/post-pricing-catalog-review.mjs
