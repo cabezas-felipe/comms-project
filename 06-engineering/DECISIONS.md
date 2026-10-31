@@ -2,26 +2,27 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
-### 2026-10-31 - D-087 - Ops pricing Slack webhooks were cross-wired (workaround)
+### 2026-10-31 - D-087 - Ops pricing Slack webhooks cross-wired → secrets corrected
 
 #### Context
 
-- Daily digests posted to the wrong channels: **ingestion spend** appeared in `#ops-pricing-models`; **model spend** appeared in `#ops-pricing-ingestion` (footers still named the intended channel).
-- Root cause: GitHub Actions secrets `TEMPO_OPS_SLACK_WEBHOOK_URL` and `TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION` hold each other’s channel webhooks.
+- Daily digests posted to the wrong channels: **ingestion spend** appeared in `#ops-pricing-models`; **model spend** appeared in `#ops-pricing-ingestion`.
+- Root cause: GitHub Actions secrets `TEMPO_OPS_SLACK_WEBHOOK_URL` and `TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION` held each other’s channel webhooks.
+- A temporary workflow remapping shipped, then secrets were reset to the correct channel URLs (operator `gh secret set`; values never committed).
 
 #### Decision
 
-- **Workaround (in workflows):** map each job’s script env to the secret that currently targets the correct channel — [daily-ops-spend.yml](../.github/workflows/daily-ops-spend.yml), [weekly-pricing-catalog-review.yml](../.github/workflows/weekly-pricing-catalog-review.yml), [model-pricing-review.yml](../.github/workflows/model-pricing-review.yml) alias.
-- **Preferred follow-up:** in GitHub → Settings → Secrets, **swap the two secret values** so names match [07-ops/README.md](../07-ops/README.md), then restore 1:1 secret→env bindings and remove the workaround comments.
+- **Secrets (SoT):** `#ops-pricing-models` → `TEMPO_OPS_SLACK_WEBHOOK_URL` · `#ops-pricing-ingestion` → `TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION` ([07-ops/README.md](../07-ops/README.md)).
+- **Workflows:** 1:1 secret→env bindings restored on [daily-ops-spend.yml](../.github/workflows/daily-ops-spend.yml), [weekly-pricing-catalog-review.yml](../.github/workflows/weekly-pricing-catalog-review.yml), [model-pricing-review.yml](../.github/workflows/model-pricing-review.yml).
 
 #### Why
 
-- Restore correct channel routing without blocking on secret value access in-repo.
+- Secret names match docs and channels; no permanent cross-map in Actions YAML.
 
 #### Consequences
 
-- Until secrets are swapped + workflows reverted, secret *names* remain misleading; comments in the three workflows document the map.
-- Summarization B2 `.env.example` adds `TEMPO_AI_SUMMARIZATION_*` stubs (unrelated; same day).
+- Rotate Slack webhooks if URLs were ever exposed outside secret stores.
+- Summarization B2 `.env.example` adds `TEMPO_AI_SUMMARIZATION_*` stubs (same day; unrelated).
 
 ### 2026-10-29 - D-086 - Ops pricing digests + weekly catalog heartbeat (amends D-074)
 

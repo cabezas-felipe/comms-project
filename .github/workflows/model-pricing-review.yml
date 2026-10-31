@@ -34,6 +34,5 @@ jobs:
 
       - name: Post model catalog
         env:
-          # 31 Oct 2026: cross-wired secrets — see daily-ops-spend.yml
-          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION }}
+          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL }}
         run: node 07-ops/scripts/post-pricing-catalog-review.mjs

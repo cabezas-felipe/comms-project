@@ -3,15 +3,10 @@ name: Daily ops spend digests
 # Every day 14:00 UTC — estimated $/day shells for ingestion + models.
 # Wire PostHog / *_runs queries at build; until then posts TBD placeholders.
 #
-# Slack (intended):
+# Slack:
 #   #ops-pricing-ingestion → TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION
 #   #ops-pricing-models    → TEMPO_OPS_SLACK_WEBHOOK_URL
 # Omit a secret → dry-run that digest to workflow logs.
-#
-# 31 Oct 2026: GitHub secret *values* were cross-wired (ingestion digests landed in
-# #ops-pricing-models and model digests in #ops-pricing-ingestion). Steps below map
-# each script env to the secret that currently targets the correct channel. Prefer
-# swapping the two secret values in GitHub so names match docs, then restore 1:1 binding.
 
 on:
   schedule:
@@ -41,12 +36,10 @@ jobs:
 
       - name: Ingestion spend (#ops-pricing-ingestion)
         env:
-          # Cross-wired secret: URL value currently points at ingestion channel
-          TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL }}
+          TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION }}
         run: node 07-ops/scripts/post-ingestion-spend-digest.mjs
 
       - name: Model spend (#ops-pricing-models)
         env:
-          # Cross-wired secret: INGESTION value currently points at models channel
-          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL_INGESTION }}
+          TEMPO_OPS_SLACK_WEBHOOK_URL: ${{ secrets.TEMPO_OPS_SLACK_WEBHOOK_URL }}
         run: node 07-ops/scripts/post-model-spend-digest.mjs
