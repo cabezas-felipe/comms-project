@@ -1,6 +1,6 @@
 # Ingestion — pipeline / runtime SoT
 
-> **Stage:** Ingestion · **Status:** Locked (B1) · **Last updated:** 2 Nov 2026  
+> **Stage:** Ingestion · **Status:** Locked (B1) · **Last updated:** 2 Nov 2026 (MVP carry-over)  
 > **Altitude:** Engineer pipeline SoT (pre-runtime). Product rules live in the [contract](../../../02-product/contracts/ingestion.md) — this file owns jobs, triggers, sequences, data binds, failure matrix, and observability pointers. No LLM prompt or gold ownership.
 
 **Related**
@@ -120,11 +120,13 @@ Every new admit is handed to metastory **same tick**, including zero chips / tag
 
 Ingestion **orchestrates** only. Sibling stages own prompts, retries (≤2), and column writes.
 
-| Target | Passes | Waits for | Must not |
-|--------|--------|-----------|----------|
-| **Summarization** | `story_id`, `uri`, title, body in memory, `trigger_kind` (`clock` \| `warm`). Stage **mints its own** `trigger_id` for `summarization_runs` / `summarization_invoke` — not shared with story-tagging or metastory | success \| fail \| skip (**no body**, or `article_summary` already present incl. resurrect — [SR-05](../../../02-product/contracts/summarization.md)) | Write `article_summary`; discard body alone; invent summary |
-| **Story-tagging** | `story_id`, kind, text (title+body \| title \| X text), `trigger_kind` (`clock` \| `warm` \| `x_edit`). Stage **mints its own** `trigger_id` for `story_tagging_runs` / `story_tagging_invoke` | success \| fail \| skip (empty aperture) | Write `story_*`; invent chips. Mark disposition is sibling-owned: **admit** final fail → no new marks; **IR-14** final fail → empty replace-set ([ST-06](../../../02-product/contracts/story-tagging.md)); empty aperture → empty replace-set ([ST-15](../../../02-product/contracts/story-tagging.md)) |
-| **Metastory** | Admitted `story_id`(s); body handle if still in memory; tick / job correlation id (orchestrator-owned — not an LLM-stage `trigger_id`) | Handoff completion (incl. same-tick what-happened when used) / degrade for **this** handoff | Run embeddings/writer; gate on chips; final body discard |
+| Target | Passes | Waits for | Target must not |
+|--------|--------|-----------|-----------------|
+| **Summarization** | `story_id`, `uri`, title, body in memory, `trigger_kind` (`clock` \| `warm`). Stage **mints its own** `trigger_id` for `summarization_runs` / `summarization_invoke` — not shared with story-tagging or metastory | success \| fail \| skip (**no body**, or `article_summary` already present incl. resurrect — [SR-05](../../../02-product/contracts/summarization.md)) | Discard body alone; invent summary; store/log body |
+| **Story-tagging** | `story_id`, kind, text (title+body \| title \| X text), `trigger_kind` (`clock` \| `warm` \| `x_edit`). Stage **mints its own** `trigger_id` for `story_tagging_runs` / `story_tagging_invoke` | success \| fail \| skip (empty aperture) | Invent chips; discard body. Mark disposition: **admit** final fail → no new marks; **IR-14** final fail → empty replace-set ([ST-06](../../../02-product/contracts/story-tagging.md)); empty aperture → empty replace-set ([ST-15](../../../02-product/contracts/story-tagging.md)) |
+| **Metastory** | Admitted `story_id`(s); body handle if still in memory; tick / job correlation id (orchestrator-owned — not an LLM-stage `trigger_id`) | Handoff completion (incl. same-tick what-happened when used) / degrade for **this** handoff | Discard body (orchestrator owns after barrier — [IR-05](../../../02-product/contracts/ingestion.md)); invent chips; fail the pool tick on handoff degrade |
+
+Sibling **writes** (`article_summary`, `story_*`, metastory tables) are owned by those stages — ingestion does not write them.
 
 **`trigger_id` spine:** each LLM stage mints a new UUID when it enters the generate path (shared by ≤2 attempts). Ingestion does **not** assign one shared UUID across summarization + story-tagging for the same admit. Correlate same-tick work via `story_id` + clock/warm job, not a cross-stage `trigger_id`.
 
@@ -139,6 +141,19 @@ Ingestion **orchestrates** only. Sibling stages own prompts, retries (≤2), and
 | Call | Chunked `Get posts by ids`; upsert `text` when changed → re-invoke story-tagging |
 | Cap | **No MVP $-cap**; window + chunking only; fail-open keep prior text |
 | Pricing | Usage facts → PostHog; $ in daily digest (§9) |
+
+---
+
+## 6.1 Vendor HTTP + aperture (MVP carry-over)
+
+| Lock | Value |
+|------|--------|
+| Press + X runtime | **NewsAPI.ai Stream + X** only — RSS feed-reader, manifest allowlists, and `ingestion_recent_items` cache-warmer are **not** live product ingestion paths (legacy / quarantine until deleted) |
+| Story identity | Press **`uri`** / X **post id** only — **no** cross-URL/headline deduper on top of vendor identity |
+| X aperture | Handles + `fetch_mode` from **live confirmed scope union** only; env may gate client on/off + credentials — **not** which handles belong in the pool |
+| Per-request timeout | **12000** ms default (env-overridable); NewsAPI uses the same unless vendor docs force otherwise |
+| X handle concurrency | **3** parallel handles default (env-overridable) |
+| Not this stage | `source-matcher`, `embedding-recall`, `evidence-translator` (and similar as-is personalization/recall under `ingestion/`) — **out** of Tempo ingestion SoT; join/personalization owns per-user selection |
 
 ---
 
@@ -217,9 +232,9 @@ Model daily spend (from `*_runs.estimated_cost_usd`) → `#ops-pricing-models` v
 
 ## 10. Runtime gap (build phase)
 
-**Target:** NewsAPI.ai Stream + X per vendor docs; jobs and admits as above.
+**Target:** NewsAPI.ai Stream + X per vendor docs; jobs and admits as above ([§6.1](#61-vendor-http--aperture-mvp-carry-over)).
 
-**Today’s prototype** may still use RSS / local feed-reader paths. Treat as **legacy** until build reconciles. Do not treat RSS allowlists as the product aperture.
+**Today’s prototype** may still use RSS / local feed-reader / cache-warmer / env handle allowlists. Treat as **legacy** — not a second live SoT. Do not treat RSS allowlists or `TEMPO_X_HANDLE_ALLOWLIST` as the product aperture. Do not port cross-feed URL+headline dedupe or embedding-recall into the IR admit path.
 
 ---
 
@@ -233,6 +248,7 @@ Model daily spend (from `*_runs.estimated_cost_usd`) → `#ops-pricing-models` v
 - Slack failure paging / runbooks → later platform ops  
 - Wiring PostHog `ingestion_job_completed` facts + live SKU rates into the landed GHA digests ([daily-ops-spend.yml](../../../.github/workflows/daily-ops-spend.yml) · [weekly-pricing-catalog-review.yml](../../../.github/workflows/weekly-pricing-catalog-review.yml)) — envelope exists; facts/rates at build  
 - Model daily cost digest channel ownership → [07-ops/README.md](../../../07-ops/README.md)
+- As-is `source-matcher` / `embedding-recall` / dashboard personalization → join / dashboard / metastory (not IR admit)
 
 ---
 
@@ -255,3 +271,8 @@ Model daily spend (from `*_runs.estimated_cost_usd`) → `#ops-pricing-models` v
 | 2 Nov 2026 | Related | `ingestion-pricing` files are live envelope (not “planned”); story-tagging Related → pipeline + contract |
 | 2 Nov 2026 | Coherence ↔ contract | Fix §9 cross-refs; admit barrier ↔ IR-05 / SR-05 / MR-08; Out = wire facts into landed GHA (not “implement workflows”) |
 | 2 Nov 2026 | Cross-stage `trigger_id` | Ingestion passes `trigger_kind` (+ story context); each LLM stage mints its own `trigger_id` — not one UUID shared across summarization + story-tagging |
+| 2 Nov 2026 | Carry-over 1 | **A** — NewsAPI + X only; retire RSS/manifest/cache-warmer as live product ingestion |
+| 2 Nov 2026 | Carry-over 2 | **A** — identity = `uri` / post id only; no cross-URL/headline merge |
+| 2 Nov 2026 | Carry-over 3 | **A** — X handles from live scope union; env ≠ handle aperture |
+| 2 Nov 2026 | Carry-over 4 | **A** — vendor HTTP **12s**/request; X concurrency **3** |
+| 2 Nov 2026 | Carry-over 5 | **A** — matcher / embedding-recall / evidence-translator out of ingestion SoT |

@@ -141,6 +141,10 @@ Operator does not trigger summarization directly. They see the result when openi
 | Exact primary/fallback model ids | **Locked:** `anthropic:claude-haiku-5-5` → `anthropic:claude-sonnet-5-5` | Prompt ✓ |
 | Quality-escalate rule (when Haiku → Sonnet) | **Locked:** attempt 1 Haiku; attempt 2 Sonnet on provider/timeout/validation fail | Pipeline ✓ |
 | Max body chars sent to model | **Locked:** full vendor body MVP; truncate N deferred | Pipeline ✓ |
+| Per-attempt timeout | **Locked:** **15000** ms ceiling (shared with extraction + story-tagging) | Pipeline ✓ |
+| Concurrent URI summarizations | **Locked:** **4** (clamp 1–8) | Pipeline ✓ |
+| Output length runtime | **Locked:** trim only; no hard char cap / overlap-% gate; soft density + F7 advisory offline | Pipeline ✓ / evals ✓ |
+| So-what denylist (V3) | **Locked:** keep 7-phrase list; expand only from gold fails | Pipeline ✓ |
 | Closed `trigger_kind` enum | **Locked:** `clock` \| `warm` | Runs DBML ✓ |
 | Gold suite size / dimensions | **Locked:** 22 cases (18 synthetic + 4 derived_real); arbiter pass done | Evals ✓ |
 | Advisory vs blocking evals | **Locked for B2:** advisory until promote gate; quality via gold/`ds-coder`, not PostHog | Evals / `engineer-qa` ✓ |
@@ -213,3 +217,4 @@ Shared LLM measurement stack ([D-088](../../06-engineering/DECISIONS.md)): `summ
 | B2 X4 `summarization_invoke` | Thin PostHog invoke + shared LLM stack (D-088); no chip-like UX metric | 31 Oct 26 | Instrumented at build |
 | B2 hygiene | Status Spec locked; gap/open-Q tables match Locked siblings (D-089) | 1 Nov 26 | Build ships live path |
 | Summarization artifact coherence | Align Success/`summarization_invoke`, escalate wording ↔ pipeline V1–V3, ops daily+weekly; contract runtime gap no longer “prompt lands” | 02 Nov 26 | Next stage coherence pass |
+| MVP carry-over timeout / length / denylist | **15s**/attempt; trim-only length; keep V3 so-what list; no cluster/claim-join as this stage | 2 Nov 26 | Live digests → soft length escalate; gold F7 |

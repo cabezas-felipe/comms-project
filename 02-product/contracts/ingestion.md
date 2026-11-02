@@ -1,6 +1,6 @@
 # Ingestion — product contract
 
-> **Stage:** Ingestion · **Altitude:** Product contract (not a PRD) · **Status:** Locked · **Last updated:** 2 Nov 2026 (cross-stage coherence)  
+> **Stage:** Ingestion · **Altitude:** Product contract (not a PRD) · **Status:** Locked · **Last updated:** 2 Nov 2026 (MVP carry-over coherence)  
 > **Pattern:** Stage contracts live at `02-product/contracts/{stage}.md`. Engineer pipeline / vendor / eval artifacts link here; they do not replace this doc.  
 > **Intent:** ship
 
@@ -90,7 +90,10 @@ Product success stays qualitative. Ops metering event `ingestion_job_completed` 
 - Get articles backfill; storing / logging / showing publisher body
 - Invented chips (story-tagging fail-closed); join-only warm when scope widens
 - Per-user fetch as the shared-pool SoT
-- RSS / local feed-reader as target aperture (legacy — see runtime gap)
+- RSS / local feed-reader / manifest allowlists / cache-warmer as live product ingestion (legacy — see runtime gap + [pipeline §6.1](../../06-engineering/docs/pipelines/ingestion.md#61-vendor-http--aperture-mvp-carry-over))
+- Env handle allowlists as product X aperture (handles come from live confirmed scope union — IR-01/04)
+- Cross-URL/headline dedupe on top of vendor `uri` / post id (IR-02 / IR-15)
+- Embedding-recall / source-matcher personalization inside the shared-pool admit path (join/dashboard owns per-user selection)
 - **v1 pool GC / aperture-driven soft-remove** on scope narrow or “no live user still needs this story” ([IR-16](#locked-rules))
 - Activity-windowed union (last-N-days sign-in) — product aperture is all live scopes
 - MVP keep-list **metadata refresh** on active duplicate Stream/X hits
@@ -160,7 +163,7 @@ Product success stays qualitative. Ops metering event `ingestion_job_completed` 
 
 This contract describes the **target**: NewsAPI.ai Stream + X per [api-newsapi-ai.md](../../06-engineering/docs/api-newsapi-ai.md) and [api-x.md](../../06-engineering/docs/api-x.md).
 
-**Today’s prototype** still centers RSS / local feed-reader paths. Treat that path as **legacy** until build reconciles runtime to this contract. Foundation docs must not treat RSS allowlists as the product aperture.
+**Today’s prototype** still centers RSS / local feed-reader / cache-warmer / env handle allowlists. Treat those as **legacy** — not a second live SoT. Product aperture is the **union of live confirmed scopes** (IR-01); story identity is vendor **`uri` / post id** (IR-02 / IR-15). Eng HTTP defaults (12s / X concurrency 3) live in [pipeline §6.1](../../06-engineering/docs/pipelines/ingestion.md#61-vendor-http--aperture-mvp-carry-over).
 
 ---
 
@@ -195,6 +198,7 @@ This contract describes the **target**: NewsAPI.ai Stream + X per [api-newsapi-a
 | 2 Nov 2026 | Coherence ↔ pipeline | Warm inputs include Tags + Context Save; ops event name deferred to pipeline §9; IR-14 minutes remain stub here / thickened to 15‑min offsets in eng |
 | 2 Nov 2026 | IR-14 pointer | Product cadence stays ~10–15 min; eng lock cited (15‑min offsets, no MVP $-cap) so contract ≠ pipeline stub conflict |
 | 2 Nov 2026 | Cross-stage | LLM `trigger_id` is stage-minted (pipeline §5); ingestion owns IR-05/08/11 handoff only — no shared UUID across summarization + story-tagging |
+| 2 Nov 2026 | MVP carry-over | Out + runtime gap align pipeline §6.1: NewsAPI+X only; uri/post-id identity; scope-union X aperture; no recall-in-admit; eng 12s / concurrency 3 |
 
 ---
 

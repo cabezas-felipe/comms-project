@@ -131,7 +131,7 @@ Output:
 
 ## 7. Out of this document
 
-- Attempt/escalate, concurrency, logging, `input_hash` → [pipelines/summarization.md](../pipelines/summarization.md)
+- Attempt/escalate, **15s** per-attempt timeout, concurrency, logging, `input_hash`, so-what denylist → [pipelines/summarization.md](../pipelines/summarization.md)
 - Product SR table → [contracts/summarization.md](../../../02-product/contracts/summarization.md)
 - Gold / failure modes → [evals/summarization.md](../evals/summarization.md)
 - Source-reader chrome → dashboard / [source-reader](../../../03-design/design-system/patterns/source-reader.md)

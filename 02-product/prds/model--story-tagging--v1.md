@@ -165,6 +165,8 @@ Shared LLM stack ([D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088--
 | Tag which stories? | **Locked:** every new admit + IR-14 text change (pool-wide); join filters feed | This PRD / contract ✓ |
 | Quality-escalate rule (when Haiku → Sonnet) | **Locked:** attempt 1 Haiku-class; attempt 2 Sonnet-class on provider/timeout/validation fail | Pipeline ✓ |
 | Exact primary/fallback model ids | **Locked:** `anthropic:claude-haiku-5-5` → `anthropic:claude-sonnet-5-5`; temp 0; max_tokens 1024 | Prompt ✓ |
+| Per-attempt timeout / concurrency | **Locked:** **15000** ms ceiling; concurrent invokes **4** (clamp 1–8) | Pipeline ✓ |
+| Post-model / user scope | **Locked:** drop unknown/wrong-shelf + dedupe only; **no** settings clamp, alias/lexical/URL/semantic backfill; join owns user chips | Pipeline ✓ / [ST-02](../contracts/story-tagging.md)·[ST-08](../contracts/story-tagging.md) |
 | `input_hash` canonical bytes | **Locked:** `text_payload + "\n---\n" + catalog_payload` (tempo label fields) | Pipeline ✓ / runs DBML ✓ |
 | Gold suite size / dimensions | **Locked:** st-skip-01 + st-01…22 (E3–E5) | Evals ✓ |
 | Advisory vs blocking evals | **Locked for B2a:** advisory until promote gate; quality via gold/`ds-coder`, not PostHog | Evals / `engineer-qa` |
@@ -233,3 +235,4 @@ Shared LLM stack ([D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088--
 | B2a coherence ↔ contract/pipeline | Skip named; wrong-shelf; tempo label fields; ops daily+weekly; pipeline Locked in status/gaps | 2 Nov 26 | Further sibling lock |
 | B2a runs DBML Locked | D1–D6: `clock`\|`warm`\|`x_edit`; hash; skip=no row; same error_kind spine as summarization ([D-090](../../06-engineering/DECISIONS.md#2026-11-02---d-090---phase-b2a-story-tagging-artifacts-locked-incl-runs-dbml)) | 2 Nov 26 | Migration / schema drift |
 | Story-tagging artifact coherence | Cross-check contract ↔ PRD ↔ prompt ↔ pipeline ↔ runs ↔ evals/gold; residual skip/`no_posthog` + Locked-B2a pointer fixes only | 02 Nov 26 | Next stage coherence pass |
+| MVP carry-over timeout / post-model | **15s**/attempt; concurrency 4; drop/dedupe only; no settings clamp / lexical backfill | 2 Nov 26 | Cost/quality forces aperture retrieval or soft length gate |

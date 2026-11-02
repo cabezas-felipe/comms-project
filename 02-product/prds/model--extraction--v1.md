@@ -2,9 +2,9 @@
 
 Turn onboarding and Account Context blurbs into structured watch-scope Tempo can store, confirm (onboarding), merge (Account), and use for retrieval.
 
-Status: Draft  
+Status: Spec locked (invoke / resolve / chip-acceptance / gold; linked eng SoTs Locked)  
 Owner: Felipe  
-Update: 02 Nov 26  
+Update: 2 Nov 26  
 Intent: ship  
 
 **Thin ship shell.** Do not duplicate lane rules, prompt text, or gold — change those in the SoTs below first. This PRD owns **invoke contract**, build deltas vs live legacy, and ship sequencing. UX chrome lives in sibling PRDs.
@@ -67,7 +67,7 @@ Intent: ship
 
 ### Overview
 
-Five optional blurbs → **write** to Database library blurb tables → **one** LLM call on filled lanes (`extraction-v1`) → hygiene/resolve → **onboarding Review** or **Account merge** (no second Review). Attempt lineage in Extraction runs. Chip memberships stay in Database library.
+Five optional blurbs → **write** to Database library blurb tables → **one** LLM call on filled lanes (`extraction-v1`) → **hygiene-only** / resolve ([pipeline §3.1](../../06-engineering/docs/pipelines/extraction.md#31-hygiene-allowlist-mvp-carry-over): no additive recall / noise denylists / synonym maps; **15s**/attempt) → **onboarding Review** or **Account merge** (no second Review). Attempt lineage in Extraction runs. Chip memberships stay in Database library.
 
 ### User flow (invoke — UX locked)
 
@@ -140,7 +140,7 @@ Onboarding guardrail for Topics, Keywords, Geographies, Press, and Platforms. It
 
 ### Metrics — extract invoke (locked)
 
-PostHog event for a finished model invoke. It records that the attempt finished, including when the person never commits Review. It is not chip acceptance, and it is not a quality score. It does not wait for the `extraction_runs` table. A write failure does not call the model, so it does not emit this event.
+PostHog event for a finished model **invoke** (once per invoke — not per attempt / not per `extraction_runs` row). It records that the invoke finished, including when the person never commits Review. It is not chip acceptance, and it is not a quality score. It does not wait for the `extraction_runs` table. A write failure does not call the model, so it does not emit this event.
 
 | Rule | Lock |
 | --- | --- |
@@ -290,9 +290,9 @@ Blurb 5. The model emits `traditionalSources` and `socialSources` as strings. It
 
 | In | Out |
 | --- | --- |
-| Invoke contract (table above), `trigger_kind` / `trigger_id`, fail/retry semantics, chip-acceptance guardrail | Onboarding / Account chrome copy and layout (siblings) |
-| Model I/O, hygiene/resolve, eval/gold, runs persist (later slices) | Magic link, Incomplete modal UX, Tags prune UX detail |
-| SKU cutover after gold (D-073) | Dashboard ranking after scope is live; LLM-judge; blocking CI gate (MVP) |
+| Invoke contract (table above), `trigger_kind` / `trigger_id` mint, fail/retry semantics, chip-acceptance guardrail, per-facet **resolve** locks | Onboarding / Account chrome copy and layout (siblings) |
+| SKU cutover after gold (D-073); ship sequencing vs linked SoTs | Magic link, Incomplete modal UX, Tags prune UX detail |
+| Implement against linked prompt / pipeline hygiene / evals / runs (not a second copy here) | Dashboard ranking after scope is live; LLM-judge; blocking CI gate (MVP); owning prompt/gold/hygiene rules in this PRD |
 
 ### Ship sequencing (one train)
 
@@ -383,6 +383,7 @@ Blurb 5. The model emits `traditionalSources` and `socialSources` as strings. It
 | New handle pages `#model-extraction-source` | Same channel and secret as a new press alias. Message names the handle and the default `word_search`. At most once per `trigger_id` | 26 Oct 26 | Source alerts need a snooze |
 | Extraction artifact coherence | Aligned contract / prompt / pipeline / eval / gold / runs notes with this PRD (topic lowercase emit, identity pre-Review, gold id prefixes, gold no longer “draft”) | 02 Nov 26 | Next stage coherence pass |
 | Ops pricing daily + Monday | Match summarization / story-tagging `#ops-pricing-models` cadence (daily spend + Monday catalog) | 02 Nov 26 | Ops channel change |
+| MVP carry-over hygiene + timeout | Hygiene-only §3.1; **15s** per attempt (§3.2); shared with sum/ST | 2 Nov 26 | Advisory evidence forces denylist/fold/timeout retune |
 
 ### Blocking open questions
 

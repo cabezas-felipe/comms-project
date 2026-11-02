@@ -1,6 +1,6 @@
 # Story-tagging — pipeline / runtime SoT
 
-> **Stage:** Story-tagging · **Status:** Locked (B2a) · **Last updated:** 2 Nov 2026 (coherence ↔ siblings)  
+> **Stage:** Story-tagging · **Status:** Locked (B2a) · **Last updated:** 2 Nov 2026 (MVP carry-over)  
 > **Altitude:** Engineer pipeline SoT (pre-runtime). Does **not** duplicate prompt text — see [prompts/story-tagging.md](../prompts/story-tagging.md) (B2a). Product meaning — [contracts/story-tagging.md](../../../02-product/contracts/story-tagging.md).
 
 **Related**
@@ -93,7 +93,7 @@ Same-tick order vs summarization / metastory what-happened is **flexible** among
 1. Receive model payload (or error).
 2. On provider / timeout / config error → mark attempt `failed` with `error_kind`; if attempts remain → escalate; else final fail (mark disposition per §2).
 3. **Runtime validate** ([§4](#4-runtime-validation)): on fail → attempt `failed` (`schema_error` or `empty_response`); escalate or final fail.
-4. On pass → **drop** unknown and wrong-shelf IDs (per-kind; no auto-move); **dedupe** each array; persist replace-set (once per invoke success); attempt `succeeded`.
+4. On pass → **drop** unknown and wrong-shelf IDs (per-kind; no auto-move); **dedupe** each array; persist replace-set (once per invoke success); attempt `succeeded`. **No** post-LLM alias inject, lexical backfill, URL evidence, semantic uplift, or clamp to the invoking user’s settings vocabulary ([ST-02](../../../02-product/contracts/story-tagging.md) / [ST-08](../../../02-product/contracts/story-tagging.md) — join owns user scope).
 5. Always **return** body reference to orchestrator when body was borrowed (borrow/return — do not discard here). X / title-only paths have nothing to return.
 
 ---
@@ -144,7 +144,7 @@ Over-tag / under-tag quality, keyword match-term strictness, bilingual support �
 
 | Knob | Default | Env (build) |
 |------|---------|-------------|
-| Per-attempt timeout | **8000** ms | `TEMPO_AI_STORY_TAGGING_TIMEOUT_MS` |
+| Per-attempt timeout | **15000** ms (ceiling; shared default with extraction + summarization) | `TEMPO_AI_STORY_TAGGING_TIMEOUT_MS` |
 | Concurrent story-tagging invokes per tick | **4** (clamp 1–8) | `TEMPO_AI_STORY_TAGGING_CONCURRENCY` |
 
 Per-story attempts are **sequential** (Haiku then maybe Sonnet). Concurrency caps **how many stories** may be in the tagging path at once (pool-wide admits in a tick).
@@ -161,7 +161,7 @@ Per-story attempts are **sequential** (Haiku then maybe Sonnet). Concurrency cap
 
 **Target:** Invoked from ingestion on each new admit + IR-14 text change; replace-set `story_*`; lineage rows; orchestrator body discard after same-tick consumers.
 
-**Today:** Stage **not shipped** at runtime. Prompt / pipeline / runs DBML / evals+gold are **Locked B2a**; wire migrate + harness + `story_tagging_invoke` at build. Do not treat prototype lexical gates as this SoT. Exact Haiku/Sonnet model ids: [prompts/story-tagging.md](../prompts/story-tagging.md).
+**Today:** Stage **not shipped** at runtime. Prompt / pipeline / runs DBML / evals+gold are **Locked B2a**; wire migrate + harness + `story_tagging_invoke` at build. Do **not** treat prototype `meta-story-tags` / settings-vocabulary lexical or semantic uplift as this SoT — Tempo ST is LLM + full shared catalog only. Exact Haiku/Sonnet model ids: [prompts/story-tagging.md](../prompts/story-tagging.md).
 
 ---
 
@@ -173,6 +173,7 @@ Per-story attempts are **sequential** (Haiku then maybe Sonnet). Concurrency cap
 - Join / chip chrome → [dashboard--v1.md](../../../02-product/prds/dashboard--v1.md)
 - Ingestion drains / admit / IR-05 barrier → [pipelines/ingestion.md](./ingestion.md)
 - User chips / catalog growth → [extraction](../../../02-product/contracts/extraction.md)
+- Prototype `meta-story-tags` / settings-vocabulary lexical tagging → legacy dashboard path; not this stage
 
 ---
 
@@ -190,7 +191,7 @@ Per-story attempts are **sequential** (Haiku then maybe Sonnet). Concurrency cap
 | 2 Nov 2026 | L8 | IR-14 final fail → empty replace-set; admit final fail → no new marks |
 | 2 Nov 2026 | L9 | New UUID `trigger_id` per LLM invoke; skips → no rows |
 | 2 Nov 2026 | L10 | Strict log minimize; borrow/return body; orchestrator discard |
-| 2 Nov 2026 | L11 | 8s per-attempt timeout; concurrency default 4 (clamp 1–8) |
+| 2 Nov 2026 | L11 | 8s per-attempt timeout; concurrency default 4 (clamp 1–8) — **superseded** by Carry-over timeout → **15s** |
 | 2 Nov 2026 | L12 | `input_hash` = SHA-256 of `text_payload + "\n---\n" + catalog_payload`; labels from tempo `name` / `name_normalized` |
 | 2 Nov 2026 | L13 | Artifact written; Status Locked (B2a) |
 | 2 Nov 2026 | L14 | Runs DBML Locked B2a (D1–D6); evals/gold Locked; B2a design stack complete |
@@ -198,3 +199,7 @@ Per-story attempts are **sequential** (Haiku then maybe Sonnet). Concurrency cap
 | 2 Nov 2026 | L15 | Coherence with contract/PRD: ST-07 wrong-shelf; ST-15 `skip`; tempo label fields; Related/Next foundations refreshed upstream |
 | 2 Nov 2026 | L16 | Runtime gap / `trigger_kind` note: siblings Locked (not “thicken next”); build = migrate + harness |
 | 2 Nov 2026 | L17 | Coherence pass vs contract/PRD/prompt/evals/runs/gold — no rule forks; skip PostHog named in evals |
+| 2 Nov 2026 | Carry-over 1 | **A** — retire lexical/settings tagger as story-tagging; LLM + shared catalog only |
+| 2 Nov 2026 | Carry-over 2 | **A** — no settings clamp on `story_*`; join owns user scope |
+| 2 Nov 2026 | Carry-over 3 | **A** — post-model drop/dedupe only; no alias/lexical/URL/semantic backfill |
+| 2 Nov 2026 | Carry-over timeout | **15s** per attempt (was L11 8s); concurrency 4 unchanged |

@@ -1,6 +1,6 @@
 # Extraction — product contract
 
-> **Stage:** Extraction · **Altitude:** Product contract (not a PRD) · **Status:** Locked (Session A) · **Last updated:** 02 Nov 2026 (cross-stage coherence)  
+> **Stage:** Extraction · **Altitude:** Product contract (not a PRD) · **Status:** Locked (Session A) · **Last updated:** 2 Nov 2026 (MVP carry-over coherence)  
 > **Pattern:** Stage contracts live at `02-product/contracts/{stage}.md`. Engineer prompt / pipeline / eval artifacts link here; they do not replace this doc.
 
 **Related**
@@ -68,7 +68,7 @@ All five lanes are **in-scope extraction** (one product capability, lane-specifi
 | **North star** | Downstream **retrieval / dashboard utility** — on-beat stories admitted, irrelevant excluded |
 | **Early signal** | **Chip acceptance** — PostHog `extraction_chip_acceptance` at a successful onboarding commit. Kept, removed, and added per shelf. It records what the operator kept. It is not an eval. Definition in the [extraction PRD](../prds/model--extraction--v1.md). |
 
-Thin PostHog invoke `extraction_invoke` (finished LLM attempt, success or fail) is **specified** on the [extraction PRD](../prds/model--extraction--v1.md) under [D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088---shared-thin-_invoke-posthog-events-for-all-llm-stages) — same `*_invoke` family as summarization / story-tagging; **not** chip acceptance; **not instrumented** until build.
+Thin PostHog invoke `extraction_invoke` (**once per finished LLM invoke**, success or fail — not per attempt / not per `extraction_runs` row; primary→fallback share one event) is **specified** on the [extraction PRD](../prds/model--extraction--v1.md) under [D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088---shared-thin-_invoke-posthog-events-for-all-llm-stages) — same `*_invoke` family as summarization / story-tagging; **not** chip acceptance; **not instrumented** until build.
 
 Do not optimize for pretty chip lists that fail retrieval.
 
@@ -93,7 +93,7 @@ Do not optimize for pretty chip lists that fail retrieval.
 
 This contract describes the **target**: five blurbs, five stored lanes, one multi-lane extraction run, **onboarding Review required**, settings Rebuild merge-without-Review.
 
-**Today’s prototype** still centers a **single narrative** → one extract into a settings-shaped blob. Treat that path as **legacy** until build reconciles runtime to this contract and [tempo.dbml](../../06-engineering/docs/data/tempo.dbml). Foundation docs must not assume five-lane migrations already ship.
+**Today’s prototype** still centers a **single narrative** → one extract into a settings-shaped blob (`extract-v8` + sanitizer). Treat that path as **legacy** until build reconciles runtime to this contract and [tempo.dbml](../../06-engineering/docs/data/tempo.dbml). Do not treat the live sanitizer as target hygiene ([pipeline §3.1](../../06-engineering/docs/pipelines/extraction.md#31-hygiene-allowlist-mvp-carry-over)). Foundation docs must not assume five-lane migrations already ship.
 
 ---
 
@@ -114,6 +114,8 @@ This contract describes the **target**: five blurbs, five stored lanes, one mult
 | 21 Oct 2026 | Topic vs keyword | Product split lives in the prompt (Lanes 2–3). Contract points there; it does not restate the model rules. |
 | 27 Oct 2026 | A2 | User chips vs story chips pointer; monitoring contracts locked |
 | 2 Nov 2026 | Cross-stage | Success notes `extraction_invoke` (D-088) beside chip acceptance — aligns summarization / story-tagging contracts |
+| 2 Nov 2026 | MVP carry-over | Eng hygiene-only + **15s**/attempt locked in [pipeline](../../06-engineering/docs/pipelines/extraction.md) §3.1–3.2 — contract stays product altitude |
+| 2 Nov 2026 | `extraction_invoke` grain | Once per finished LLM **invoke** (not per attempt) — aligns PRD / D-088 / sum·ST |
 
 ---
 
