@@ -10,7 +10,7 @@
 - Data (target): [tempo.dbml](../data/tempo.dbml) · [Database library](https://dbdiagram.io/d/6ab4852e58694256127b2a37)
 - Extraction runs: [extraction-runs.dbml](../data/extraction-runs.dbml) · [dbdiagram](https://dbdiagram.io/d/Extraction-runs-6ab952050f25a52d011d406d)
 - Legacy runtime (single-blob): [`onboarding-extractor.mjs`](../../apps/api/src/ai/onboarding-extractor.mjs) (`EXTRACT_PROMPT_VERSION = extract-v8`) — superseded by this SoT at build
-- Pipeline / hygiene / resolve (Session C, locked): [pipelines/extraction.md](../pipelines/extraction.md)
+- Pipeline / hygiene (Session C, locked): [pipelines/extraction.md](../pipelines/extraction.md) — per-facet **resolve** locks → model PRD
 - Eval / gold (Session E, locked): [evals/extraction.md](../evals/extraction.md) · [extraction.gold.json](../evals/extraction.gold.json)
 - Pattern: stage prompt SoTs live at `06-engineering/docs/prompts/{stage}.md`
 
@@ -208,9 +208,9 @@ At call time, append the current `functions.name` values after the per-lane rule
 
 ## 8. Out of this document
 
-- Deterministic hygiene (normalize, caps, geo/keyword strip, noise denylists, `KEYWORD_PATTERNS`) → Session C pipeline
-- Alias / function catalog ops and UUID resolve → Session C + ops
-- Eval / gold shape → Session E
+- Deterministic hygiene (hygiene-only: lower+trim, 64/24 caps, junk/handles/dedupe/sort, exact geo≠keyword — **no** additive recall, noise denylists, or synonym maps) → [pipelines/extraction.md](../pipelines/extraction.md) §3.1
+- Alias / function catalog ops and UUID resolve → [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md) + ops
+- Eval / gold shape → [evals/extraction.md](../evals/extraction.md)
 - Code, env flips, migrations → build phase
 
 ---
@@ -233,3 +233,5 @@ At call time, append the current `functions.name` values after the per-lane rule
 | 24 Oct 2026 | Press names | Official outlet name, including a leading article when it is part of that name (`The New York Times`). Casual abbreviations still expand to that official name. |
 | 24 Oct 2026 | Local city | A city named in the role blurb is a geography on a priorities blurb that says “local” and names no other place. “Local” with no city named anywhere adds nothing. Do not also emit the containing region or country. |
 | 02 Nov 2026 | Topic casing | Topic collapse example and emit rule use lowercase (`elections`) to match product store + gold match keys. Version stays `extraction-v1` (prompt not shipped). |
+| 2 Nov 2026 | Hygiene pointer | Out-of-doc hygiene line matches pipeline carry-over: no `KEYWORD_PATTERNS` / noise denylists / synonym maps |
+| 2 Nov 2026 | Resolve pointer | Resolve → model PRD + ops (not Session C); Related hygiene-only → pipeline |

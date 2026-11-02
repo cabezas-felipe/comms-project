@@ -1,6 +1,6 @@
 # Story-tagging — product contract
 
-> **Stage:** Story-tagging · **Altitude:** Product contract (not a PRD) · **Status:** Locked · **Last updated:** 2 Nov 2026 (coherence pass)  
+> **Stage:** Story-tagging · **Altitude:** Product contract (not a PRD) · **Status:** Locked · **Last updated:** 2 Nov 2026 (MVP carry-over coherence)  
 > **Pattern:** Stage contracts live at `02-product/contracts/{stage}.md`. Engineer prompt / pipeline / eval artifacts link here; they do not replace this doc.  
 > **Intent:** ship
 
@@ -182,6 +182,7 @@ Operational / qualitative only for v1. Thin PostHog invoke `story_tagging_invoke
 | 2 Nov 2026 | B2a coherence ↔ PRD/pipeline | Related pipeline Locked; Outputs + ST-15 name `skip`; ST-07 wrong-shelf no auto-move; catalog labels = tempo name fields; Next foundations refreshed |
 | 2 Nov 2026 | Coherence ↔ B2a siblings | Evals/gold + runs DBML Locked; Related/Scope/Runtime/Next no longer TBD; ≤2 **attempts** (not retries) |
 | 2 Nov 2026 | Coherence pass | Explicit product lines: eng siblings Locked B2a (not “when build focuses”); wire deferred only |
+| 2 Nov 2026 | MVP carry-over | Confirm: LLM + full shared catalog only; no settings clamp on `story_*`; post-model drop/dedupe only; eng **15s**/attempt — [pipeline](../../06-engineering/docs/pipelines/story-tagging.md) |
 
 ---
 

@@ -113,7 +113,7 @@ Optional provenance for derived_real lives in `rubric_notes` (`feed_id`, sample 
 | `non_empty` | V1 | Trim → non-empty |
 | `plain_string` | V2 | Reject JSON envelope / markdown-only heading as whole payload |
 | `denylist` | V3 | Pipeline §4.1 patterns (case-insensitive substring) |
-| `soft_length` | F7 offline | Soft band ~2–4 sentences; advisory — not a runtime fail in B2 |
+| `soft_length` | F7 offline | Soft band ~2–4 sentences; advisory — not a runtime fail in B2. **Follow-up (carry-over):** add ≥1 long-body fixture and score F7 before treating density as proven on full NewsAPI bodies |
 | Body-echo overlap | F3 offline | Heuristic only; threshold TBD at harness |
 
 **Not code-gated in B2:** factual invention, ES→EN quality, unsupported 4W pad — human arbiter.
@@ -141,10 +141,12 @@ Re-open a case only if prompt/pipeline changes force gold drift. Still **advisor
 | 1 Nov 2026 | E7 | Write evals + fill gold; derived_real from wired RSS teasers |
 | 1 Nov 2026 | Arbiter | sum-01…22 locked in chat |
 | 2 Nov 2026 | Coherence pass | Related + runs pointer; skip/no-model paths do not emit `summarization_invoke` (PRD/D-088) |
+| 2 Nov 2026 | Carry-over | Keep V3 denylist; no hard length runtime; F7/long-body soft_length remains advisory follow-up |
 
 ---
 
 ## 9. Next
 
 1. Harness / `ds-coder` wiring at build (`engineer-ai` + `ds-coder`) — advisory until promote gate.  
-2. Migrate [summarization-runs.dbml](../data/summarization-runs.dbml) to Supabase at build; instrument `summarization_invoke`.
+2. Migrate [summarization-runs.dbml](../data/summarization-runs.dbml) to Supabase at build; instrument `summarization_invoke`.  
+3. F7 / long-body: add ≥1 long-article fixture and score advisory `soft_length` (carry-over follow-up — not a runtime gate).

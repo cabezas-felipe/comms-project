@@ -1,6 +1,6 @@
 # Extraction foundations — build handoff
 
-> **Status:** Foundations complete (Sessions A–E) · **Written:** 28 Sep 2026 · **Coherence pass:** 02 Nov 2026  
+> **Status:** Foundations complete (Sessions A–E) · **Written:** 28 Sep 2026 · **Coherence pass:** 2 Nov 2026 (MVP carry-over)  
 > **Do not implement from chat memory — use the linked SoTs.**
 
 ## What was locked
@@ -24,12 +24,13 @@ UX: [Onboarding happy path](https://app.paper.design/file/01M22V20HEDY4VAA8Y5S3F
 ## MUST checklist (build program)
 
 1. Implement `extraction-v1` from [prompts/extraction.md](../prompts/extraction.md) (one multi-lane call; Opus 5.5 → Sonnet 5.5 per D-073).
-2. Implement pipeline from [pipelines/extraction.md](../pipelines/extraction.md) (O4a fail-closed; Review before live; DBML chip merge).
-3. Migrate product schema toward [tempo.dbml](../data/tempo.dbml); persist attempts per [extraction-runs.dbml](../data/extraction-runs.dbml).
-4. **Promote** [docs/evals/extraction.gold.json](../evals/extraction.gold.json) → `apps/api/src/ai/evals/extraction.gold.json`; wire runner; **retire** legacy onboarding extraction gold/command as default.
-5. Score the 24 locked cases in [docs/evals/extraction.gold.json](../evals/extraction.gold.json). Do not import the legacy inventory in [docs/evals/extraction.md](../evals/extraction.md) §5.
-6. Keep extraction eval **advisory** until trusted. Chip acceptance is the PostHog event `extraction_chip_acceptance`, specified in the [extraction PRD](../../../02-product/prds/model--extraction--v1.md). It is not an eval. The LLM judge is later.
-7. **SKU cutover (D-073):** after gold on Opus 5.5 → Sonnet 5.5 — (a) `DEFAULT_EXTRACTION_*` in [`model-router.mjs`](../../apps/api/src/ai/model-router.mjs), (b) Vercel `TEMPO_AI_CLASSIFIER_MODEL` / `TEMPO_AI_CLASSIFIER_FALLBACK_MODEL`, (c) retire Opus 4.7 / Sonnet 4.6 from staging handoffs + eval runner literals. Local `.env` may already match for experiments; `.env.example` keeps mock defaults + target comments.
+2. Implement pipeline from [pipelines/extraction.md](../pipelines/extraction.md) (O4a fail-closed; identity upsert pre-Review; chip memberships at Start monitoring / Account merge; DBML chip merge).
+3. **Hygiene-only** per pipeline [§3.1](../pipelines/extraction.md#31-hygiene-allowlist-mvp-carry-over): lower+trim, 64/24 caps, junk/handles/dedupe/sort, exact geo≠keyword — **do not** port `extract-v8` additive recall, noise denylists, or synonym maps. Per-attempt timeout **15s** ([§3.2](../pipelines/extraction.md#32-timeouts-mvp-carry-over)).
+4. Migrate product schema toward [tempo.dbml](../data/tempo.dbml); persist attempts per [extraction-runs.dbml](../data/extraction-runs.dbml).
+5. **Promote** [docs/evals/extraction.gold.json](../evals/extraction.gold.json) → `apps/api/src/ai/evals/extraction.gold.json`; wire runner; **retire** legacy onboarding extraction gold/command as default.
+6. Score the 24 locked cases in [docs/evals/extraction.gold.json](../evals/extraction.gold.json) **after** pipeline §3.1 hygiene (not the legacy sanitizer). Do not import the legacy inventory in [docs/evals/extraction.md](../evals/extraction.md) §5.
+7. Keep extraction eval **advisory** until trusted. Chip acceptance is the PostHog event `extraction_chip_acceptance`, specified in the [extraction PRD](../../../02-product/prds/model--extraction--v1.md). It is not an eval. The LLM judge is later.
+8. **SKU cutover (D-073):** after gold on Opus 5.5 → Sonnet 5.5 — (a) `DEFAULT_EXTRACTION_*` in [`model-router.mjs`](../../apps/api/src/ai/model-router.mjs), (b) Vercel `TEMPO_AI_CLASSIFIER_MODEL` / `TEMPO_AI_CLASSIFIER_FALLBACK_MODEL`, (c) retire Opus 4.7 / Sonnet 4.6 from staging handoffs + eval runner literals. Local `.env` may already match for experiments; `.env.example` keeps mock defaults + target comments.
 
 ## Explicitly out of this foundation
 
@@ -41,4 +42,4 @@ UX: [Onboarding happy path](https://app.paper.design/file/01M22V20HEDY4VAA8Y5S3F
 
 ## Runtime gap reminder
 
-Prototype may still be single-narrative `extract-v8` until reconcile. Foundations describe the **target**.
+Prototype may still be single-narrative `extract-v8` + sanitizer until reconcile. Foundations describe the **target** — do not treat the live sanitizer as `extraction-v1` hygiene.

@@ -1,6 +1,6 @@
 # Summarization — pipeline / runtime SoT
 
-> **Stage:** Summarization · **Status:** Locked (B2) · **Last updated:** 2 Nov 2026 (coherence pass)  
+> **Stage:** Summarization · **Status:** Locked (B2) · **Last updated:** 2 Nov 2026 (MVP carry-over)  
 > **Altitude:** Engineer pipeline SoT (pre-runtime). Does **not** duplicate prompt text — see [prompts/summarization.md](../prompts/summarization.md). Product meaning — [contracts/summarization.md](../../../02-product/contracts/summarization.md).
 
 **Related**
@@ -78,7 +78,7 @@ Same-tick order vs story-tagging / metastory what-happened is **flexible** among
 1. Receive model text (or error).
 2. On provider / timeout / config error → mark attempt `failed` with `error_kind`; if attempts remain → escalate (L2); else final fail.
 3. **Runtime validate** ([§4](#4-runtime-validation)): on fail → attempt `failed` (`schema_error` or `empty_response` as fits); escalate or final fail.
-4. On pass → persist article summary (once per invoke success); attempt `succeeded`.
+4. On pass → persist article summary (once per invoke success); attempt `succeeded`. **Trim only** — no hard char cap, no overlap-% rewrite, no claim-join overwrite of the model string (density / body-echo stay offline — [§4.2](#42-offline-only-not-runtime-gates)).
 5. Always **return** body reference to orchestrator (borrow/return — do not discard here).
 
 ---
@@ -132,7 +132,7 @@ Soft density (typically 2–4 sentences), long verbatim body-echo / overlap %, f
 
 | Knob | Default | Env (build) |
 |------|---------|-------------|
-| Per-attempt timeout | **8000** ms | `TEMPO_AI_SUMMARIZATION_TIMEOUT_MS` |
+| Per-attempt timeout | **15000** ms (ceiling; shared default with extraction + story-tagging) | `TEMPO_AI_SUMMARIZATION_TIMEOUT_MS` |
 | Concurrent URI summarizations per tick | **4** (clamp 1–8) | `TEMPO_AI_SUMMARIZATION_CONCURRENCY` |
 
 Per-URI attempts are **sequential** (Haiku then maybe Sonnet). Concurrency caps **how many URIs** may be in the summarization path at once.
@@ -149,7 +149,7 @@ Per-URI attempts are **sequential** (Haiku then maybe Sonnet). Concurrency caps 
 
 **Target:** Invoked from ingestion on each eligible press admit; persist `article_summary`; lineage rows; orchestrator body discard after same-tick consumers.
 
-**Today:** Stage **not shipped** at runtime. Prompt / pipeline / runs DBML / evals+gold are **Locked B2**; wire migrate + harness + `summarization_invoke` at build. Do not treat RSS / prototype summarization as this SoT. Exact Haiku/Sonnet model ids: [prompts/summarization.md](../prompts/summarization.md).
+**Today:** Stage **not shipped** at runtime. Prompt / pipeline / runs DBML / evals+gold are **Locked B2**; wire migrate + harness + `summarization_invoke` at build. Do **not** treat RSS / prototype cluster or meta-story “summary” writers / `verifyGrounding` claim-join as this SoT — only this LLM path writes `press_articles.article_summary`. Exact Haiku/Sonnet model ids: [prompts/summarization.md](../prompts/summarization.md).
 
 ---
 
@@ -175,9 +175,13 @@ Per-URI attempts are **sequential** (Haiku then maybe Sonnet). Concurrency caps 
 | 31 Oct 2026 | L6 | Denylist patterns 1–7 |
 | 31 Oct 2026 | L7 | New UUID `trigger_id` per LLM invoke; skips → no rows |
 | 31 Oct 2026 | L8 | Strict log minimize; borrow/return body; orchestrator discard |
-| 31 Oct 2026 | L9 | 8s per-attempt timeout |
+| 31 Oct 2026 | L9 | 8s per-attempt timeout — **superseded** by Carry-over timeout → **15s** |
 | 31 Oct 2026 | L10 | Concurrency default 4 (clamp 1–8) |
 | 31 Oct 2026 | L11 | `input_hash` = SHA-256 of title + `\n\n` + body as sent |
 | 31 Oct 2026 | L12 | Artifact written; Status Locked |
 | 1 Nov 2026 | D1 | Runs DBML thickened Locked B2 — closed `trigger_kind` enum `clock` \| `warm`; `input_hash` note aligned to L11 |
 | 2 Nov 2026 | Coherence pass | Related Locked labels; PostHog `summarization_invoke`; runtime gap = wire (not “prompt TBD”) |
+| 2 Nov 2026 | Carry-over 1 | **A** — only this LLM path writes `article_summary`; no cluster/claim-join/meta-story summary as this stage |
+| 2 Nov 2026 | Carry-over 2 | **A** — no hard length/overlap runtime gate; trim only; F7/long-body soft_length = advisory follow-up |
+| 2 Nov 2026 | Carry-over 3 | **A** — keep locked 7-phrase so-what denylist (V3); expand only from gold fails |
+| 2 Nov 2026 | Carry-over timeout | **15s** per attempt (was L9 8s); concurrency 4 unchanged |

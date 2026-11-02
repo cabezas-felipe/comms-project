@@ -1,6 +1,6 @@
 # Summarization — product contract
 
-> **Stage:** Summarization · **Altitude:** Product contract (not a PRD) · **Status:** Locked · **Last updated:** 2 Nov 2026 (coherence pass)  
+> **Stage:** Summarization · **Altitude:** Product contract (not a PRD) · **Status:** Locked · **Last updated:** 2 Nov 2026 (MVP carry-over coherence)  
 > **Pattern:** Stage contracts live at `02-product/contracts/{stage}.md`. Engineer prompt / pipeline / eval artifacts link here; they do not replace this doc.  
 > **Intent:** ship
 
@@ -97,7 +97,7 @@ Operational / qualitative only for v1. Thin PostHog invoke `summarization_invoke
 - Cross-tick / backfill summarization retry or overwrite of an existing article summary (MVP)
 - Skipping invoke solely because the body is not English
 - Requiring all four of who/what/where/when when the article does not support them
-- Prompt text, formula math, gold cases, hard character caps, model SKU in this doc
+- Prompt text, formula math, gold cases, model SKU in this doc (hard length gates stay out — SR-12 / eng trim-only)
 - Keyword/concept drain language D (ingestion retrieval)
 
 ---
@@ -117,7 +117,7 @@ Operational / qualitative only for v1. Thin PostHog invoke `summarization_invoke
 | **SR-09** | **Invoke owner** — ingestion triggers; summarization owns summary meaning + LLM stack (prompt/pipeline/runs/evals) |
 | **SR-10** | **No URL scrape** — do not open the publisher URL to obtain body |
 | **SR-11** | **Lineage** — [summarization-runs.dbml](../../06-engineering/docs/data/summarization-runs.dbml); one row per LLM attempt; skip/no-model paths insert no row |
-| **SR-12** | **Soft density** — short prose suitable for d08 scan; **typically 2–4 sentences**; long enough for supported who/what/where/when; not a digest. No hard character cap in this contract (prompt/evals may tighten) |
+| **SR-12** | **Soft density** — short prose suitable for d08 scan; **typically 2–4 sentences**; long enough for supported who/what/where/when; not a digest. **No hard character cap** (runtime = trim only; soft length / F7 stay advisory offline — [pipeline](../../06-engineering/docs/pipelines/summarization.md) · [evals](../../06-engineering/docs/evals/summarization.md)) |
 | **SR-13** | **Paraphrase-first** — prefer paraphrase of events; short quoted phrases only when the article’s wording **is** the reported fact; **no** long verbatim body spans (anti body-echo / SR-02). Overlap thresholds live in eng/evals |
 
 ---
@@ -195,6 +195,8 @@ Operational / qualitative only for v1. Thin PostHog invoke `summarization_invoke
 | 30 Oct 2026 | B2 C8 incomplete 4W | **A** — omit unsupported slots; never invent/pad (**SR-03**) |
 | 1 Nov 2026 | B2 hygiene | Eng siblings Locked; In / Next foundations no longer TBD; build deferred |
 | 2 Nov 2026 | Coherence pass | Success ↔ D-088 `summarization_invoke` (PRD); eng siblings Locked B2 (not “when prompt lands”); guardrail → evals F1–F7 |
+| 2 Nov 2026 | MVP carry-over | Confirm: only LLM path writes `article_summary`; soft density / no hard char cap (SR-12); keep so-what runtime denylist in eng; **15s**/attempt — [pipeline](../../06-engineering/docs/pipelines/summarization.md) |
+| 2 Nov 2026 | SR-12 wording | No hard cap anywhere; prompt/evals do not invent a second length SoT — soft_length advisory only |
 
 ---
 

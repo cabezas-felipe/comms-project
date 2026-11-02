@@ -175,7 +175,7 @@ Output:
 
 ## 7. Out of this document
 
-- Attempt/escalate, concurrency, logging, `input_hash`, replace-set disposition → [pipelines/story-tagging.md](../pipelines/story-tagging.md)
+- Attempt/escalate, **15s** per-attempt timeout, concurrency, logging, `input_hash`, replace-set disposition (drop/dedupe only — no settings clamp) → [pipelines/story-tagging.md](../pipelines/story-tagging.md)
 - Product ST table → [contracts/story-tagging.md](../../../02-product/contracts/story-tagging.md)
 - Gold / failure modes → [evals/story-tagging.md](../evals/story-tagging.md)
 - Join / chip chrome → [dashboard--v1.md](../../../02-product/prds/dashboard--v1.md)

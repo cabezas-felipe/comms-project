@@ -7,7 +7,8 @@
 // Supabase schema may evolve; DBML is the design map.
 //
 // Forward compat:
-//   trigger_id — groups primary + fallback attempts for one Build/Rebuild/Retry
+//   trigger_id — shared by primary + fallback (+ retry attempts) for one build/rebuild intent;
+//                retry reuses the failed build/rebuild id (does not mint a new trigger_id)
 //   stage      — default 'extraction'; path toward shared ai_runs later
 //
 // users stub: same entity as Database library / Supabase auth hub (uid + email).
@@ -62,7 +63,7 @@ Table users {
 
 Table extraction_runs {
   run_id uuid [pk]
-  trigger_id uuid [not null, note: 'Shared by all attempts for one Build/Rebuild/Retry']
+  trigger_id uuid [not null, note: 'Shared by primary+fallback (+ retry attempts) for one build/rebuild intent; retry reuses id — does not mint']
   trigger_kind extraction_trigger_kind [not null]
   stage varchar(64) [not null, default: 'extraction', note: 'Forward compat toward multi-stage ai_runs']
   user_id uuid [not null, ref: > users.uid]

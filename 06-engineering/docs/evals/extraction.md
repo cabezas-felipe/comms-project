@@ -79,7 +79,7 @@ Lane keys: `identity` | `personalPriorities` | `organizationPriorities` | `stake
 
 ## 3. Metrics (layer 1)
 
-- Score each **present** lane separately. Compare model output **after** the same hygiene normalize the pipeline will apply (trim; lowercase match keys for topics / keywords / mentions / handles; identity strings after trim).
+- Score each **present** lane separately. Compare model output **after** pipeline hygiene ([pipelines/extraction.md](../pipelines/extraction.md) §3.1): lower+trim / structural guards only — **not** legacy `extract-v8` additive recall, noise denylists, or synonym maps. Match keys: lowercase topics / keywords / mentions / handles; identity strings after trim.
 - Arrays (`topics`, `keywords`, `geographies`, `traditionalSources`, `socialSources`, `mentions`): precision / recall / F1 on those match keys. Locked gold already stores **post-normalize** forms for topics/keywords/mentions (lowercase). Geographies and press keep display forms from the prompt SoT (`Bogotá`, `The New York Times`); score case-insensitively on the match key.
 - Identity strings: exact match after trim. `role_submitted` is English title case when present (or `""` when omit). `organization_submitted` as written. `function_label` lowercase. Identity cases pass that case’s `function_list` into the prompt (same as production).
 - Macro-average across fields in the fixture; report per-lane and overall.
@@ -150,4 +150,5 @@ Not MVP. When built, it scores whether an extract followed the extraction rules 
 | 24 Oct 2026 | Chip acceptance vs judge | Chip acceptance is PostHog `extraction_chip_acceptance`. The definition stays in the extraction PRD. Gold does not measure it. A future judge scores rule-following on unlabeled blurbs and does not score operator acceptance. |
 | 24 Oct 2026 | Seed | The locked suite is the 24 cases in extraction.gold.json. The `ex-01`–`ex-23` inventory is history, not build work. |
 | 02 Nov 2026 | Scoring | Gold arrays are post-normalize match keys; score after hygiene. Identity case rules explicit. |
+| 2 Nov 2026 | Carry-over scoring | Score after pipeline §3.1 hygiene-only — not legacy `extract-v8` sanitizer |
 | 02 Nov 2026 | Ids | Rename `unit-lane-separation-*` → `int-lane-separation-*` so id prefix matches `kind: integration`. Expected JSON unchanged. |
