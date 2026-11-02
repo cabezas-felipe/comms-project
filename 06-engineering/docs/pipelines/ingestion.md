@@ -1,17 +1,17 @@
 # Ingestion — pipeline / runtime SoT
 
-> **Stage:** Ingestion · **Status:** Locked (B1) · **Last updated:** 29 Oct 2026  
+> **Stage:** Ingestion · **Status:** Locked (B1) · **Last updated:** 2 Nov 2026  
 > **Altitude:** Engineer pipeline SoT (pre-runtime). Product rules live in the [contract](../../../02-product/contracts/ingestion.md) — this file owns jobs, triggers, sequences, data binds, failure matrix, and observability pointers. No LLM prompt or gold ownership.
 
 **Related**
 
 - Product contract: [ingestion.md](../../../02-product/contracts/ingestion.md) (locked)
 - Vendors: [api-newsapi-ai.md](../api-newsapi-ai.md) · [api-x.md](../api-x.md)
-- Invoke targets: [summarization.md](./summarization.md) · [story-tagging.md](../../../02-product/contracts/story-tagging.md) · [metastory.md](./metastory.md)
+- Invoke targets: [summarization.md](./summarization.md) ([contract](../../../02-product/contracts/summarization.md)) · [story-tagging.md](./story-tagging.md) ([contract](../../../02-product/contracts/story-tagging.md)) · [metastory.md](./metastory.md) ([contract](../../../02-product/contracts/metastory.md))
 - UX triggers: [onboarding--v1.md](../../../02-product/prds/onboarding--v1.md) · [account--v1.md](../../../02-product/prds/account--v1.md)
 - Feed join / cutover UX: [dashboard--v1.md](../../../02-product/prds/dashboard--v1.md)
 - Data: [tempo.dbml](../data/tempo.dbml) · [Database library](https://dbdiagram.io/d/6ab4852e58694256127b2a37)
-- Ops pricing: [07-ops/README.md](../../../07-ops/README.md) · planned `ingestion-pricing.json` (sibling to [model-pricing.md](../../../07-ops/model-pricing.md))
+- Ops pricing: [07-ops/README.md](../../../07-ops/README.md) · [ingestion-pricing.json](../../../07-ops/ingestion-pricing.json) · [ingestion-pricing.md](../../../07-ops/ingestion-pricing.md) (sibling to [model-pricing.md](../../../07-ops/model-pricing.md))
 - Pattern: stage pipelines live at `06-engineering/docs/pipelines/{stage}.md`
 
 ---
@@ -96,9 +96,9 @@ Empty aperture → no vendor fetch; no invented scope.
 ### Press (body present)
 
 1. Persist keep-list **first** (no body)  
-2. Fan-out same-tick consumers (**order flexible / parallel OK**): summarization · story-tagging · metastory handoff  
-3. **Barrier** — wait for each **invoked** consumer’s terminal signal (success \| fail-open \| skip)  
-4. Discard body  
+2. Fan-out same-tick consumers (**order flexible / parallel OK**): summarization (if invoked) · story-tagging · metastory handoff (including same-tick **what-happened** when that path reads body — [MR-08](../../../02-product/contracts/metastory.md) / [IR-05](../../../02-product/contracts/ingestion.md))  
+3. **Barrier** — wait for each **invoked** consumer’s terminal signal (success \| fail-open \| skip). Skip counts as terminal — including summarization skip when `article_summary` already present ([SR-05](../../../02-product/contracts/summarization.md))  
+4. Discard body only after the barrier (never store/log/show)  
 
 ### Press (no body)
 
@@ -122,9 +122,11 @@ Ingestion **orchestrates** only. Sibling stages own prompts, retries (≤2), and
 
 | Target | Passes | Waits for | Must not |
 |--------|--------|-----------|----------|
-| **Summarization** | `story_id`, `uri`, title, body in memory, trigger id | success \| fail \| skip (no body) | Write `article_summary`; discard body alone; invent summary |
-| **Story-tagging** | `story_id`, kind, text (title+body \| title \| X text), trigger id (+ IR-14 reason) | success \| fail | Write `story_*`; invent chips |
-| **Metastory** | Admitted `story_id`(s); body handle if still in memory; tick id | Handoff completion / degrade for **this** handoff | Run embeddings/writer; gate on chips |
+| **Summarization** | `story_id`, `uri`, title, body in memory, `trigger_kind` (`clock` \| `warm`). Stage **mints its own** `trigger_id` for `summarization_runs` / `summarization_invoke` — not shared with story-tagging or metastory | success \| fail \| skip (**no body**, or `article_summary` already present incl. resurrect — [SR-05](../../../02-product/contracts/summarization.md)) | Write `article_summary`; discard body alone; invent summary |
+| **Story-tagging** | `story_id`, kind, text (title+body \| title \| X text), `trigger_kind` (`clock` \| `warm` \| `x_edit`). Stage **mints its own** `trigger_id` for `story_tagging_runs` / `story_tagging_invoke` | success \| fail \| skip (empty aperture) | Write `story_*`; invent chips. Mark disposition is sibling-owned: **admit** final fail → no new marks; **IR-14** final fail → empty replace-set ([ST-06](../../../02-product/contracts/story-tagging.md)); empty aperture → empty replace-set ([ST-15](../../../02-product/contracts/story-tagging.md)) |
+| **Metastory** | Admitted `story_id`(s); body handle if still in memory; tick / job correlation id (orchestrator-owned — not an LLM-stage `trigger_id`) | Handoff completion (incl. same-tick what-happened when used) / degrade for **this** handoff | Run embeddings/writer; gate on chips; final body discard |
+
+**`trigger_id` spine:** each LLM stage mints a new UUID when it enters the generate path (shared by ≤2 attempts). Ingestion does **not** assign one shared UUID across summarization + story-tagging for the same admit. Correlate same-tick work via `story_id` + clock/warm job, not a cross-stage `trigger_id`.
 
 ---
 
@@ -136,7 +138,7 @@ Ingestion **orchestrates** only. Sibling stages own prompts, retries (≤2), and
 | Eligibility | `x_posts` with `published_at` still inside ~**30‑min** vendor edit window |
 | Call | Chunked `Get posts by ids`; upsert `text` when changed → re-invoke story-tagging |
 | Cap | **No MVP $-cap**; window + chunking only; fail-open keep prior text |
-| Pricing | Usage facts → PostHog; $ in daily digest (§8) |
+| Pricing | Usage facts → PostHog; $ in daily digest (§9) |
 
 ---
 
@@ -155,7 +157,7 @@ Field-level SoT: [tempo.dbml](../data/tempo.dbml) / [Database library](https://d
 | IR-14 | `x_posts` in window | Upsert `text` when changed |
 | Warm recompute | Triggering `user_id` | Signal only — join/personalization tables not owned here |
 
-**Not ingestion metering:** cursors / compliance jobs = **pipeline state**, not cost facts (§8).
+**Not ingestion metering:** cursors / compliance jobs = **pipeline state**, not cost facts (§9).
 
 ---
 
@@ -167,7 +169,7 @@ Field-level SoT: [tempo.dbml](../data/tempo.dbml) / [Database library](https://d
 | One X lane / handle fails | Degrade that lane/handle; others continue |
 | Empty aperture | No vendor fetch |
 | Summarization fail/skip | Keep-list stays; still tag + metastory; no body store |
-| Story-tagging fail | Story stays; still metastory; no invented chips |
+| Story-tagging fail / skip | Story stays; still metastory; no invented chips. **Admit** final fail → sibling writes no new marks; **IR-14 text-change** final fail → sibling **empty replace-set** (clear priors — [ST-06](../../../02-product/contracts/story-tagging.md)); empty aperture → empty replace-set ([ST-15](../../../02-product/contracts/story-tagging.md)) |
 | Metastory handoff degrade | Body discarded after barrier; keep-list kept; cluster retry per metastory rules |
 | Compliance fail/expired | Pool unchanged; retry next `:00` |
 | IR-14 lookup fail | Keep prior `text`; retry next IR-14 slot |
@@ -229,8 +231,8 @@ Model daily spend (from `*_runs.estimated_cost_usd`) → `#ops-pricing-models` v
 - Dashboard join, last-good, rising formulas → [dashboard--v1.md](../../../02-product/prds/dashboard--v1.md)  
 - Column-level ERD → [tempo.dbml](../data/tempo.dbml)  
 - Slack failure paging / runbooks → later platform ops  
-- GHA workflow implementation for digests and auto-diff → post-lock ops pass  
-- Model daily cost digest → `07-ops` (after ingestion digest spec)
+- Wiring PostHog `ingestion_job_completed` facts + live SKU rates into the landed GHA digests ([daily-ops-spend.yml](../../../.github/workflows/daily-ops-spend.yml) · [weekly-pricing-catalog-review.yml](../../../.github/workflows/weekly-pricing-catalog-review.yml)) — envelope exists; facts/rates at build  
+- Model daily cost digest channel ownership → [07-ops/README.md](../../../07-ops/README.md)
 
 ---
 
@@ -249,3 +251,7 @@ Model daily spend (from `*_runs.estimated_cost_usd`) → `#ops-pricing-models` v
 | 29 Oct 2026 | Failure matrix | Fail-open pool; active duplicate no-op |
 | 29 Oct 2026 | Cost / PostHog | `ingestion_job_completed`; `ingestion-pricing`; daily `#ops-pricing-ingestion`; weekly auto-diff+human with models |
 | 29 Oct 2026 | Artifact | **Locked** — this file |
+| 2 Nov 2026 | ST-06 handoff | Story-tagging fail matrix + AI fence: admit vs IR-14 mark disposition; empty-aperture skip — aligns contract Edges + [ST-06](../../../02-product/contracts/story-tagging.md) / [ST-15](../../../02-product/contracts/story-tagging.md) |
+| 2 Nov 2026 | Related | `ingestion-pricing` files are live envelope (not “planned”); story-tagging Related → pipeline + contract |
+| 2 Nov 2026 | Coherence ↔ contract | Fix §9 cross-refs; admit barrier ↔ IR-05 / SR-05 / MR-08; Out = wire facts into landed GHA (not “implement workflows”) |
+| 2 Nov 2026 | Cross-stage `trigger_id` | Ingestion passes `trigger_kind` (+ story context); each LLM stage mints its own `trigger_id` — not one UUID shared across summarization + story-tagging |

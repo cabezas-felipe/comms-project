@@ -1,7 +1,7 @@
 {
   "schemaVersion": "extraction-gold-v1",
   "promptVersion": "extraction-v1",
-  "notes": "24 of 24 locked. Felipe confirmed expected JSON. Previous draft examples removed from this file. MVP function list on identity cases: communications, policy, operations, partnerships.",
+  "notes": "24 of 24 locked. Felipe confirmed expected JSON. Previous draft examples removed from this file. MVP function list on identity cases: communications, policy, operations, partnerships. Array expected values are post-normalize match keys. Lane-separation cases are kind=integration (ids int-lane-separation-*).",
   "examples": [
     {
       "id": "unit-omit-01",
@@ -248,7 +248,7 @@
       "rubric_notes": "Nueva York becomes New York. Do not narrow to New York City or also emit the United States. No topic or keyword. source personal_priorities."
     },
     {
-      "id": "unit-lane-separation-01",
+      "id": "int-lane-separation-01",
       "kind": "integration",
       "lane": null,
       "bucket": "lane-separation",
@@ -271,7 +271,7 @@
       "rubric_notes": "visa stays on personal_priorities. election results is the topic elections on organization_priorities. Do not copy either onto the other lane."
     },
     {
-      "id": "unit-lane-separation-02",
+      "id": "int-lane-separation-02",
       "kind": "integration",
       "lane": null,
       "bucket": "lane-separation",

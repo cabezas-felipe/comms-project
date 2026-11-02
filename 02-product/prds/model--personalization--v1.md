@@ -65,6 +65,18 @@ Stub. Input = metastory shared fields + user function/priorities/org priorities/
 **In:** Why this matters, what comes next, practice-note hook, personalization-runs, skip-if-unchanged.  
 **Out:** Clustering/shared copy; feed chrome; frozen feed-rank formula math.
 
+### Metrics — personalization invoke (specified)
+
+Shared LLM stack ([D-088](../../06-engineering/DECISIONS.md)): `personalization_runs` + ops spend + evals/gold, **plus** thin PostHog invoke. Skip-if-unchanged (no model call) does **not** emit.
+
+| Rule | Lock |
+| --- | --- |
+| When it fires | Once when a personalization **LLM invoke** finishes (success or fail) |
+| Event | `personalization_invoke` |
+| Properties | `trigger_id` · `outcome` (`success` \| `fail`) · `prompt_version` · `model_id` · `error_kind` if fail |
+| Left out | Why/next copy text, user ids in props beyond what’s required for ops join later, gold scores |
+| Wiring | Specified, not instrumented |
+
 ---
 
 ## Decisions & open questions
@@ -74,3 +86,4 @@ Stub. Input = metastory shared fields + user function/priorities/org priorities/
 | Stub PRD | Align artifact map | 27 Oct 26 | Contract draft |
 | Practice notes authored later; rule locked | Same as process lock | 27 Oct 26 | First note draft |
 | Contract locked (PR-01…13); B4 notes-with-prompt reminder | Skip-if-unchanged; retain history out of feed; block generate until notes | 27 Oct 26 | Contract change |
+| `personalization_invoke` stub | Thin PostHog invoke when model runs (D-088); skip-if-unchanged silent | 31 Oct 26 | Instrumented at build |

@@ -68,6 +68,18 @@ Stub. Input = tagged stories in the shared pool. Output = metastory rows + membe
 **In:** Embeddings, clustering/boundary, shared metastory fields, id stability, metastory-runs lineage.  
 **Out:** Fetch/compliance/tagging; per-user why/what next; feed UX; formula weights for rising/source/feed.
 
+### Metrics — metastory invoke (specified)
+
+Shared LLM stack ([D-088](../../06-engineering/DECISIONS.md)): `metastory_runs` + ops spend + evals/gold, **plus** thin PostHog invoke. Embed/cluster-propose without an LLM call do **not** emit.
+
+| Rule | Lock |
+| --- | --- |
+| When it fires | Once per finished **LLM** invoke (`call_kind` boundary \| writer), success or fail |
+| Event | `metastory_invoke` |
+| Properties | `trigger_id` · `call_kind` (`boundary` \| `writer`) · `outcome` (`success` \| `fail`) · `prompt_version` · `model_id` · `error_kind` if fail |
+| Left out | Shared copy text, membership graphs, gold scores |
+| Wiring | Specified, not instrumented |
+
 ---
 
 ## Decisions & open questions
@@ -77,3 +89,4 @@ Stub. Input = tagged stories in the shared pool. Output = metastory rows + membe
 | Stub PRD; clustering owned here | Embeddings + writer are one metastory stage | 27 Oct 26 | Contract draft |
 | What changed = prior vs current run | Product lock; replaces user-relative ever-seen engine | 27 Oct 26 | Eval fails on drift |
 | Contract locked (MR-01…13) | Event grain; chips ≠ id; embed fallback; writer ≤2 + last good; partial success A | 27 Oct 26 | Contract change |
+| `metastory_invoke` stub | Thin PostHog invoke per boundary/writer LLM call (D-088) | 31 Oct 26 | Instrumented at build |

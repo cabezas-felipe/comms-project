@@ -1,15 +1,17 @@
 # Extraction — pipeline / runtime SoT
 
-> **Stage:** Extraction · **Status:** Locked (Session C) · **Last updated:** 17 Oct 2026  
-> **Altitude:** Engineer pipeline SoT (pre-runtime). Does **not** duplicate prompt text — see [prompts/extraction.md](../prompts/extraction.md).
+> **Stage:** Extraction · **Status:** Locked (Session C) · **Last updated:** 02 Nov 2026  
+> **Altitude:** Engineer pipeline SoT (pre-runtime). Does **not** duplicate prompt text — see [prompts/extraction.md](../prompts/extraction.md). Invoke CTAs, identity write timing, and per-facet resolve locks live in [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md).
 
 **Related**
 
 - Product contract: [extraction.md](../../../02-product/contracts/extraction.md)
+- Model PRD (invoke / resolve / chip acceptance): [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md)
 - Onboarding UX (Review gate): [onboarding--v1.md](../../../02-product/prds/onboarding--v1.md)
 - Prompt SoT (`extraction-v1`): [prompts/extraction.md](../prompts/extraction.md)
 - Product data ERD: [tempo.dbml](../data/tempo.dbml) · [Database library](https://dbdiagram.io/d/6ab4852e58694256127b2a37)
 - Extraction runs (Session D, locked): [extraction-runs.dbml](../data/extraction-runs.dbml) · [dbdiagram](https://dbdiagram.io/d/Extraction-runs-6ab952050f25a52d011d406d)
+- Eval / gold (Session E, locked): [evals/extraction.md](../evals/extraction.md) · [extraction.gold.json](../evals/extraction.gold.json)
 - UX happy path: [Paper — Onboarding](https://app.paper.design/file/01M22V20HEDY4VAA8Y5S3FSP9T/4-0/70H-0)
 - UX extract fail: [O4a · Extract fail](https://app.paper.design/file/01M22V20HEDY4VAA8Y5S3FSP9T/5-0/IB7-0)
 - Pattern: stage pipelines live at `06-engineering/docs/pipelines/{stage}.md`
@@ -71,11 +73,12 @@ flowchart TD
 
 1. **Parse / schema-validate** lane-keyed JSON (`extraction-v1` shape).  
 2. **Deterministic hygiene** (trim, length/list caps, normalize labels, geo≠keyword strip, noise denylists, additive pattern hints — detail owned by build; catalog of rules can grow without bumping prompt version unless instructions change). Within one lane, after normalize, if the same string is in both `topics` and `keywords`, **keep the topic and drop the keyword**. Personal and organization lanes stay separate, so the same string may exist on both with different `source` values.  
-3. **Catalog resolve** — Model never emits UUIDs. Match `function_label` → `functions.name` → `function_id`; treat `organization_submitted` as alias → `organizations` → `organization_id`; facet/press/X normalize per [tempo.dbml](../data/tempo.dbml). Unresolved FKs may be null pending ops.  
-4. **Onboarding only:** present Review chips (canonical forms the user will confirm).  
-5. **Commit:** onboarding on **Confirm** (Start monitoring / warm accept); settings **immediately** after resolve — apply merge rules (§4) and mark scope live / update memberships.
+3. **Catalog resolve** — Model never emits UUIDs. Match `function_label` → `functions.name` → `function_id`; treat `organization_submitted` as alias → `organizations` → `organization_id`; facet/press/X normalize per [tempo.dbml](../data/tempo.dbml) and the resolve locks in [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md). Unresolved FKs may be null pending ops.  
+4. **Identity write (lane 1 filled):** on successful parse + resolve, **before** onboarding Review — INSERT/UPDATE `user_role_organization` (labels + resolved FKs). Chip memberships for lanes 2–5 are **not** written here.  
+5. **Onboarding only:** present Review chips (canonical forms the user will confirm). Session draft only for Topics / Keywords / Geographies / Press / Platforms.  
+6. **Commit memberships:** onboarding on **Start monitoring** (warm accept); Account **immediately** after resolve — apply merge rules (§4) and mark scope live / update memberships. Stamp run `accepted_at` at this moment.
 
-Hard failure at (1) (or equivalent unusable payload) → same as LLM failure → **O4a** (or settings fail equivalent).
+Hard failure at (1) (or equivalent unusable payload) → same as LLM failure → **O4a** (or Account fail equivalent). Do **not** write identity or memberships on hard fail.
 
 ---
 
@@ -93,7 +96,7 @@ Adopt [tempo.dbml](../data/tempo.dbml) / [data README](../data/README.md), with 
 | `user_added` on re-extract | **Untouched** |
 | Stakeholders | Extract-only (no Add/x); drop → `deleted_at` (schema may still use `superseded` here / later) |
 | Active scope | `deleted_at IS NULL` |
-| Eval reject signal | `extracted` + `user_removed` |
+| Later analytics reject (stored then removed) | `extracted` + `user_removed` — not first-Review chip acceptance (that is PostHog `extraction_chip_acceptance` in the model PRD) |
 
 ---
 
@@ -108,8 +111,9 @@ Adopt [tempo.dbml](../data/tempo.dbml) / [data README](../data/README.md), with 
 | Re-extract resurrects after remove | Model proposes again | Clear `deleted_at` |
 | Leave chip unchanged through Review | Soft accept (onboarding) | No row change |
 | O4a Retry | Infra/model failure recovery | Runs row `failed`, then new run |
-| Confirm Review → live | Scope committed (onboarding) | Pipeline milestone / run `accepted_at` |
+| Start monitoring (warm accept) | Scope committed (onboarding) | Memberships written; run `accepted_at`; PostHog `extraction_chip_acceptance` |
 | Account Context Save success | Scope updated without Review | Merge applied; run `accepted_at` on successful merge |
+| Model invoke finished | Attempt completed (success or fail) | PostHog `extraction_invoke` (not a quality score) |
 
 Per-run model metadata → [extraction-runs.dbml](../data/extraction-runs.dbml). Each extract **attempt** must write a run record once migrated to Supabase.
 
@@ -126,7 +130,8 @@ This pipeline describes the **target** (five blurbs, multi-lane call, onboarding
 - Prompt instructions / JSON field semantics → [prompts/extraction.md](../prompts/extraction.md)
 - Product intent / non-goals → [contracts/extraction.md](../../../02-product/contracts/extraction.md)
 - Onboarding Review UX → [onboarding--v1.md](../../../02-product/prds/onboarding--v1.md) · Paper O5
-- Eval / gold → Session E
+- Eval / gold → [evals/extraction.md](../evals/extraction.md)
+- Per-facet resolve / Slack ops / invoke CTA table → [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md)
 - Production chip-efficacy reports → later analytics (join runs ↔ memberships)
 - Account Tags / Context prune UX → Account / design SoT (no Review gate)
 
@@ -147,3 +152,5 @@ This pipeline describes the **target** (five blurbs, multi-lane call, onboarding
 | 17 Oct 2026 | Account merge | T/K/G/Press/Platforms: no auto-drop on re-extract; operator removes in Tags. |
 | 17 Oct 2026 | Account Save | Persist + rebuild (not blurb-edit-alone). Invoke table → [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md). |
 | 17 Oct 2026 | a03g | Dual-mode fail (`fail_kind` client-only); generic MVP copy. |
+| 02 Nov 2026 | Identity vs chips | Identity upsert at resolve (pre-Review); lane 2–5 memberships at Start monitoring / Account merge. Aligns model PRD. |
+| 02 Nov 2026 | Signals | Clarify chip acceptance vs stored `user_removed`; name `extraction_invoke`. |

@@ -2,6 +2,75 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-11-02 - D-090 - Phase B2a story-tagging artifacts Locked (incl. runs DBML)
+
+#### Context
+
+- Phase B2a thinking stack for story-tagging: contract already Locked; thicken PRD → pipeline → prompt → evals/gold → `story-tagging-runs.dbml`.
+- A4 left `trigger_kind` as provisional varchar (admit | ir14_re_tag placeholders) pending B2a.
+
+#### Decision
+
+- **B2a artifacts Locked:** [model--story-tagging--v1.md](../02-product/prds/model--story-tagging--v1.md) · [pipelines/story-tagging.md](docs/pipelines/story-tagging.md) · [prompts/story-tagging.md](docs/prompts/story-tagging.md) · [evals/story-tagging.md](docs/evals/story-tagging.md) · [story-tagging.gold.json](docs/evals/story-tagging.gold.json) (st-skip-01 + st-01…22 arbiter-locked) · [story-tagging-runs.dbml](docs/data/story-tagging-runs.dbml).
+- **Runs thicken (D1–D6):** closed enum `story_tagging_trigger_kind` = `clock` \| `warm` \| `x_edit`; `input_hash` = SHA-256 of `text_payload + "\n---\n" + catalog_payload` as sent; no body / `output_json` / `attempt_index` / `eval_scores` columns; skip/no-model → no row; failed LLM attempts still recorded.
+- **Eval posture:** code checks + human gold; **no** LLM judge in B2a; advisory until promote gate.
+- **Not build:** runtime invoke, Supabase migration, harness still deferred.
+
+#### Why
+
+- Closes story-tagging design SoTs so build can implement against locked I/O, prompt, gold, and lineage without reopening product meaning.
+
+#### Consequences
+
+- Push dbdiagram cloud copy when convenient (`docs/data/README.md` push command).
+- Next stage deepen remains metastory / personalization runs enums as those phases land.
+
+### 2026-11-01 - D-089 - Phase B2 summarization artifacts Locked (incl. runs DBML)
+
+#### Context
+
+- Phase B2 thinking stack for summarization: contract already Locked; thicken PRD → pipeline → prompt → evals/gold → `summarization-runs.dbml`.
+- A4 left `trigger_kind` as provisional varchar pending B2.
+
+#### Decision
+
+- **B2 artifacts Locked:** [model--summarization--v1.md](../02-product/prds/model--summarization--v1.md) · [pipelines/summarization.md](docs/pipelines/summarization.md) · [prompts/summarization.md](docs/prompts/summarization.md) · [evals/summarization.md](docs/evals/summarization.md) · [summarization.gold.json](docs/evals/summarization.gold.json) (22/22 arbiter-locked) · [summarization-runs.dbml](docs/data/summarization-runs.dbml).
+- **Runs thicken (D1):** closed enum `summarization_trigger_kind` = `clock` \| `warm`; `input_hash` = SHA-256 of `title + "\n\n" + body` as sent; no body / `output_json` / `attempt_index` / `eval_scores` columns; skip/no-model → no row.
+- **Eval posture:** code checks + human gold; **no** LLM judge in B2; advisory until promote gate.
+- **Not build:** runtime invoke, Supabase migration, harness still deferred.
+
+#### Why
+
+- Closes summarization design SoTs so build can implement against locked I/O, prompt, gold, and lineage without reopening product meaning.
+
+#### Consequences
+
+- Push dbdiagram cloud copy when convenient (`docs/data/README.md` push command).
+- Story-tagging runs enum closed in [D-090](#2026-11-02---d-090---phase-b2a-story-tagging-artifacts-locked-incl-runs-dbml). Next stage deepen remains metastory / personalization.
+
+### 2026-10-31 - D-088 - Shared thin `*_invoke` PostHog events for all LLM stages
+
+#### Context
+
+- Every LLM stage needs comparable ops/performance visibility. Extraction already specified `extraction_invoke` (plus stage-specific chip acceptance). Summarization and siblings have runs + evals but no common product analytics event.
+- Chip-style UX metrics are **not** portable (extraction Review only).
+
+#### Decision
+
+- **Shared LLM measurement stack (all stages):** `*_runs` lineage + `estimated_cost_usd` / `#ops-pricing-models` + evals/gold (`pm-evals` / `ds-*`).
+- **Plus** a thin PostHog `*{stage}_invoke` per finished **LLM invoke** (not per attempt; skip/no-model paths silent):  
+  `extraction_invoke` · `summarization_invoke` · `story_tagging_invoke` · `metastory_invoke` · `personalization_invoke`.
+- **Minimal props:** `trigger_id`, stage-appropriate kind fields, `outcome`, `prompt_version`, `model_id`, `error_kind` on fail. No payloads / copy / gold scores.
+- **Altitude:** specified on model PRDs; **not instrumented** until each stage builds. Metastory emits per `call_kind` (boundary \| writer).
+
+#### Why
+
+- Durable cross-stage dashboards without forcing extraction’s chip metric onto ingest/feed models.
+
+#### Consequences
+
+- Build wires PostHog alongside runs; dual-write must keep grain = invoke. Advisory until used.
+
 ### 2026-10-31 - D-087 - Ops pricing Slack webhooks cross-wired → secrets corrected
 
 #### Context

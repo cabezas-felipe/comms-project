@@ -8,8 +8,8 @@ First-principles database design for Tempo. dbdiagram renders version-controlled
 |---------|------|-------|---------|
 | **Database library** | [tempo.dbml](tempo.dbml) | [dbdiagram](https://dbdiagram.io/d/6ab4852e58694256127b2a37) | Product data — extraction lanes 1–5 + monitoring 6–11 (shared pool, metastories, feed, ops) |
 | **Extraction runs** | [extraction-runs.dbml](extraction-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/Extraction-runs-6ab952050f25a52d011d406d) | Per-attempt LLM lineage for stage `extraction` |
-| **Summarization runs** | [summarization-runs.dbml](summarization-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28ffced134e407e37a6d0) | Per-attempt lineage for stage `summarization` |
-| **Story-tagging runs** | [story-tagging-runs.dbml](story-tagging-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fe9ed134e407e37a621) | Per-attempt lineage for stage `story-tagging` |
+| **Summarization runs** | [summarization-runs.dbml](summarization-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28ffced134e407e37a6d0) | Per-attempt lineage for stage `summarization` (Locked B2 — `clock` \| `warm`) |
+| **Story-tagging runs** | [story-tagging-runs.dbml](story-tagging-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fe9ed134e407e37a621) | Per-attempt lineage for stage `story-tagging` (Locked B2a — `clock` \| `warm` \| `x_edit`) |
 | **Metastory runs** | [metastory-runs.dbml](metastory-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fb1ed134e407e37a484) | Per-attempt lineage for stage `metastory` (`call_kind` = boundary \| writer) |
 | **Personalization runs** | [personalization-runs.dbml](personalization-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fcfaac33014104ead45) | Per-attempt lineage for stage `personalization` |
 
@@ -66,7 +66,7 @@ Canvas positions live in [tempo.dbdiagram](tempo.dbdiagram). After push, **fit-t
 | 9 · Story embeddings | `story_embeddings` | Closed (A3) — dims N with embed SKU |
 | 10 · Feed membership | `user_feed_membership` | Closed (A3) |
 | 11 · Ingest ops | NewsAPI drain cursors, `x_word_search_cursor`, `x_post_download_cursors`, compliance jobs | Closed (A3) |
-| LLM run lineage | `extraction` + `summarization` + `story-tagging` + `metastory` + `personalization` `*-runs.dbml` | Closed (A4) |
+| LLM run lineage | `extraction` + `summarization` (B2 locked) + `story-tagging` (B2a locked) + `metastory` + `personalization` `*-runs.dbml` | A4 stubs; summarization B2 + story-tagging B2a thickened |
 
 **Phase A closed** (28 Oct 2026, [D-085](../../DECISIONS.md#2026-10-28---d-085---phase-a-closed-extraction--metastory-foundations)): contracts ↔ ERD ↔ vendor SoTs aligned; A3 monitoring SoT + A4 runs stubs done. Next: Phase B vertical deepen.
 

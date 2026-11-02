@@ -1,6 +1,6 @@
 # Ingestion — product contract
 
-> **Stage:** Ingestion · **Altitude:** Product contract (not a PRD) · **Status:** Locked · **Last updated:** 29 Oct 2026 (B1 gaps 1–7 + pipeline SoT)  
+> **Stage:** Ingestion · **Altitude:** Product contract (not a PRD) · **Status:** Locked · **Last updated:** 2 Nov 2026 (cross-stage coherence)  
 > **Pattern:** Stage contracts live at `02-product/contracts/{stage}.md`. Engineer pipeline / vendor / eval artifacts link here; they do not replace this doc.  
 > **Intent:** ship
 
@@ -10,7 +10,7 @@
 - Summarization (invoke target): contract [summarization.md](./summarization.md) (locked) · PRD [model--summarization--v1.md](../prds/model--summarization--v1.md)
 - Story-tagging (invoke target): contract [story-tagging.md](./story-tagging.md) (locked) · PRD [model--story-tagging--v1.md](../prds/model--story-tagging--v1.md)
 - Upstream scope: [extraction.md](./extraction.md) · [model--extraction--v1.md](../prds/model--extraction--v1.md)
-- Warm triggers (UX): [onboarding--v1.md](../prds/onboarding--v1.md) (Start monitoring) · [account--v1.md](../prds/account--v1.md) (Context Save)
+- Warm triggers (UX): [onboarding--v1.md](../prds/onboarding--v1.md) (Start monitoring) · [account--v1.md](../prds/account--v1.md) (Tags / Context Save) · UX map [pipeline §2.1](../../06-engineering/docs/pipelines/ingestion.md)
 - Downstream handoff: [metastory.md](./metastory.md) (locked) · [model--metastory--v1.md](../prds/model--metastory--v1.md) · [personalization.md](./personalization.md) (locked) · [model--personalization--v1.md](../prds/model--personalization--v1.md)
 - Feed join / UX: [dashboard--v1.md](../prds/dashboard--v1.md) (source ∧ ≥1 chip)
 - Pipeline (locked B1): [ingestion.md](../../06-engineering/docs/pipelines/ingestion.md)
@@ -60,7 +60,7 @@ Autosuggest source/concept URI resolve stays **settings-time** (onboarding / acc
 | **North star** | Downstream metastory / feed utility — on-beat stories present in the shared pool; publisher bodies never retained |
 | **Early signal** | Warm-after-widen runs shared fetch when aperture grew; clock tick completes without storing body; compliance failure retries next tick without wiping the pool |
 
-Operational / qualitative only for v1 — no invented analytics event names until instrumentation locks.
+Product success stays qualitative. Ops metering event `ingestion_job_completed` is owned by the [pipeline](../../06-engineering/docs/pipelines/ingestion.md) §9 (specified; wire at build) — not a product primary metric.
 
 ---
 
@@ -114,7 +114,7 @@ Operational / qualitative only for v1 — no invented analytics event names unti
 | **IR-11** | **Summarization invoke** — new press admit **with body in memory** → call summarization stage; **skip** when body is absent (no title/excerpt-only invent). This contract owns trigger/handoff only; summarization owns `article_summary` |
 | **IR-12** | **Settings-time URI resolve** — Suggest sources/concepts at onboarding/settings, not on the poll |
 | **IR-13** | **No Get articles backfill** — Stream (+ X polls) only for v0 retrieval |
-| **IR-14** | **X edit re-read (stub)** — separate job every **~10–15 minutes**; select `x_posts` with `published_at` still inside the ~**30‑min** vendor edit window; **Get posts by ids**; replace `text` when changed. **No** `edit_window_until` / `edit_reread_at` column — eligibility from `published_at`; re-fetch while in window is idempotent. Endpoint: [api-x.md](../../06-engineering/docs/api-x.md). Exact minutes + pricing cap: thicken in eng pipeline when built |
+| **IR-14** | **X edit re-read** — separate job on a **~10–15 min** product cadence; select `x_posts` with `published_at` still inside the ~**30‑min** vendor edit window; **Get posts by ids**; replace `text` when changed. **No** `edit_window_until` / `edit_reread_at` column — eligibility from `published_at`; re-fetch while in window is idempotent. Endpoint: [api-x.md](../../06-engineering/docs/api-x.md). Eng lock: **15‑min** offsets `:10/:25/:40/:55`, no MVP $-cap — [pipeline §6](../../06-engineering/docs/pipelines/ingestion.md) |
 | **IR-15** | **Admit / reappear** — **New admit** = first **active** pool membership for that press `uri` or X post id, **or** reappear of a **soft-removed** row (**resurrect** → treat as new admit). **Active duplicate** (already in pool, `removed_at` null) → **no-op** for summarization, story-tagging, and metastory-admit; MVP does **not** refresh keep-list metadata on that hit. IR-14 text change remains the X re-tag exception |
 | **IR-16** | **Narrow / no v1 pool GC** — when scope shrinks, next clock/warm uses the smaller union; **do not** soft-remove shared stories because a user narrowed or because no live user currently “needs” the row. Removals = X compliance (IR-07) or rare operator. Join/feed hide what the user no longer matches |
 
@@ -127,7 +127,7 @@ Operational / qualitative only for v1 — no invented analytics event names unti
 ### Inputs
 
 - Union of **all accounts with live confirmed scope**: traditional source URIs, topic/geo concept URIs, keyword strings, X handles + `fetch_mode`
-- Warm trigger: onboarding Start monitoring · Account Context Save (widen vs join-only / narrow)
+- Warm trigger: onboarding Start monitoring · Account **Tags** or **Context** Save / recover after successful scope commit (widen → shared fetch; narrow/unchanged → recompute only) — UX map in [pipeline](../../06-engineering/docs/pipelines/ingestion.md) §2.1
 - Shared clock tick
 - Vendor responses per [api-newsapi-ai.md](../../06-engineering/docs/api-newsapi-ai.md) and [api-x.md](../../06-engineering/docs/api-x.md)
 - Summarization result for a new press admit (article summary) — or skip/failure signal
@@ -136,7 +136,7 @@ Operational / qualitative only for v1 — no invented analytics event names unti
 ### Outputs
 
 - Shared story rows (press by `uri`, X by post id) with keep-list fields; press may gain **`article_summary`** when summarization succeeded (column owned by that stage)
-- **Story chips** via story-tagging replace-set on `story_*` when tagging succeeded (joins owned by that stage)
+- **Story chips** via story-tagging replace-set on `story_*` (joins owned by that stage; success writes marks; IR-14 fail / empty aperture clear per [ST-06](./story-tagging.md) / [ST-15](./story-tagging.md))
 - Updated cursors / compliance job state / warm metadata
 - **Every new admit** available to metastory same tick (body still in memory for new press with body until summarization if any, story-tagging, and metastory same-tick what-happened — if any — complete)
 - Warm ensures that user’s join + personalization recompute (join / feed membership owned by dashboard)
@@ -145,7 +145,7 @@ Operational / qualitative only for v1 — no invented analytics event names unti
 
 - **No body** on new press admit → persist keep-list → **skip** summarization → still invoke story-tagging (**title only**) → hand metastory → nothing to discard
 - Summarization fail → keep-list remains **without** article summary; do not store body; do not block the rest of the pool tick (**fail open for pool**, fail closed for body); source reader has no snippet; still tag + hand metastory
-- Story-tagging fail → story remains in pool **without** new chips (or keep prior marks on re-tag); do not block pool tick (**fail open for pool**, fail closed for inventing chips); **still hand metastory**
+- Story-tagging fail → story remains in pool; do not block pool tick (**fail open for pool**, fail closed for inventing chips); **still hand metastory**. Mark disposition owned by [story-tagging](./story-tagging.md): **admit** final fail → no new marks; **IR-14 text-change** final fail → **empty replace-set** (clear priors — [ST-06](./story-tagging.md)); empty aperture skip → empty replace-set ([ST-15](./story-tagging.md))
 - Compliance job fail → keep pool as-is; retry next clock
 - Drain / X lane fail → degrade that lane; other lanes continue
 - Empty union aperture → no vendor fetch; no invented scope
@@ -191,6 +191,10 @@ This contract describes the **target**: NewsAPI.ai Stream + X per [api-newsapi-a
 | 29 Oct 2026 | **B1 Gap 6** | Union = all accounts with live confirmed scope |
 | 29 Oct 2026 | **B1 Gap 7** | Related → Pipeline (stub); IR-10 keeps `fetch_mode` change as shared-fetch widen |
 | 29 Oct 2026 | **B1 pipeline** | [pipelines/ingestion.md](../../06-engineering/docs/pipelines/ingestion.md) locked — jobs/triggers/admit/observability |
+| 2 Nov 2026 | B2a ST-06 handoff | Story-tagging fail edge: IR-14 final fail clears marks (empty replace-set); admit fail leaves no new marks — aligns [ST-06](./story-tagging.md) / [ST-07](./story-tagging.md) |
+| 2 Nov 2026 | Coherence ↔ pipeline | Warm inputs include Tags + Context Save; ops event name deferred to pipeline §9; IR-14 minutes remain stub here / thickened to 15‑min offsets in eng |
+| 2 Nov 2026 | IR-14 pointer | Product cadence stays ~10–15 min; eng lock cited (15‑min offsets, no MVP $-cap) so contract ≠ pipeline stub conflict |
+| 2 Nov 2026 | Cross-stage | LLM `trigger_id` is stage-minted (pipeline §5); ingestion owns IR-05/08/11 handoff only — no shared UUID across summarization + story-tagging |
 
 ---
 
@@ -198,6 +202,6 @@ This contract describes the **target**: NewsAPI.ai Stream + X per [api-newsapi-a
 
 | Artifact | Notes |
 |----------|-------|
-| [pipelines/ingestion.md](../../06-engineering/docs/pipelines/ingestion.md) | **Locked (B1)** — implement GHA digests / `ingestion-pricing` / auto-diff in ops pass |
-| [story-tagging.md](./story-tagging.md) · [model--story-tagging--v1.md](../prds/model--story-tagging--v1.md) | Contract locked — eng stack when in build focus |
+| [pipelines/ingestion.md](../../06-engineering/docs/pipelines/ingestion.md) | **Locked (B1)** — GHA digests + `ingestion-pricing` envelope landed; wire PostHog facts + SKU rates at build |
+| [story-tagging.md](./story-tagging.md) · [model--story-tagging--v1.md](../prds/model--story-tagging--v1.md) | Contract + B2a eng siblings Locked — runtime wire deferred |
 | LLM `*-runs.dbml` siblings | Landed A4 — see [data README](../../06-engineering/docs/data/README.md) (ingestion itself has no runs page) |
