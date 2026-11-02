@@ -1,6 +1,315 @@
 {
   "schemaVersion": "summarization-gold-v1",
-  "promptVersion": "TBD",
-  "notes": "Stub only. examples is empty until eval craft. Do not treat as a passing suite.",
-  "examples": []
+  "promptVersion": "summarization-v1",
+  "notes": "22 of 22 arbiter-locked (Felipe, 1 Nov 2026). sum-01…18 synthetic; sum-19…22 derived_real from wired RSS teasers (shortened — not scraped full articles). Advisory until a promote gate; not a passing suite by emptiness.",
+  "examples": [
+    {
+      "id": "sum-01",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "wire_complete_4w",
+      "stress": "happy",
+      "title": "Colombia and U.S. reopen bilateral trade talks in Bogotá",
+      "body": "BOGOTÁ (Wire) — On Tuesday, Colombia’s trade minister and a visiting U.S. commerce delegation reopened formal talks on agricultural market access at the Ministry of Trade in Bogotá. Officials said the two-day agenda covers coffee, cut flowers, and sanitary inspection timelines. A joint statement is expected Wednesday evening if negotiators agree on a work plan.",
+      "expected": {
+        "article_summary": "On Tuesday in Bogotá, Colombia’s trade minister and a U.S. commerce delegation reopened talks on agricultural market access covering coffee, cut flowers, and sanitary inspection timelines. Officials said a joint statement is expected Wednesday evening if they agree on a work plan."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Happy EN wire. Keep who/what/where/when; omit speculation about outcomes. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-02",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "thin_incomplete_4w",
+      "stress": "happy",
+      "title": "Port strike delays cargo",
+      "body": "A strike at the Atlantic port slowed container moves overnight. Authorities gave no timeline for a return to normal operations.",
+      "expected": {
+        "article_summary": "A strike at an Atlantic port slowed container moves overnight. Authorities have not given a timeline for restoring normal operations."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Thin body: omit invented city, union name, date beyond overnight. Short summary OK. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-03",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "quote_heavy",
+      "stress": "happy",
+      "title": "Mayor rejects claims of secret migration pact",
+      "body": "At a City Hall briefing Friday, Mayor Elena Ruiz said, “There is no secret pact on migration with Washington.” She added, “Every meeting we hold is on the public calendar.” Ruiz did not take questions on pending state legislation.",
+      "expected": {
+        "article_summary": "At a City Hall briefing Friday, Mayor Elena Ruiz said there is no secret migration pact with Washington and that every meeting is on the public calendar. She did not take questions on pending state legislation."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Paraphrase preferred; short quotes OK only if wording is the fact. Do not echo entire briefing. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-04",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "long_digressive",
+      "stress": "happy",
+      "title": "Border bridge reopens after overnight closure",
+      "body": "The international bridge between Laredo and Nuevo Laredo reopened at 6:15 a.m. local time after an overnight closure for a vehicle inspection drill, customs officials said. Motorists lined up for nearly an hour before lanes cleared. Separately, a local food festival downtown drew larger crowds than last year, vendors sold out of tamales by noon, and a high-school band played near the plaza — none of which was connected to the bridge closure. Officials said similar drills may occur again this quarter without advance public notice beyond a short advisory.",
+      "expected": {
+        "article_summary": "The Laredo–Nuevo Laredo international bridge reopened at 6:15 a.m. local time after an overnight closure for a vehicle inspection drill, customs officials said. Motorists faced roughly an hour of delays before lanes cleared. Officials said similar drills may recur this quarter with only short advance advisories."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Omit festival digression. Soft density 2–4 sentences — not a digest of every clause. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-05",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "wire_complete_4w",
+      "stress": "so_what_bait",
+      "title": "Congress advances narrow asylum processing bill",
+      "body": "WASHINGTON — The House on Thursday passed a narrow bill that would add asylum officers at five southern ports of entry, sending the measure to the Senate. Sponsors said staffing could rise within six months of enactment. The bill does not change asylum eligibility standards. Analysts argued this matters because midterm messaging will hinge on border optics, and observers say this means the White House must respond before recess.",
+      "expected": {
+        "article_summary": "On Thursday the House passed a bill that would add asylum officers at five southern ports of entry and sent it to the Senate. Sponsors said staffing could rise within six months of enactment. The bill does not change asylum eligibility standards."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Body contains denylist bait (“this matters because”, “observers say this means”). Expected must strip editorial so-what; code denylist on model out. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-06",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "thin_incomplete_4w",
+      "stress": "so_what_bait",
+      "title": "Embassy issues travel note",
+      "body": "The embassy issued a brief travel note for citizens abroad. Why this matters: unrest could reshape the region. Details were not published.",
+      "expected": {
+        "article_summary": "An embassy issued a brief travel note for citizens abroad. Further details were not published."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Omit “why this matters” clause entirely. Do not invent country or unrest facts. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-07",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "wire_complete_4w",
+      "stress": "entity_dense",
+      "title": "Multi-agency task force announces fentanyl seizure in Cartagena",
+      "body": "CARTAGENA — On Monday, Colombia’s National Police, the Attorney General’s Office, and U.S. DEA agents announced a joint seizure of 1.2 tons of fentanyl precursors at Cartagena’s maritime terminal. Prosecutor Laura Méndez said three suspects, including a Panamanian national, were arrested. The operation, labeled “Operación Muelle,” also involved DIAN customs inspectors. No U.S. charges were filed in Colombia, Méndez said.",
+      "expected": {
+        "article_summary": "On Monday in Cartagena, Colombia’s National Police, the Attorney General’s Office, and U.S. DEA agents announced a joint seizure of 1.2 tons of fentanyl precursors at the maritime terminal. Prosecutor Laura Méndez said three suspects, including a Panamanian national, were arrested in the operation labeled Operación Muelle, which also involved DIAN customs inspectors. She said no U.S. charges were filed in Colombia."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Keep named agencies/people; do not drop Operación Muelle or DIAN if summarizing the joint claim. Avoid inventing additional agencies. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-08",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "quote_heavy",
+      "stress": "entity_dense",
+      "title": "Treasury, Fed, and IMF officials spar over dollar swap lines",
+      "body": "In Davos on Friday, U.S. Treasury Secretary Nina Cole said, “Swap lines remain a last-resort tool.” Fed Governor Marcus Hale replied, “We will not pre-commit capacity to every emerging-market request.” IMF Deputy Managing Director Priya Nair added, “Members should strengthen domestic buffers first.” The panel did not announce new facilities.",
+      "expected": {
+        "article_summary": "In Davos on Friday, U.S. Treasury Secretary Nina Cole said dollar swap lines remain a last-resort tool, Fed Governor Marcus Hale said the Fed will not pre-commit capacity to every emerging-market request, and IMF Deputy Managing Director Priya Nair said members should strengthen domestic buffers first. The panel did not announce new facilities."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Entity-dense quotes: paraphrase attributions without inventing agreement among officials. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-09",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "wire_complete_4w",
+      "stress": "happy",
+      "title": "Cancillería confirma reunión con el Departamento de Estado en Washington",
+      "body": "BOGOTÁ — La Cancillería de Colombia confirmó el jueves que el vicecanciller se reunirá el lunes en Washington con funcionarios del Departamento de Estado de Estados Unidos para hablar de cooperación migratoria y visas de trabajo temporal. La reunión está prevista en la sede del Departamento de Estado. No se anunció una declaración conjunta previa.",
+      "expected": {
+        "article_summary": "Colombia’s Foreign Ministry confirmed Thursday that the deputy foreign minister will meet U.S. State Department officials Monday in Washington on migration cooperation and temporary work visas. The meeting is scheduled at the State Department. No joint statement was announced in advance."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "ES→EN happy path. Translate factually; do not add agenda items not in body. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-10",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "thin_incomplete_4w",
+      "stress": "happy",
+      "title": "Protestas en el centro",
+      "body": "Hubo protestas esta tarde en el centro. Autoridades no precisaron el número de asistentes ni la duración.",
+      "expected": {
+        "article_summary": "Protests took place downtown this afternoon. Authorities did not specify attendance or duration."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Thin ES: omit city/country invention. Short English OK. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-11",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "wire_complete_4w",
+      "stress": "translation_uncertain",
+      "title": "Gobierno anuncia ‘mesa técnica’ sobre el ‘pico y placa’ ambiental",
+      "body": "El Ministerio de Ambiente anunció el miércoles en Bogotá una ‘mesa técnica’ para revisar el ‘pico y placa’ ambiental que rige en días de contingencia por calidad del aire. La entidad no explicó si el esquema se ampliará a municipios aledaños ni cuándo publicará el acta.",
+      "expected": {
+        "article_summary": "Colombia’s Environment Ministry announced Wednesday in Bogotá a technical working group to review the contingency-day environmental driving restriction known as pico y placa. The ministry did not say whether the scheme would expand to neighboring municipalities or when minutes would be published."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Keep ‘pico y placa’ glossed; do not invent expansion decisions. Prefer omit over wrong calque. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-12",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "thin_incomplete_4w",
+      "stress": "translation_uncertain",
+      "title": "Se cayó el ‘hilo’ en redes",
+      "body": "Se cayó el ‘hilo’ en redes tras el anuncio. No hay más detalles.",
+      "expected": {
+        "article_summary": "A social-media thread went down after an announcement. No further details were provided."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Ambiguous slang ‘hilo’: one plain claim OK; do not invent platform or content. Prefer less hedging than ‘collapsed or taken down’. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-13",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "wire_complete_4w",
+      "stress": "so_what_bait",
+      "title": "Senado aprueba en primer debate reforma de inteligencia",
+      "body": "El Senado de Colombia aprobó el martes en primer debate un proyecto de reforma a los controles de inteligencia. El texto pasa a segundo debate. Columnistas dijeron que esto importa porque redefine el poder del Ejecutivo y que las implicaciones para la oposición serán profundas.",
+      "expected": {
+        "article_summary": "Colombia’s Senate on Tuesday approved in first debate a bill reforming intelligence oversight controls. The text advances to a second debate."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Strip editorial ‘implicaciones’ so-what. English out; no denylist phrases. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-14",
+      "source": "synthetic",
+      "language": "mixed_within_body",
+      "shape": "wire_complete_4w",
+      "stress": "happy",
+      "title": "U.S.–Colombia working group sets March checklist",
+      "body": "WASHINGTON — On Monday, a U.S.–Colombia working group published a March checklist for joint border tech pilots. Officials said the list includes biometrics upgrades at two airports. Un portavoz en Bogotá añadió que la financiación mixta se discutirá en abril. No timeline was given for airport installation.",
+      "expected": {
+        "article_summary": "On Monday a U.S.–Colombia working group published a March checklist for joint border technology pilots, including biometrics upgrades at two airports. A Bogotá spokesperson said mixed financing would be discussed in April. No installation timeline for the airports was given."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Mixed EN/ES body → single English summary covering both clauses. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-15",
+      "source": "synthetic",
+      "language": "mixed_within_body",
+      "shape": "quote_heavy",
+      "stress": "translation_uncertain",
+      "title": "Ambassador cites ‘confianza mutua’ after closed-door meeting",
+      "body": "After a closed-door meeting Thursday in Miami, the ambassador said, “We leave with confianza mutua.” A deputy later said, “No hay acuerdo firmado.” The embassy released no transcript.",
+      "expected": {
+        "article_summary": "After a closed-door meeting Thursday in Miami, the ambassador said the sides left with mutual trust, while a deputy said no agreement had been signed. The embassy released no transcript."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Render ‘confianza mutua’ plainly; do not invent a signed deal. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-16",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "long_digressive",
+      "stress": "so_what_bait",
+      "title": "Cabinet approves emergency flood funding",
+      "body": "The cabinet on Sunday approved emergency flood funding for three coastal departments after weekend rains, the presidency said. Transfers are scheduled within ten days. The announcement followed a lengthy recount of historical flood seasons, a reminiscence about a 1990s bridge collapse, and a paragraph arguing the bottom line is that climate politics will decide the next election — implications for party coalitions that the decree itself does not address. The decree names the Finance Ministry as disbursement lead.",
+      "expected": {
+        "article_summary": "The cabinet on Sunday approved emergency flood funding for three coastal departments after weekend rains, the presidency said, with transfers scheduled within ten days. The Finance Ministry will lead disbursement under the decree."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Cut digression and ‘the bottom line’ / implications bait. Keep decree facts only. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-17",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "long_digressive",
+      "stress": "entity_dense",
+      "title": "Quad-plus meeting lists attendees for Cartagena security forum",
+      "body": "CARTAGENA — A security forum opening Tuesday listed attendees including Colombia’s Defense Minister Sofía Rangel, U.S. Southern Command’s Adm. Derek Holt, Brazil’s institutional security chief Paulo Nogueira, Ecuador’s police commander Gen. Rita Vásquez, and OAS Secretary for Multidimensional Security Luis Herrera. The agenda covers riverine trafficking corridors. Organizers also printed a multi-page history of prior forums, hotel shuttle maps, and catering notes that do not change the attendee list. Canada’s observer seat remains vacant, organizers said.",
+      "expected": {
+        "article_summary": "A Cartagena security forum opening Tuesday lists attendees including Colombia’s Defense Minister Sofía Rangel, U.S. Southern Command’s Adm. Derek Holt, Brazil’s institutional security chief Paulo Nogueira, Ecuador’s police commander Gen. Rita Vásquez, and OAS Secretary for Multidimensional Security Luis Herrera. The agenda covers riverine trafficking corridors. Organizers said Canada’s observer seat remains vacant."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Keep named attendees; drop hotel/catering digression. Soft length still aims 2–4 sentences. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-18",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "quote_heavy",
+      "stress": "entity_dense",
+      "title": "Fiscalía, Policía y Migración Colombia detallan operativo en Cúcuta",
+      "body": "En Cúcuta el viernes, la fiscal Ángela Rojas dijo: “Capturamos a cuatro integrantes de una red de tráfico.” El general Mateo Quiroga, de la Policía, afirmó: “Incautamos documentos falsos en el puente Simón Bolívar.” La directora de Migración Colombia, Valeria Peña, señaló: “Hay dos indicios de corrupción interna en investigación.” No se revelaron nombres de los detenidos.",
+      "expected": {
+        "article_summary": "In Cúcuta on Friday, prosecutor Ángela Rojas said four members of a trafficking network were arrested, Police Gen. Mateo Quiroga said forged documents were seized at the Simón Bolívar Bridge, and Migración Colombia director Valeria Peña said two internal corruption leads are under investigation. Detainees’ names were not released."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "Preserve three attributed claims; English paraphrase; no invented detainee names. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-19",
+      "source": "derived_real",
+      "language": "en",
+      "shape": "wire_complete_4w",
+      "stress": "happy",
+      "title": "Brazil election to reshape trade with US, with tariffs and minerals at stake",
+      "body": "Two starkly different visions for US-Brazil relations hang in the balance in Brazil’s presidential runoff, but the strategies of both Senator Flavio Bolsonaro and incumbent President Luiz Inacio Lula da Silva come with their own risks, experts said.",
+      "expected": {
+        "article_summary": "Brazil’s presidential runoff features contrasting approaches to U.S.–Brazil relations from Senator Flavio Bolsonaro and incumbent President Luiz Inacio Lula da Silva, with trade issues including tariffs and minerals in play. Experts said both strategies carry risks."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "derived_real: reuters-world-americas RSS teaser (shortened; not full article). Sampled 1 Nov 2026. https://www.reuters.com/world/americas/brazil-election-reshape-trade-with-us-with-tariffs-minerals-stake-2026-10-09/ — do not invent vote dates or poll numbers beyond teaser. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-20",
+      "source": "derived_real",
+      "language": "es",
+      "shape": "wire_complete_4w",
+      "stress": "happy",
+      "title": "Gobierno publicó el decreto que oficializa la llegada de Alejandro Ordóñez al Ministerio del Interior",
+      "body": "El nuevo jefe de la cartera política se posesionaría la próxima semana en el cargo.",
+      "expected": {
+        "article_summary": "The Colombian government published a decree formalizing Alejandro Ordóñez’s appointment as Interior Minister. He is expected to take office next week."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "derived_real: semana-politica RSS teaser (shortened). Sampled 1 Nov 2026. https://www.semana.com/politica/articulo/gobierno-publico-el-decreto-que-oficializa-la-llegada-de-alejandro-ordonez-al-ministerio-del-interior/202657/ — English summary; do not invent decree number, swearing-in venue, or prior role. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-21",
+      "source": "derived_real",
+      "language": "en",
+      "shape": "thin_incomplete_4w",
+      "stress": "happy",
+      "title": "Mexico comes alive with color and tradition for Day of the Dead",
+      "body": "Bright orange marigolds, glowing candles, and painted faces fill Mexico's streets during the Day of the Dead celebrations.",
+      "expected": {
+        "article_summary": "Mexico’s streets filled with marigolds, candles, and painted faces during Day of the Dead celebrations."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "derived_real: ap-world-latin-america RSS teaser (thin). Sampled 1 Nov 2026. https://apnews.com/article/mexico-day-of-dead-3a7842be9ad9d7e63d63b33334cad7de — omit invented cities/dates. Arbiter: locked 1 Nov 2026."
+    },
+    {
+      "id": "sum-22",
+      "source": "derived_real",
+      "language": "en",
+      "shape": "wire_complete_4w",
+      "stress": "entity_dense",
+      "title": "Trump envoy kept financial ties to firm behind $15 billion Hormuz-bypass oil pipeline plan",
+      "body": "Thomas Barrack, a top US diplomat in the Middle East, advocated for a firm run by his business partner to take part in the development of an oil pipeline from Iraq to Syria, three people said, activities which appear to violate federal ethics rules.",
+      "expected": {
+        "article_summary": "Thomas Barrack, a top U.S. diplomat in the Middle East, advocated for a firm run by his business partner to join development of an oil pipeline from Iraq to Syria, three people said, in activities that appear to violate federal ethics rules. The pipeline plan is described as a Hormuz-bypass project valued at $15 billion."
+      },
+      "code_checks": ["non_empty", "plain_string", "denylist", "soft_length"],
+      "rubric_notes": "derived_real: reuters-world-us RSS teaser + title entities (shortened). Sampled 1 Nov 2026. https://www.reuters.com/world/us/trump-envoy-kept-financial-ties-firm-behind-15-billion-hormuz-bypass-oil-2026-10-09/ — $15B / Hormuz-bypass only from title; do not invent partner firm name. Arbiter: locked 1 Nov 2026."
+    }
+  ]
 }

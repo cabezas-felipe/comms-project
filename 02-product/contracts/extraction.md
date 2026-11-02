@@ -1,6 +1,6 @@
 # Extraction — product contract
 
-> **Stage:** Extraction · **Altitude:** Product contract (not a PRD) · **Status:** Locked (Session A) · **Last updated:** 27 Oct 2026 (A2 pointer)  
+> **Stage:** Extraction · **Altitude:** Product contract (not a PRD) · **Status:** Locked (Session A) · **Last updated:** 02 Nov 2026 (cross-stage coherence)  
 > **Pattern:** Stage contracts live at `02-product/contracts/{stage}.md`. Engineer prompt / pipeline / eval artifacts link here; they do not replace this doc.
 
 **Related**
@@ -11,7 +11,7 @@
 - Prompt SoT (Session B, locked): [extraction.md](../../06-engineering/docs/prompts/extraction.md) (`extraction-v1`)
 - Pipeline SoT (Session C, locked): [extraction.md](../../06-engineering/docs/pipelines/extraction.md)
 - Extraction runs (Session D, locked): [extraction-runs.dbml](../../06-engineering/docs/data/extraction-runs.dbml) · [dbdiagram](https://dbdiagram.io/d/Extraction-runs-6ab952050f25a52d011d406d)
-- Eval / gold (Session E, locked): [extraction.md](../../06-engineering/docs/evals/extraction.md) · draft [extraction.gold.json](../../06-engineering/docs/evals/extraction.gold.json)
+- Eval / gold (Session E, locked): [extraction.md](../../06-engineering/docs/evals/extraction.md) · [extraction.gold.json](../../06-engineering/docs/evals/extraction.gold.json) (24 cases)
 - Build handoff (exit): [extraction-build-handoff.md](../../06-engineering/docs/evals/extraction-build-handoff.md)
 - Product principles: [principles.md](../principles.md) (esp. pp2 — user scope is the ceiling)
 
@@ -68,6 +68,8 @@ All five lanes are **in-scope extraction** (one product capability, lane-specifi
 | **North star** | Downstream **retrieval / dashboard utility** — on-beat stories admitted, irrelevant excluded |
 | **Early signal** | **Chip acceptance** — PostHog `extraction_chip_acceptance` at a successful onboarding commit. Kept, removed, and added per shelf. It records what the operator kept. It is not an eval. Definition in the [extraction PRD](../prds/model--extraction--v1.md). |
 
+Thin PostHog invoke `extraction_invoke` (finished LLM attempt, success or fail) is **specified** on the [extraction PRD](../prds/model--extraction--v1.md) under [D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088---shared-thin-_invoke-posthog-events-for-all-llm-stages) — same `*_invoke` family as summarization / story-tagging; **not** chip acceptance; **not instrumented** until build.
+
 Do not optimize for pretty chip lists that fail retrieval.
 
 ---
@@ -111,6 +113,7 @@ This contract describes the **target**: five blurbs, five stored lanes, one mult
 | 17 Oct 2026 | Review gate | **Onboarding only.** Settings Rebuild merges live; prune in Account. Aligns pipeline + onboarding PRD. |
 | 21 Oct 2026 | Topic vs keyword | Product split lives in the prompt (Lanes 2–3). Contract points there; it does not restate the model rules. |
 | 27 Oct 2026 | A2 | User chips vs story chips pointer; monitoring contracts locked |
+| 2 Nov 2026 | Cross-stage | Success notes `extraction_invoke` (D-088) beside chip acceptance — aligns summarization / story-tagging contracts |
 
 ---
 
@@ -121,4 +124,4 @@ This contract describes the **target**: five blurbs, five stored lanes, one mult
 | B | Done — [prompts/extraction.md](../../06-engineering/docs/prompts/extraction.md) |
 | C | Done — [pipelines/extraction.md](../../06-engineering/docs/pipelines/extraction.md) |
 | D | Done — [extraction-runs.dbml](../../06-engineering/docs/data/extraction-runs.dbml) · [D-072](../../06-engineering/DECISIONS.md) |
-| E | Done — [docs/evals/extraction.md](../../06-engineering/docs/evals/extraction.md) (**BUILD MUST** promote gold) |
+| E | Done — [docs/evals/extraction.md](../../06-engineering/docs/evals/extraction.md) · locked [extraction.gold.json](../../06-engineering/docs/evals/extraction.gold.json) (**BUILD MUST** promote gold) |

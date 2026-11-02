@@ -1,15 +1,17 @@
 # Extraction — prompt / behavior SoT
 
-> **Stage:** Extraction · **Prompt version:** `extraction-v1` · **Status:** Locked (Session B) · **Last updated:** 24 Oct 2026  
+> **Stage:** Extraction · **Prompt version:** `extraction-v1` · **Status:** Locked (Session B) · **Last updated:** 02 Nov 2026  
 > **Altitude:** Engineer prompt SoT (pre-runtime). Implementation must mirror this file; do not treat live `extract-v8` as the target.
 
 **Related**
 
 - Product contract: [extraction.md](../../../02-product/contracts/extraction.md)
+- Model PRD (invoke / resolve locks): [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md)
 - Data (target): [tempo.dbml](../data/tempo.dbml) · [Database library](https://dbdiagram.io/d/6ab4852e58694256127b2a37)
 - Extraction runs: [extraction-runs.dbml](../data/extraction-runs.dbml) · [dbdiagram](https://dbdiagram.io/d/Extraction-runs-6ab952050f25a52d011d406d)
 - Legacy runtime (single-blob): [`onboarding-extractor.mjs`](../../apps/api/src/ai/onboarding-extractor.mjs) (`EXTRACT_PROMPT_VERSION = extract-v8`) — superseded by this SoT at build
 - Pipeline / hygiene / resolve (Session C, locked): [pipelines/extraction.md](../pipelines/extraction.md)
+- Eval / gold (Session E, locked): [evals/extraction.md](../evals/extraction.md) · [extraction.gold.json](../evals/extraction.gold.json)
 - Pattern: stage prompt SoTs live at `06-engineering/docs/prompts/{stage}.md`
 
 ---
@@ -155,7 +157,7 @@ Same field rules; keep lanes **separate** (do not merge personal and org facets)
 
 | Field | Rule |
 |-------|------|
-| `topics` | Collapsed theme only: what the operator follows, not the phrase they used. Short canonical labels (1–4 words). Usually **one or two** per blurb. Collapse related mentions into one label (`presidential elections` and `congressional elections` → `Elections`). Never a person, organization, product, instrument, or event. |
+| `topics` | Collapsed theme only: what the operator follows, not the phrase they used. Short canonical labels (1–4 words). Usually **one or two** per blurb. Collapse related mentions into one label (`presidential elections` and `congressional elections` → `elections`). Emit lowercase topic labels (product stores lowercase). Never a person, organization, product, instrument, or event. |
 | `keywords` | Bare match term (1–2 words). A common word is English (`deportation flights` → `deportation`). A person, organization, product name, or acronym stays as written (`Petro`, `Cancillería`). Never a geography. Do not copy a name into stakeholders unless the stakeholders blurb states that class. |
 | `geographies` | Country, region, or city the blurb names. Use the English name when one exists (`Nueva York` → `New York`). A city stays that city (`Bogotá` does not also emit `Colombia`). If the role blurb names a city and this priorities blurb says “local” without naming a different place, that city is a geography here (`consulate in Boston` plus `local papers` → `Boston`). “Local” with no city named anywhere adds nothing. Never duplicate a place into `keywords` or a topic label. |
 
@@ -230,3 +232,4 @@ At call time, append the current `functions.name` values after the per-lane rule
 | 23 Oct 2026 | Language | English for role, function, topics, common-word keywords, geographies, and stakeholder classes. As written: blurbs, organization, press, handles, and proper-name keywords. A named city does not also emit its country. Version stays `extraction-v1` because this prompt has not shipped. |
 | 24 Oct 2026 | Press names | Official outlet name, including a leading article when it is part of that name (`The New York Times`). Casual abbreviations still expand to that official name. |
 | 24 Oct 2026 | Local city | A city named in the role blurb is a geography on a priorities blurb that says “local” and names no other place. “Local” with no city named anywhere adds nothing. Do not also emit the containing region or country. |
+| 02 Nov 2026 | Topic casing | Topic collapse example and emit rule use lowercase (`elections`) to match product store + gold match keys. Version stays `extraction-v1` (prompt not shipped). |

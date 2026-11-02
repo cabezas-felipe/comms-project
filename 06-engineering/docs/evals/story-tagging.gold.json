@@ -1,0 +1,948 @@
+{
+  "schemaVersion": "story-tagging-gold-v1",
+  "promptVersion": "story-tagging-v1",
+  "status": "locked_b2a",
+  "notes": "st-skip-01 + st-01…22 arbiter-locked (Felipe, 2 Nov 2026). Fixture catalog UUIDs are hermetic (not live Tempo DB). st-19…21 derived_real RSS teasers; st-22 derived_real from X warm cache (x:whitehouse).",
+  "examples": [
+    {
+      "id": "st-skip-01",
+      "kind": "skip",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_body",
+      "stress": "happy",
+      "title": "Any title",
+      "body": "Any body — model must not be called when catalog is empty.",
+      "text": "",
+      "catalog": { "topics": [], "keywords": [], "geographies": [] },
+      "expected": {
+        "topic_ids": [],
+        "keyword_ids": [],
+        "geography_ids": [],
+        "outcome": "skip"
+      },
+      "code_checks": ["skip_no_llm", "empty_replace_set", "no_run_row", "no_posthog"],
+      "rubric_notes": "ST-15: empty aperture → skip LLM; empty replace-set; no story_tagging_runs; no story_tagging_invoke. Code-only fixture.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-01",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_body",
+      "stress": "happy",
+      "title": "Colombia and the United States deepen trade talks in Bogotá",
+      "body": "Officials from Colombia and the United States met in Bogotá this week to discuss bilateral trade and nearshoring. Ministers said both countries want clearer rules for investment. The talks did not address unrelated sports news.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002"
+        ],
+        "keyword_ids": ["a2000001-0001-4000-8000-000000000001"],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Clear support for bilateral relations + trade; nearshoring as keyword; Colombia, US, Bogotá. Omit migration and fentanyl (unsupported).",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-02",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_only",
+      "stress": "happy",
+      "title": "Washington hosts Colombian migration dialogue",
+      "body": "",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000004", "name_normalized": "washington" },
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000003"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000004",
+          "a3000001-0001-4000-8000-000000000001"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Title-only: migration + US-Colombia; Washington, United States, Colombia. No fentanyl or trade in title.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-03",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "x_text",
+      "stress": "happy",
+      "title": "",
+      "body": "",
+      "text": "Just landed in Bogotá for the security cooperation working group with our Colombian counterparts. #USColombia",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" }
+        ],
+        "keywords": [],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" },
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000004"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000003",
+          "a3000001-0001-4000-8000-000000000001"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "X text: security cooperation + bilateral; Bogotá + Colombia. Omit trade.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-04",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_body",
+      "stress": "invent_bait",
+      "title": "Embassy cultural night draws crowd in Cartagena",
+      "body": "A music evening at the cultural center featured local bands. Organizers thanked volunteers. No trade or migration policy was discussed.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000005", "name_normalized": "cartagena" },
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000005",
+          "a3000001-0001-4000-8000-000000000001"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Invent_bait: do not invent a 'culture' topic — not in catalog. Geos Cartagena + Colombia OK. Omit trade/migration/nearshoring.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-05",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_body",
+      "stress": "wrong_shelf_bait",
+      "title": "Nearshoring surge reshapes US-Colombia industrial ties",
+      "body": "Factories cite nearshoring as they expand plants serving United States buyers. Analysts link the trend to bilateral commercial policy.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002"
+        ],
+        "keyword_ids": ["a2000001-0001-4000-8000-000000000001"],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Wrong_shelf_bait: nearshoring belongs in keyword_ids only — never as a topic_id. Topics = relations + trade; geos Colombia + US. Harness should fail outputs that put nearshoring UUID on topic_ids.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-06",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_body",
+      "stress": "keyword_strict",
+      "title": "Colombia and US expand commercial agenda after summit",
+      "body": "Officials in Bogotá and Washington framed a broader trade push. Separate remarks touched fentanyl interdiction. Analysts noted factories relocating production closer to US buyers, without using industry jargon for that shift.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" },
+          { "id": "a3000001-0001-4000-8000-000000000004", "name_normalized": "washington" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002"
+        ],
+        "keyword_ids": ["a2000001-0001-4000-8000-000000000002"],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003",
+          "a3000001-0001-4000-8000-000000000004"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Keyword_strict: fentanyl is a clear match term → include. Nearshoring is only implied by relocating production — omit (do not stretch). Topics relations + trade; omit migration. Geos Colombia, US, Bogotá, Washington.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-07",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_body",
+      "stress": "paraphrase_bilingual",
+      "title": "Summit wires: warmer ties after talks in both capitals",
+      "body": "English desk copy frames closer partnership between Washington and Bogotá. Spanish clips stress migración irregular and measures on comercio exterior. No security-cooperation agenda was named.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" },
+          { "id": "a3000001-0001-4000-8000-000000000004", "name_normalized": "washington" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002",
+          "a1000001-0001-4000-8000-000000000003"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003",
+          "a3000001-0001-4000-8000-000000000004"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Paraphrase_bilingual: 'warmer ties' / partnership → us-colombia relations (no verbatim label). Spanish migración → migration; comercio exterior → trade. Omit security cooperation. Geos via capitals + country support. Omit nearshoring.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-08",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_body",
+      "stress": "under_tag_risk",
+      "title": "US-Colombia relations strained as migration talks stall in Bogotá",
+      "body": "United States negotiators left Colombia without a deal. Coverage also flags fentanyl seizures tied to the same talks and fresh trade complaints from exporters. Security-cooperation funding was not on the agenda.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002",
+          "a1000001-0001-4000-8000-000000000003"
+        ],
+        "keyword_ids": ["a2000001-0001-4000-8000-000000000002"],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Under_tag_risk: all three clear topics (relations, migration, trade) + fentanyl + Colombia/US/Bogotá must appear. Easy miss = title-only topics or drop body trade/fentanyl/geos. Omit security cooperation and nearshoring.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-09",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "press_title_body",
+      "stress": "happy",
+      "title": "Colombia y Estados Unidos refuerzan la cooperación en seguridad",
+      "body": "Funcionarios en Bogotá anunciaron nuevos canales con Washington. El comunicado menciona comercio bilateral de forma breve y no habla de migración ni de nearshoring.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" },
+          { "id": "a3000001-0001-4000-8000-000000000004", "name_normalized": "washington" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002",
+          "a1000001-0001-4000-8000-000000000004"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003",
+          "a3000001-0001-4000-8000-000000000004"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Es happy: security cooperation + bilateral framing → relations; brief comercio → trade. Omit migration. Omit nearshoring (named as absent). Geos Colombia, US, Bogotá, Washington.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-10",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "press_title_only",
+      "stress": "happy",
+      "title": "Migración: Washington endurece el tono hacia Colombia",
+      "body": "",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000004", "name_normalized": "washington" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000003"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000004"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Es title-only happy: migración → migration; tono hacia Colombia from Washington → relations + geos. Omit trade and fentanyl (unsupported in title).",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-11",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "x_text",
+      "stress": "keyword_strict",
+      "title": "",
+      "body": "",
+      "text": "Desde Bogotá: hablamos de fentanilo y de comercio con EE.UU. Hay fábricas que mueven líneas más cerca del mercado estadounidense, pero nadie dijo nearshoring en la rueda de prensa.",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002"
+        ],
+        "keyword_ids": ["a2000001-0001-4000-8000-000000000002"],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Es x_text keyword_strict: fentanilo → fentanyl (clear). Nearshoring named as absent / only implied by moving production lines → omit. Topics trade + relations; omit migration. Geos Bogotá, Colombia, US (EE.UU.).",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-12",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "press_title_body",
+      "stress": "paraphrase_bilingual",
+      "title": "Más cercanía entre las dos capitales tras la cumbre",
+      "body": "Cronistas describen un vínculo más estrecho Washington–Bogotá. English wires cite trade frictions alongside movilidad humana irregular. Nadie nombró una agenda de cooperación en seguridad ni nearshoring.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" },
+          { "id": "a3000001-0001-4000-8000-000000000004", "name_normalized": "washington" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002",
+          "a1000001-0001-4000-8000-000000000003"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003",
+          "a3000001-0001-4000-8000-000000000004"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Es paraphrase_bilingual: vínculo/cercanía → us-colombia relations; English 'trade frictions' → trade; movilidad humana irregular → migration. Omit security cooperation + nearshoring. Geos via capitals + country support.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-13",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "press_title_body",
+      "stress": "invent_bait",
+      "title": "Festival gastronómico reúne chefs en Medellín",
+      "body": "El evento destacó cocina local y turismo cultural. Organizadores agradecieron a voluntarios. No se habló de comercio, migración ni política bilateral.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000006", "name_normalized": "medellin" },
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000006",
+          "a3000001-0001-4000-8000-000000000001"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Es invent_bait: do not invent culture/tourism/food topics. Geos Medellín + Colombia OK. Omit all catalog topics/keywords (unsupported; story denies trade/migration/bilateral).",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-14",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "mixed",
+      "shape": "press_title_body",
+      "stress": "happy",
+      "title": "US-Colombia relations: avance en comercio after Bogotá talks",
+      "body": "Washington welcomed the step. En Bogotá, funcionarios highlighted bilateral trade measures and left migración off the joint statement. Nearshoring no fue mencionado.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" },
+          { "id": "a3000001-0001-4000-8000-000000000004", "name_normalized": "washington" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003",
+          "a3000001-0001-4000-8000-000000000004"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Mixed happy: title relations + comercio/trade → topics. Migración named as left off → omit migration. Omit security cooperation + nearshoring. Geos Colombia, US, Bogotá, Washington.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-15",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "mixed",
+      "shape": "press_title_body",
+      "stress": "paraphrase_bilingual",
+      "title": "Closer partnership after the dual-capital round",
+      "body": "Desks call it a warmer vínculo entre ambas naciones. Spanish hits stress rutas irregulares; English briefs add commercial snags at the border. Security-cooperation dollars were not discussed. Cartagena only appears as a color aside, not a venue.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000005", "name_normalized": "cartagena" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002",
+          "a1000001-0001-4000-8000-000000000003"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000005",
+          "a3000001-0001-4000-8000-000000000001"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Mixed paraphrase_bilingual: warmer vínculo / closer partnership → relations; commercial snags → trade; rutas irregulares → migration. Omit security cooperation + nearshoring. Geos: Cartagena (only named place) + Colombia; omit United States (never named — do not infer from 'ambas naciones' / dual-capital alone).",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-16",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "x_text",
+      "stress": "invent_bait",
+      "title": "",
+      "body": "",
+      "text": "Quick hit from Cartagena: embassy staff ran a pickup soccer match with local teens. Fun night. Zero policy — no trade, migration, or bilateral agenda.",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000005", "name_normalized": "cartagena" },
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000005",
+          "a3000001-0001-4000-8000-000000000001"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "En x_text invent_bait: do not invent sports/youth/culture topics or stretch 'embassy' into us-colombia relations when text denies policy/bilateral agenda. Geos Cartagena + Colombia. Omit all catalog topics/keywords.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-17",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "en",
+      "shape": "press_title_only",
+      "stress": "under_tag_risk",
+      "title": "Bogotá: US-Colombia relations fray as migration and trade talks stall; fentanyl seizures cited",
+      "body": "",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002",
+          "a1000001-0001-4000-8000-000000000003"
+        ],
+        "keyword_ids": ["a2000001-0001-4000-8000-000000000002"],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "En title-only under_tag_risk: dense title — relations + migration + trade + fentanyl + Bogotá/Colombia/US all required. Easy miss = drop trailing trade, fentanyl, or a geo. Omit security cooperation and nearshoring.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-18",
+      "kind": "model",
+      "source": "synthetic",
+      "language": "es",
+      "shape": "press_title_body",
+      "stress": "under_tag_risk",
+      "title": "Tensiones en la relación Colombia–EE.UU. por migración",
+      "body": "Desde Bogotá, el gobierno también denunció fricciones comerciales. Reportes citan decomisos de fentanilo. Washington aparece en la cobertura. La cooperación en seguridad no figuró en la agenda.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000003", "name_normalized": "bogota" },
+          { "id": "a3000001-0001-4000-8000-000000000004", "name_normalized": "washington" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002",
+          "a1000001-0001-4000-8000-000000000003"
+        ],
+        "keyword_ids": ["a2000001-0001-4000-8000-000000000002"],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000003",
+          "a3000001-0001-4000-8000-000000000004"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Es under_tag_risk: title relations + migration; body trade + fentanilo + Bogotá/Washington/Colombia/EE.UU. all required. Easy miss = title-only or drop body trade/fentanyl/Washington. Omit security cooperation and nearshoring.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-19",
+      "kind": "model",
+      "source": "derived_real",
+      "language": "en",
+      "shape": "press_title_body",
+      "stress": "happy",
+      "title": "Brazil election to reshape trade with US, with tariffs and minerals at stake",
+      "body": "Two starkly different visions for US-Brazil relations hang in the balance in Brazil’s presidential runoff, but the strategies of both Senator Flavio Bolsonaro and incumbent President Luiz Inacio Lula da Silva come with their own risks, experts said.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000007", "name_normalized": "brazil" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" }
+        ]
+      },
+      "expected": {
+        "topic_ids": ["a1000001-0001-4000-8000-000000000002"],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000007",
+          "a3000001-0001-4000-8000-000000000002"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Derived_real: reuters-world-americas RSS teaser (shortened; not full article). Sampled 2 Nov 2026. https://www.reuters.com/world/americas/brazil-election-reshape-trade-with-us-with-tariffs-minerals-stake-2026-10-09/ — trade + Brazil + US. Omit us-colombia relations (Brazil, not Colombia), migration, nearshoring, colombia geo.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-20",
+      "kind": "model",
+      "source": "derived_real",
+      "language": "es",
+      "shape": "press_title_body",
+      "stress": "happy",
+      "title": "Acuerdo De la Espriella-Trump entrega ventajas en minerales críticos a EEUU",
+      "body": "Es muy similar a los que firmaron otros países, como Perú. Análisis de los últimos memorandos que privilegian los intereses de Estados Unidos.",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" },
+          { "id": "a1000001-0001-4000-8000-000000000004", "name": "security cooperation" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" },
+          { "id": "a3000001-0001-4000-8000-000000000008", "name_normalized": "peru" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [
+          "a1000001-0001-4000-8000-000000000001",
+          "a1000001-0001-4000-8000-000000000002"
+        ],
+        "keyword_ids": [],
+        "geography_ids": [
+          "a3000001-0001-4000-8000-000000000001",
+          "a3000001-0001-4000-8000-000000000002",
+          "a3000001-0001-4000-8000-000000000008"
+        ]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Derived_real: silla-nacional RSS teaser (shortened). Sampled 2 Nov 2026. https://www.lasillavacia.com/silla-nacional/acuerdo-de-la-espriella-trump-entrega-ventajas-en-minerales-criticos-a-eeuu/ — De la Espriella–Trump minerals deal → us-colombia relations + trade. Geos Colombia (president/deal side), Estados Unidos/EEUU, Perú (named comparison). Omit migration, security cooperation, nearshoring.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-21",
+      "kind": "model",
+      "source": "derived_real",
+      "language": "en",
+      "shape": "press_title_only",
+      "stress": "happy",
+      "title": "Colombia faces hurdles to meet IMF commitments under possible lending deal",
+      "body": "",
+      "text": "",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" }
+        ]
+      },
+      "expected": {
+        "topic_ids": [],
+        "keyword_ids": [],
+        "geography_ids": ["a3000001-0001-4000-8000-000000000001"]
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Derived_real: reuters-world-americas title-only (no body). Sampled 2 Nov 2026. https://www.reuters.com/world/americas/colombia-faces-hurdles-meet-imf-commitments-under-possible-lending-deal-2026-10-08/ — Colombia geo only. Do not stretch IMF/lending into trade or us-colombia relations; omit US, migration, nearshoring, fentanyl.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    },
+    {
+      "id": "st-22",
+      "kind": "model",
+      "source": "derived_real",
+      "language": "en",
+      "shape": "x_text",
+      "stress": "keyword_strict",
+      "title": "",
+      "body": "",
+      "text": "This National Fentanyl Prevention and Awareness Day, we remember those we've lost, and fight for the ones we can still protect. Thanks to the Trump Admin’s border crackdown, campaign against drug cartels, and the arrests of convicted fentanyl traffickers, fentanyl-related",
+      "catalog": {
+        "topics": [
+          { "id": "a1000001-0001-4000-8000-000000000001", "name": "us-colombia relations" },
+          { "id": "a1000001-0001-4000-8000-000000000002", "name": "trade" },
+          { "id": "a1000001-0001-4000-8000-000000000003", "name": "migration" }
+        ],
+        "keywords": [
+          { "id": "a2000001-0001-4000-8000-000000000001", "name": "nearshoring" },
+          { "id": "a2000001-0001-4000-8000-000000000002", "name": "fentanyl" }
+        ],
+        "geographies": [
+          { "id": "a3000001-0001-4000-8000-000000000001", "name_normalized": "colombia" },
+          { "id": "a3000001-0001-4000-8000-000000000002", "name_normalized": "united states" }
+        ]
+      },
+      "expected": {
+        "topic_ids": ["a1000001-0001-4000-8000-000000000003"],
+        "keyword_ids": ["a2000001-0001-4000-8000-000000000002"],
+        "geography_ids": []
+      },
+      "code_checks": ["schema", "no_invent", "no_wrong_shelf", "dedupe"],
+      "rubric_notes": "Derived_real: x:whitehouse from ingestion_recent_items cache (X warm path — not RSS). Sampled 2 Nov 2026. https://x.com/whitehouse/status/2090874020203831556 — shortened teaser (truncated mid-sentence in cache). Keyword_strict: fentanyl clear → include; nearshoring absent → omit (do not invent). Topics: migration via border crackdown (prefer false positive over miss); omit trade + us-colombia relations. Geos: empty — do not infer United States from Trump Admin / WH account when text does not name a geographic entity; omit colombia.",
+      "arbiter": "locked",
+      "arbiter_date": "2 Nov 2026"
+    }
+  ]
+}

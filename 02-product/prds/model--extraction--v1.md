@@ -4,7 +4,7 @@ Turn onboarding and Account Context blurbs into structured watch-scope Tempo can
 
 Status: Draft  
 Owner: Felipe  
-Update: 26 Oct 26  
+Update: 02 Nov 26  
 Intent: ship  
 
 **Thin ship shell.** Do not duplicate lane rules, prompt text, or gold — change those in the SoTs below first. This PRD owns **invoke contract**, build deltas vs live legacy, and ship sequencing. UX chrome lives in sibling PRDs.
@@ -26,7 +26,7 @@ Intent: ship
 
 **Walk status:** **UX/UI invoke** + **`extraction_runs`** + **Identity** + **priorities topics/keywords** + **geographies** + **stakeholders** + **sources** + **chip-acceptance guardrail** (22 Oct 26) + **gold cases** (24 Oct 26). `function_label` is chosen from live `functions.name` or omitted. v1 seed: `communications`, `policy`, `operations`, `partnerships` (24 Oct 26). Stakeholder mentions are every distinct class the blurb states. 24 cases are locked in [extraction.gold.json](../../06-engineering/docs/evals/extraction.gold.json). `extraction_invoke` is specified (24 Oct 26). Remaining: an advisory gold pass once a runner scores `extraction-v1` against that file.
 
-**Ops pricing:** [07-ops/model-pricing.json](../../07-ops/model-pricing.json) (SoT) · runtime copy under API `pricing/model-prices.json` · weekly Slack review → `#ops-pricing-models`.
+**Ops pricing:** [07-ops/model-pricing.json](../../07-ops/model-pricing.json) (SoT) · runtime copy under API `pricing/model-prices.json` · Slack `#ops-pricing-models`: **daily** model spend digest (by stage/`model_id`) + **Monday** unit-price catalog review.
 
 **Ops extraction identity:** `#model-extraction-organization` · `#model-extraction-function` · `#model-extraction-role` (`tempo-comms.slack.com`) — secrets on Actions; mirror to API/Vercel when the resolve write path posts.
 
@@ -149,6 +149,7 @@ PostHog event for a finished model invoke. It records that the attempt finished,
 | Properties | `trigger_id`. `trigger_kind`: `build`, `rebuild`, or `retry`. `surface`: `onboarding` or `account`. `outcome`: `success` or `fail`. `prompt_version`. `model_id` of the attempt the person got. `error_kind` only when `outcome` is `fail`, from the closed enum above |
 | Left out | Chip counts, chip text, a quality score, and Account `fail_kind` |
 | Wiring | Specified, not instrumented. Baseline and target are `PM input required` |
+| Convention | Same thin `*_invoke` pattern as other LLM stages — [D-088](../../06-engineering/DECISIONS.md). Chip acceptance remains extraction-only (layer 2). |
 
 ### Data — Identity / `user_role_organization` (locked)
 
@@ -194,7 +195,7 @@ Post **after** successful identity write/resolve only (not on hard extract fail)
 
 ### Data — Your priorities / topics and keywords (locked)
 
-Blurb 2 only. Geographies on this blurb are the next beat. Schema: [tempo.dbml](../../06-engineering/docs/data/tempo.dbml). Chip lifetime: [onboarding--v1.md](./onboarding--v1.md) (Review draft + Start monitoring). Merge: [extraction pipeline](../../06-engineering/docs/pipelines/extraction.md) §4. Topic vs keyword: [extraction prompt](../../06-engineering/docs/prompts/extraction.md) Lanes 2–3. Contract points there.
+Blurb 2 topics and keywords only. Geographies from this blurb: [Geographies](#data--geographies-locked) below. Schema: [tempo.dbml](../../06-engineering/docs/data/tempo.dbml). Chip lifetime: [onboarding--v1.md](./onboarding--v1.md) (Review draft + Start monitoring). Merge: [extraction pipeline](../../06-engineering/docs/pipelines/extraction.md) §4. Topic vs keyword: [extraction prompt](../../06-engineering/docs/prompts/extraction.md) Lanes 2–3. Contract points there.
 
 | Rule | Lock |
 | --- | --- |
@@ -342,7 +343,7 @@ Blurb 5. The model emits `traditionalSources` and `socialSources` as strings. It
 ## Dependencies & Path 2
 
 - **Schema:** five blurb tables + memberships (Database library); `extraction_runs` migration (sibling ERD).  
-- **Pricing:** [07-ops/model-pricing.json](../../07-ops/model-pricing.json); weekly Action [model-pricing-review.yml](../../.github/workflows/model-pricing-review.yml); secret `TEMPO_OPS_SLACK_WEBHOOK_URL`.  
+- **Pricing:** [07-ops/model-pricing.json](../../07-ops/model-pricing.json); Slack `#ops-pricing-models` (**daily** spend + **Monday** catalog via [weekly-pricing-catalog-review.yml](../../.github/workflows/weekly-pricing-catalog-review.yml) / [daily-ops-spend.yml](../../.github/workflows/daily-ops-spend.yml)); secret `TEMPO_OPS_SLACK_WEBHOOK_URL`.  
 - **Identity ops Slack:** `#model-extraction-organization` / `-function` / `-role`; secrets `TEMPO_OPS_SLACK_WEBHOOK_URL_EXTRACTION_{ORG,FUNCTION,ROLE}` (Actions set; API/Vercel when posting).  
 - **Path 2:** migrate runs + SKU cutover — revert: keep legacy extract path / env SKUs until gold; disable new invoke behind flag if needed. Owner: eng build train.
 
@@ -377,8 +378,11 @@ Blurb 5. The model emits `traditionalSources` and `socialSources` as strings. It
 | v1 functions seed | `communications`, `policy`, `operations`, `partnerships`. Inserted at build. The prompt file does not hardcode them. Unmatched labels still queue in Slack and do not create a row | 24 Oct 26 | A fifth function is needed for a real invited user |
 | Advisory extraction runner | New command scores the 24 cases against `extraction-v1`. Identity cases pass that case’s `function_list`. Score does not block release. Retire or quarantine `eval:onboarding-extraction`. Do not import `ex-01`–`ex-23`. Code is a later build | 24 Oct 26 | The advisory pass has a score |
 | `extraction_invoke` | One PostHog event when a model invoke finishes, success or fail. Separate from chip acceptance. No chip counts, no `fail_kind`. Write failures do not emit it. Specified, not instrumented | 24 Oct 26 | A target is set |
+| Shared `*_invoke` convention (D-088) | Extraction already matched the durable pattern; siblings stubbed 31 Oct 26 | 31 Oct 26 | Instrument at build |
 | `social_accounts.fetch_mode` | `word_search` (default) or `post_download`, on the shared handle only. Operator sets it for the MVP. A later job may set it from a rolling 30-day post count. No reason column | 26 Oct 26 | The volume job has a threshold |
 | New handle pages `#model-extraction-source` | Same channel and secret as a new press alias. Message names the handle and the default `word_search`. At most once per `trigger_id` | 26 Oct 26 | Source alerts need a snooze |
+| Extraction artifact coherence | Aligned contract / prompt / pipeline / eval / gold / runs notes with this PRD (topic lowercase emit, identity pre-Review, gold id prefixes, gold no longer “draft”) | 02 Nov 26 | Next stage coherence pass |
+| Ops pricing daily + Monday | Match summarization / story-tagging `#ops-pricing-models` cadence (daily spend + Monday catalog) | 02 Nov 26 | Ops channel change |
 
 ### Blocking open questions
 

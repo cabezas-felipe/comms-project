@@ -1,6 +1,6 @@
 # Extraction foundations — build handoff
 
-> **Status:** Foundations complete (Sessions A–E) · **Written:** 28 Sep 2026  
+> **Status:** Foundations complete (Sessions A–E) · **Written:** 28 Sep 2026 · **Coherence pass:** 02 Nov 2026  
 > **Do not implement from chat memory — use the linked SoTs.**
 
 ## What was locked

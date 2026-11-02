@@ -1,11 +1,12 @@
 # Extraction — eval / gold SoT
 
-> **Stage:** Extraction · **Gold schema:** `extraction-gold-v1` · **Status:** Locked (Session E) · **Last updated:** 24 Oct 2026  
+> **Stage:** Extraction · **Gold schema:** `extraction-gold-v1` · **Status:** Locked (Session E) · **Last updated:** 02 Nov 2026  
 > **Altitude:** Eval design + locked gold (24 cases). **Advisory** until build rewires the runner. Live harness still uses legacy `extract-v8` + [onboarding-extraction.gold.json](../../apps/api/src/ai/evals/onboarding-extraction.gold.json).
 
 **Related**
 
 - Product contract: [extraction.md](../../../02-product/contracts/extraction.md)
+- Model PRD (chip acceptance / invoke — not gold): [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md)
 - Prompt SoT: [prompts/extraction.md](../prompts/extraction.md) (`extraction-v1`)
 - Pipeline: [pipelines/extraction.md](../pipelines/extraction.md)
 - Locked gold: [extraction.gold.json](extraction.gold.json)
@@ -78,17 +79,23 @@ Lane keys: `identity` | `personalPriorities` | `organizationPriorities` | `stake
 
 ## 3. Metrics (layer 1)
 
-- Score each **present** lane separately.
-- Arrays (`topics`, `keywords`, `geographies`, `traditionalSources`, `socialSources`, `mentions`): precision / recall / F1 after agreed normalize (lowercase match keys where product stores lowercase; display forms for outlets as in prompt SoT).
-- Identity strings: exact match after trim; `function_label` lowercase.
+- Score each **present** lane separately. Compare model output **after** the same hygiene normalize the pipeline will apply (trim; lowercase match keys for topics / keywords / mentions / handles; identity strings after trim).
+- Arrays (`topics`, `keywords`, `geographies`, `traditionalSources`, `socialSources`, `mentions`): precision / recall / F1 on those match keys. Locked gold already stores **post-normalize** forms for topics/keywords/mentions (lowercase). Geographies and press keep display forms from the prompt SoT (`Bogotá`, `The New York Times`); score case-insensitively on the match key.
+- Identity strings: exact match after trim. `role_submitted` is English title case when present (or `""` when omit). `organization_submitted` as written. `function_label` lowercase. Identity cases pass that case’s `function_list` into the prompt (same as production).
 - Macro-average across fields in the fixture; report per-lane and overall.
 - Still **advisory** — does not gate release until explicitly promoted.
+- **Not scored here:** PostHog `extraction_chip_acceptance` / `extraction_invoke` (product analytics in the model PRD).
 
 ---
 
 ## 4. Locked suite
 
-See [extraction.gold.json](extraction.gold.json). The September draft examples were removed. All 24 replacement cases are locked.
+See [extraction.gold.json](extraction.gold.json). Wrapper: `schemaVersion: extraction-gold-v1`, `promptVersion: extraction-v1`, `examples` (24). The September draft examples were removed. All 24 replacement cases are locked.
+
+| `kind` | Count | Id prefix |
+|--------|------:|-----------|
+| `unit` | 18 | `unit-*` |
+| `integration` | 6 | `int-*` (includes `int-lane-separation-*`, formerly mis-prefixed `unit-lane-separation-*`) |
 
 ---
 
@@ -142,3 +149,5 @@ Not MVP. When built, it scores whether an extract followed the extraction rules 
 | 28 Sep 2026 | Metrics | Deterministic P/R MVP; judge later |
 | 24 Oct 2026 | Chip acceptance vs judge | Chip acceptance is PostHog `extraction_chip_acceptance`. The definition stays in the extraction PRD. Gold does not measure it. A future judge scores rule-following on unlabeled blurbs and does not score operator acceptance. |
 | 24 Oct 2026 | Seed | The locked suite is the 24 cases in extraction.gold.json. The `ex-01`–`ex-23` inventory is history, not build work. |
+| 02 Nov 2026 | Scoring | Gold arrays are post-normalize match keys; score after hygiene. Identity case rules explicit. |
+| 02 Nov 2026 | Ids | Rename `unit-lane-separation-*` → `int-lane-separation-*` so id prefix matches `kind: integration`. Expected JSON unchanged. |

@@ -13,7 +13,9 @@
 // users stub: same entity as Database library / Supabase auth hub (uid + email).
 // Full users shape is owned by tempo.dbml → Supabase; do not fork identity here.
 //
-// Chip acceptance (kept / removed / added) is a PostHog event. Spec: 02-product/prds/model--extraction--v1.md.
+// Chip acceptance (kept / removed / added) is PostHog extraction_chip_acceptance.
+// Invoke finished (success/fail) is PostHog extraction_invoke.
+// Spec: 02-product/prds/model--extraction--v1.md.
 // A chip removed on first Review is not a membership row, so this delta cannot be joined from tempo.dbml.
 // Offline gold scores are separate eval artifacts — not columns here.
 
