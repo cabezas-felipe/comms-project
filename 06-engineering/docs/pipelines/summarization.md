@@ -62,7 +62,7 @@ flowchart TD
 | Trigger | Ingestion [IR-11](../../../02-product/contracts/ingestion.md): new press admit (clock or warm) with body **in memory** |
 | Skip (no LLM, no run row) | X; no body; `article_summary` already present (incl. resurrect) |
 | Input | That URI’s **title + body only** (never multi-URI stitch). Full vendor body MVP — **no truncate N** until cost evidence ([L3](#8-decision-log-b2)) |
-| `trigger_id` | New UUID when entering the generate path; attempt 1 + 2 share it. **Stage-minted** — not inherited from ingestion or shared with story-tagging ([ingestion pipeline §5](./ingestion.md)) |
+| `trigger_id` | New UUID when entering the generate path; attempt 1 + 2 share it. **Stage-minted** — not inherited from ingestion or shared with story-tagging / metastory / personalization ([ingestion pipeline §5](./ingestion.md)) |
 | Attempt 1 | Haiku-class primary (`summarization-v1` prompt) |
 | Attempt 2 | Sonnet-class **only if** attempt 1 hits provider/timeout/config error **or** fails runtime validation. Max **2** LLM calls total |
 | Success | Persist `press_articles.article_summary`; write succeeded run row(s); return body to orchestrator |
@@ -132,7 +132,7 @@ Soft density (typically 2–4 sentences), long verbatim body-echo / overlap %, f
 
 | Knob | Default | Env (build) |
 |------|---------|-------------|
-| Per-attempt timeout | **15000** ms (ceiling; shared default with extraction + story-tagging) | `TEMPO_AI_SUMMARIZATION_TIMEOUT_MS` |
+| Per-attempt timeout | **15000** ms (ceiling; shared default with extraction + story-tagging + metastory + personalization) | `TEMPO_AI_SUMMARIZATION_TIMEOUT_MS` |
 | Concurrent URI summarizations per tick | **4** (clamp 1–8) | `TEMPO_AI_SUMMARIZATION_CONCURRENCY` |
 
 Per-URI attempts are **sequential** (Haiku then maybe Sonnet). Concurrency caps **how many URIs** may be in the summarization path at once.

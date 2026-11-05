@@ -75,7 +75,7 @@ flowchart TD
 | Empty aperture | Outcome **`skip`**: empty replace-set; no `trigger_id`; no run rows; no `story_tagging_invoke` |
 | Input text | Press: **title + body** in memory when body present; press: **title only** when body absent; X: keep-list **`text`**. Never `article_summary` alone. Full text MVP — **no truncate N** until cost evidence |
 | Catalog aperture | Full shared lexicon from Database library ([tempo.dbml](../data/tempo.dbml) · [dbdiagram](https://dbdiagram.io/d/Database-library-6ab4852e58694256127b2a37)): all `topics` / `keywords` / `geographies` rows at invoke (`topic_id`+`name`, `keyword_id`+`name`, `geography_id`+`name_normalized`). No chunking / retrieval in v1 |
-| `trigger_id` | New UUID when entering the **LLM** path; attempt 1 + 2 share it. **Stage-minted** — not inherited from ingestion or shared with summarization ([ingestion pipeline §5](./ingestion.md)) |
+| `trigger_id` | New UUID when entering the **LLM** path; attempt 1 + 2 share it. **Stage-minted** — not inherited from ingestion or shared with summarization / metastory / personalization ([ingestion pipeline §5](./ingestion.md)) |
 | Attempt 1 | Haiku-class primary (`story-tagging-v1` prompt) |
 | Attempt 2 | Sonnet-class **only if** attempt 1 hits provider/timeout/config error **or** fails runtime validation (V1–V2). Max **2** LLM calls total |
 | Post-validate | Per-kind aperture: drop unknown IDs and **wrong-shelf** IDs (do **not** move to another array); **dedupe** each array; empty valid set after drop/dedupe is still **success** |
@@ -144,7 +144,7 @@ Over-tag / under-tag quality, keyword match-term strictness, bilingual support �
 
 | Knob | Default | Env (build) |
 |------|---------|-------------|
-| Per-attempt timeout | **15000** ms (ceiling; shared default with extraction + summarization) | `TEMPO_AI_STORY_TAGGING_TIMEOUT_MS` |
+| Per-attempt timeout | **15000** ms (ceiling; shared default with extraction + summarization + metastory + personalization) | `TEMPO_AI_STORY_TAGGING_TIMEOUT_MS` |
 | Concurrent story-tagging invokes per tick | **4** (clamp 1–8) | `TEMPO_AI_STORY_TAGGING_CONCURRENCY` |
 
 Per-story attempts are **sequential** (Haiku then maybe Sonnet). Concurrency caps **how many stories** may be in the tagging path at once (pool-wide admits in a tick).

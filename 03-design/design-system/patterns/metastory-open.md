@@ -65,7 +65,7 @@ Aligned with the product value beat; eng field names in parentheses where they d
 | --- | --- |
 | **Why this matters** | Monitoring posture + comms readiness (`whyItMatters`) |
 | **What happened** | Multi-source synthesis (`Summary`) |
-| **What changed** | User-relative delta |
+| **What changed** | Shared prior vs current run (MR-09); null OK first mint only (D-102) |
 | **What comes next** | Context-grounded prep blurb for the brief action (non-directive; pp5) |
 | **Sources** | Provenance — key list on desktop; full cluster on mobile |
 
@@ -174,3 +174,7 @@ Same quiet text cells as desktop (`Outlet` + time), not bordered chips.
 ## Mobile (summary)
 
 Stack: Why → hairline → What happened → What changed → What comes next → Share brief → Sources (full-list horizontal scroll with peek + fade when overflowing). Keep **24px** between bands. Artboard height: min 844, `fit-content` when content exceeds (non-keyboard).
+
+## Product completeness (D-102)
+
+Open/feed chrome expects **title, subtitle, what happened**, and **what changed** (after first mint). Dashboard must not surface incomplete shared cards; generation requiredness owned by metastory writer/contract.

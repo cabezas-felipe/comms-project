@@ -6,12 +6,12 @@ First-principles database design for Tempo. dbdiagram renders version-controlled
 
 | Diagram | File | Cloud | Purpose |
 |---------|------|-------|---------|
-| **Database library** | [tempo.dbml](tempo.dbml) | [dbdiagram](https://dbdiagram.io/d/6ab4852e58694256127b2a37) | Product data — extraction lanes 1–5 + monitoring 6–11 (shared pool, metastories, feed, ops) |
+| **Database library** | [tempo.dbml](tempo.dbml) | [dbdiagram](https://dbdiagram.io/d/6ab4852e58694256127b2a37) | Product data — extraction lanes 1–5 + monitoring 6–11 (B3 amend §§8–9: D-102 · D-094) |
 | **Extraction runs** | [extraction-runs.dbml](extraction-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/Extraction-runs-6ab952050f25a52d011d406d) | Per-attempt LLM lineage for stage `extraction` |
 | **Summarization runs** | [summarization-runs.dbml](summarization-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28ffced134e407e37a6d0) | Per-attempt lineage for stage `summarization` (Locked B2 — `clock` \| `warm`) |
 | **Story-tagging runs** | [story-tagging-runs.dbml](story-tagging-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fe9ed134e407e37a621) | Per-attempt lineage for stage `story-tagging` (Locked B2a — `clock` \| `warm` \| `x_edit`) |
-| **Metastory runs** | [metastory-runs.dbml](metastory-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fb1ed134e407e37a484) | Per-attempt lineage for stage `metastory` (`call_kind` = boundary \| writer) |
-| **Personalization runs** | [personalization-runs.dbml](personalization-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fcfaac33014104ead45) | Per-attempt lineage for stage `personalization` |
+| **Metastory runs** | [metastory-runs.dbml](metastory-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fb1ed134e407e37a484) | Per-attempt lineage for stage `metastory` (Locked B3 — `call_kind` = boundary \| writer; `clock` \| `warm`) |
+| **Personalization runs** | [personalization-runs.dbml](personalization-runs.dbml) | [dbdiagram](https://dbdiagram.io/d/6ae28fcfaac33014104ead45) | Per-attempt lineage for stage `personalization` (Locked B4 design close — D-109 · D-110) |
 
 Ingestion has **no** runs page (rules + vendor jobs). Embed / cluster-propose are **not** metastory-runs rows.
 
@@ -26,7 +26,7 @@ Two bands on [the diagram](https://dbdiagram.io/d/6ab4852e58694256127b2a37): **e
 | # | Band | Group | Flow |
 |---|------|-------|------|
 | 1 | Extraction | **Account** | `users` (hub — `uid` + email; Supabase identity intent) |
-| 2 | Extraction | **Identity (blurb 1)** | blurb → model labels → post-model resolve → `function_id` + `organization_id` |
+| 2 | Extraction | **Identity (blurb 1)** | blurb → model labels → post-model resolve → `function_id` + `organization_id`; `practice_notes` per function (what-next) |
 | 3 | Extraction | **Priorities & retrieval (blurbs 2–3)** | blurbs → `user_topics\|keywords\|geographies` → facet catalogs (+ `vendor_concept_uri` on T/G) |
 | 4 | Extraction | **Stakeholders (blurb 4)** | blurb → per-user `mention` strings (no shared catalog) |
 | 5 | Extraction | **Sources (blurb 5)** | blurb → press/social membership → catalogs (+ `vendor_source_uri` / `x_user_id`) |
@@ -56,19 +56,19 @@ Canvas positions live in [tempo.dbdiagram](tempo.dbdiagram). After push, **fit-t
 | Area | Tables | Status |
 |------|--------|--------|
 | 1 · Account | `users` | Landed |
-| 2 · Identity (blurb 1) | `user_role_organization` + `functions` + org/industry catalogs (`roles` dropped in v1) | Landed |
+| 2 · Identity (blurb 1) | `user_role_organization` + `functions` + `practice_notes` + org/industry catalogs (`roles` dropped in v1) | Landed; practice-note bodies Locked F-pass — seed [practice-notes.seed.json](./practice-notes.seed.json) · handoff [practice-notes-seed.md](./practice-notes-seed.md) |
 | 3 · Priorities & retrieval (blurbs 2–3) | priority blurbs + `user_topics\|keywords\|geographies` + facet catalogs (+ vendor concept URIs) | Landed |
 | 4 · Stakeholders (blurb 4) | `user_stakeholders`, `user_stakeholder_mentions` | Landed |
 | 5 · Sources (blurb 5) | `user_sources` + press/social membership + catalogs (+ vendor source URI / X user id) | Landed |
 | 6 · Shared stories | `stories`, `press_articles`, `x_posts` | Closed (A3) |
 | 7 · Story chips | `story_topics\|keywords\|geographies` | Closed (A3) |
-| 8 · Metastories | `metastories`, `metastory_stories` | Closed (A3) |
-| 9 · Story embeddings | `story_embeddings` | Closed (A3) — dims N with embed SKU |
+| 8 · Metastories | `metastories`, `metastory_stories` | Closed (A3); **B3 amend** D-102 requiredness |
+| 9 · Story embeddings | `story_embeddings` | Closed (A3); **B3 amend** D-094 `vector(1536)` |
 | 10 · Feed membership | `user_feed_membership` | Closed (A3) |
 | 11 · Ingest ops | NewsAPI drain cursors, `x_word_search_cursor`, `x_post_download_cursors`, compliance jobs | Closed (A3) |
-| LLM run lineage | `extraction` + `summarization` (B2 locked) + `story-tagging` (B2a locked) + `metastory` + `personalization` `*-runs.dbml` | A4 stubs; summarization B2 + story-tagging B2a thickened |
+| LLM run lineage | `extraction` + `summarization` (B2) + `story-tagging` (B2a) + `metastory` (B3 locked) + `personalization` (B4 locked D-109 · D-110) `*-runs.dbml` | Personalization `trigger_kind` = `clock` \| `warm`; B4 design Locked; metastory Locked B3 (D-106) |
 
-**Phase A closed** (28 Oct 2026, [D-085](../../DECISIONS.md#2026-10-28---d-085---phase-a-closed-extraction--metastory-foundations)): contracts ↔ ERD ↔ vendor SoTs aligned; A3 monitoring SoT + A4 runs stubs done. Next: Phase B vertical deepen.
+**Phase A closed** (28 Oct 2026, [D-085](../../DECISIONS.md#2026-10-28---d-085---phase-a-closed-extraction--metastory-foundations)): contracts ↔ ERD ↔ vendor SoTs aligned; A3 monitoring SoT + A4 runs stubs done. Phase B design Locked through **B4** ([D-110](../../DECISIONS.md#2026-11-05---d-110---personalization-dbdbml-review-locked-b4-design-close)); Must coherence Closed. Runtime wire / migrate deferred. Status-header sync follow-on.
 
 **Blurbs (v1):** all five are **optional** — UX highly suggests; do not block finishing onboarding. Skip = no row, or row with NULL `blurb`. Dashboard is weak until filled; editable in account settings.
 
@@ -78,7 +78,7 @@ Canvas positions live in [tempo.dbdiagram](tempo.dbdiagram). After push, **fit-t
 
 **Scope chips (Review your scope / account):** extract → INSERT joins (`origin = extracted`) at commit (onboarding: Start monitoring; Account: successful merge). User **x** → `deleted_at` + `end_reason = user_removed`. **Add** → INSERT `user_added` (or clear end on same PK). Re-extract does **not** auto-drop Topics, Keywords, Geographies, Press, or Platforms (`superseded` unused on those joins). Newly proposed → INSERT or **resurrect** (clear `deleted_at` / `end_reason`, including prior `user_removed`). `user_added` untouched by re-extract. Active = `deleted_at IS NULL`. Eval reject = `extracted` + `user_removed`.
 
-**Identity (blurb 1):** Model emits `role_submitted` (display-only), `organization_submitted`, and `function_label` — never UUIDs. Post-model resolve: `function_label` → `functions.name` → `function_id`; `organization_submitted` → `organization_aliases` → `organization_id`. No `roles` / title catalog in v1. Durable function SoT is `functions`.
+**Identity (blurb 1):** Model emits `role_submitted` (display-only), `organization_submitted`, and `function_label` — never UUIDs. Post-model resolve: `function_label` → `functions.name` → `function_id`; `organization_submitted` → `organization_aliases` → `organization_id`. No `roles` / title catalog in v1. Durable function SoT is `functions`. **Practice notes:** author in [`02-product/practice-notes/`](../../../02-product/practice-notes/README.md); seed fixture [practice-notes.seed.json](./practice-notes.seed.json); build steps [practice-notes-seed.md](./practice-notes-seed.md). Load latest `version` by `function_id` for what-next; missing → PR-14 why-only.
 
 **Conventions:** **FK** = foreign key. Match keys (catalog names, aliases, handles, emails, mentions) store **lowercase**. Blurbs and `*_submitted` keep original casing for display. Blurb columns and blurb-1 resolved FKs / submitted extracts are **nullable**. Timestamps: user-owned + correctable catalogs (orgs, press, social) → `created_at` + `updated_at`; near-enums / lexicon (`functions`, `industries`, `topics`, `keywords`, `geographies`) and aliases → `created_at` only; scope memberships → `created_at` + `deleted_at` + `end_reason`.
 

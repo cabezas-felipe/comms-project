@@ -1,6 +1,6 @@
 # Why this matters — field doctrine
 
-> **Archived (MVP-era).** Historical product doctrine for `story.whyItMatters`. Do not treat as the active reconstruction SoT. Live product judgment: [principles](../../principles.md), [features bank](../../features-bank.md). Strategy: [`../../strategy/`](../../strategy/). New PRDs: [`../../prds/`](../../prds/).
+> **Archived (MVP-era).** Historical product doctrine for `story.whyItMatters`. Do not treat as the active reconstruction SoT. **Live why / what-next:** [personalization contract](../personalization.md) · [model--personalization--v1.md](../../prds/model--personalization--v1.md). Also: [principles](../../principles.md), [features bank](../../features-bank.md). Strategy: [`../../strategy/`](../../strategy/).
 
 **Status:** Archived (was: In progress / planning program)  
 **Owner:** Felipe  

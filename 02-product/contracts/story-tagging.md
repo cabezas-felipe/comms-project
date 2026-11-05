@@ -190,7 +190,7 @@ Operational / qualitative only for v1. Thin PostHog invoke `story_tagging_invoke
 
 | Artifact | Notes |
 |----------|-------|
-| [model--story-tagging--v1.md](../prds/model--story-tagging--v1.md) | **Spec locked (B2a PRD)** — Execution + Must + NFR |
+| [model--story-tagging--v1.md](../prds/model--story-tagging--v1.md) | **Spec locked (B2a PRD)** — Execution + Constraints (cite ST-*; no Must REQ table) + NFR; Must coherence Closed; B4 personalization design Locked (build deferred) |
 | [pipelines/story-tagging.md](../../06-engineering/docs/pipelines/story-tagging.md) | **Locked (B2a)** |
 | [prompts/story-tagging.md](../../06-engineering/docs/prompts/story-tagging.md) | **Locked (B2a)** — `story-tagging-v1` |
 | [evals/story-tagging.md](../../06-engineering/docs/evals/story-tagging.md) · [story-tagging.gold.json](../../06-engineering/docs/evals/story-tagging.gold.json) | **Locked (B2a)** — advisory harness at build |

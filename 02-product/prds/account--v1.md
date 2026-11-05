@@ -4,10 +4,10 @@ Let a confirmed-scope operator edit watch-scope chips and blurbs on **desktop we
 
 Status: Draft  
 Owner: Felipe  
-Update: 17 Oct 26  
+Update: 5 Nov 26  
 Intent: ship  
 
-**Stub** — Solution walk not started. Lock screens piece by piece (Paper Account · Tags / Context). **Invoke table + `trigger_kind` / `trigger_id` / a03g modes** locked in [model--extraction--v1.md](./model--extraction--v1.md); this file owns Account chrome, copy, and screen walk.
+**Stub** — Solution walk not started. Lock screens piece by piece (Paper Account · Tags / Context). **Invoke table + `trigger_kind` / `trigger_id` / a03g modes** locked in [model--extraction--v1.md](./model--extraction--v1.md); this file owns Account chrome, copy, and screen walk. **Deep-link target** for dashboard what-next-null chrome when function/role is incomplete ([dashboard--v1.md](./dashboard--v1.md) · [personalization PR-14](../contracts/personalization.md)) — exact CTA copy deferred to Paper walks.
 
 **Related**
 
@@ -85,6 +85,7 @@ Specimen IDs in flight (Paper): **a03a** / **a03f** (Context Save path), **a03g*
 | a03g dual-mode (not two screens) | Rare fails; one Account fail UI; Try again branches on client `fail_kind` | 17 Oct 26 | Operators confuse recover path |
 | `fail_kind` not in DBML | Ephemeral UI state; extract fails already leave `extraction_runs`; write fails never mint a run | 17 Oct 26 | Need durable audit of write fails |
 | a03g generic copy (MVP) | Rare; avoid copy matrix until evidence | 17 Oct 26 | Support tickets need clearer reason |
+| Dashboard deep-link for incomplete function | What-next-null chrome targets Account Context / role blurb | 5 Nov 26 | Paper Account + dashboard walks |
 
 ### Blocking open questions
 

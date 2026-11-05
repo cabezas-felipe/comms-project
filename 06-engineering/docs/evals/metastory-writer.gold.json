@@ -1,6 +1,1116 @@
 {
   "schemaVersion": "metastory-writer-gold-v1",
-  "promptVersion": "TBD",
-  "notes": "Stub only. examples is empty until eval craft. Do not treat as a passing suite.",
-  "examples": []
+  "promptVersion": "metastory-writer-v1",
+  "notes": "G2=A′+ / D-105 writer gold (23 cases). d05 evidence-earned length thicken 5 Nov 2026 (Felipe): happies/updates/judgment/baits thickened toward soft bars when evidence allows; carve-outs stay thin (mw-04, mw-07 changed, mw-14, mw-15, mw-17, mw-22, mw-23). Soft length advisory only — no new W-Fx. promptVersion metastory-writer-v1. Suite map: evals/metastory-writer.md.",
+  "examples": [
+    {
+      "id": "mw-01",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "happy",
+      "failure_mode": "W-F2",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000101",
+          "kind": "press",
+          "title": "U.S. and Colombia reopen market-access talks in Bogotá",
+          "article_summary_or_text": "U.S. and Colombian trade officials reopened agricultural market-access talks in Bogotá on Tuesday, covering coffee and inspection timelines.",
+          "outlet": "Reuters",
+          "published_at": "2026-10-14T15:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000102",
+          "kind": "press",
+          "title": "Bogotá talks resume on coffee and flower exports to the U.S.",
+          "article_summary_or_text": "Negotiators in Bogotá resumed discussions on coffee and cut-flower access to the U.S. market, with a work plan expected within days.",
+          "outlet": "AP",
+          "published_at": "2026-10-14T18:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "U.S. and Colombia reopen agricultural market-access talks in Bogotá",
+        "subtitle": "Coffee and cut-flower access on the agenda; work plan expected within days",
+        "what_happened": "On Tuesday in Bogotá, U.S. and Colombian trade officials reopened agricultural market-access talks covering coffee, cut flowers, and inspection timelines. Negotiators resumed the discussions, with coffee and cut-flower access on the table and a work plan expected within days.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "denylist_so_what",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Happy EN first_mint. All three required fields; what_changed null. d05 thicken happened → soft band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-02",
+      "source": "synthetic",
+      "language": "es",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "es_to_en",
+      "failure_mode": "W-F7",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000103",
+          "kind": "press",
+          "title": "Petro anuncia mesa de seguridad con gobernadores del Pacífico",
+          "article_summary_or_text": "El presidente Petro convocó una mesa de seguridad con gobernadores del Pacífico para coordinar respuestas a la violencia en la región.",
+          "outlet": "El Tiempo",
+          "published_at": "2026-09-02T12:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000104",
+          "kind": "press",
+          "title": "Gobernadores del Pacífico se reúnen con el Gobierno por la violencia",
+          "article_summary_or_text": "Gobernadores del Pacífico asistieron a una reunión con el Gobierno nacional para alinear medidas frente a la violencia en la costa.",
+          "outlet": "Semana",
+          "published_at": "2026-09-02T16:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Petro convenes Pacific security meeting with governors",
+        "subtitle": "Governors meet national government to align responses to regional violence",
+        "what_happened": "President Petro convened a security meeting with governors from Colombia's Pacific region to coordinate responses to violence along the coast. Governors from the Pacific attended the session with the national government to align measures against regional violence.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "denylist_so_what",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "W-F7: ES source members → English shared copy only. d05 thicken happened → soft band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-03",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "update",
+      "material_gate": "material",
+      "stress": "happy_update",
+      "failure_mode": "W-F3",
+      "prior": {
+        "title": "U.S. designates new sanctions on Venezuelan oil network",
+        "subtitle": "Washington targets a procurement network, officials said",
+        "what_happened": "The United States designated new sanctions targeting a Venezuelan oil procurement network, officials said in Washington.",
+        "what_changed": null
+      },
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000105",
+          "kind": "press",
+          "title": "U.S. designates new sanctions on Venezuelan oil network",
+          "article_summary_or_text": "The United States designated new sanctions targeting a Venezuelan oil procurement network, officials said in Washington.",
+          "outlet": "Reuters",
+          "published_at": "2026-07-01T12:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000106",
+          "kind": "press",
+          "title": "Treasury adds three firms to Venezuela oil sanctions list",
+          "article_summary_or_text": "Treasury added three trading firms to the Venezuela oil sanctions list, expanding last week’s designation.",
+          "outlet": "Bloomberg",
+          "published_at": "2026-07-08T12:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "U.S. designates new sanctions on Venezuelan oil network",
+        "subtitle": "Treasury expands the list with three trading firms",
+        "what_happened": "The United States designated new sanctions targeting a Venezuelan oil procurement network, officials said in Washington. Treasury then added three trading firms to the Venezuela oil sanctions list in a follow-on action that expanded the earlier designation.",
+        "what_changed": "Treasury expanded the sanctions by adding three trading firms to the Venezuela oil list, beyond the earlier designation of a Venezuelan oil procurement network."
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_nonempty_update",
+        "english_only",
+        "denylist_user_relative",
+        "title_prefer_ok",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Happy update; shared-run delta only (not user-relative). Prefer prior title. d05 thicken happened→soft band; changed evidence-thin under band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened_changed"
+      }
+    },
+    {
+      "id": "mw-04",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "invent_facts",
+      "failure_mode": "W-F1",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000107",
+          "kind": "press",
+          "title": "IMF staff visit discusses Colombia inflation outlook",
+          "article_summary_or_text": "An IMF staff visit discussed Colombia’s inflation outlook and policy options with finance officials in Bogotá.",
+          "outlet": "IMF note",
+          "published_at": "2026-06-01T10:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "IMF staff visit discusses Colombia inflation outlook",
+        "subtitle": "Talks with finance officials in Bogotá on policy options",
+        "what_happened": "An IMF staff visit discussed Colombia's inflation outlook and policy options with finance officials in Bogotá, according to the staff note.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "grounding_no_invent",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Invent-facts stress (W-F1): stay thin — near-verbatim member only. d05 carve-out: no soft-band pad. Arbiter: confirmed stay-thin 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_carveout_stay_thin"
+      }
+    },
+    {
+      "id": "mw-05",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "so_what_bait",
+      "failure_mode": "W-F6",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000108",
+          "kind": "press",
+          "title": "House passes narrow asylum staffing bill",
+          "article_summary_or_text": "The House passed a narrow bill that would add asylum officers at five southern ports and sent it to the Senate. Sponsors said staffing could rise within six months. Analysts said this matters for midterm messaging and means the White House must respond before recess.",
+          "outlet": "WaPo",
+          "published_at": "2026-04-03T18:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "House passes narrow asylum staffing bill",
+        "subtitle": "Measure to add officers at five ports heads to the Senate",
+        "what_happened": "The House passed a narrow bill that would add asylum officers at five southern ports of entry and sent the measure to the Senate. Sponsors said asylum staffing at those ports could rise within six months of enactment.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "denylist_so_what",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "So-what bait (W-F6): factual only — no midterm/White House must-respond. d05 thicken factual; under soft band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-06",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "update",
+      "material_gate": "material",
+      "stress": "user_relative_bait",
+      "failure_mode": "W-F3",
+      "prior": {
+        "title": "Bridge collapse on Colombia–Ecuador border kills three",
+        "subtitle": "Freight lanes closed after the span failed",
+        "what_happened": "A bridge collapse on a Colombia–Ecuador border crossing killed three people and closed freight lanes, authorities said.",
+        "what_changed": null
+      },
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000109",
+          "kind": "press",
+          "title": "Bridge collapse on border crossing kills three",
+          "article_summary_or_text": "A bridge collapse on a Colombia–Ecuador border crossing killed three people and closed freight lanes, authorities said.",
+          "outlet": "Reuters",
+          "published_at": "2026-03-15T07:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000110",
+          "kind": "press",
+          "title": "Freight halted after border bridge disaster",
+          "article_summary_or_text": "Freight traffic remained halted after the border bridge disaster that killed three, as inspectors assessed the span.",
+          "outlet": "El Comercio",
+          "published_at": "2026-03-15T20:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Bridge collapse on Colombia–Ecuador border kills three",
+        "subtitle": "Freight remains halted as inspectors assess the span",
+        "what_happened": "A bridge collapse on a Colombia–Ecuador border crossing killed three people and closed freight lanes, authorities said. Freight traffic remained halted after the border bridge disaster as inspectors assessed the damaged span on that crossing.",
+        "what_changed": "Freight traffic remained halted after the border bridge disaster that killed three, as inspectors assessed the span on the Colombia–Ecuador crossing."
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_nonempty_update",
+        "denylist_user_relative",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "User-relative bait (W-F3): shared-run delta only. d05 thicken; under soft band OK. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened_changed"
+      }
+    },
+    {
+      "id": "mw-07",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "update",
+      "material_gate": "material",
+      "stress": "thin_material_delta",
+      "failure_mode": "W-F4",
+      "prior": {
+        "title": "Hurricane Elsa strengthens over Caribbean",
+        "subtitle": "Sustained winds near 85 mph, NHC said",
+        "what_happened": "Hurricane Elsa strengthened over the eastern Caribbean with maximum sustained winds near 85 mph, the NHC said.",
+        "what_changed": null
+      },
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000111",
+          "kind": "press",
+          "title": "Hurricane Elsa strengthens over Caribbean",
+          "article_summary_or_text": "Hurricane Elsa strengthened over the eastern Caribbean with maximum sustained winds near 85 mph, the NHC said.",
+          "outlet": "NHC",
+          "published_at": "2026-08-20T06:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000112",
+          "kind": "press",
+          "title": "Elsa upgraded as it tracks west",
+          "article_summary_or_text": "Forecasters upgraded Elsa as the storm tracked west, warning islands in its path to prepare for heavy rain. Maximum sustained winds remained near 85 mph.",
+          "outlet": "Reuters",
+          "published_at": "2026-08-20T12:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Hurricane Elsa strengthens over Caribbean",
+        "subtitle": "Storm tracks west; islands warned of heavy rain",
+        "what_happened": "Hurricane Elsa strengthened over the eastern Caribbean with maximum sustained winds near 85 mph, the NHC said. Forecasters upgraded Elsa as it tracked west and warned islands in its path to prepare for heavy rain, with winds still near 85 mph.",
+        "what_changed": "Additional coverage noted Elsa tracking west with heavy-rain warnings for islands in its path; winds remained near 85 mph."
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_nonempty_update",
+        "english_only",
+        "grounding_no_invent",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Thin material delta (W-F4): thicken happened; keep what_changed thin (winds unchanged). Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened_keep_changed_thin"
+      }
+    },
+    {
+      "id": "mw-08",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "update",
+      "material_gate": "material",
+      "stress": "title_prefer",
+      "failure_mode": "W-F8",
+      "prior": {
+        "title": "Colombia election authority sets presidential debate schedule",
+        "subtitle": "Televised debates planned ahead of the first round",
+        "what_happened": "Colombia’s election authority published the schedule for televised presidential debates ahead of the first round.",
+        "what_changed": null
+      },
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000113",
+          "kind": "press",
+          "title": "Colombia election authority sets presidential debate schedule",
+          "article_summary_or_text": "Colombia’s election authority published the schedule for televised presidential debates ahead of the first round.",
+          "outlet": "Reuters",
+          "published_at": "2026-03-01T09:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000114",
+          "kind": "press",
+          "title": "Debate calendar confirmed for first-round presidential race",
+          "article_summary_or_text": "Officials confirmed the televised debate calendar for Colombia’s first-round presidential race, matching the earlier published schedule.",
+          "outlet": "El Tiempo",
+          "published_at": "2026-03-02T11:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Colombia election authority sets presidential debate schedule",
+        "subtitle": "Televised debates planned ahead of the first round",
+        "what_happened": "Colombia's election authority published the schedule for televised presidential debates ahead of the first round. Officials later confirmed that televised debate calendar for the first-round presidential race, matching the earlier published schedule.",
+        "what_changed": "Officials confirmed the televised debate calendar for Colombia's first-round presidential race, matching the earlier published schedule from the election authority."
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_nonempty_update",
+        "title_prefer_ok",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Title prefer: keep prior title. d05 thicken happened→soft band; changed confirmation-thin under band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened_changed"
+      }
+    },
+    {
+      "id": "mw-09",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "update",
+      "material_gate": "material",
+      "stress": "title_rename",
+      "failure_mode": "W-F8",
+      "prior": {
+        "title": "Peace talks scheduled for next month",
+        "subtitle": "Negotiators expected to meet in Bogotá",
+        "what_happened": "Negotiators said peace talks were scheduled for next month in Bogotá.",
+        "what_changed": null
+      },
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000115",
+          "kind": "press",
+          "title": "Government suspends planned peace talks indefinitely",
+          "article_summary_or_text": "The government suspended planned peace talks indefinitely after a weekend attack, officials said in Bogotá.",
+          "outlet": "Reuters",
+          "published_at": "2026-05-12T09:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000116",
+          "kind": "press",
+          "title": "Peace process on hold following weekend attack",
+          "article_summary_or_text": "Colombia’s peace process is on hold following a weekend attack; the previously scheduled talks will not proceed as planned.",
+          "outlet": "AP",
+          "published_at": "2026-05-12T14:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Government suspends planned peace talks indefinitely",
+        "subtitle": "Talks halted after a weekend attack, officials said",
+        "what_happened": "The government suspended planned peace talks indefinitely after a weekend attack, officials said in Bogotá. Reporting the same day said Colombia's peace process is on hold following the attack, and the previously scheduled talks will not proceed as planned.",
+        "what_changed": "Planned peace talks that had been set for Bogotá were suspended indefinitely after a weekend attack; officials said the previously scheduled talks will not proceed and the peace process is on hold."
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_nonempty_update",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Title rename warranted by suspend/on-hold evidence. d05 thicken happened+changed → soft bands. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened_changed"
+      }
+    },
+    {
+      "id": "mw-10",
+      "source": "synthetic",
+      "language": "mixed",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "bilingual_members",
+      "failure_mode": "W-F7",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000117",
+          "kind": "press",
+          "title": "U.S. Embassy issues security alert for Cali protests",
+          "article_summary_or_text": "The U.S. Embassy issued a security alert advising U.S. citizens to avoid protest areas in Cali on Friday evening.",
+          "outlet": "US Embassy",
+          "published_at": "2026-04-18T16:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000118",
+          "kind": "press",
+          "title": "Autoridades de Cali confirman concentraciones en el centro",
+          "article_summary_or_text": "Las autoridades de Cali confirmaron concentraciones en el centro de la ciudad y pidieron evitar la zona durante la noche.",
+          "outlet": "Alcaldía",
+          "published_at": "2026-04-18T18:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Cali protests prompt U.S. Embassy security alert",
+        "subtitle": "City officials confirm downtown gatherings Friday evening",
+        "what_happened": "The U.S. Embassy issued a security alert advising U.S. citizens to avoid protest areas in Cali on Friday evening. Cali city authorities confirmed downtown gatherings in the city center the same evening and asked people to avoid the area during the night.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "W-F7: mixed EN/ES members → English shared copy only. d05 thicken happened → soft band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-11",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "press_plus_x",
+      "failure_mode": "W-F2",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000119",
+          "kind": "press",
+          "title": "White House announces new tariff comment period",
+          "article_summary_or_text": "The White House announced a public comment period on proposed tariff adjustments affecting industrial goods.",
+          "outlet": "WaPo",
+          "published_at": "2026-09-10T14:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000120",
+          "kind": "x",
+          "title": "White House",
+          "article_summary_or_text": "Today we opened a public comment period on proposed tariff adjustments for industrial goods. Details on WhiteHouse.gov.",
+          "outlet": "@WhiteHouse",
+          "published_at": "2026-09-10T14:30:00Z"
+        }
+      ],
+      "expected": {
+        "title": "White House opens tariff comment period on industrial goods",
+        "subtitle": "Public comments invited on proposed adjustments",
+        "what_happened": "The White House announced a public comment period on proposed tariff adjustments affecting industrial goods. The official White House X account posted the same notice the same day, directing the public to WhiteHouse.gov for details on the proposed adjustments.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Happy press+X first_mint. All three required fields; what_changed null. d05 thicken happened → soft band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-12",
+      "source": "synthetic",
+      "language": "es",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "continuity_case",
+      "failure_mode": "W-F7",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000121",
+          "kind": "press",
+          "title": "Fiscalía imputa a exministro por irregularidades en contrato",
+          "article_summary_or_text": "La Fiscalía imputó a un exministro por irregularidades en un contrato de infraestructura firmado durante su gestión.",
+          "outlet": "El Espectador",
+          "published_at": "2026-01-20T10:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000122",
+          "kind": "press",
+          "title": "Juez abre audiencia preparatoria en caso del exministro",
+          "article_summary_or_text": "Un juez abrió la audiencia preparatoria en el caso del exministro investigado por el contrato de infraestructura.",
+          "outlet": "W Radio",
+          "published_at": "2026-02-03T15:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Former minister charged over infrastructure contract irregularities",
+        "subtitle": "Judge opens preparatory hearing in the same case",
+        "what_happened": "Colombia's prosecutors charged a former minister over irregularities in an infrastructure contract signed during his tenure. A judge later opened a preparatory hearing in the same case against the former minister under investigation for that contract.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "ES→EN continuity first_mint (W-F7). d05 thicken happened → soft band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-13",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "update",
+      "material_gate": "material",
+      "stress": "continuity_update",
+      "failure_mode": "W-F1",
+      "prior": {
+        "title": "Two candidates advance to Colombia presidential runoff",
+        "subtitle": "First-round results set the matchup",
+        "what_happened": "Colombia’s first-round presidential results left two candidates heading to a runoff, with partial tallies confirming the matchup.",
+        "what_changed": null
+      },
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000123",
+          "kind": "press",
+          "title": "First-round results leave two candidates in Colombia runoff",
+          "article_summary_or_text": "Colombia’s first-round presidential results left two candidates heading to a runoff, with partial tallies confirming the matchup.",
+          "outlet": "Reuters",
+          "published_at": "2026-05-30T02:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000124",
+          "kind": "press",
+          "title": "Runoff rivals open final stretch of Colombia presidential campaign",
+          "article_summary_or_text": "The two runoff contenders opened the final stretch of Colombia’s presidential campaign with rallies in Bogotá and Medellín.",
+          "outlet": "AP",
+          "published_at": "2026-06-05T19:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000125",
+          "kind": "press",
+          "title": "Observers deploy for Colombia’s presidential runoff vote",
+          "article_summary_or_text": "Electoral observers began deploying nationwide ahead of Colombia’s presidential runoff vote this weekend.",
+          "outlet": "WaPo",
+          "published_at": "2026-06-12T08:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Two candidates advance to Colombia presidential runoff",
+        "subtitle": "Campaign enters final stretch; observers deploy for weekend vote",
+        "what_happened": "Colombia's first-round presidential results left two candidates heading to a runoff, with partial tallies confirming the matchup. The contenders opened the final stretch of the campaign with rallies in Bogotá and Medellín, and electoral observers began deploying nationwide ahead of the runoff this weekend.",
+        "what_changed": "Runoff campaigning entered its final stretch with rallies in Bogotá and Medellín, and electoral observers began deploying nationwide ahead of Colombia's presidential runoff this weekend."
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_nonempty_update",
+        "title_prefer_ok",
+        "english_only",
+        "grounding_no_invent",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Continuity update; ground only in members (W-F1). d05 thicken happened+changed. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened_changed"
+      }
+    },
+    {
+      "id": "mw-14",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "body_leakage",
+      "failure_mode": "W-F5",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000126",
+          "kind": "press",
+          "title": "Central bank holds interest rate unchanged",
+          "article_summary_or_text": "Colombia’s central bank held its policy interest rate unchanged after a split board vote, a statement said.",
+          "outlet": "BanRep",
+          "published_at": "2026-06-01T22:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Colombia central bank holds interest rate unchanged",
+        "subtitle": "Decision followed a split board vote",
+        "what_happened": "Colombia's central bank held its policy interest rate unchanged after a split board vote.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "no_body_dump",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "W-F5 body_leakage carve-out: stay thin; no invented body/board quotes; drop statement-attribution crutches. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_carveout_stay_thin_no_statement_attr"
+      }
+    },
+    {
+      "id": "mw-15",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "thin_evidence",
+      "failure_mode": "W-F1",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000127",
+          "kind": "press",
+          "title": "Port strike delays cargo",
+          "article_summary_or_text": "A strike at an Atlantic port slowed container moves overnight. Authorities gave no timeline for a return to normal operations.",
+          "outlet": "Wire",
+          "published_at": "2026-02-01T06:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Atlantic port strike slows container moves",
+        "subtitle": "Authorities give no timeline for restoring normal operations",
+        "what_happened": "A strike at an Atlantic port slowed container moves overnight. Authorities gave no timeline for a return to normal operations.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "grounding_no_invent",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Thin evidence (W-F1) carve-out: stay thin — no invented port/union/timeline. d05 confirmed stay-thin. Arbiter: confirmed 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_carveout_stay_thin"
+      }
+    },
+    {
+      "id": "mw-16",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "update",
+      "material_gate": "material",
+      "stress": "membership_plus_n",
+      "failure_mode": "W-F4",
+      "prior": {
+        "title": "White House opens tariff comment period on industrial goods",
+        "subtitle": "Public comments invited on proposed adjustments",
+        "what_happened": "The White House announced a public comment period on proposed tariff adjustments affecting industrial goods.",
+        "what_changed": null
+      },
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000128",
+          "kind": "press",
+          "title": "White House announces new tariff comment period",
+          "article_summary_or_text": "The White House announced a public comment period on proposed tariff adjustments affecting industrial goods.",
+          "outlet": "WaPo",
+          "published_at": "2026-09-10T14:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000129",
+          "kind": "press",
+          "title": "Trade groups prepare filings for tariff comment window",
+          "article_summary_or_text": "U.S. trade groups said they are preparing filings for the White House tariff comment window on industrial goods; no policy change was announced beyond the comment period itself.",
+          "outlet": "Bloomberg",
+          "published_at": "2026-09-11T10:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "White House opens tariff comment period on industrial goods",
+        "subtitle": "Trade groups prepare filings for the comment window",
+        "what_happened": "The White House announced a public comment period on proposed tariff adjustments affecting industrial goods. U.S. trade groups said they are preparing filings for that window on industrial goods; no policy change was announced beyond the comment period itself.",
+        "what_changed": "U.S. trade groups said they are preparing filings for the White House tariff comment window on industrial goods; no policy change was announced beyond the comment period itself."
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_nonempty_update",
+        "title_prefer_ok",
+        "grounding_no_invent",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Membership +n; thin material (W-F4) — no invented drama in what_changed. d05 thicken happened→soft band; changed honest-under. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened_changed"
+      }
+    },
+    {
+      "id": "mw-17",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "prescribe_bait",
+      "failure_mode": "W-F6",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000130",
+          "kind": "press",
+          "title": "Ministers urge calm after overnight clashes",
+          "article_summary_or_text": "Ministers urged calm after overnight clashes in several cities. One columnist wrote that leaders should resign and that readers must prepare for a national strike next week.",
+          "outlet": "National daily",
+          "published_at": "2026-01-08T09:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Ministers urge calm after overnight clashes",
+        "subtitle": "Clashes reported in several cities overnight",
+        "what_happened": "Ministers urged calm after overnight clashes in several cities, according to reporting on the unrest.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "denylist_so_what",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Prescribe bait (W-F6): factual ministers-urge-calm only; no resign/strike. Stay thin (carve-out). Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_factual_thin"
+      }
+    },
+    {
+      "id": "mw-18",
+      "source": "synthetic",
+      "language": "mixed",
+      "mode": "update",
+      "material_gate": "material",
+      "stress": "mixed_update",
+      "failure_mode": "W-F7",
+      "prior": {
+        "title": "Congress resumes pension reform debate in Bogotá",
+        "subtitle": "Government and opposition intervene in sessions",
+        "what_happened": "Congress resumed debate on pension reform in Bogotá with interventions from government and opposition parties.",
+        "what_changed": null
+      },
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000131",
+          "kind": "press",
+          "title": "Congreso debate reforma pensional en Bogotá",
+          "article_summary_or_text": "El Congreso retomó el debate de la reforma pensional en sesiones en Bogotá con intervenciones de partidos de gobierno y oposición.",
+          "outlet": "La Silla Vacía",
+          "published_at": "2026-04-10T13:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000132",
+          "kind": "press",
+          "title": "Key pension reform article advances in committee",
+          "article_summary_or_text": "A key article of Colombia’s pension reform advanced in committee after a close vote, lawmakers said.",
+          "outlet": "Reuters",
+          "published_at": "2026-04-11T17:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Congress resumes pension reform debate in Bogotá",
+        "subtitle": "Key article advances in committee after a close vote",
+        "what_happened": "Congress resumed debate on Colombia's pension reform in sessions in Bogotá with interventions from government and opposition parties. Reporting the next day said a key article of the reform advanced in committee after a close vote, according to lawmakers.",
+        "what_changed": "A key article of Colombia's pension reform advanced in committee after a close vote, lawmakers said, after Congress had resumed the Bogotá debate sessions."
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_nonempty_update",
+        "english_only",
+        "title_prefer_ok",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Mixed ES/EN members → English shared copy (W-F7). d05 thicken happened→soft band; changed thin-under. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened_changed"
+      }
+    },
+    {
+      "id": "mw-19",
+      "source": "derived_real",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "happy",
+      "failure_mode": "W-F1",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000133",
+          "kind": "press",
+          "title": "Brazil election to reshape trade with US, with tariffs and minerals at stake",
+          "article_summary_or_text": "Two starkly different visions for US-Brazil relations hang in the balance in Brazil’s presidential runoff, with tariffs and minerals at stake.",
+          "outlet": "Reuters",
+          "published_at": "2026-10-09T12:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000134",
+          "kind": "press",
+          "title": "Runoff choice puts US-Brazil trade and minerals policy on the ballot",
+          "article_summary_or_text": "Brazil’s presidential runoff frames a choice over tariffs and critical minerals cooperation with the United States, analysts tracking the race said.",
+          "outlet": "Synthetic companion",
+          "published_at": "2026-10-09T18:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Brazil runoff puts US trade and minerals policy on the ballot",
+        "subtitle": "Tariffs and critical minerals cooperation at stake",
+        "what_happened": "Brazil's presidential runoff frames contrasting visions for US-Brazil relations, with tariffs and critical minerals cooperation at stake. Coverage of the race said two starkly different approaches to trade with the United States hang in the balance for voters.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "grounding_no_invent",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Derived_real EN first_mint; ground only in members (W-F1). d05 thicken happened → soft band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-20",
+      "source": "derived_real",
+      "language": "es",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "happy",
+      "failure_mode": "W-F7",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000135",
+          "kind": "press",
+          "title": "Gobierno publicó el decreto que oficializa la llegada de Alejandro Ordóñez al Ministerio del Interior",
+          "article_summary_or_text": "El nuevo jefe de la cartera política se posesionaría la próxima semana en el cargo.",
+          "outlet": "Semana",
+          "published_at": "2026-10-01T12:00:00Z"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000136",
+          "kind": "press",
+          "title": "Decreto confirma a Ordóñez como ministro del Interior; posesión la próxima semana",
+          "article_summary_or_text": "Un decreto del Gobierno confirma el nombramiento en Interior y apunta la posesión para la próxima semana.",
+          "outlet": "Synthetic companion",
+          "published_at": "2026-10-01T15:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Government decree names Alejandro Ordóñez interior minister",
+        "subtitle": "Swearing-in expected next week",
+        "what_happened": "The government published a decree confirming Alejandro Ordóñez as interior minister and head of the political portfolio. A companion report said the decree confirms the Interior appointment, with the swearing-in expected the following week.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "grounding_no_invent",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Derived_real ES→EN (W-F7). d05 thicken happened; evidence-thin under soft band. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-21",
+      "source": "derived_real",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "happy",
+      "failure_mode": "W-F1",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000137",
+          "kind": "press",
+          "title": "Mexico comes alive with color and tradition for Day of the Dead",
+          "article_summary_or_text": "Bright orange marigolds, glowing candles, and painted faces fill Mexico's streets during the Day of the Dead celebrations.",
+          "outlet": "Reuters",
+          "published_at": "2026-11-01T12:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Mexico marks Day of the Dead with street celebrations",
+        "subtitle": "Marigolds, candles, and painted faces fill public spaces",
+        "what_happened": "Mexico came alive with color and tradition for Day of the Dead as bright orange marigolds, glowing candles, and painted faces filled the country's streets during the celebrations, according to coverage of the festivities.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "grounding_no_invent",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Derived_real single-member EN; d05 thicken max evidence-earned (under soft band). Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_thicken_happened"
+      }
+    },
+    {
+      "id": "mw-22",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "requiredness",
+      "failure_mode": "W-F2",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000138",
+          "kind": "x",
+          "title": "BanRep",
+          "article_summary_or_text": "Policy rate held unchanged after a split board vote.",
+          "outlet": "@BanRep",
+          "published_at": "2026-06-01T22:15:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Colombia central bank holds policy rate unchanged",
+        "subtitle": "Split board vote, per BanRep post",
+        "what_happened": "Colombia's central bank held its policy rate unchanged after a split board vote.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "X-only requiredness (W-F2) carve-out: stay thin; source cue in subtitle; no post-attribution in happened. Arbiter: re-locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_carveout_stay_thin_no_post_attr"
+      }
+    },
+    {
+      "id": "mw-23",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "first_mint",
+      "material_gate": "first_mint",
+      "stress": "invent_outlet",
+      "failure_mode": "W-F1",
+      "prior": null,
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000139",
+          "kind": "press",
+          "title": "Mudslide blocks highway outside Medellín after heavy rains",
+          "article_summary_or_text": "Heavy rains triggered a mudslide that blocked a major highway outside Medellín, stranding freight traffic overnight.",
+          "outlet": "El Colombiano",
+          "published_at": "2026-03-01T11:00:00Z"
+        }
+      ],
+      "expected": {
+        "title": "Mudslide blocks highway outside Medellín after heavy rains",
+        "subtitle": "Freight traffic stranded overnight",
+        "what_happened": "Heavy rains triggered a mudslide that blocked a major highway outside Medellín, stranding freight traffic overnight.",
+        "what_changed": null
+      },
+      "code_checks": [
+        "valid_json",
+        "required_fields_nonempty",
+        "what_changed_null_first_mint",
+        "english_only",
+        "grounding_no_invent",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Invent-outlet stress (W-F1): stay thin; only El Colombiano in Members — no invented wires. d05 carve-out confirmed. Arbiter: confirmed 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "d05_carveout_stay_thin"
+      }
+    }
+  ]
 }

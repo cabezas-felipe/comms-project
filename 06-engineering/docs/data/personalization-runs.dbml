@@ -1,8 +1,12 @@
 // Tempo — Personalization runs (design ERD)
 // Cloud: https://dbdiagram.io/d/6ae28fcfaac33014104ead45
 // Title: Personalization runs
+// Status: Locked (B4 design close) · Last updated: 5 Nov 2026 (D-109 trigger_kind · D-110 DB/DBML review)
 //
 // Sibling to tempo.dbml (product Database library) and extraction-runs.dbml.
+// Product / eng SoTs: contracts/personalization.md · pipelines/personalization.md ·
+// prompts/personalization.md · evals/personalization.md
+//
 // Intent: per-attempt LLM lineage for stage=personalization.
 // Not live Supabase until migrated. DBML is the design map.
 //
@@ -10,7 +14,7 @@
 // Skip-if-unchanged (PR-08) and out-of-feed (no generate) do NOT insert rows.
 //
 // Forward compat:
-//   trigger_kind — varchar until Phase B4 locks a closed enum
+//   trigger_kind — closed enum clock | warm (D-109); no UX / no x_edit
 //   stage        — default 'personalization'; path toward shared ai_runs later
 //
 // No output_json — why/what-next on user_feed_membership are SoT.
@@ -18,7 +22,12 @@
 
 Project personalization_runs {
   database_type: 'PostgreSQL'
-  Note: 'Per-attempt LLM lineage for stage=personalization. Sibling to product Database library. Cache-skip / no-model paths do not insert rows.'
+  Note: 'Per-attempt LLM lineage for stage=personalization. Sibling to product Database library. Cache-skip / no-model paths do not insert rows. Locked B4 (D-109).'
+}
+
+Enum personalization_run_trigger_kind {
+  clock
+  warm
 }
 
 Enum personalization_run_status {
@@ -61,12 +70,12 @@ Table metastories {
 Table personalization_runs {
   run_id uuid [pk]
   trigger_id uuid [not null, note: 'Shared by attempts for one invoke; primary + one retry (≤2)']
-  trigger_kind varchar(64) [not null, note: 'Provisional until B4 locks closed enum (e.g. clock | warm | retry)']
+  trigger_kind personalization_run_trigger_kind [not null, note: 'clock | warm — parent ingestion job only; no UX regenerate; retries inherit kind (not a separate enum value). D-109']
   stage varchar(64) [not null, default: 'personalization', note: 'Forward compat toward multi-stage ai_runs']
   user_id uuid [not null, ref: > users.uid]
   metastory_id uuid [not null, ref: > metastories.metastory_id]
   status personalization_run_status [not null]
-  model_provider varchar(64) [not null, note: 'e.g. anthropic — SKU locked in B4']
+  model_provider varchar(64) [not null, note: 'e.g. anthropic — SKU locked in B4 prompt']
   model_id varchar(128) [not null, note: 'Router SKU; filled at write time']
   prompt_version varchar(64) [not null, note: 'e.g. personalization-v1']
   input_hash varchar(64) [not null, note: 'SHA-256 hex of canonical model input (grounding + profile + practice-note id/version); excludes system prompt; aligns with PR-09 cache-key classes']
@@ -83,5 +92,5 @@ Table personalization_runs {
     (prompt_version, started_at)
   }
 
-  Note: 'No output_json (user_feed_membership why/what-next is SoT). No eval_scores. PR-08 cache skip and out-of-feed do not insert rows. UI gate remains personalized_at on membership (PR-12).'
+  Note: 'No output_json (user_feed_membership why/what-next is SoT). No eval_scores. PR-08 cache skip and out-of-feed do not insert rows. UI gate remains personalized_at on membership (PR-12). Locked B4 (D-109).'
 }

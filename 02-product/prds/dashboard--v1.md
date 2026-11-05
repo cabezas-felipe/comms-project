@@ -4,11 +4,11 @@ Give a solo operator a scoped feed of metastories and an open view (what happene
 
 Status: Draft  
 Owner: Felipe  
-Update: 28 Oct 26  
+Update: 5 Nov 26  
 Intent: ship  
 Execution spec: waived by PM until Solution walk locks against Paper
 
-**Stub.** Behavior locks and UX walk come next. Do not invent screens or copy here. Formula weights stay out until a later lock.
+**Stub.** Behavior locks and UX walk come next. Do not invent screens or copy here. Formula weights stay out until a later lock. No separate dashboard UX contract (same pattern as onboarding).
 
 **Owns (product)**
 
@@ -58,16 +58,18 @@ Execution spec: waived by PM until Solution walk locks against Paper
 
 ---
 
+**Parked from metastory D-102 (encode at B5 thicken):** Feed shows at most **≤5** metastories; **only list/open metastories with complete shared copy** (title + subtitle + what_happened; what_changed required after first mint — null OK on first-mint cards). Incomplete cards must not appear as 20% “missing” monitoring. Writer fail-closed remains metastory-owned; dashboard is the display safety net.
+
 ## Solution
 
 ### Overview
 
-Stub. Feed = **feed membership** (user ↔ metastory) after **join** (source ∧ ≥1 chip) over shared metastories — UI lists only members with personalization present (`personalized_at`; never blank why/next). Open view = Paper metastory-open (d08 family): shared title / subtitle / what happened / what changed + per-user why / what comes next. Source rail opens the [source reader](../../03-design/design-system/patterns/source-reader.md): press snippet = **article summary** when present (labeled as Tempo’s summary — not the article); X = post text; **Open original** at end of path. No summary → title + meta + Open original only.
+Stub. Feed = **feed membership** (user ↔ metastory) after **join** (source ∧ ≥1 chip) over shared metastories — UI lists/opens only when **why** is present (`personalized_at` set per [personalization PR-12](../contracts/personalization.md); never blank why). **What comes next** may be null when function is unresolved or practice note missing ([PR-14](../contracts/personalization.md)) — this PRD owns **chrome** for that slot (CTA to complete function/role in [account](./account--v1.md)); defer exact copy/layout to Paper walk. Never fabricate what-next in the UI. Open view = Paper metastory-open (d08 family): shared title / subtitle / what happened / what changed + per-user why / what comes next (or chrome). Source rail opens the [source reader](../../03-design/design-system/patterns/source-reader.md): press snippet = **article summary** when present (labeled as Tempo’s summary — not the article); X = post text; **Open original** at end of path. No summary → title + meta + Open original only.
 
 ### Scope
 
-**In:** Feed UX, open metastory UX, join → feed membership, product meaning of rank pills and orders, cutover UX (last-good until clock; warm hooks).  
-**Out:** Vendor matrices; LLM prompts; frozen formula math (link out when written); extraction Review; story-chip tagging; article-summary generation.
+**In:** Feed UX, open metastory UX, join → feed membership, product meaning of rank pills and orders, cutover UX (last-good until clock; warm hooks), **personalization completeness chrome** (why present / what-next null → account CTA).  
+**Out:** Vendor matrices; LLM prompts; why/what-next **generation** ([personalization](../contracts/personalization.md)); frozen formula math (link out when written); extraction Review; story-chip tagging; article-summary generation; separate dashboard UX contract.
 
 ### Source order inside a metastory (proposal — not locked)
 
@@ -95,5 +97,6 @@ Each item’s own article/post **URL** is for Open original / source reader — 
 | A2 coherence | Join = source ∧ ≥1 chip; feed membership term; clock/warm/last-good aligned to ingestion; contracts locked pointers | 27 Oct 26 | Contract rename |
 | Source-reader snippet = article summary | NewsAPI has no excerpt; operators need in-app scan; disclosure + Open original ([D-076](../../06-engineering/DECISIONS.md)) | 28 Oct 26 | Paper d08 copy / counsel |
 | A2′ (story-tagging in set) | Gaps list includes story-tagging; article-summary gen vs source-reader display ownership; join/source-order wording unchanged | 28 Oct 26 | Contract rename |
+| Personalization completeness chrome | List/open on why (`personalized_at`); what-next-null → account CTA; no dashboard contract | 5 Nov 26 | Paper walk / B5 |
 
-**Next (not blocking on contracts):** Solution walk vs Paper (d08 disclosure copy); formula locks later.
+**Next (not blocking on contracts):** Solution walk vs Paper (d08 disclosure copy; what-next-null chrome); formula locks later.

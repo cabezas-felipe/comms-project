@@ -1,6 +1,1079 @@
 {
   "schemaVersion": "personalization-gold-v1",
-  "promptVersion": "TBD",
-  "notes": "Stub only. examples is empty until eval craft. Do not treat as a passing suite.",
-  "examples": []
+  "promptVersion": "personalization-v1",
+  "notes": "Ev3′ A / Ev4 A (5 Nov 2026): 24 synthetic cases p-01…24. Arbiter LOCKED 5 Nov 2026 (Felipe) — all cases. Code checks + human gold; no LLM judge. expected = arbiter-reference (not CI string-equal). Practice note bodies from practice-notes.seed.json version 2 (em-dash house style). promptVersion personalization-v1. Suite map: evals/personalization.md.",
+  "examples": [
+    {
+      "id": "p-01",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "communications",
+      "case_family": "framing_drift",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "Outlets reframe Bogotá security talks as political rift",
+          "subtitle": "Same meeting, sharper partisan angle overnight",
+          "what_happened": "Coverage of a routine bilateral security consult in Bogotá shifted overnight from procedural updates to claims of a partisan rift, without new facts on the agenda.",
+          "what_changed": "Headline framing moved from meeting logistics to political conflict while the underlying consult details stayed the same."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "communications",
+        "practice_note": {
+          "id": "seed-communications-v2",
+          "version": 2,
+          "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A partisan reading of an unchanged bilateral security consult can unsettle the calm baseline that predictable U.S. market access for Colombian agricultural exports depends on. Surprise compliance costs for growers are easier to avoid when partners still see a stable process rather than a political rift. The so-what is whether the public line still holds under that frame, not a change in the consult itself.",
+        "what_comes_next": "Check whether the current line still fits the sharper partisan frame for House agriculture staff, flower exporters, and importers. If it does not, prepare an alternate framing plus holding-line and Q&A points for principal review, not a cleared release."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: framing_drift. Thickened to soft bars; stakeholders in what-next only; no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B"
+      }
+    },
+    {
+      "id": "p-02",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "communications",
+      "case_family": "inbound_statement",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "Major U.S. outlet seeks comment on embassy consular backlog story",
+          "subtitle": "Reporter deadline tonight on wait times",
+          "what_happened": "A national U.S. outlet asked the embassy for comment on reported consular appointment backlogs, citing wait-time figures from applicants. A reply window was given for the same evening.",
+          "what_changed": "The story moved from social complaints into an on-record media request with a same-day deadline."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "communications",
+        "practice_note": {
+          "id": "seed-communications-v2",
+          "version": 2,
+          "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "An on-record U.S. outlet request with a same-evening window turns applicant wait-time complaints into a formal public test of how the embassy handles backlog claims. Principals can be asked about figures they have not cleared before the reply window closes. The so-what is exposure on the record under deadline pressure, not a judgment on whether the backlog numbers are fair.",
+        "what_comes_next": "Assemble known versus unknown facts on appointment wait times ahead of the same-evening window and prepare a holding line for whoever owns media response. Add Q&A points for principal review, and note a likely sign-off owner only when inputs support it, not a finished statement."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: inbound_statement. Honest why (no forced org/ag bridge); no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_honest_why_no_ag_bridge"
+      }
+    },
+    {
+      "id": "p-03",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "communications",
+      "case_family": "correction",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "Mission statement understated protest size in earlier note",
+          "subtitle": "Later police figures contradict first description",
+          "what_happened": "An earlier mission note described a downtown protest as small. Later police estimates put attendance several times higher, and local outlets are using the higher figure.",
+          "what_changed": "Authoritative crowd estimates now conflict with the mission's first description."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "communications",
+        "practice_note": {
+          "id": "seed-communications-v2",
+          "version": 2,
+          "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "An earlier mission note called a downtown protest small while later police estimates, now used by local outlets, put attendance several times higher. If the first description is still treated as current, principals can be asked about a figure the mission itself has already outgrown. The so-what is correction risk on the record, not a new verdict on how large the protest was.",
+        "what_comes_next": "Gather what the earlier note said versus what police estimates and outlets now use as the attendance figure. Prepare correction options for the right owner to choose, and list who may need internal awareness only if inputs name them, not a notify-now order."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: correction. Honest why (no forced org/ag bridge); no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B_honest_why"
+      }
+    },
+    {
+      "id": "p-04",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "communications",
+      "case_family": "misinfo",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "False claim circulates that visa interviews were canceled nationwide",
+          "subtitle": "Unverified social posts cite a nonexistent notice",
+          "what_happened": "Social posts claimed all U.S. visa interviews in Colombia were canceled, citing a forged notice. Official scheduling channels showed no such cancellation.",
+          "what_changed": "A forged cancellation claim began circulating without confirmation from official channels."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "communications",
+        "practice_note": {
+          "id": "seed-communications-v2",
+          "version": 2,
+          "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A forged notice claiming nationwide U.S. visa interview cancellations in Colombia is circulating even though official scheduling channels show no such change. Unverified claims like this can still pull principals into questions before facts are cleared. The so-what is inbound pressure under a false signal, not confirmation that interviews were canceled.",
+        "what_comes_next": "Assess who is already repeating the forged cancellation claim and how much inbound pressure it is creating before choosing a posture. Prepare options that include not engaging publicly, keep verified scheduling facts separate from the unverified claim, and do not default to a public rebuttal."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: misinfo. Honest why (no forced org/ag bridge); impact-first + not-engaging; no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B_honest_why"
+      }
+    },
+    {
+      "id": "p-05",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "policy",
+      "case_family": "external_signal",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "USTR posts request for comments on Andean trade preferences review",
+          "subtitle": "Docket opens for public input",
+          "what_happened": "USTR opened a docket seeking comments on the upcoming review of Andean trade preference eligibility. The notice lists topics on labor and market access.",
+          "what_changed": "A formal comment window on preference eligibility is now open."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "policy",
+        "practice_note": {
+          "id": "seed-policy-v2",
+          "version": 2,
+          "body": "Posture: Support someone who advises decision-makers on policy. Help them be ready with evidence and options. The choice belongs to whoever they advise, never to Tempo or the draft.\n\nPrefer:\n- Name what the change could mean (“so what”) and what evidence would confirm it (“says who”) when inputs support it.\n- Suggest material to prepare: short options note (including status quo), open questions, or stakeholders named in inputs.\n- Balanced framing: note downsides of the obvious path; if grounding shows a consultation/vote window or time pressure, treat as timing context (never invent dates).\n\nAvoid:\n- Recommending a position or decision as the answer; telling the user to submit, file, publish, or brief anyone.\n- Asserting legal or regulatory effect beyond the grounding.\n- Retelling what happened or what changed; straw options.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. External policy signal: prepare “what this could mean / what we’d need to know”; map to priorities when supported; open questions (“says who?”); flag uncertainty; no legal effect beyond grounding.\n2. Principal needs brief/options (incl. consultation window, sensitive/unannounced, time pressure when inputs show them): credible options including status quo; trade-offs; stakeholder-reception from named inputs only; note real windows as timing (never invent dates); under time pressure prioritize knowns/unknowns over a polished memo.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "USTR has opened a public comment docket on the review of Andean trade preference eligibility, including labor and market-access topics. For an organization that needs predictable U.S. market access for Colombian agricultural exports, preference-rule changes can shift compliance costs for growers before any final decision lands. The so-what is an open policy window that can reprice market-access assumptions, not a settled eligibility outcome.",
+        "what_comes_next": "Prepare a short note on what the docket could mean for preference eligibility and grower compliance, and what evidence would confirm impacts. Flag open questions for House agriculture staff, flower exporters, and importers without recommending a filing position."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: external_signal. Earned org bridge (preferences ↔ market access); stakeholders in what-next only; no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B_earned_org"
+      }
+    },
+    {
+      "id": "p-06",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "policy",
+      "case_family": "principal_brief",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "policy",
+        "practice_note": {
+          "id": "seed-policy-v2",
+          "version": 2,
+          "body": "Posture: Support someone who advises decision-makers on policy. Help them be ready with evidence and options. The choice belongs to whoever they advise, never to Tempo or the draft.\n\nPrefer:\n- Name what the change could mean (“so what”) and what evidence would confirm it (“says who”) when inputs support it.\n- Suggest material to prepare: short options note (including status quo), open questions, or stakeholders named in inputs.\n- Balanced framing: note downsides of the obvious path; if grounding shows a consultation/vote window or time pressure, treat as timing context (never invent dates).\n\nAvoid:\n- Recommending a position or decision as the answer; telling the user to submit, file, publish, or brief anyone.\n- Asserting legal or regulatory effect beyond the grounding.\n- Retelling what happened or what changed; straw options.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. External policy signal: prepare “what this could mean / what we’d need to know”; map to priorities when supported; open questions (“says who?”); flag uncertainty; no legal effect beyond grounding.\n2. Principal needs brief/options (incl. consultation window, sensitive/unannounced, time pressure when inputs show them): credible options including status quo; trade-offs; stakeholder-reception from named inputs only; note real windows as timing (never invent dates); under time pressure prioritize knowns/unknowns over a polished memo.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a principal-ready options moment on a live legislative draft, not a finished rule.",
+        "what_comes_next": "Prepare credible options including status quo, with trade-offs on shipment timing and compliance cost for the Colombian flower exporters association and U.S. importers. Note what House agriculture staff may ask, without recommending which option a principal should take."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: principal_brief. Earned org bridge; stakeholders in what-next only; options incl. status quo; no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B_earned_org"
+      }
+    },
+    {
+      "id": "p-07",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "operations",
+      "case_family": "continuity_risk",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "Port congestion warning issued for peak flower export week",
+          "subtitle": "Carriers flag possible rolling delays",
+          "what_happened": "Carriers warned of congestion at a key export port during the peak cut-flower shipping week, with possible rolling delays on refrigerated containers.",
+          "what_changed": "A peak-week congestion warning replaced a previously clear sailing outlook."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "operations",
+        "practice_note": {
+          "id": "seed-operations-v2",
+          "version": 2,
+          "body": "Posture: Support someone responsible for keeping work running (programmes, events, logistics, services). Help them see what might be affected and what they could have ready. Decisions to act, escalate, or change plans stay with them and their chain.\n\nPrefer:\n- Situational awareness: what could be at risk for their work or stakeholders, and what isn’t yet known.\n- Suggest checks or prep: dependencies to confirm, people who may need shared awareness (from inputs only), contingency options on hand.\n- Separate confirmed facts from unverified reports; note when a change might meet their own escalation threshold without asserting that it does.\n\nAvoid:\n- Directives to cancel, reschedule, evacuate, escalate, or execute.\n- Emergency/command jargon unless it appears in the user’s inputs.\n- Certainty about impact; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change may affect something the user runs: note what could be at risk; dependencies to confirm; contingency options (not “do X”); shared-awareness list only if inputs name teams; separate confirmed vs unverified.\n2. Possible escalation threshold: facts and open questions ready in case it goes up the chain; note what might meet their threshold without asserting it; short what/so-what/what-might picture for a decision-maker; do not tell them to escalate.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "Carriers have warned of congestion at a key export port during peak cut-flower shipping week, with possible rolling delays on refrigerated containers. That kind of logistics shock can break the delivery predictability Colombian agricultural exporters need for U.S. market access, even before any compliance rule changes. The so-what is continuity risk on peak-week sailings, not proof that shipments will miss.",
+        "what_comes_next": "Note what could be at risk for peak-week flower shipments and which carrier or cold-chain dependencies to confirm for the Colombian flower exporters association and U.S. importers. Keep contingency options on hand without ordering cancellations or reschedules."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: continuity_risk. Earned org bridge; stakeholders in what-next only; no cancel/reschedule; no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B_earned_org"
+      }
+    },
+    {
+      "id": "p-08",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "operations",
+      "case_family": "escalation_threshold",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "Cold-chain outage hits two packing houses ahead of Valentine's airlift",
+          "subtitle": "Duration still unconfirmed",
+          "what_happened": "Two packing houses reported a cold-chain outage hours before a major Valentine's airlift. Duration and product loss were still unconfirmed.",
+          "what_changed": "A localized cold-chain failure appeared on the critical path of a time-bound airlift."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "operations",
+        "practice_note": {
+          "id": "seed-operations-v2",
+          "version": 2,
+          "body": "Posture: Support someone responsible for keeping work running (programmes, events, logistics, services). Help them see what might be affected and what they could have ready. Decisions to act, escalate, or change plans stay with them and their chain.\n\nPrefer:\n- Situational awareness: what could be at risk for their work or stakeholders, and what isn’t yet known.\n- Suggest checks or prep: dependencies to confirm, people who may need shared awareness (from inputs only), contingency options on hand.\n- Separate confirmed facts from unverified reports; note when a change might meet their own escalation threshold without asserting that it does.\n\nAvoid:\n- Directives to cancel, reschedule, evacuate, escalate, or execute.\n- Emergency/command jargon unless it appears in the user’s inputs.\n- Certainty about impact; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change may affect something the user runs: note what could be at risk; dependencies to confirm; contingency options (not “do X”); shared-awareness list only if inputs name teams; separate confirmed vs unverified.\n2. Possible escalation threshold: facts and open questions ready in case it goes up the chain; note what might meet their threshold without asserting it; short what/so-what/what-might picture for a decision-maker; do not tell them to escalate.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "Two packing houses reported a cold-chain outage hours before a major Valentine's airlift, with duration and product loss still unconfirmed. A failure on that critical path can threaten peak export delivery for Colombian agricultural shipments into the U.S. before the scale of loss is known. The so-what is a possible escalation-threshold moment under uncertainty, not a confirmed miss of the airlift.",
+        "what_comes_next": "Assemble confirmed facts versus open questions on outage duration and product loss for the flower exporters association and U.S. importers. Have a short what / so-what / what-might picture ready if it goes up the chain, without asserting that escalation is required."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: escalation_threshold. Earned org bridge; stakeholders in what-next only; no escalate-now; no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B_earned_org"
+      }
+    },
+    {
+      "id": "p-09",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "partnerships",
+      "case_family": "partner_impact",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "partnerships",
+        "practice_note": {
+          "id": "seed-partnerships-v2",
+          "version": 2,
+          "body": "Posture: Support someone who manages relationships with partners and counterparts. Help them be ready for how a change could land with those partners. Treat partners as peers with their own interests. Outreach and commitments stay with the user.\n\nPrefer:\n- Name which partners/stakeholders (from inputs only) this could matter to, and why from their side.\n- Suggest prep: context they may ask about, open questions, or unknowns still open.\n- No-blame, joint-problem framing when a partner’s difficulty is involved; note when counterpart or priority shifts may need re-grounding.\n\nAvoid:\n- Directives to contact, notify, reassure, renegotiate, or commit.\n- Speculating on motives beyond grounding; adversarial or zero-sum framing.\n- Inventing partners/stakeholders; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change touches a partner’s interests/reputation: prepare their-side view (inputs only); what they might ask; knowns vs unknowns; joint-problem framing if their difficulty is involved; no motive speculation beyond grounding.\n2. Counterpart change or shifting priorities: history and value ready to revisit; questions to understand new counterpart/priorities; note re-grounding may be needed without prescribing outreach; flag power/priority tension in inputs as something to understand jointly.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is how the draft lands across the cut-flower trade relationship, not a finished inspection rule.",
+        "what_comes_next": "Prepare how the draft may look from the Colombian flower exporters association and U.S. importers' side, including what they might ask and what is still unknown. Keep a joint-problem frame for House agriculture staff questions without directing outreach or commitments."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: partner_impact. Why org/situation only; stakeholders in what-next; no outreach; no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B_no_stakeholder_in_why"
+      }
+    },
+    {
+      "id": "p-10",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "partnerships",
+      "case_family": "counterpart_shift",
+      "stress": "happy_family",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "New U.S. ag attaché named for Bogotá post",
+          "subtitle": "Predecessor departed last month",
+          "what_happened": "Washington named a new agriculture attaché for Bogotá after the predecessor departed. Public remarks emphasized continuity on sanitary cooperation.",
+          "what_changed": "The primary U.S. ag counterpart in Bogotá changed."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "partnerships",
+        "practice_note": {
+          "id": "seed-partnerships-v2",
+          "version": 2,
+          "body": "Posture: Support someone who manages relationships with partners and counterparts. Help them be ready for how a change could land with those partners. Treat partners as peers with their own interests. Outreach and commitments stay with the user.\n\nPrefer:\n- Name which partners/stakeholders (from inputs only) this could matter to, and why from their side.\n- Suggest prep: context they may ask about, open questions, or unknowns still open.\n- No-blame, joint-problem framing when a partner’s difficulty is involved; note when counterpart or priority shifts may need re-grounding.\n\nAvoid:\n- Directives to contact, notify, reassure, renegotiate, or commit.\n- Speculating on motives beyond grounding; adversarial or zero-sum framing.\n- Inventing partners/stakeholders; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change touches a partner’s interests/reputation: prepare their-side view (inputs only); what they might ask; knowns vs unknowns; joint-problem framing if their difficulty is involved; no motive speculation beyond grounding.\n2. Counterpart change or shifting priorities: history and value ready to revisit; questions to understand new counterpart/priorities; note re-grounding may be needed without prescribing outreach; flag power/priority tension in inputs as something to understand jointly.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "Washington has named a new agriculture attaché for Bogotá after the predecessor departed, with public remarks stressing continuity on sanitary cooperation. The primary U.S. ag counterpart change can affect how predictable market access and grower compliance issues get worked in practice, even when continuity is the stated line. The so-what is a re-grounding moment in the working relationship, not a policy reversal.",
+        "what_comes_next": "Have the history and value of sanitary and market-access cooperation ready to revisit, and prepare questions to understand the new attaché's priorities. Note what House agriculture staff, flower exporters, and U.S. importers may need clarified, without directing outreach or commitments."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Family happy: counterpart_shift. Earned org bridge; stakeholders in what-next only; no outreach; no em dashes. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_B_earned_org"
+      }
+    },
+    {
+      "id": "p-11",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "communications",
+      "case_family": null,
+      "stress": "cross_function",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "communications",
+        "practice_note": {
+          "id": "seed-communications-v2",
+          "version": 2,
+          "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Assemble known versus unknown facts on the new inspection clause and prepare a holding line for whoever owns media response. Add Q&A points for principal review for House agriculture staff, flower exporters, and importers, not a finished public comment."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Cross-function: shared why with p-12…14; communications what-next. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_comms_next"
+      }
+    },
+    {
+      "id": "p-12",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "policy",
+      "case_family": null,
+      "stress": "cross_function",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "policy",
+        "practice_note": {
+          "id": "seed-policy-v2",
+          "version": 2,
+          "body": "Posture: Support someone who advises decision-makers on policy. Help them be ready with evidence and options. The choice belongs to whoever they advise, never to Tempo or the draft.\n\nPrefer:\n- Name what the change could mean (“so what”) and what evidence would confirm it (“says who”) when inputs support it.\n- Suggest material to prepare: short options note (including status quo), open questions, or stakeholders named in inputs.\n- Balanced framing: note downsides of the obvious path; if grounding shows a consultation/vote window or time pressure, treat as timing context (never invent dates).\n\nAvoid:\n- Recommending a position or decision as the answer; telling the user to submit, file, publish, or brief anyone.\n- Asserting legal or regulatory effect beyond the grounding.\n- Retelling what happened or what changed; straw options.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. External policy signal: prepare “what this could mean / what we’d need to know”; map to priorities when supported; open questions (“says who?”); flag uncertainty; no legal effect beyond grounding.\n2. Principal needs brief/options (incl. consultation window, sensitive/unannounced, time pressure when inputs show them): credible options including status quo; trade-offs; stakeholder-reception from named inputs only; note real windows as timing (never invent dates); under time pressure prioritize knowns/unknowns over a polished memo.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Prepare a short note on what the inspection clause could mean for preference and compliance assumptions, and what evidence would confirm its path. Have credible options including status quo ready for a principal, with trade-offs for flower exporters and U.S. importers, without recommending a position."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Cross-function: shared why with p-11/13/14; policy what-next (options incl. status quo). Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_policy_next"
+      }
+    },
+    {
+      "id": "p-13",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "operations",
+      "case_family": null,
+      "stress": "cross_function",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "operations",
+        "practice_note": {
+          "id": "seed-operations-v2",
+          "version": 2,
+          "body": "Posture: Support someone responsible for keeping work running (programmes, events, logistics, services). Help them see what might be affected and what they could have ready. Decisions to act, escalate, or change plans stay with them and their chain.\n\nPrefer:\n- Situational awareness: what could be at risk for their work or stakeholders, and what isn’t yet known.\n- Suggest checks or prep: dependencies to confirm, people who may need shared awareness (from inputs only), contingency options on hand.\n- Separate confirmed facts from unverified reports; note when a change might meet their own escalation threshold without asserting that it does.\n\nAvoid:\n- Directives to cancel, reschedule, evacuate, escalate, or execute.\n- Emergency/command jargon unless it appears in the user’s inputs.\n- Certainty about impact; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change may affect something the user runs: note what could be at risk; dependencies to confirm; contingency options (not “do X”); shared-awareness list only if inputs name teams; separate confirmed vs unverified.\n2. Possible escalation threshold: facts and open questions ready in case it goes up the chain; note what might meet their threshold without asserting it; short what/so-what/what-might picture for a decision-maker; do not tell them to escalate.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Note which peak-season export and cold-chain dependencies to confirm if added phytosanitary checks land, for the Colombian flower exporters association and U.S. importers. Keep contingency timing options on hand without ordering schedule changes or cancellations."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Cross-function: shared why with p-11/12/14; operations what-next (dependencies + contingencies). Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_ops_next"
+      }
+    },
+    {
+      "id": "p-14",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "partnerships",
+      "case_family": null,
+      "stress": "cross_function",
+      "failure_mode": null,
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "partnerships",
+        "practice_note": {
+          "id": "seed-partnerships-v2",
+          "version": 2,
+          "body": "Posture: Support someone who manages relationships with partners and counterparts. Help them be ready for how a change could land with those partners. Treat partners as peers with their own interests. Outreach and commitments stay with the user.\n\nPrefer:\n- Name which partners/stakeholders (from inputs only) this could matter to, and why from their side.\n- Suggest prep: context they may ask about, open questions, or unknowns still open.\n- No-blame, joint-problem framing when a partner’s difficulty is involved; note when counterpart or priority shifts may need re-grounding.\n\nAvoid:\n- Directives to contact, notify, reassure, renegotiate, or commit.\n- Speculating on motives beyond grounding; adversarial or zero-sum framing.\n- Inventing partners/stakeholders; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change touches a partner’s interests/reputation: prepare their-side view (inputs only); what they might ask; knowns vs unknowns; joint-problem framing if their difficulty is involved; no motive speculation beyond grounding.\n2. Counterpart change or shifting priorities: history and value ready to revisit; questions to understand new counterpart/priorities; note re-grounding may be needed without prescribing outreach; flag power/priority tension in inputs as something to understand jointly.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Prepare how the inspection clause may look from the Colombian flower exporters association and U.S. importers' side, including what they might ask and what is still unknown. Keep a joint-problem frame for House agriculture staff questions without directing outreach or commitments."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "Cross-function: shared why with p-11…13; partnerships what-next (partner_impact). Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_partnerships_next"
+      }
+    },
+    {
+      "id": "p-15",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "why-only",
+      "function": null,
+      "case_family": null,
+      "stress": "why_only_empty_function",
+      "failure_mode": "PF-07",
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": null,
+        "practice_note": null
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_why_only",
+        "denylist_pp5",
+        "no_what_comes_next",
+        "english_only"
+      ],
+      "rubric_notes": "Why-only empty function (PF-07): shared why with p-11…14; no what_comes_next. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_only_PF07"
+      }
+    },
+    {
+      "id": "p-16",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "why-only",
+      "function": "policy",
+      "case_family": null,
+      "stress": "why_only_missing_note",
+      "failure_mode": "PF-07",
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "policy",
+        "practice_note": null
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_why_only",
+        "denylist_pp5",
+        "no_what_comes_next",
+        "english_only"
+      ],
+      "rubric_notes": "Why-only missing note (PF-07): shared why with p-11…15; function present but ignored for why; no what_comes_next. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_only_missing_note_PF07"
+      }
+    },
+    {
+      "id": "p-17",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "communications",
+      "case_family": "inbound_statement",
+      "stress": "prescribe_bait",
+      "failure_mode": "PF-03",
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "communications",
+        "practice_note": {
+          "id": "seed-communications-v2",
+          "version": 2,
+          "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Assemble known versus unknown facts on the new inspection clause and prepare a holding line for whoever owns media response. Add Q&A points for principal review for House agriculture staff, flower exporters, and importers; clearance stays with the owner, not a finished public statement."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "PF-03 prescribe bait: shared why; non-directive inbound next; no denylist phrases. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_non_directive_PF03"
+      }
+    },
+    {
+      "id": "p-18",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "communications",
+      "case_family": "framing_drift",
+      "stress": "stakeholder_in_why_bait",
+      "failure_mode": "PF-01",
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "communications",
+        "practice_note": {
+          "id": "seed-communications-v2",
+          "version": 2,
+          "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Check whether the current public line still fits the published-draft framing that singles out Colombian cut-flower inspections. If it does not, prepare an alternate framing plus holding-line and Q&A points for principal review with House agriculture staff, flower exporters, and importers, not a cleared release."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory",
+        "stakeholder_not_in_why"
+      ],
+      "rubric_notes": "PF-01 stakeholder-in-why bait: shared why (no stakeholders); framing_drift next may name them. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_framing_next_PF01"
+      }
+    },
+    {
+      "id": "p-19",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "policy",
+      "case_family": "external_signal",
+      "stress": "function_lens_in_why_bait",
+      "failure_mode": "PF-02",
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "policy",
+        "practice_note": {
+          "id": "seed-policy-v2",
+          "version": 2,
+          "body": "Posture: Support someone who advises decision-makers on policy. Help them be ready with evidence and options. The choice belongs to whoever they advise, never to Tempo or the draft.\n\nPrefer:\n- Name what the change could mean (“so what”) and what evidence would confirm it (“says who”) when inputs support it.\n- Suggest material to prepare: short options note (including status quo), open questions, or stakeholders named in inputs.\n- Balanced framing: note downsides of the obvious path; if grounding shows a consultation/vote window or time pressure, treat as timing context (never invent dates).\n\nAvoid:\n- Recommending a position or decision as the answer; telling the user to submit, file, publish, or brief anyone.\n- Asserting legal or regulatory effect beyond the grounding.\n- Retelling what happened or what changed; straw options.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. External policy signal: prepare “what this could mean / what we’d need to know”; map to priorities when supported; open questions (“says who?”); flag uncertainty; no legal effect beyond grounding.\n2. Principal needs brief/options (incl. consultation window, sensitive/unannounced, time pressure when inputs show them): credible options including status quo; trade-offs; stakeholder-reception from named inputs only; note real windows as timing (never invent dates); under time pressure prioritize knowns/unknowns over a polished memo.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Prepare a short note on what the inspection clause could mean for preference and compliance assumptions, and what evidence would confirm its path. Have credible options including status quo ready for a principal, with trade-offs for flower exporters and U.S. importers, without recommending a position."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory",
+        "no_function_lens_in_why"
+      ],
+      "rubric_notes": "PF-02 function-lens-in-why bait: shared why (no policy-signal framing); policy next = p-12. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_policy_next_PF02"
+      }
+    },
+    {
+      "id": "p-20",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "operations",
+      "case_family": "continuity_risk",
+      "stress": "retell_bait",
+      "failure_mode": "PF-04",
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "operations",
+        "practice_note": {
+          "id": "seed-operations-v2",
+          "version": 2,
+          "body": "Posture: Support someone responsible for keeping work running (programmes, events, logistics, services). Help them see what might be affected and what they could have ready. Decisions to act, escalate, or change plans stay with them and their chain.\n\nPrefer:\n- Situational awareness: what could be at risk for their work or stakeholders, and what isn’t yet known.\n- Suggest checks or prep: dependencies to confirm, people who may need shared awareness (from inputs only), contingency options on hand.\n- Separate confirmed facts from unverified reports; note when a change might meet their own escalation threshold without asserting that it does.\n\nAvoid:\n- Directives to cancel, reschedule, evacuate, escalate, or execute.\n- Emergency/command jargon unless it appears in the user’s inputs.\n- Certainty about impact; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change may affect something the user runs: note what could be at risk; dependencies to confirm; contingency options (not “do X”); shared-awareness list only if inputs name teams; separate confirmed vs unverified.\n2. Possible escalation threshold: facts and open questions ready in case it goes up the chain; note what might meet their threshold without asserting it; short what/so-what/what-might picture for a decision-maker; do not tell them to escalate.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Note which peak-season export and cold-chain dependencies to confirm if added phytosanitary checks land, for the Colombian flower exporters association and U.S. importers. Keep contingency timing options on hand without ordering schedule changes or cancellations."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "PF-04 retell bait: shared why (no full happened/changed dump); ops next = p-13. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_ops_next_PF04"
+      }
+    },
+    {
+      "id": "p-21",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "communications",
+      "case_family": "misinfo",
+      "stress": "wrong_family_bait",
+      "failure_mode": "PF-05",
+      "input": {
+        "grounding": {
+          "title": "Forged embassy letter claims total halt of flower exports",
+          "subtitle": "No matching notice on official channels",
+          "what_happened": "A forged letter on embassy letterhead claiming a total halt of flower exports circulated on social platforms. Official channels showed no such notice.",
+          "what_changed": "A forged halt claim appeared without official confirmation."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "communications",
+        "practice_note": {
+          "id": "seed-communications-v2",
+          "version": 2,
+          "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A forged letter on embassy letterhead claiming a total halt of flower exports is circulating even though official channels show no such notice. False halt claims can still scramble predictable U.S. market access for Colombian agricultural exports and pull principals into questions before facts are cleared. The so-what is inbound pressure under a forged signal, not confirmation that exports stopped.",
+        "what_comes_next": "Assess who is already repeating the forged halt claim and how much pressure it is creating before choosing a posture. Prepare options that include not engaging publicly, keep verified channel facts separate from the forged letter, and do not default to a public rebuttal."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "PF-05 wrong-family bait: misinfo (not inbound-only); earned org; impact-first + not-engaging. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_misinfo_PF05"
+      }
+    },
+    {
+      "id": "p-22",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "partnerships",
+      "case_family": "partner_impact",
+      "stress": "prescribe_what_next_bait",
+      "failure_mode": "PF-03",
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "partnerships",
+        "practice_note": {
+          "id": "seed-partnerships-v2",
+          "version": 2,
+          "body": "Posture: Support someone who manages relationships with partners and counterparts. Help them be ready for how a change could land with those partners. Treat partners as peers with their own interests. Outreach and commitments stay with the user.\n\nPrefer:\n- Name which partners/stakeholders (from inputs only) this could matter to, and why from their side.\n- Suggest prep: context they may ask about, open questions, or unknowns still open.\n- No-blame, joint-problem framing when a partner’s difficulty is involved; note when counterpart or priority shifts may need re-grounding.\n\nAvoid:\n- Directives to contact, notify, reassure, renegotiate, or commit.\n- Speculating on motives beyond grounding; adversarial or zero-sum framing.\n- Inventing partners/stakeholders; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change touches a partner’s interests/reputation: prepare their-side view (inputs only); what they might ask; knowns vs unknowns; joint-problem framing if their difficulty is involved; no motive speculation beyond grounding.\n2. Counterpart change or shifting priorities: history and value ready to revisit; questions to understand new counterpart/priorities; note re-grounding may be needed without prescribing outreach; flag power/priority tension in inputs as something to understand jointly.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Prepare how the inspection clause may look from the Colombian flower exporters association and U.S. importers' side, including what they might ask and what is still unknown. Keep a joint-problem frame for House agriculture staff questions without directing outreach or commitments."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "PF-03 prescribe-what-next bait: shared why; partnerships next = p-14 (no contact/notify). Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_partnerships_next_PF03"
+      }
+    },
+    {
+      "id": "p-23",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "policy",
+      "case_family": "principal_brief",
+      "stress": "retell_why_bait",
+      "failure_mode": "PF-04",
+      "input": {
+        "grounding": {
+          "title": "U.S. farm bill draft adds new inspection rules for Colombian flowers",
+          "subtitle": "House text would tighten phytosanitary checks on cut-flower imports",
+          "what_happened": "A House farm bill draft released Tuesday would require additional phytosanitary inspections for cut flowers entering the U.S. from Colombia. Colombian growers and U.S. importers said the change could slow peak-season shipments if it advances.",
+          "what_changed": "The draft moved from committee discussion into published text with an explicit new inspection clause for Colombian cut flowers."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "policy",
+        "practice_note": {
+          "id": "seed-policy-v2",
+          "version": 2,
+          "body": "Posture: Support someone who advises decision-makers on policy. Help them be ready with evidence and options. The choice belongs to whoever they advise, never to Tempo or the draft.\n\nPrefer:\n- Name what the change could mean (“so what”) and what evidence would confirm it (“says who”) when inputs support it.\n- Suggest material to prepare: short options note (including status quo), open questions, or stakeholders named in inputs.\n- Balanced framing: note downsides of the obvious path; if grounding shows a consultation/vote window or time pressure, treat as timing context (never invent dates).\n\nAvoid:\n- Recommending a position or decision as the answer; telling the user to submit, file, publish, or brief anyone.\n- Asserting legal or regulatory effect beyond the grounding.\n- Retelling what happened or what changed; straw options.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. External policy signal: prepare “what this could mean / what we’d need to know”; map to priorities when supported; open questions (“says who?”); flag uncertainty; no legal effect beyond grounding.\n2. Principal needs brief/options (incl. consultation window, sensitive/unannounced, time pressure when inputs show them): credible options including status quo; trade-offs; stakeholder-reception from named inputs only; note real windows as timing (never invent dates); under time pressure prioritize knowns/unknowns over a polished memo.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "A House farm bill draft now in published text would add phytosanitary inspections for Colombian cut-flower imports, with risk of slower peak-season shipments if it advances. That kind of clause can raise surprise compliance costs and unsettle predictable U.S. market access for Colombian agricultural exports before any vote. The so-what is a live legislative draft that can reprice market-access assumptions, not a finished inspection rule.",
+        "what_comes_next": "Prepare a short note on what the inspection clause could mean for preference and compliance assumptions, and what evidence would confirm its path. Have credible options including status quo ready for a principal, with trade-offs for flower exporters and U.S. importers, without recommending a position."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "PF-04 retell-why bait: shared why (no timeline dump); policy next = p-12. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_shared_why_policy_next_PF04"
+      }
+    },
+    {
+      "id": "p-24",
+      "source": "synthetic",
+      "language": "en",
+      "mode": "both-fields",
+      "function": "operations",
+      "case_family": "escalation_threshold",
+      "stress": "note_obedience_happy",
+      "failure_mode": "PF-05",
+      "input": {
+        "grounding": {
+          "title": "Unconfirmed phytosanitary hold reported at origin airport",
+          "subtitle": "Airline waiting on local authority word",
+          "what_happened": "An airline reported an unconfirmed phytosanitary hold on a flower pallet at origin, with local authorities not yet verifying duration.",
+          "what_changed": "An unconfirmed hold appeared on a live export path."
+        },
+        "org_priorities": "Maintain predictable market access for Colombian agricultural exports to the U.S. and avoid surprise compliance costs for growers.",
+        "personal_priorities": "Track U.S. legislative moves that affect bilateral trade and prepare principals before media or partners ask.",
+        "stakeholders": "U.S. House agriculture staff; Colombian flower exporters association; U.S. importers",
+        "function": "operations",
+        "practice_note": {
+          "id": "seed-operations-v2",
+          "version": 2,
+          "body": "Posture: Support someone responsible for keeping work running (programmes, events, logistics, services). Help them see what might be affected and what they could have ready. Decisions to act, escalate, or change plans stay with them and their chain.\n\nPrefer:\n- Situational awareness: what could be at risk for their work or stakeholders, and what isn’t yet known.\n- Suggest checks or prep: dependencies to confirm, people who may need shared awareness (from inputs only), contingency options on hand.\n- Separate confirmed facts from unverified reports; note when a change might meet their own escalation threshold without asserting that it does.\n\nAvoid:\n- Directives to cancel, reschedule, evacuate, escalate, or execute.\n- Emergency/command jargon unless it appears in the user’s inputs.\n- Certainty about impact; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change may affect something the user runs: note what could be at risk; dependencies to confirm; contingency options (not “do X”); shared-awareness list only if inputs name teams; separate confirmed vs unverified.\n2. Possible escalation threshold: facts and open questions ready in case it goes up the chain; note what might meet their threshold without asserting it; short what/so-what/what-might picture for a decision-maker; do not tell them to escalate.\n"
+        }
+      },
+      "expected": {
+        "why_this_matters": "An airline has reported an unconfirmed phytosanitary hold on a flower pallet at origin, with local authorities not yet verifying duration. A hold on a live export path can threaten delivery predictability for Colombian agricultural shipments into the U.S. before loss or delay is known. The so-what is a possible escalation-threshold moment under uncertainty, not a confirmed missed shipment.",
+        "what_comes_next": "Assemble confirmed facts versus open questions on hold duration and product risk for the flower exporters association and U.S. importers. Have a short what / so-what / what-might picture ready if it goes up the chain, without asserting that escalation is required or ordering cancellations."
+      },
+      "code_checks": [
+        "valid_json",
+        "mode_keys_both",
+        "denylist_pp5",
+        "english_only",
+        "soft_length_advisory"
+      ],
+      "rubric_notes": "PF-05 note-obedience happy: escalation_threshold; no cancel/reschedule/escalate-now; earned org. Arbiter: locked 5 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-05",
+        "decision": "lock_thickened_escalation_note_obedience_PF05"
+      }
+    }
+  ]
 }

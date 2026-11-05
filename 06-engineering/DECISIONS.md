@@ -2,6 +2,398 @@
 
 Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chronological: newest first.
 
+### 2026-11-05 - D-110 - Personalization DB/DBML review Locked (B4 design close)
+
+#### Context
+
+- B4 deepen complete: contract PR-01…14, prompt Pr1–Pr6 Locked, practice notes F-pass + seed v2, gold arbiter-locked (24), pipeline L1–L7, runs `trigger_kind` closed ([D-109](#2026-11-05---d-109---personalization-trigger_kind--clock--warm)).
+- Coherence pass (scope A): `tempo.dbml` `user_feed_membership` + `practice_notes` + [personalization-runs.dbml](docs/data/personalization-runs.dbml) vs locked SoTs. Status-header sync completed same day.
+
+#### Decision
+
+- **No column/shape changes.** Product + runs ERDs already match PR-07 / PR-09 / PR-12 / PR-14 + D-109:
+  - `user_feed_membership`: nullable why / what-next / cache key; `personalized_at` = successful why write; what-next may stay null when PR-14 gated; soft-end retain + resurrect; no `admitted_at`
+  - `practice_notes`: id + function_id + version + body + source_refs; unique (function_id, version); hash uses id+version; source_refs never sent to model
+  - `personalization_runs`: per-attempt; `trigger_kind` clock|warm; no output_json / eval_scores; skip → no row; `estimated_cost_usd` feeds daily `#ops-pricing-models` spend digest at build
+- Hygiene: mark runs DBML **Locked (B4)** for design close (enum already D-109); amend data README; cloud push Database library + Personalization runs.
+- **B4 design Locked** (DB/DBML). Status-header sync done 5 Nov 2026 (contract · PRD · pipeline · prompt · D-108). Build deferred (migrate + seed import + harness at build). Metastory d05 length thicken **done** 5 Nov 2026 (writer soft bars + gold evidence-earned / carve-outs) — clear for B5.
+
+#### Why
+
+- Same close pattern as metastory [D-106](#2026-11-03---d-106---metastory-dbdbml-review-locked-b3-design-close): confirm coherence, don’t invent columns.
+
+#### Consequences
+
+- Supabase migrate still at build. Header/Related “Draft / arbiter pending” lines cleared in the status-sync pass (done).
+
+### 2026-11-05 - D-109 - Personalization `trigger_kind` = clock | warm
+
+#### Context
+
+- B4 L5 / runs thicken: [personalization-runs.dbml](docs/data/personalization-runs.dbml) left `trigger_kind` as provisional varchar (A4 stub).
+- Pipeline + contract already say ingestion **clock** \| **warm** only — no UX regenerate ([PR-08](../02-product/contracts/personalization.md) skip ≠ row; retries share `trigger_id`, inherit kind).
+- Sibling pattern: summarization / metastory [D-098](#2026-11-03---d-098---metastory-trigger_kind--clock--warm); story-tagging adds `x_edit` (IR-14) — personalization has no text-edit path.
+
+#### Decision
+
+- Closed enum **`personalization_run_trigger_kind`**: **`clock` | `warm`**.
+- **No** `retry` / `ux` / `x_edit` values. Same-SKU ≤2 attempts keep one `trigger_id` and the parent job’s `trigger_kind`.
+- Mark runs DBML **Locked (B4)** for this enum; product columns unchanged.
+
+#### Why
+
+- Encode what pipeline already locks; keep lineage comparable across stages; avoid inventing a third trigger class with no product signal.
+
+#### Consequences
+
+- Cloud dbdiagram push for Personalization runs when convenient. Supabase migrate still at build.
+- Eval suite/gold arbiter-locked same day (24 cases) — not part of this enum lock.
+
+### 2026-11-04 - D-108 - Personalization MVP carry-over (as-is → to-be) encoded
+
+#### Context
+
+- Phase B4 needs as-is why-this-matters doctrine/spec/gold/engine lessons mapped onto locked [personalization.md](../02-product/contracts/personalization.md) without re-monolithing the May writer or smuggling join/recall into the why/next invoke.
+- Point-by-point carry locks P1–P14 + artifact shape A; contract P5/PR-05 updates (P16–P18); encode = pipeline carry + PRD process sync (P19 = C).
+
+#### Decision
+
+- **Encode carry posture** into [pipelines/personalization.md](docs/pipelines/personalization.md) §3 (primary); sync [model--personalization--v1.md](../02-product/prds/model--personalization--v1.md) locked process rules to P5; contract already written (4 Nov 2026).
+- **In personalization:** two fields, one invoke; share-safe why (org + personal priorities + grounding; org-voice); what-next gets function + practice note + stakeholders; practice notes replace doctrine retrieval; rubric→eval; last-good/hide; soft length; runs lineage only; no taxonomy/state/doctrine retriever/May trace/subtitle echo.
+- **Parking lot:** join, rank, rising, embedding-recall, source-matcher, watermark, share-pack chrome, hard char caps → dashboard B5. (SKU/timeout/concurrency locked in B4 deepen / X3.)
+- **Artifact shape:** one contract · PRD · pipeline · one prompt · one eval/gold (cases tagged why / what-next / both).
+- **B4 design Locked** (5 Nov 2026 / [D-110](#2026-11-05---d-110---personalization-dbdbml-review-locked-b4-design-close)): prompt Pr1–Pr6, practice notes + seed v2, gold arbiter-locked (24), SKU/timeout/concurrency, `trigger_kind`, pipeline L1–L7 / PR-14, DB/DBML. **Still deferred:** migrate, seed import, harness code, `personalization_invoke` wire.
+
+#### Why
+
+- Front-load share-safe input split and as-is disposition before prompt/gold; keep PRD from contradicting Locked contract during B4 deepen.
+
+#### Consequences
+
+- B4 deepen + DB close + status-header sync complete. **Build next:** migrate · seed v2 import · harness · invoke. Metastory d05 length thicken **done** 5 Nov 2026 — clear for B5.
+
+### 2026-11-03 - D-106 - Metastory DB/DBML review Locked (B3 design close)
+
+#### Context
+
+- B3 artifact deepen complete: contract, PRD, pipeline L1–L7, prompts, gold arbiter-locked (D-104 · D-105).
+- Plan item remaining before Must coherence: explicit DB/DBML review of `tempo.dbml` §§8–9 + `metastory-runs.dbml` vs locked SoTs.
+
+#### Decision
+
+- **No column/shape changes.** Product + runs ERDs already match D-094 / D-095 / D-098 / D-099 / D-102 / MR-04…13:
+  - `metastories`: title+subtitle+what_happened NOT NULL; what_changed nullable (first mint)
+  - `metastory_stories`: soft M:N; no `metastory_chips`
+  - `story_embeddings`: `vector(1536)` + model + `embedded_text_hash` (skip on model+hash); not a runs row
+  - `metastory_runs`: per-attempt; `call_kind` boundary|writer; `trigger_kind` clock|warm; `metastory_id` null until mint; embed/propose out
+- Hygiene: mark [metastory-runs.dbml](docs/data/metastory-runs.dbml) **Locked (B3)**; amend data README + tempo TableGroup notes; clear stale “gold open” prompt notes.
+- **B3 design Locked.** Next: Must coherence (summarization + story-tagging) → B4. Build deferred (migrate DBML at build).
+
+#### Consequences
+
+- Cloud dbdiagram push for Metastory runs / Database library when convenient (IDs unchanged). Supabase migrate still at build.
+
+#### Follow-up (same day)
+
+- Cloud push completed 3 Nov 2026: [Metastory runs](https://dbdiagram.io/d/6ae28fb1ed134e407e37a484) · [Database library](https://dbdiagram.io/d/6ab4852e58694256127b2a37). Local DBML validated before push.
+
+### 2026-11-03 - D-105 - Metastory writer gold suite G2=A′+ (23 cases)
+
+#### Context
+
+- Boundary gold arbiter-locked at N=18 (D-104). Writer has more failure modes (W-F1…W-F8) + first_mint/update + EN synthesis from multilingual members.
+- Best practice: craft/advisory suites cover known P0 modes first; ~100-trace saturation is discovery-scale, not first gold.
+
+#### Decision
+
+- **Writer G2 = A′+:** **23** cases (`mw-01`…`23`); ~22–24 band; 20 synthetic + 3 derived_real; member languages en/es/mixed → English outputs; modes first_mint + update; full reference `expected` strings + soft code checks; **no LLM judge**.
+- **W-F4 framing:** pipeline skips writer on `gate=none`; gold tests thin **material updates** (no invented drama).
+- **Boundary N=18 stays** — already covers B-F1…F6 + EN/ES/mixed; do not inflate unless flywheel finds a gap.
+
+#### Consequences
+
+- Arbiter (Felipe) locks mw-01…23 before suite Locked. Next after lock: B3 eval close / Must coherence (summarization + story-tagging).
+
+#### Follow-up (same day)
+
+- **Arbiter lock complete** 3 Nov 2026 (Felipe): all mw-01…23. Protocol: review with full member evidence each case. Boundary N=18 unchanged.
+
+### 2026-11-03 - D-104 - Metastory boundary gold suite G1=A′
+
+#### Context
+
+- B3 evals after prompts Locked. Index `evals/metastory.md` stays thin; gold SoTs are call-kind only.
+- Sibling precedent: ~20–24 cases, EN/ES, 2–4 derived_real; no LLM judge.
+
+#### Decision
+
+- **G1=A′:** ~16–20 cases (landed **18**: mb-01…18); languages **en/es/mixed**; mostly synthetic + **3 derived_real** anchors; schema mirrors boundary wire; cover B-F1…F6 + P1 healer/merge/bilingual.
+- Code checks + human arbiter (Felipe); **no LLM judge**; advisory until promote + arbiter lock.
+- Keep thin [evals/metastory.md](docs/evals/metastory.md) index.
+
+#### Consequences
+
+- Arbiter must lock expected decisions before treating suite as Locked. Next: writer gold with same posture.
+
+#### Follow-up (same day)
+
+- **Arbiter lock complete** 3 Nov 2026 (Felipe): all mb-01…18. Protocol locked: split vs defer by unit_kind/confidence; continuity = evidence-justified stay or split.
+
+### 2026-11-03 - D-103 - Metastory writer prompt body Locked (W1–W3)
+
+#### Context
+
+- B3 writer deepen after D-102 requiredness and boundary D-101.
+- Shared card copy is the product surface; JSON + Mode-driven first_mint null what_changed.
+
+#### Decision
+
+- Lock [prompts/metastory-writer.md](docs/prompts/metastory-writer.md) as `metastory-writer-v1`: Sonnet-only; temp 0; max_tokens 1024; no few-shots; JSON `title`/`subtitle`/`what_happened`/`what_changed` with D-102 validate; user wire Mode + prior + gate + ≤12 members; grounding and no so-what/why/next.
+
+#### Consequences
+
+- Next B3: boundary + writer **gold** (`pm-evals` / `ds-synthetic`). No LLM judge. Then Must coherence (summarization + story-tagging) before B4.
+
+### 2026-11-03 - D-102 - Shared copy requiredness (title+subtitle+what_happened; what_changed null only first mint)
+
+#### Context
+
+- MR-06 / D-080 had title required and subtitle optional; `what_happened` nullable. Operator monitoring needs a complete card — missing subtitle/what_happened/what_changed is unacceptable data loss on a small feed (envisioned ≤5 metastories).
+- Dashboard-only filtering without writer rules would hide bad writes instead of preventing them.
+
+#### Decision
+
+- **Amend MR-06:** successful persist requires non-empty **title + subtitle + what_happened**. **`what_changed` null only on first mint** (expected); later successful writer runs must supply it when the material gate invokes the writer.
+- Empty required fields → **fail attempt** (not successful mint/overwrite).
+- **tempo.dbml:** `subtitle` and `what_happened` **NOT NULL**; `what_changed` remains nullable for first mint.
+- **Dashboard (B5 parked):** feed **≤5** metastories; **only show complete shared cards** (safety net). Not a metastory-stage max-5 pool law.
+- Amends display posture of [D-080](#2026-10-28---d-080---metastories-title-required-mint-only-after-successful-title-write) (subtitle no longer optional).
+
+#### Consequences
+
+- Writer prompt/gold must enforce requiredness. Partial success still last-good-only when prior complete copy exists (MR-10).
+
+### 2026-11-03 - D-101 - Metastory boundary prompt body Locked (R1–R3)
+
+#### Context
+
+- B3 prompt deepen after pipeline L1–L7. Boundary is the event-grain judge; writer owns shared copy.
+- Point locks: JSON out; temp 0; max_tokens 1024; no few-shots; one candidate unit per invoke; schema + wire; system rules A.
+
+#### Decision
+
+- Lock [prompts/metastory-boundary.md](docs/prompts/metastory-boundary.md) as `metastory-boundary-v1`: Sonnet-only (D-095); JSON `confirm|split|merge|defer` + `clusters[].member_story_ids` + optional ops `reason`; user payload ≤12 members, no body; rules for MR-01/02/05/10 and B-F3 continuity without election-bundle Jaccard.
+
+#### Consequences
+
+- Next: metastory **writer** prompt body, then boundary/writer gold. No LLM judge.
+
+### 2026-11-03 - D-100 - Metastory ops bag parked (budget + deferred recluster)
+
+#### Context
+
+- B3 L7: per-tick LLM/embed budget ≠ ≤2 retries; deferred recluster = optional async second pass for ambiguous sets (as-is residue).
+- MVP user value is stable event copy via boundary/writer quality, not tick caps or async recluster.
+
+#### Decision
+
+- **Park** both for MVP design: no tick-budget integers; no deferred-recluster pass in to-be pipeline.
+- Ambiguity / hard cases → **fail closed + boundary/writer gold** (not a second cluster job).
+- Reopen when staging shows tick overruns or systematic need for async repair. Skip-if-unchanged already **D-099**.
+
+#### Consequences
+
+- [pipelines/metastory.md](docs/pipelines/metastory.md) deepen **L1–L7 Locked**. Next B3: prompt bodies → evals/gold. Remind: post-B3 Must coherence (summarization + story-tagging) before B4.
+
+### 2026-11-03 - D-107 - Metastory writer same-tick body (MR-08 coherence)
+
+#### Context
+
+- Product [MR-08](../02-product/contracts/metastory.md) / [IR-05](../02-product/contracts/ingestion.md) keep metastory as a same-tick **what-happened** body consumer for new press.
+- Locked writer prompt + D-099 originally said **no** body in LLM payloads — dual SoT vs product/ingestion.
+
+#### Decision
+
+- **Keep** MR-08 / IR-05: writer may receive optional `same_tick_body` for new press still in memory; prefer `article_summary_or_text` when both present; never store/log/show body; no verbatim body dump into shared fields (W-F5).
+- **Boundary** stays body-free (not an MR-08 consumer).
+- Amend D-099: writer `input_hash` includes `same_tick_body` bytes **when sent**; boundary hash still excludes body. Encode in [prompts/metastory-writer.md](docs/prompts/metastory-writer.md) + [pipelines/metastory.md](docs/pipelines/metastory.md) (L9).
+
+#### Consequences
+
+- Ingestion barrier unchanged (sum + ST + metastory what-happened). Gold may omit `same_tick_body` (empty path); optional future cases with body present.
+
+### 2026-11-03 - D-099 - Metastory Mermaid + idempotency keys
+
+#### Context
+
+- B3 L6: build-ready sequence + skip keys so agents do not double-call boundary/writer or re-embed unchanged text.
+- Pattern match: summarization / story-tagging `input_hash` = SHA-256 of exact bytes sent.
+
+#### Decision
+
+- Thicken [pipelines/metastory.md](docs/pipelines/metastory.md) Mermaid with embed skip, boundary fail→prior graph, material gate, writer skip, MR-10 fail paths.
+- **Idempotency:** embed skip on model + `embedded_text_hash`; boundary/writer `trigger_id` per invoke (not shared across call_kinds); `input_hash` per call_kind payload as sent (≤12 evidence); material gate none → no writer LLM; writer skip when `input_hash` unchanged **and** last-good exists; failed attempts still logged.
+- **Body (amended [D-107](#2026-11-03---d-107---metastory-writer-same-tick-body-mr-08-coherence)):** boundary payload **no** body; writer payload may include `same_tick_body` for new press (MR-08) — hashed only as sent, never a runs column.
+- Ops bag item 3 (skip-if-unchanged) **closed** into this lock; per-tick budget / deferred recluster remain open.
+
+#### Consequences
+
+- Next: ops bag numerics or prompt bodies / gold.
+
+### 2026-11-03 - D-098 - Metastory `trigger_kind` = clock | warm
+
+#### Context
+
+- B3 L5: close provisional `trigger_kind` on [metastory-runs.dbml](docs/data/metastory-runs.dbml). Story-tagging uses `clock` | `warm` | `x_edit`.
+- Ingestion: metastory handoff on **new admits** during clock/warm; **IR-14** text change → **story-tagging only** (not metastory).
+
+#### Decision
+
+- Closed enum **`metastory_run_trigger_kind`**: **`clock` | `warm`**.
+- Admits in-tick inherit the parent job’s kind (no separate `admit` value).
+- **No `x_edit`** on metastory runs — aligns with IR-14 / IR-15 (retag ≠ recluster).
+
+#### Consequences
+
+- Lineage + `metastory_invoke` (D-088) use these kinds only. Next: Mermaid/ops bag or prompt bodies.
+
+### 2026-11-03 - D-097 - Metastory membership uncapped; LLM evidence cap 12
+
+#### Context
+
+- B3 L4: “sources ceiling” ownership was metastory; integer deferred. Blind hard cap fights event truth; uncapped prompts fight quality/cost (RAG/MDS: flat synthesis best ~10–15 docs).
+- Point locks L4.1–L4.6 (3 Nov 2026).
+
+#### Decision
+
+- **Split ceilings:** persisted membership ≠ LLM evidence ≠ UI list (UI → dashboard).
+- **Membership:** **uncapped** on `metastory_stories`.
+- **LLM evidence cap:** **12** (`TEMPO_METASTORY_EVIDENCE_CAP`) for boundary/writer/healer input per metastory per tick.
+- **Rank (advisory):** composite 0–1 signals — recency **0.35**, embed-to-centroid **0.40**, outlet novelty **0.15**, evidence richness **0.10**; tie-break `story_id`.
+- **Overflow:** ranks 13+ **remain members**; **omitted from LLM prompts** this tick.
+- **UI source-list / +N more:** dashboard (B5), not this stage.
+
+#### Consequences
+
+- Eval/ops may retune cap/weights like D-096. `trigger_kind` → [D-098](#2026-11-03---d-098---metastory-trigger_kind--clock--warm).
+
+### 2026-11-03 - D-096 - Metastory propose/healer advisory thresholds (no election-bundle)
+
+#### Context
+
+- B3 L3b: numeric floors for embed propose + deterministic repair. As-is healer included election-bundle Jaccard (0.34) + min-shared 2 tuned to one beat under mega-cluster LLM.
+- To-be stack is embed → propose → light healer → Sonnet boundary; cargo-culting as-is knobs is unsafe. Continuity/over-split is a long-term semantic problem.
+
+#### Decision
+
+- **Propose** advisory cosine link floor **`0.65`** (`TEMPO_METASTORY_PROPOSE_MIN_COSINE`) among already-admitted stories only. Distinct from recall `TEMPO_EMBED_MIN_SIMILARITY`.
+- **Healer** advisory geo-stripped split Jaccard **`0.22`** (`TEMPO_METASTORY_HEALER_SPLIT_JACCARD`); hints only — boundary remains final judge; no invent merges.
+- **Drop** election-bundle Jaccard / min-shared specific from to-be metastory. Continuous-event continuity owned by **boundary prompt + gold B-F3**.
+- Numbers are **advisory until gold promotes**; evals must recommend knob moves before blaming prompts alone.
+
+#### Consequences
+
+- As-is `TEMPO_ELECTION_BUNDLE_*` remains prototype residue until cutover.
+- Next B3: prompt bodies / gold, or membership ceiling / `trigger_kind` / Mermaid / ops bag.
+
+### 2026-11-03 - D-095 - Metastory boundary/writer Sonnet-only
+
+#### Context
+
+- B3 L3a: generative SKUs for boundary + writer. Opus 5.5 is ~2× Sonnet and fits extraction (rare); metastory can run every clock/warm tick with ≤2 attempts each call_kind.
+- Rejected Sonnet→Opus fallback (cost escalation on the hottest path). Rejected Haiku-primary writer (shared copy is the product surface).
+
+#### Decision
+
+- **Boundary** and **writer** both use **`anthropic:claude-sonnet-5-5`** as primary.
+- **Fallback env empty** = second attempt is the **same Sonnet** (retry for transient/schema fail), **not** Opus escalate.
+- Env: `TEMPO_AI_METASTORY_BOUNDARY_MODEL` / `_FALLBACK_MODEL` · `TEMPO_AI_METASTORY_WRITER_MODEL` / `_FALLBACK_MODEL` (see `.env.example`).
+- No catalog change — `claude-sonnet-5-5` already in [model-pricing.json](../07-ops/model-pricing.json). Opus remains extraction-primary only until evals reopen.
+- Revisit Opus (or other) only with gold evidence of systematic Sonnet failure — not as default fallback.
+
+#### Consequences
+
+- Next (at D-095 time): L3b thresholds — closed in [D-096](#2026-11-03---d-096---metastory-proposehealer-advisory-thresholds-no-election-bundle).
+- Encode: prompts SKU tables, pipeline steps 4/7, PRD open row, contract log, `.env.example`, this entry, Slack note.
+
+### 2026-11-03 - D-094 - Embed SKU lock + to-be model-pricing inventory
+
+#### Context
+
+- B3 pipeline L2: embed SKU + `vector(N)` blocked metastory deepen and `story_embeddings` migrate.
+- Ops inventory preference: `#ops-pricing-models` / [`model-pricing.json`](../07-ops/model-pricing.json) should list only SKUs planned for the to-be prototype — not upgrade-path or as-is residue.
+
+#### Decision
+
+- **Embed (shared `story_embeddings`):** `text-embedding-3-small` via `TEMPO_OPENAI_EMBEDDING_MODEL`; pgvector **`vector(1536)`**; no Matryoshka shorten in MVP. Quality lever stays boundary/writer + eligible text (`article_summary`), not a pricier embed SKU.
+- **Pricing catalog trim:** keep `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `text-embedding-3-small`. Remove `text-embedding-3-large`, `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`.
+- **No dedicated translate SKU:** English bridge = summarization → `article_summary` (already locked). Do not add `gpt-4o-mini` to inventory; as-is `TEMPO_TRANSLATION_*` is residue until retired.
+- **As-is delta / advisory cluster:** env defaults that pointed at removed 4.x ids must mock, cut over to a catalogued 5.x SKU, or stay off — uncatalogued live spend cannot be priced.
+- Encode: ops JSON + sync, `.env.example`, pipeline embed row, `tempo.dbml`, metastory-runs note, PRD/contract open rows, this entry.
+
+#### Consequences
+
+- Monday Slack catalog heartbeat will show the trimmed inventory after merge.
+- Metastory boundary/writer SKUs → [D-095](#2026-11-03---d-095---metastory-boundarywriter-sonnet-only).
+- Next B3 (at D-094 time): pipeline L3+.
+
+### 2026-11-03 - D-093 - Metastory model PRD thickened (B3 P1–P9)
+
+#### Context
+
+- Contract shell refreshed (D-092). PRD was thin stub with Execution waived.
+
+#### Decision
+
+- Thicken [model--metastory--v1.md](../02-product/prds/model--metastory--v1.md): Runtime gap table (9 rows), Solution/Scope, full Execution + Constraints (MR-cited; **no** Must REQ table), NFR, metrics, open questions, decisions.
+- Post-B3: coherence pass on summarization + story-tagging Must tables; then B4 personalization.
+
+#### Consequences
+
+- Next B3 artifacts: pipeline → prompts → evals/gold → metastory-runs.dbml.
+- **Done (later):** Must-coherence Closed (3 Nov); B4 personalization design Locked / build deferred (D-110).
+
+### 2026-11-03 - D-092 - Metastory contract B3 shell refresh (C1–C10)
+
+#### Context
+
+- B3 cross-cut X1–X4 locked; contract felt fragile vs carry/pipeline (Happy path omitted repair + material gate; Related/Success stale).
+
+#### Decision
+
+- Refresh [metastory.md](../02-product/contracts/metastory.md) shell (Related, Happy path, Scope, Success, I/O, Runtime, decision log) per C1–C10.
+- Clarify **MR-05** (+n/−n membership when event continues) and **MR-07** (English = shared outputs; prefer article_summary for model input; source language ≠ admission gate). Other MRs unchanged.
+- No UX trigger; chrome → dashboard. Metrics remain D-088 on PRD.
+
+#### Consequences
+
+- Next: thicken model PRD execution, then pipeline / prompts / evals / runs DBML.
+
+### 2026-11-03 - D-091 - Metastory MVP carry-over (as-is → to-be) encoded
+
+#### Context
+
+- Phase B3 deepen needs as-is prototype lessons (`cluster-v4`, split-healer, what-changed engine, lineage) mapped onto locked [metastory.md](../02-product/contracts/metastory.md) without re-monolithing prompts or reopening MR rules.
+- Point-by-point carry locks P1–P11 (3 Nov 2026 session).
+
+#### Decision
+
+- **Encode carry posture** into [pipelines/metastory.md](docs/pipelines/metastory.md) (primary), prompt stubs [metastory-boundary](docs/prompts/metastory-boundary.md) / [metastory-writer](docs/prompts/metastory-writer.md), eval stubs + index, PRD decision rows, contract decision-log line only (**MR-01…13 unchanged**).
+- **In metastory:** decompose cluster-v4; boundary + adapted deterministic repair; UUID/+n/−n continuity; four persisted fields; shared-run what-changed + material gate; English synthesis from multilingual sources; MR-10 fail-closed; no runtime claims (grounding = writer eval **P0**).
+- **Caps:** sources/membership ceiling → metastory (integer later); feed count/overflow → dashboard; no global product cap.
+- **Parking lot:** beat-fit pre-cluster, overflow/rank, rising, watermark → dashboard B5; why/next → personalization B4; meta-story-tags already closed under story-tagging.
+- **Ops revisit bag (metastory):** per-tick LLM/embed budget · deferred recluster · skip-if-unchanged hash — decide together at ops thicken.
+- **Not B3 Locked yet:** prompt bodies, gold cases, SKUs, thresholds, `trigger_kind` enum, harness.
+
+#### Why
+
+- Front-load hard thinking before autopilot build; prevent smuggling dashboard megapipe into shared-pool metastory; keep existing boundary/writer eval files as SoT surfaces.
+
+#### Consequences
+
+- Next B3 work: thicken PRD execution → prompt bodies → `pm-evals` gold (must include writer W-F1 grounding) → runs enum/SKU → implement.
+- B4/B5 must run their own as-is carry for parked items (formulas still thin on dashboard).
+
 ### 2026-11-02 - D-090 - Phase B2a story-tagging artifacts Locked (incl. runs DBML)
 
 #### Context
@@ -243,6 +635,7 @@ Engineering and Tempo build-out decisions (intake, slices, tooling). Reverse chr
 #### Decision
 
 - Keep `title` NOT NULL; INSERT `metastories` only after a successful title write; subtitle remains nullable.
+- **Amended by [D-102](#2026-11-03---d-102---shared-copy-requiredness-titlesubtitlewhat_happened-what_changed-null-only-first-mint):** subtitle + what_happened also required on success.
 - New event + writer fail both attempts → no row, no membership; retry next tick.
 - Partial success only when last-good already exists.
 - No archive/ended column and no copy-input hash in v0. Notes + [metastory.md](../02-product/contracts/metastory.md) MR-05/06/10 updated.

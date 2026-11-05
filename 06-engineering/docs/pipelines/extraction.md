@@ -112,7 +112,7 @@ Prompt + gold own canonical labels and conservatism. Revisit a tiny evidence-bas
 |------|---------|-------------|
 | Per-attempt timeout | **15000** ms (ceiling; return as soon as the model finishes) | `TEMPO_AI_TIMEOUT_MS` or extraction-specific override at build |
 
-Primary and fallback each get their **own** 15s budget (do not share one wall clock across both attempts). Same **15s** default applies to summarization and story-tagging per-attempt timeouts ([summarization.md](./summarization.md) · [story-tagging.md](./story-tagging.md)).
+Primary and fallback each get their **own** 15s budget (do not share one wall clock across both attempts). Same **15s** default applies to summarization, story-tagging, metastory (boundary + writer), and personalization per-attempt timeouts ([summarization.md](./summarization.md) · [story-tagging.md](./story-tagging.md) · [metastory.md](./metastory.md) · [personalization.md](./personalization.md)).
 
 ---
 
@@ -192,6 +192,6 @@ This pipeline describes the **target** (five blurbs, multi-lane call, onboarding
 | 2 Nov 2026 | Carry-over 2 | **B** — no noise / qualifier denylist in v1 |
 | 2 Nov 2026 | Carry-over 3 | **B** — lower+trim only; no synonym map in extraction hygiene |
 | 2 Nov 2026 | Carry-over 4 | **A** — caps **64** chars / item, **24** items / array |
-| 2 Nov 2026 | Carry-over 5 | **15s** per LLM attempt (extraction + summarization + story-tagging); ceiling only |
+| 2 Nov 2026 | Carry-over 5 | **15s** per LLM attempt (extraction + summarization + story-tagging + metastory boundary/writer + personalization); ceiling only |
 | 2 Nov 2026 | Carry-over 6 | **A** — structural package only (junk/handles/dedupe/sort/exact geo≠keyword/topic≠keyword); no source taste filters |
 | 2 Nov 2026 | `extraction_invoke` grain | Once per invoke (not per attempt) — aligns PRD / D-088 |

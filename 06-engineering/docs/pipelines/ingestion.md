@@ -124,11 +124,11 @@ Ingestion **orchestrates** only. Sibling stages own prompts, retries (≤2), and
 |--------|--------|-----------|-----------------|
 | **Summarization** | `story_id`, `uri`, title, body in memory, `trigger_kind` (`clock` \| `warm`). Stage **mints its own** `trigger_id` for `summarization_runs` / `summarization_invoke` — not shared with story-tagging or metastory | success \| fail \| skip (**no body**, or `article_summary` already present incl. resurrect — [SR-05](../../../02-product/contracts/summarization.md)) | Discard body alone; invent summary; store/log body |
 | **Story-tagging** | `story_id`, kind, text (title+body \| title \| X text), `trigger_kind` (`clock` \| `warm` \| `x_edit`). Stage **mints its own** `trigger_id` for `story_tagging_runs` / `story_tagging_invoke` | success \| fail \| skip (empty aperture) | Invent chips; discard body. Mark disposition: **admit** final fail → no new marks; **IR-14** final fail → empty replace-set ([ST-06](../../../02-product/contracts/story-tagging.md)); empty aperture → empty replace-set ([ST-15](../../../02-product/contracts/story-tagging.md)) |
-| **Metastory** | Admitted `story_id`(s); body handle if still in memory; tick / job correlation id (orchestrator-owned — not an LLM-stage `trigger_id`) | Handoff completion (incl. same-tick what-happened when used) / degrade for **this** handoff | Discard body (orchestrator owns after barrier — [IR-05](../../../02-product/contracts/ingestion.md)); invent chips; fail the pool tick on handoff degrade |
+| **Metastory** | Admitted `story_id`(s); body handle if still in memory (writer optional `same_tick_body` — [MR-08](../../../02-product/contracts/metastory.md) / [D-107](../../DECISIONS.md); boundary body-free); tick / job correlation id (orchestrator-owned — not an LLM-stage `trigger_id`). Boundary/writer each mint their own LLM `trigger_id` | Handoff completion (incl. same-tick what-happened when used) / degrade for **this** handoff | Discard body (orchestrator owns after barrier — [IR-05](../../../02-product/contracts/ingestion.md)); invent chips; fail the pool tick on handoff degrade |
 
 Sibling **writes** (`article_summary`, `story_*`, metastory tables) are owned by those stages — ingestion does not write them.
 
-**`trigger_id` spine:** each LLM stage mints a new UUID when it enters the generate path (shared by ≤2 attempts). Ingestion does **not** assign one shared UUID across summarization + story-tagging for the same admit. Correlate same-tick work via `story_id` + clock/warm job, not a cross-stage `trigger_id`.
+**`trigger_id` spine:** each LLM stage mints a new UUID when it enters the generate path (shared by ≤2 attempts). Ingestion does **not** assign one shared UUID across summarization + story-tagging + metastory for the same admit. Metastory boundary and writer each mint their own `trigger_id` (do not reuse across `call_kind`). Post-join **personalization** also stage-mints its own `trigger_id` (not shared with admit-tick LLMs). Correlate same-tick work via `story_id` + clock/warm job, not a cross-stage `trigger_id`.
 
 ---
 
@@ -270,7 +270,7 @@ Model daily spend (from `*_runs.estimated_cost_usd`) → `#ops-pricing-models` v
 | 2 Nov 2026 | ST-06 handoff | Story-tagging fail matrix + AI fence: admit vs IR-14 mark disposition; empty-aperture skip — aligns contract Edges + [ST-06](../../../02-product/contracts/story-tagging.md) / [ST-15](../../../02-product/contracts/story-tagging.md) |
 | 2 Nov 2026 | Related | `ingestion-pricing` files are live envelope (not “planned”); story-tagging Related → pipeline + contract |
 | 2 Nov 2026 | Coherence ↔ contract | Fix §9 cross-refs; admit barrier ↔ IR-05 / SR-05 / MR-08; Out = wire facts into landed GHA (not “implement workflows”) |
-| 2 Nov 2026 | Cross-stage `trigger_id` | Ingestion passes `trigger_kind` (+ story context); each LLM stage mints its own `trigger_id` — not one UUID shared across summarization + story-tagging |
+| 2 Nov 2026 | Cross-stage `trigger_id` | Ingestion passes `trigger_kind` (+ story context); each LLM stage mints its own `trigger_id` — not one UUID shared across summarization + story-tagging + metastory (boundary/writer separate) + personalization post-join |
 | 2 Nov 2026 | Carry-over 1 | **A** — NewsAPI + X only; retire RSS/manifest/cache-warmer as live product ingestion |
 | 2 Nov 2026 | Carry-over 2 | **A** — identity = `uri` / post id only; no cross-URL/headline merge |
 | 2 Nov 2026 | Carry-over 3 | **A** — X handles from live scope union; env ≠ handle aperture |

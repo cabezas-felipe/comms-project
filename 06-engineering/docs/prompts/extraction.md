@@ -51,7 +51,7 @@ flowchart LR
 
 - Do **not** default to Fable-class models unless gold shows Opus 5.5 insufficient.
 - SKU changes require a **DECISIONS** entry + eval evidence. Bump `extraction-vN` **only** when prompt instructions or output schema change — not for SKU-only swaps.
-- Legacy defaults (`claude-opus-4-7` / `claude-sonnet-4-6`) remain in code until build adopts this SoT.
+- Legacy 4.x defaults removed from [model-pricing.json](../../../07-ops/model-pricing.json) inventory ([D-094](../../DECISIONS.md)); cut env to this SoT or mock — do not price uncatalogued ids.
 
 ---
 
@@ -209,6 +209,7 @@ At call time, append the current `functions.name` values after the per-lane rule
 ## 8. Out of this document
 
 - Deterministic hygiene (hygiene-only: lower+trim, 64/24 caps, junk/handles/dedupe/sort, exact geo≠keyword — **no** additive recall, noise denylists, or synonym maps) → [pipelines/extraction.md](../pipelines/extraction.md) §3.1
+- Per-attempt timeout **15s**, primary→fallback, logging, `extraction_invoke` (once per invoke, not per attempt) → [pipelines/extraction.md](../pipelines/extraction.md) §3.2 / observability
 - Alias / function catalog ops and UUID resolve → [model--extraction--v1.md](../../../02-product/prds/model--extraction--v1.md) + ops
 - Eval / gold shape → [evals/extraction.md](../evals/extraction.md)
 - Code, env flips, migrations → build phase
@@ -235,3 +236,4 @@ At call time, append the current `functions.name` values after the per-lane rule
 | 02 Nov 2026 | Topic casing | Topic collapse example and emit rule use lowercase (`elections`) to match product store + gold match keys. Version stays `extraction-v1` (prompt not shipped). |
 | 2 Nov 2026 | Hygiene pointer | Out-of-doc hygiene line matches pipeline carry-over: no `KEYWORD_PATTERNS` / noise denylists / synonym maps |
 | 2 Nov 2026 | Resolve pointer | Resolve → model PRD + ops (not Session C); Related hygiene-only → pipeline |
+| 3 Nov 2026 | Timeout pointer | Out-of-doc → pipeline §3.2 **15s** + `extraction_invoke` grain (align sum/ST/metastory) |

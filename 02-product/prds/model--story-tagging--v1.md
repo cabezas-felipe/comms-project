@@ -2,9 +2,9 @@
 
 Mark each stored shared story with every topic, keyword, and geography in Tempo’s shared catalogs that the story text supports. One constrained model call; catalog IDs only.
 
-Status: Spec locked (B2a) — all design siblings Locked; build deferred  
+Status: Spec locked (B2a) — Constraints↔ST coherence Locked (3 Nov 2026); build deferred  
 Owner: Felipe  
-Update: 02 Nov 26  
+Update: 03 Nov 26  
 Intent: ship
 
 **Thin ship shell.** Do not duplicate ST table, prompt text, or gold — change those in the SoTs below first. This PRD owns **invoke contract**, runtime gap vs today, build sequencing, and agent-ready Execution. Stage name is **story-tagging** (apply marks to the **shared pool** on every new admit — join filters the feed later). Distinct from **extraction**, which creates user chips and grows catalogs. Product behavior SoT: locked [contract](../contracts/story-tagging.md) (ST-01…15).
@@ -105,7 +105,7 @@ Shared LLM stack ([D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088--
 
 | Rule | Lock |
 | --- | --- |
-| When it fires | Once when a story-tagging **LLM invoke** finishes (success or fail). Skip / no-model paths (IR-14 no-change, empty aperture) do **not** emit. |
+| When it fires | Once when a story-tagging **LLM invoke** finishes (success or fail). Skip / no-model paths (IR-14 no-change, empty aperture) do **not** emit. Attempt 2 (Sonnet escalate) is the same invoke — **one** event (**not** per attempt). |
 | Event | `story_tagging_invoke` |
 | Properties | `trigger_id` · `trigger_kind` (`clock` \| `warm` \| `x_edit`) · `outcome` (`success` \| `fail`) · `prompt_version` · `model_id` (attempt that produced the persisted replace-set, or last attempt on fail) · `error_kind` if fail |
 | Left out | Chip ID lists, story text, gold scores |
@@ -150,12 +150,19 @@ Shared LLM stack ([D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088--
 - Never re-tag press from `article_summary` alone; never re-tag solely because catalogs grew.
 - Both attempts fail → fail-open for pool; mark disposition per edges above; still hand metastory.
 
-**Constraints**
+**Constraints** (agent-scannable; contract remains full ST SoT — no Must REQ table)
 
-- Fail closed: inventing chips, retaining/logging/showing publisher body, growing catalogs from this stage.
+- Tag every new admit + IR-14 text change (pool-wide); join does not gate invoke — [ST-09](../contracts/story-tagging.md) · [IR-08](../contracts/ingestion.md)
+- Catalog IDs only; drop invent / unknown / wrong-shelf; never INSERT catalogs — [ST-03](../contracts/story-tagging.md) · [ST-07](../contracts/story-tagging.md)
+- Never store, log, or show publisher body; provider must not train on it — [ST-01](../contracts/story-tagging.md)
+- Body discard only via ingestion orchestrator after same-tick consumers; this stage does not assume final discard — [ST-14](../contracts/story-tagging.md) · [IR-05](../contracts/ingestion.md)
+- Replace-set is the full current mark set; IR-14 final fail → empty replace-set — [ST-05](../contracts/story-tagging.md) · [ST-06](../contracts/story-tagging.md)
+- Empty aperture → skip LLM; empty replace-set; no run row — [ST-15](../contracts/story-tagging.md)
+- Same-invoke retry only: ≤2 attempts total; final fail → fail-open for pool + mark disposition per ST-06 / admit edges — [ST-11](../contracts/story-tagging.md)
+- Full shared catalogs at invoke (every T/K/G row); not per-user scope alone — [ST-02](../contracts/story-tagging.md)
+- Marks are shared-pool assertions; join ceiling remains the user’s confirmed chips — [ST-08](../contracts/story-tagging.md)
 - Fail open: story remains in pool; metastory handoff continues.
 - Exact SKUs, prompt body, Mermaid, gold cases → prompt / pipeline / evals.
-- Provider must not train on body (when body was in the prompt).
 
 **Open questions** (design locks for B2a; build still deferred)
 
@@ -165,25 +172,11 @@ Shared LLM stack ([D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088--
 | Tag which stories? | **Locked:** every new admit + IR-14 text change (pool-wide); join filters feed | This PRD / contract ✓ |
 | Quality-escalate rule (when Haiku → Sonnet) | **Locked:** attempt 1 Haiku-class; attempt 2 Sonnet-class on provider/timeout/validation fail | Pipeline ✓ |
 | Exact primary/fallback model ids | **Locked:** `anthropic:claude-haiku-5-5` → `anthropic:claude-sonnet-5-5`; temp 0; max_tokens 1024 | Prompt ✓ |
-| Per-attempt timeout / concurrency | **Locked:** **15000** ms ceiling; concurrent invokes **4** (clamp 1–8) | Pipeline ✓ |
+| Per-attempt timeout / concurrency | **Locked:** **15000** ms ceiling (shared with extraction + summarization + metastory + personalization); concurrent invokes **4** (clamp 1–8) | Pipeline ✓ |
 | Post-model / user scope | **Locked:** drop unknown/wrong-shelf + dedupe only; **no** settings clamp, alias/lexical/URL/semantic backfill; join owns user chips | Pipeline ✓ / [ST-02](../contracts/story-tagging.md)·[ST-08](../contracts/story-tagging.md) |
 | `input_hash` canonical bytes | **Locked:** `text_payload + "\n---\n" + catalog_payload` (tempo label fields) | Pipeline ✓ / runs DBML ✓ |
 | Gold suite size / dimensions | **Locked:** st-skip-01 + st-01…22 (E3–E5) | Evals ✓ |
 | Advisory vs blocking evals | **Locked for B2a:** advisory until promote gate; quality via gold/`ds-coder`, not PostHog | Evals / `engineer-qa` |
-
----
-
-## Must constraints
-
-| ID | Requirement | Acceptance | Trace |
-| --- | --- | --- | --- |
-| **REQ-01** | Tag every new admit + IR-14 text change (pool-wide); not feed-filtered | Join does not gate invoke | [ST-09](../contracts/story-tagging.md)·[IR-08](../contracts/ingestion.md)·A |
-| **REQ-02** | Catalog IDs only; drop invent / wrong-shelf; never INSERT catalogs | Unknown/wrong-shelf IDs dropped (no auto-move); invoke may still succeed | [ST-03](../contracts/story-tagging.md)·[ST-07](../contracts/story-tagging.md) |
-| **REQ-03** | Never store, log, or show publisher body; no-train on provider | No body column/logs; runs use `input_hash` only | [ST-01](../contracts/story-tagging.md)·[ST-14](../contracts/story-tagging.md) |
-| **REQ-04** | Body discard only via ingestion orchestrator after same-tick consumers | Stage releases body; does not assume final discard | [IR-05](../contracts/ingestion.md)·[ST-14](../contracts/story-tagging.md) |
-| **REQ-05** | Replace-set is full current mark set; IR-14 final fail clears | Empty replace-set on IR-14 fail | [ST-05](../contracts/story-tagging.md)·[ST-06](../contracts/story-tagging.md) |
-| **REQ-06** | Empty aperture → skip LLM; empty replace-set; no run row | ST-15 path | [ST-15](../contracts/story-tagging.md) |
-| **REQ-07** | Cost-aware model bias: Haiku-class primary → Sonnet-class escalate | Prompt/router defaults match bias; Opus not default | Goals |
 
 ---
 
@@ -230,9 +223,10 @@ Shared LLM stack ([D-088](../../06-engineering/DECISIONS.md#2026-10-31---d-088--
 | No LLM judge in B2a | Code checks + human gold; same as summarization B2 | 2 Nov 26 | Promote gate / judge need |
 | Exact SKUs + prompt P1–P5 | Prompt Locked B2a: Haiku→Sonnet; wire; invent-hard rules; no few-shots | 2 Nov 26 | Gold forces prompt bump |
 | `story_tagging_invoke` | Thin PostHog invoke + shared LLM stack (D-088) | 31 Oct 26 | Instrumented at build |
-| B2a C4 Execution un-waived | Agent-ready I/O + Must + NFR | 2 Nov 26 | Sibling SoTs lock |
-| B2a C0–C5 PRD locked | Gate-by-gate Problem→Goals→Solution→Execution→Must/NFR/Path2→Decisions; approach A | 2 Nov 26 | Contract change / sibling lock drift |
+| B2a C4 Execution un-waived | Agent-ready I/O + Constraints + NFR | 2 Nov 26 | Sibling SoTs lock |
+| B2a C0–C5 PRD locked | Gate-by-gate Problem→Goals→Solution→Execution→Constraints/NFR/Path2→Decisions; approach A | 2 Nov 26 | Contract change / sibling lock drift |
+| B3 coherence: retire Must REQ table | Align with summarization / metastory P6 — Constraints cite ST-* only; model bias stays Cost NFR; avoid REQ↔ST collision | 3 Nov 26 | Contract ST change |
 | B2a coherence ↔ contract/pipeline | Skip named; wrong-shelf; tempo label fields; ops daily+weekly; pipeline Locked in status/gaps | 2 Nov 26 | Further sibling lock |
 | B2a runs DBML Locked | D1–D6: `clock`\|`warm`\|`x_edit`; hash; skip=no row; same error_kind spine as summarization ([D-090](../../06-engineering/DECISIONS.md#2026-11-02---d-090---phase-b2a-story-tagging-artifacts-locked-incl-runs-dbml)) | 2 Nov 26 | Migration / schema drift |
-| Story-tagging artifact coherence | Cross-check contract ↔ PRD ↔ prompt ↔ pipeline ↔ runs ↔ evals/gold; residual skip/`no_posthog` + Locked-B2a pointer fixes only | 02 Nov 26 | Next stage coherence pass |
+| Story-tagging artifact coherence | Cross-check contract ↔ PRD ↔ prompt ↔ pipeline ↔ runs ↔ evals/gold; residual skip/`no_posthog` + Locked-B2a pointer fixes only | 02 Nov 26 | Rule drift / stage reopen |
 | MVP carry-over timeout / post-model | **15s**/attempt; concurrency 4; drop/dedupe only; no settings clamp / lexical backfill | 2 Nov 26 | Cost/quality forces aperture retrieval or soft length gate |

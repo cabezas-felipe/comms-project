@@ -1,8 +1,8 @@
-// Embeddings router.  Single capability for now (text-embedding-3-small via
-// OpenAI).  Encapsulates env reads, timeout, retries, and a minimal mock so
-// callers can stay agnostic of the underlying provider.
+// Embeddings router.  To-be inventory SKU: text-embedding-3-small via OpenAI
+// → vector(1536) on story_embeddings (D-094). Encapsulates env reads, timeout,
+// retries, and a minimal mock so callers stay provider-agnostic.
 //
-// The recall stage is the only consumer.  When TEMPO_AI_MOCK_ONLY=true the
+// Consumers: recall today; metastory cluster-propose at B3 build. When TEMPO_AI_MOCK_ONLY=true the
 // router returns deterministic hash-derived vectors so mock-only test runs and
 // dev environments without a key still produce stable output (cosine values
 // are not meaningful in this mode — strictly for plumbing).
@@ -81,9 +81,9 @@ export async function embedTexts(texts, { signal, model: modelOverride } = {}) {
   if (!apiKey) {
     throw new Error("TEMPO_OPENAI_API_KEY (or OPENAI_API_KEY) required for embeddings");
   }
-  // Per-call `model` override wins so the semantic-BeatFit stage can request
-  // text-embedding-3-large while the recall stage stays on
-  // text-embedding-3-small (the env default).
+  // Per-call `model` override wins for tests. Production inventory is
+  // text-embedding-3-small only (D-094) — do not point live traffic at
+  // uncatalogued embed SKUs (breaks pricing + vector(1536) column).
   const model =
     typeof modelOverride === "string" && modelOverride.length > 0
       ? modelOverride

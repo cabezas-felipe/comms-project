@@ -1,6 +1,8 @@
 // Tempo — exploratory ERD (DBML source of truth)
 // Cloud: https://dbdiagram.io/d/6ab4852e58694256127b2a37
 // Not the live app schema until deliberately reconciled.
+// B3 DB/DBML (D-106, 3 Nov 2026): §§8–9 notes amend (D-102 · D-094); no column changes.
+// B4 DB/DBML (D-110, 5 Nov 2026): practice_notes + membership personalization + runs sibling coherent; no column changes.
 //
 // Two bands on one Postgres project:
 //   EXTRACTION / SCOPE (groups 1–5) — blurbs → user chips → catalogs (incl. vendor send keys)
@@ -26,8 +28,9 @@
 //     function*       T / K / G           catalog)         press + X
 //     org             (+ conceptUri)                       (+ sourceUri / x id)
 //
-//   * function (not job title) drives why-this-matters / what-comes-next.
-//     role_submitted is display-only; resolve goes submitted → function (no roles catalog in v1).
+//   * function (not job title) drives what-comes-next (+ practice_notes);
+//     why-this-matters uses priorities only (PR-03). role_submitted is display-only;
+//     resolve goes submitted → function (no roles catalog in v1).
 //
 //   MONITORING (shared pool → event → per-user feed):
 //     6 stories ──► 7 story chips ──► 8 metastories (+ membership)
@@ -157,9 +160,10 @@ Table users {
 //           post-model: organization_submitted → aliases → organization_id
 // =============================================================================
 
-TableGroup "2 · Identity (blurb 1)" [color: #DCE8F5, note: 'blurb → model labels → post-model function/org FKs'] {
+TableGroup "2 · Identity (blurb 1)" [color: #DCE8F5, note: 'blurb → model labels → post-model function/org FKs; practice_notes per function for what-next'] {
   user_role_organization
   functions
+  practice_notes
   organizations
   organization_aliases
   industries
@@ -180,10 +184,25 @@ Table user_role_organization {
 
 Table functions {
   function_id uuid [pk]
-  name varchar(200) [unique, not null, note: 'Store lowercase — primary why-matters / next-steps signal']
+  name varchar(200) [unique, not null, note: 'Store lowercase — primary what-comes-next signal (with practice_notes); not a why input']
   created_at timestamptz [not null]
 
   Note: 'Closed set. v1 seed: communications, policy, operations, partnerships. Insert these four lowercase rows at build. Do not hardcode the list in the extraction prompt. Near-enum — created_at only. Job titles not catalogued in v1.'
+}
+
+Table practice_notes {
+  practice_note_id uuid [pk]
+  function_id uuid [not null, ref: > functions.function_id, note: 'One note lineage per function; load latest version for generate']
+  version int [not null, note: 'Bump when body changes so PR-09 input_hash moves; hash uses id+version not body bytes']
+  body text [not null, note: 'Compressed Model body from 02-product/practice-notes/{function}.md; sent in user message; seed = practice-notes.seed.json']
+  source_refs text [null, note: 'JSON text array of {id,url}; provenance only — never send to model; from seed fixture']
+  created_at timestamptz [not null]
+
+  indexes {
+    (function_id, version) [unique, name: 'practice_notes_function_version_uidx']
+  }
+
+  Note: 'Personalization what-comes-next only (PR-07 / PR-14). Empty function or missing body → why-only. App selects max(version) per function_id. Author SoT: 02-product/practice-notes/*.md. Seed fixture: practice-notes.seed.json · handoff: practice-notes-seed.md. Resolve function_name→function_id at migrate; generate practice_note_id at insert.'
 }
 
 Table organizations {
@@ -568,21 +587,21 @@ Table story_geographies {
 // 8 · Metastories — event grain + story membership (chips ≠ identity)
 // =============================================================================
 
-TableGroup "8 · Metastories" [color: #F5E6D8, note: 'Shared copy; M:N membership; no metastory_chips; no archive col in v0'] {
+TableGroup "8 · Metastories" [color: #F5E6D8, note: 'Shared copy; M:N membership; no metastory_chips; no archive col in v0. B3 amend D-102 requiredness.'] {
   metastories
   metastory_stories
 }
 
 Table metastories {
-  metastory_id uuid [pk, note: 'Stable across ticks when the event continues (MR-05). Mint only after writer produces title.']
-  title text [not null, note: 'Required. INSERT row only after successful title write — no untitled metastories.']
-  subtitle text [null, note: 'Optional shared line; null OK']
-  what_happened text [null, note: 'Last-good held on writer fail when prior copy exists (MR-10)']
-  what_changed text [null, note: 'Prior vs current shared run — not per-user last-seen (MR-09). Null on first successful write.']
+  metastory_id uuid [pk, note: 'Stable across ticks when the event continues (MR-05). Mint only after successful writer: title+subtitle+what_happened (D-102).']
+  title text [not null, note: 'Required. INSERT only after successful writer: title+subtitle+what_happened (D-102).']
+  subtitle text [not null, note: 'Required on successful persist (D-102 / MR-06).']
+  what_happened text [not null, note: 'Required on successful persist (D-102). Last-good held on later writer fail (MR-10).']
+  what_changed text [null, note: 'Prior vs current shared run (MR-09). Null on first mint only (D-102); required on later successful writer when gate fires.']
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
 
-  Note: 'MR-06 shared fields (same for all viewers); English MVP (MR-07). New event + writer fail → no row / no membership (retry next tick). Partial success (membership + last-good copy) only when last-good already exists. No archive/ended column in v0; no copy-input hash until skip-if-unchanged locks. Lineage → metastory-runs (MR-13).'
+  Note: 'MR-06 shared fields (D-102): title+subtitle+what_happened NOT NULL; what_changed null on first mint only. English MVP (MR-07). New event + writer fail → no row / no membership. Partial success (membership + last-good) only when last-good exists. Feed completeness + ≤5 → dashboard. Lineage → metastory-runs (MR-13).'
 }
 
 Table metastory_stories {
@@ -603,13 +622,13 @@ Table metastory_stories {
 // 9 · Story embeddings — clustering input (not metastory identity)
 // =============================================================================
 
-TableGroup "9 · Story embeddings" [color: #EDE8F5, note: 'pgvector side table; async; 1:1 current embed; MR-04 hash'] {
+TableGroup "9 · Story embeddings" [color: #EDE8F5, note: 'pgvector side table; async; 1:1 current embed; MR-04 hash. B3 amend D-094: text-embedding-3-small / vector(1536).'] {
   story_embeddings
 }
 
 Table story_embeddings {
   story_id uuid [pk, ref: - stories.story_id, note: '1:1 — overwrite on re-embed; no per-model history in v0']
-  embedding vector [not null, note: 'pgvector; dims N locked with embed SKU — do not invent N in this SoT']
+  embedding vector(1536) [not null, note: 'pgvector; N=1536 from text-embedding-3-small (D-094); no Matryoshka shorten in MVP']
   model varchar(200) [not null, note: 'provider:model id used to produce embedding']
   embedded_text_hash varchar(64) [not null, note: 'Hash of MR-04 canonical embed text (press: title+article_summary if present, else title+excerpt if present, else title; X: text). Not body.']
   created_at timestamptz [not null]
@@ -622,7 +641,7 @@ Table story_embeddings {
 // 10 · Feed membership — join result + per-user why / what-next
 // =============================================================================
 
-TableGroup "10 · Feed membership" [color: #F8E8EC, note: 'Dashboard join + personalization; no admitted_at spell col in v0'] {
+TableGroup "10 · Feed membership" [color: #F8E8EC, note: 'Dashboard join + personalization; PR-12/14; no admitted_at in v0. B4 amend D-110 coherent (no column change).'] {
   user_feed_membership
 }
 
@@ -633,9 +652,9 @@ Table user_feed_membership {
   ended_at timestamptz [null, note: 'NULL = currently in feed (join SoT). Retain row when ended (PR-12). Re-join = resurrect: clear ended_at + end_reason; keep created_at + why/next + cache']
   end_reason feed_membership_end_reason [null, note: 'Required when ended_at set: left_join | operator']
   why_this_matters text [null, note: 'Per-user; last-good on writer fail. May be null while personalization lags join']
-  what_comes_next text [null, note: 'Per-user; last-good on writer fail. May be null while personalization lags join']
+  what_comes_next text [null, note: 'Per-user; last-good on writer fail. NULL when PR-14 gated (empty function / missing note) or while personalization lags']
   personalization_cache_key varchar(128) [null, note: 'Hash of PR-09 input classes; NULL until first success; skip regenerate when unchanged']
-  personalized_at timestamptz [null, note: 'Last successful personalization write (both why + what-next). UI feed/open requires this set — never show blank why/next']
+  personalized_at timestamptz [null, note: 'Last successful why write (PR-12). what_comes_next may stay null when PR-14 gated. UI feed/open requires this set — never blank why']
   updated_at timestamptz [not null]
 
   indexes {
@@ -643,7 +662,7 @@ Table user_feed_membership {
     metastory_id [name: 'user_feed_membership_metastory_id_idx', note: 'Reverse: users with this metastory in membership history']
   }
 
-  Note: 'Join = source ∧ ≥1 user chip (dashboard) — may INSERT before personalization. Personalization reads profile from lanes 1–4 — do not denormalize blurbs here. Current = ended_at IS NULL. UI lists/opens only when personalized_at IS NOT NULL (or retained last-good on resurrect); new member + personalization fail → hide from UI, retry later — no blank cards. No rank/rising columns.'
+  Note: 'Join = source ∧ ≥1 user chip (dashboard) — may INSERT before personalization. Personalization reads profile from lanes 1–4 + practice_notes — do not denormalize blurbs here. Current = ended_at IS NULL. UI lists/opens only when personalized_at IS NOT NULL; what-next-null chrome → dashboard PRD. New member + why fail → hide from UI, retry later — no blank why. No rank/rising columns.'
 }
 
 // =============================================================================

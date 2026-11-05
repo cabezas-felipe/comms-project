@@ -197,8 +197,8 @@ This contract describes the **target**: NewsAPI.ai Stream + X per [api-newsapi-a
 | 2 Nov 2026 | B2a ST-06 handoff | Story-tagging fail edge: IR-14 final fail clears marks (empty replace-set); admit fail leaves no new marks — aligns [ST-06](./story-tagging.md) / [ST-07](./story-tagging.md) |
 | 2 Nov 2026 | Coherence ↔ pipeline | Warm inputs include Tags + Context Save; ops event name deferred to pipeline §9; IR-14 minutes remain stub here / thickened to 15‑min offsets in eng |
 | 2 Nov 2026 | IR-14 pointer | Product cadence stays ~10–15 min; eng lock cited (15‑min offsets, no MVP $-cap) so contract ≠ pipeline stub conflict |
-| 2 Nov 2026 | Cross-stage | LLM `trigger_id` is stage-minted (pipeline §5); ingestion owns IR-05/08/11 handoff only — no shared UUID across summarization + story-tagging |
-| 2 Nov 2026 | MVP carry-over | Out + runtime gap align pipeline §6.1: NewsAPI+X only; uri/post-id identity; scope-union X aperture; no recall-in-admit; eng 12s / concurrency 3 |
+| 2 Nov 2026 | Cross-stage | LLM `trigger_id` is stage-minted (pipeline §5); ingestion owns IR-05/08/11 handoff only — no shared UUID across summarization + story-tagging + metastory (boundary/writer each mint their own) |
+| 2 Nov 2026 | MVP carry-over | Out + runtime gap align pipeline §6.1: NewsAPI+X only; uri/post-id identity; scope-union X aperture; no recall-in-admit; eng **vendor HTTP** 12s / X concurrency 3 (distinct from LLM **15s** ceilings) |
 
 ---
 

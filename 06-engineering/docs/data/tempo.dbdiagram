@@ -10,10 +10,11 @@
       { "name": "users", "schemaName": "public", "x": 40, "y": 80 },
 
       { "name": "user_role_organization", "schemaName": "public", "x": 480, "y": 40 },
-      { "name": "functions", "schemaName": "public", "x": 480, "y": 420 },
-      { "name": "organizations", "schemaName": "public", "x": 480, "y": 680 },
-      { "name": "organization_aliases", "schemaName": "public", "x": 480, "y": 980 },
-      { "name": "industries", "schemaName": "public", "x": 480, "y": 1280 },
+      { "name": "functions", "schemaName": "public", "x": 480, "y": 400 },
+      { "name": "practice_notes", "schemaName": "public", "x": 480, "y": 640 },
+      { "name": "organizations", "schemaName": "public", "x": 480, "y": 1000 },
+      { "name": "organization_aliases", "schemaName": "public", "x": 480, "y": 1320 },
+      { "name": "industries", "schemaName": "public", "x": 480, "y": 1640 },
 
       { "name": "user_priorities", "schemaName": "public", "x": 1000, "y": 40 },
       { "name": "user_organization_priorities", "schemaName": "public", "x": 1000, "y": 300 },

@@ -1,11 +1,13 @@
 # Why this matters — engineer spec (v0, planning)
 
-**Status:** Draft (planning complete — ready for implementation)  
+> **Superseded (not live SoT).** Tempo personalization B4 owns why / what-next — [pipelines/personalization.md](pipelines/personalization.md) · [prompts/personalization.md](prompts/personalization.md) · [evals/personalization.md](evals/personalization.md). Do not implement from this file.
+
+**Status:** Historical only (was: Draft / planning complete)  
 **Owner:** Felipe  
-**Last updated:** 20 May 26  
+**Last updated:** 20 May 26 (banner 5 Nov 2026)
 
 **Product source (archive):** [Why this matters — field doctrine](../../02-product/contracts/archive/why-this-matters--field-doctrine.md)
-**Eval set:** [why-this-matters.gold.json](evals/why-this-matters.gold.json) (18 cases, locked)
+**Eval set (legacy):** [why-this-matters.gold.json](evals/why-this-matters.gold.json) (18 cases) — live gold is [personalization.gold.json](evals/personalization.gold.json) (24)
 
 **Phases:** §1–12 locked (planning complete)
 

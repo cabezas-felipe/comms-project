@@ -169,7 +169,7 @@ Output:
 
 **Target:** Router loads this SoT; primary/fallback SKUs and sampling as §2; pipeline validates → drop/dedupe → replace-set `story_*`.
 
-**Today:** Stage not shipped. Add env keys `TEMPO_AI_STORY_TAGGING_MODEL` / `TEMPO_AI_STORY_TAGGING_FALLBACK_MODEL` (and timeout/concurrency per pipeline) in API `.env.example` at build.
+**Today:** Stage not shipped. Env stubs live in API `.env.example` (`TEMPO_AI_STORY_TAGGING_MODEL` / `_FALLBACK_MODEL` / `_TIMEOUT_MS` / `_CONCURRENCY`); wire router + harness at build.
 
 ---
 

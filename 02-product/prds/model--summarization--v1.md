@@ -2,7 +2,7 @@
 
 Write one factual Tempo **article summary** per new press URI from that URI’s vendor body in memory. Persist the summary for clustering / later refreshes and as the **source-reader snippet** (labeled as Tempo’s summary). Body discard is owned by the **ingestion orchestrator** after same-tick consumers finish — not by this stage alone.
 
-Status: Spec locked (B2) — build deferred  
+Status: Spec locked (B2) — Constraints↔SR coherence Locked (3 Nov 2026); build deferred  
 Owner: Felipe  
 Update: 02 Nov 26  
 Intent: ship
@@ -35,7 +35,7 @@ Intent: ship
 
 **Pain:** Metastory grouping and in-app source scan need more than a headline, without retaining publisher bodies — and NewsAPI.ai provides no excerpt field.
 
-**Why now:** Keep-list + source-reader locks require a durable Tempo-owned stand-in for the body. B2 design SoTs are Locked; remaining gap is **runtime build** (after sibling models are defined).
+**Why now:** Keep-list + source-reader locks require a durable Tempo-owned stand-in for the body. B2 design SoTs are Locked; remaining gap is **runtime build** (ST + metastory design Locked; wire deferred).
 
 **Gaps (build only):** Wire IR-11 invoke → persist `article_summary` → runs rows → `summarization_invoke`; migrate `summarization_runs`; advisory harness. Product meaning lives in the [contract](../contracts/summarization.md).
 
@@ -127,12 +127,18 @@ Operator does not trigger summarization directly. They see the result when openi
 - Both attempts fail → failure signal; no summary; body still held for other same-tick consumers until [IR-05](../contracts/ingestion.md) discard.
 - Already has summary → idempotent skip; no MVP overwrite/backfill.
 
-**Constraints**
+**Constraints** (agent-scannable; contract remains full SR SoT — no Must REQ table)
 
-- Fail closed: body retention, inventing summary, multi-body stitch, URL scrape for body.
-- Fail open: URI remain on keep-list without summary.
-- Provider must not train on body.
-- Exact SKUs, prompt body, Mermaid, overlap thresholds → prompt / pipeline / evals.
+- Press only; never summarize X — [SR-01](../contracts/summarization.md)
+- Never store, log, or show publisher body; provider must not train on it — [SR-02](../contracts/summarization.md)
+- Never invent facts or unsupported 4W; no summary without a usable body — [SR-03](../contracts/summarization.md) · [SR-05](../contracts/summarization.md)
+- Body discard only via ingestion orchestrator after same-tick consumers; this stage does not assume final discard — [SR-02](../contracts/summarization.md) · [IR-05](../contracts/ingestion.md)
+- Persist plain English prose string only (not JSON/bullets as stored form) — [SR-05](../contracts/summarization.md) · [SR-04](../contracts/summarization.md)
+- Skip invoke when `article_summary` already present (including resurrect); no MVP overwrite — [SR-05](../contracts/summarization.md)
+- Same-invoke retry only: ≤2 attempts total while body in memory; no cross-tick / backfill retry in MVP — [SR-06](../contracts/summarization.md)
+- Do not open the publisher URL to obtain body — [SR-10](../contracts/summarization.md)
+- Fail open: URI remains on keep-list without summary when invoke fails or is skipped.
+- Exact SKUs, prompt body, Mermaid, soft-density/overlap thresholds → prompt / pipeline / evals.
 
 **Open questions** (design Locked; build still deferred)
 
@@ -141,27 +147,13 @@ Operator does not trigger summarization directly. They see the result when openi
 | Exact primary/fallback model ids | **Locked:** `anthropic:claude-haiku-5-5` → `anthropic:claude-sonnet-5-5` | Prompt ✓ |
 | Quality-escalate rule (when Haiku → Sonnet) | **Locked:** attempt 1 Haiku; attempt 2 Sonnet on provider/timeout/validation fail | Pipeline ✓ |
 | Max body chars sent to model | **Locked:** full vendor body MVP; truncate N deferred | Pipeline ✓ |
-| Per-attempt timeout | **Locked:** **15000** ms ceiling (shared with extraction + story-tagging) | Pipeline ✓ |
+| Per-attempt timeout | **Locked:** **15000** ms ceiling (shared with extraction + story-tagging + metastory + personalization) | Pipeline ✓ |
 | Concurrent URI summarizations | **Locked:** **4** (clamp 1–8) | Pipeline ✓ |
 | Output length runtime | **Locked:** trim only; no hard char cap / overlap-% gate; soft density + F7 advisory offline | Pipeline ✓ / evals ✓ |
 | So-what denylist (V3) | **Locked:** keep 7-phrase list; expand only from gold fails | Pipeline ✓ |
 | Closed `trigger_kind` enum | **Locked:** `clock` \| `warm` | Runs DBML ✓ |
 | Gold suite size / dimensions | **Locked:** 22 cases (18 synthetic + 4 derived_real); arbiter pass done | Evals ✓ |
 | Advisory vs blocking evals | **Locked for B2:** advisory until promote gate; quality via gold/`ds-coder`, not PostHog | Evals / `engineer-qa` ✓ |
-
----
-
-## Must constraints
-
-| ID | Requirement | Acceptance | Trace |
-| --- | --- | --- | --- |
-| **REQ-01** | Press only; never summarize X | X admits never call summarization | [SR-01](../contracts/summarization.md) |
-| **REQ-02** | Never store, log, or show publisher body; no-train on provider | No body column/logs; runs use `input_hash` only | [SR-02](../contracts/summarization.md) |
-| **REQ-03** | Never invent a summary without a usable body; omit unsupported 4W | No title-only invent; empty/unusable → fail | [SR-03](../contracts/summarization.md)·[SR-05](../contracts/summarization.md) |
-| **REQ-04** | Body discard only via ingestion orchestrator after same-tick consumers | Stage releases body; does not assume final discard | [IR-05](../contracts/ingestion.md)·[SR-02](../contracts/summarization.md) |
-| **REQ-05** | Persist plain English prose string only (not JSON/bullets as stored form) | `article_summary` text column | [SR-05](../contracts/summarization.md)·C2 |
-| **REQ-06** | Skip invoke when `article_summary` already present (incl. resurrect) | Idempotent; no MVP overwrite | [SR-05](../contracts/summarization.md) |
-| **REQ-07** | Cost-aware model bias: Haiku-class primary → Sonnet-class quality fallback | Prompt/router defaults match bias; Opus not default | P5 B1 |
 
 ---
 
@@ -191,7 +183,7 @@ Shared LLM measurement stack ([D-088](../../06-engineering/DECISIONS.md)): `summ
 
 | Rule | Lock |
 | --- | --- |
-| When it fires | Once when a summarization **LLM invoke** finishes (success or fail). Skip paths (X, no body, summary already present) do **not** emit. Attempt 2 (Sonnet escalate) is the same invoke — **one** event. |
+| When it fires | Once when a summarization **LLM invoke** finishes (success or fail). Skip paths (X, no body, summary already present) do **not** emit. Attempt 2 (Sonnet escalate) is the same invoke — **one** event (**not** per attempt). |
 | Event | `summarization_invoke` |
 | Properties | `trigger_id` · `trigger_kind` (`clock` \| `warm`) · `outcome` (`success` \| `fail`) · `prompt_version` · `model_id` (attempt that produced the persisted summary, or last attempt on fail) · `error_kind` only when `outcome` is `fail` |
 | Left out | Body, article summary text, token counts (runs SoT), gold scores |
@@ -207,14 +199,15 @@ Shared LLM measurement stack ([D-088](../../06-engineering/DECISIONS.md)): `summ
 | Full model stack (own pipeline, not only a paragraph in ingestion) | Stored text other models depend on; same LLM discipline as extraction | 27 Oct 26 | If summarization proves trivial deterministic |
 | Fail posture aligned to contract | Fail closed body + no invent; fail open URI; English MVP; 1 same-invoke retry | 27 Oct 26 | Contract change |
 | SR-07: summary = source-reader snippet | NewsAPI has no excerpt; operators need in-app scan | 28 Oct 26 | Counsel / UX copy fail |
-| B2 P1 thin ship shell | Contract + eng siblings are behavior SoTs; PRD = invoke/build shell | 30 Oct 26 | Agents miss gates without Must |
+| B2 P1 thin ship shell | Contract + eng siblings are behavior SoTs; PRD = invoke/build shell | 30 Oct 26 | Agents miss gates — mitigated by SR-cited Constraints |
 | B2 P2–P3 runtime gap table | Autopilot must not treat prototype paths as target | 30 Oct 26 | Live path ships |
 | B2 P4 Execution un-waived | Contract locked; agent-ready I/O + edges | 30 Oct 26 | — |
 | B2 P5 B1 model bias | Haiku→Sonnet cost-aware quality; metastory is premium surface; summary still trust-visible | 30 Oct 26 | Gold shows systematic Haiku fails |
 | B2 P6 short Must REQs | Agent-scannable gates; contract remains full SR SoT | 30 Oct 26 | REQ drift vs contract |
+| B3 coherence: retire Must REQ table | Align with metastory P6 — Constraints cite SR-* only; avoid REQ↔SR collision | 3 Nov 26 | Contract SR change |
 | B2 P7 thin NFR; no Path 2 | Custody + cost visible; MVP not a gated experiment | 30 Oct 26 | Kill-switch / canary desired |
 | B2 P8 open questions table | Defaults parked on pipeline / prompt / evals / runs | 30 Oct 26 | Each sibling locks |
 | B2 X4 `summarization_invoke` | Thin PostHog invoke + shared LLM stack (D-088); no chip-like UX metric | 31 Oct 26 | Instrumented at build |
 | B2 hygiene | Status Spec locked; gap/open-Q tables match Locked siblings (D-089) | 1 Nov 26 | Build ships live path |
-| Summarization artifact coherence | Align Success/`summarization_invoke`, escalate wording ↔ pipeline V1–V3, ops daily+weekly; contract runtime gap no longer “prompt lands” | 02 Nov 26 | Next stage coherence pass |
+| Summarization artifact coherence | Align Success/`summarization_invoke`, escalate wording ↔ pipeline V1–V3, ops daily+weekly; contract runtime gap no longer “prompt lands” | 02 Nov 26 | Rule drift / stage reopen |
 | MVP carry-over timeout / length / denylist | **15s**/attempt; trim-only length; keep V3 so-what list; no cluster/claim-join as this stage | 2 Nov 26 | Live digests → soft length escalate; gold F7 |

@@ -209,4 +209,4 @@ Operational / qualitative only for v1. Thin PostHog invoke `summarization_invoke
 | [prompts/summarization.md](../../06-engineering/docs/prompts/summarization.md) | Locked B2 — `summarization-v1` |
 | Evals / gold | Locked B2 — [evals/summarization.md](../../06-engineering/docs/evals/summarization.md) · arbiter 22/22 |
 | Runs schema | Locked B2 — [summarization-runs.dbml](../../06-engineering/docs/data/summarization-runs.dbml) (`clock` \| `warm`) |
-| **Build** | IR-11 invoke · persist · runs migrate · `summarization_invoke` — after sibling models defined |
+| **Build** | IR-11 invoke · persist · runs migrate · `summarization_invoke` — sibling ST + metastory design Locked; wire at build |

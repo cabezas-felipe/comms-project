@@ -144,7 +144,7 @@ PostHog event for a finished model **invoke** (once per invoke — not per attem
 
 | Rule | Lock |
 | --- | --- |
-| When it fires | Once, when a model invoke finishes, on success or fail. Onboarding and Account. A retry is a new event with the same `trigger_id` |
+| When it fires | Once, when a model invoke finishes, on success or fail. Onboarding and Account. Primary→fallback = **one** invoke / **one** event (not per attempt). A user **retry** is a new event with the same `trigger_id` |
 | Event | `extraction_invoke` |
 | Properties | `trigger_id`. `trigger_kind`: `build`, `rebuild`, or `retry`. `surface`: `onboarding` or `account`. `outcome`: `success` or `fail`. `prompt_version`. `model_id` of the attempt the person got. `error_kind` only when `outcome` is `fail`, from the closed enum above |
 | Left out | Chip counts, chip text, a quality score, and Account `fail_kind` |
@@ -381,9 +381,9 @@ Blurb 5. The model emits `traditionalSources` and `socialSources` as strings. It
 | Shared `*_invoke` convention (D-088) | Extraction already matched the durable pattern; siblings stubbed 31 Oct 26 | 31 Oct 26 | Instrument at build |
 | `social_accounts.fetch_mode` | `word_search` (default) or `post_download`, on the shared handle only. Operator sets it for the MVP. A later job may set it from a rolling 30-day post count. No reason column | 26 Oct 26 | The volume job has a threshold |
 | New handle pages `#model-extraction-source` | Same channel and secret as a new press alias. Message names the handle and the default `word_search`. At most once per `trigger_id` | 26 Oct 26 | Source alerts need a snooze |
-| Extraction artifact coherence | Aligned contract / prompt / pipeline / eval / gold / runs notes with this PRD (topic lowercase emit, identity pre-Review, gold id prefixes, gold no longer “draft”) | 02 Nov 26 | Next stage coherence pass |
+| Extraction artifact coherence | Aligned contract / prompt / pipeline / eval / gold / runs notes with this PRD (topic lowercase emit, identity pre-Review, gold id prefixes, gold no longer “draft”) | 02 Nov 26 | Rule drift / stage reopen |
 | Ops pricing daily + Monday | Match summarization / story-tagging `#ops-pricing-models` cadence (daily spend + Monday catalog) | 02 Nov 26 | Ops channel change |
-| MVP carry-over hygiene + timeout | Hygiene-only §3.1; **15s** per attempt (§3.2); shared with sum/ST | 2 Nov 26 | Advisory evidence forces denylist/fold/timeout retune |
+| MVP carry-over hygiene + timeout | Hygiene-only §3.1; **15s** per attempt (§3.2); shared with sum/ST/metastory/personalization | 2 Nov 26 | Advisory evidence forces denylist/fold/timeout retune |
 
 ### Blocking open questions
 

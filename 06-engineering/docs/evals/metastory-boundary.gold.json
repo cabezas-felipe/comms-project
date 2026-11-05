@@ -1,6 +1,999 @@
 {
   "schemaVersion": "metastory-boundary-gold-v1",
-  "promptVersion": "TBD",
-  "notes": "Stub only. examples is empty until eval craft. Do not treat as a passing suite.",
-  "examples": []
+  "promptVersion": "metastory-boundary-v1",
+  "notes": "G1=A′ (D-104): 18 cases — mb-01…15 synthetic; mb-16…18 derived_real anchors (+ synthetic companions). Mix en/es/mixed. Covers B-F1…F6 + P1 healer override + merge path. Code checks + human arbiter; no LLM judge. Arbiter: LOCKED 3 Nov 2026 (Felipe) — all mb-01…18. Protocol: split vs defer by unit_kind/confidence; continuity = evidence-justified stay or split (not cycle ban). Optional model `reason` is ops-only — not scored / not in expected.",
+  "examples": [
+    {
+      "id": "mb-01",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "happy",
+      "failure_mode": "B-F6",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000001",
+          "kind": "press",
+          "title": "U.S. and Colombia reopen market-access talks in Bogotá",
+          "article_summary_or_text": "U.S. and Colombian trade officials reopened agricultural market-access talks in Bogotá on Tuesday, covering coffee and inspection timelines.",
+          "outlet": "Reuters",
+          "published_at": "2026-10-14T15:00:00Z",
+          "chips": "trade,colombia"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000002",
+          "kind": "press",
+          "title": "Bogotá talks resume on coffee and flower exports to the U.S.",
+          "article_summary_or_text": "Negotiators in Bogotá resumed discussions on coffee and cut-flower access to the U.S. market, with a work plan expected within days.",
+          "outlet": "AP",
+          "published_at": "2026-10-14T18:00:00Z",
+          "chips": "trade,colombia"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000001",
+              "00000000-0000-4000-8000-000000000002"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "Happy EN same-event confirm. Sound propose should be confirmed (B-F6). Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-02",
+      "source": "synthetic",
+      "language": "es",
+      "stress": "happy",
+      "failure_mode": "B-F6",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000003",
+          "kind": "press",
+          "title": "Petro anuncia mesa de seguridad con gobernadores del Pacífico",
+          "article_summary_or_text": "El presidente Petro convocó una mesa de seguridad con gobernadores del Pacífico para coordinar respuestas a la violencia en la región.",
+          "outlet": "El Tiempo",
+          "published_at": "2026-09-02T12:00:00Z",
+          "chips": "seguridad,colombia"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000004",
+          "kind": "press",
+          "title": "Gobernadores del Pacífico se reúnen con el Gobierno por la violencia",
+          "article_summary_or_text": "Gobernadores del Pacífico asistieron a una reunión con el Gobierno nacional para alinear medidas frente a la violencia en la costa.",
+          "outlet": "Semana",
+          "published_at": "2026-09-02T16:00:00Z",
+          "chips": "seguridad,colombia"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000003",
+              "00000000-0000-4000-8000-000000000004"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "Happy ES same-event confirm. Decision JSON only — not English prose. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-03",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "chip_force",
+      "failure_mode": "B-F1",
+      "unit_kind": "merge_candidates",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000005",
+          "kind": "press",
+          "title": "Senate passes narrow AI disclosure bill",
+          "article_summary_or_text": "The U.S. Senate passed a narrow bill requiring disclosure of AI-generated political ads ahead of federal elections.",
+          "outlet": "WaPo",
+          "published_at": "2026-08-11T10:00:00Z",
+          "chips": "elections,technology,united states"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000006",
+          "kind": "press",
+          "title": "California wildfire forces evacuations near Lake Tahoe",
+          "article_summary_or_text": "A fast-moving wildfire near Lake Tahoe forced thousands to evacuate as winds pushed flames toward lakeside towns.",
+          "outlet": "AP",
+          "published_at": "2026-08-11T14:00:00Z",
+          "chips": "elections,technology,united states"
+        }
+      ],
+      "expected": {
+        "decision": "defer",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000005"
+            ]
+          },
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000006"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "defer_or_split_no_merge"
+      ],
+      "rubric_notes": "B-F1: identical chips must NOT force merge — unrelated AI bill vs wildfire. Prefer defer/split fragments. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "defer"
+      }
+    },
+    {
+      "id": "mb-04",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "same_geo_unrelated",
+      "failure_mode": "B-F2",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "split_signal: weak geo-stripped overlap",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000007",
+          "kind": "press",
+          "title": "Colombia election authority sets presidential debate schedule",
+          "article_summary_or_text": "Colombia’s election authority published the schedule for televised presidential debates ahead of the first round.",
+          "outlet": "Reuters",
+          "published_at": "2026-03-01T09:00:00Z",
+          "chips": "colombia,elections"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000008",
+          "kind": "press",
+          "title": "Mudslide blocks highway outside Medellín after heavy rains",
+          "article_summary_or_text": "Heavy rains triggered a mudslide that blocked a major highway outside Medellín, stranding freight traffic overnight.",
+          "outlet": "El Colombiano",
+          "published_at": "2026-03-01T11:00:00Z",
+          "chips": "colombia,elections"
+        }
+      ],
+      "expected": {
+        "decision": "split",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000007"
+            ]
+          },
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000008"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "split_ge_2"
+      ],
+      "rubric_notes": "B-F2: same country + shared chip elections noise — election schedule vs mudslide must split. proposed_cluster already co-grouped → split (not defer). Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "split"
+      }
+    },
+    {
+      "id": "mb-05",
+      "source": "synthetic",
+      "language": "es",
+      "stress": "same_geo_unrelated",
+      "failure_mode": "B-F2",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000009",
+          "kind": "press",
+          "title": "Congreso debate reforma pensional en Bogotá",
+          "article_summary_or_text": "El Congreso retomó el debate de la reforma pensional en sesiones en Bogotá con intervenciones de partidos de gobierno y oposición.",
+          "outlet": "La Silla Vacía",
+          "published_at": "2026-04-10T13:00:00Z",
+          "chips": "colombia,congreso"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000010",
+          "kind": "press",
+          "title": "Selección Colombia empata en amistoso en Barranquilla",
+          "article_summary_or_text": "La selección Colombia empató en un amistoso disputado en Barranquilla ante un rival sudamericano.",
+          "outlet": "Caracol",
+          "published_at": "2026-04-10T23:00:00Z",
+          "chips": "colombia,congreso"
+        }
+      ],
+      "expected": {
+        "decision": "split",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000009"
+            ]
+          },
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000010"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "split_ge_2"
+      ],
+      "rubric_notes": "B-F2 ES: reforma pensional vs partido de fútbol — same geo chip trap. proposed_cluster → split. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "split"
+      }
+    },
+    {
+      "id": "mb-06",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "continuity",
+      "failure_mode": "B-F3",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000011",
+          "kind": "press",
+          "title": "First-round results leave two candidates in Colombia runoff",
+          "article_summary_or_text": "Colombia’s first-round presidential results left two candidates heading to a runoff, with partial tallies confirming the matchup.",
+          "outlet": "Reuters",
+          "published_at": "2026-05-30T02:00:00Z",
+          "chips": "colombia,elections"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000012",
+          "kind": "press",
+          "title": "Runoff rivals open final stretch of Colombia presidential campaign",
+          "article_summary_or_text": "The two runoff contenders opened the final stretch of Colombia’s presidential campaign with rallies in Bogotá and Medellín.",
+          "outlet": "AP",
+          "published_at": "2026-06-05T19:00:00Z",
+          "chips": "colombia,elections"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000013",
+          "kind": "press",
+          "title": "Observers deploy for Colombia’s presidential runoff vote",
+          "article_summary_or_text": "Electoral observers began deploying nationwide ahead of Colombia’s presidential runoff vote this weekend.",
+          "outlet": "WaPo",
+          "published_at": "2026-06-12T08:00:00Z",
+          "chips": "colombia,elections"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000011",
+              "00000000-0000-4000-8000-000000000012",
+              "00000000-0000-4000-8000-000000000013"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "B-F3: members clearly continue same presidential-runoff event — confirm (do not unjustifiably atomize). Long cycles may split when evidence justifies; this set does not. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-07",
+      "source": "synthetic",
+      "language": "es",
+      "stress": "continuity",
+      "failure_mode": "B-F3",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000014",
+          "kind": "press",
+          "title": "Fiscalía imputa a exministro por irregularidades en contrato",
+          "article_summary_or_text": "La Fiscalía imputó a un exministro por irregularidades en un contrato de infraestructura firmado durante su gestión.",
+          "outlet": "El Espectador",
+          "published_at": "2026-01-20T10:00:00Z",
+          "chips": "colombia,justicia"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000015",
+          "kind": "press",
+          "title": "Juez abre audiencia preparatoria en caso del exministro",
+          "article_summary_or_text": "Un juez abrió la audiencia preparatoria en el caso del exministro investigado por el contrato de infraestructura.",
+          "outlet": "W Radio",
+          "published_at": "2026-02-03T15:00:00Z",
+          "chips": "colombia,justicia"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000014",
+              "00000000-0000-4000-8000-000000000015"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "B-F3 ES: same legal case progressing (imputación → audiencia) — keep together. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-08",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "membership_delta",
+      "failure_mode": "B-F4",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000016",
+          "kind": "press",
+          "title": "U.S. designates new sanctions on Venezuelan oil network",
+          "article_summary_or_text": "The United States designated new sanctions targeting a Venezuelan oil procurement network, officials said in Washington.",
+          "outlet": "Reuters",
+          "published_at": "2026-07-01T12:00:00Z",
+          "chips": "venezuela,sanctions"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000017",
+          "kind": "press",
+          "title": "Treasury adds three firms to Venezuela oil sanctions list",
+          "article_summary_or_text": "Treasury added three trading firms to the Venezuela oil sanctions list, expanding last week’s designation.",
+          "outlet": "Bloomberg",
+          "published_at": "2026-07-08T12:00:00Z",
+          "chips": "venezuela,sanctions"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000016",
+              "00000000-0000-4000-8000-000000000017"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "B-F4: +n membership on continuing sanctions event — confirm same event, not new id/split. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-09",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "ambiguous_defer",
+      "failure_mode": "B-F5",
+      "unit_kind": "merge_candidates",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000018",
+          "kind": "press",
+          "title": "Protests in Bogotá after late-night police operation",
+          "article_summary_or_text": "Residents protested in Bogotá after a late-night police operation in a southern neighborhood; officials gave few details.",
+          "outlet": "City Paper",
+          "published_at": "2026-02-14T08:00:00Z",
+          "chips": "colombia,security"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000019",
+          "kind": "press",
+          "title": "Separate demonstration downtown over transit fares",
+          "article_summary_or_text": "A separate midday demonstration downtown focused on transit fares, organizers said, with no link stated to overnight policing.",
+          "outlet": "Local TV",
+          "published_at": "2026-02-14T14:00:00Z",
+          "chips": "colombia,security"
+        }
+      ],
+      "expected": {
+        "decision": "defer",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000018"
+            ]
+          },
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000019"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "defer_or_split_no_merge"
+      ],
+      "rubric_notes": "B-F5: ambiguous same-day Bogotá unrest themes — prefer defer/fragment over false merge (merge_candidates). Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "defer"
+      }
+    },
+    {
+      "id": "mb-10",
+      "source": "synthetic",
+      "language": "es",
+      "stress": "ambiguous_defer",
+      "failure_mode": "B-F5",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000020",
+          "kind": "press",
+          "title": "Ministra de Salud anuncia plan de hospitales",
+          "article_summary_or_text": "La ministra de Salud anunció un plan de inversión en hospitales públicos sin detallar cronograma por ciudad.",
+          "outlet": "Ministerio",
+          "published_at": "2026-05-01T09:00:00Z",
+          "chips": "salud,colombia"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000021",
+          "kind": "press",
+          "title": "Alcalde de Cali presenta proyecto hospitalario local",
+          "article_summary_or_text": "El alcalde de Cali presentó un proyecto hospitalario local financiado por el municipio; no citó el plan nacional.",
+          "outlet": "El País Cali",
+          "published_at": "2026-05-01T17:00:00Z",
+          "chips": "salud,colombia"
+        }
+      ],
+      "expected": {
+        "decision": "defer",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000020"
+            ]
+          },
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000021"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "defer_or_split_no_merge"
+      ],
+      "rubric_notes": "B-F5 ES: national vs city hospital plans — unclear same event → defer. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "defer"
+      }
+    },
+    {
+      "id": "mb-11",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "invent_merge",
+      "failure_mode": "B-F5",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000022",
+          "kind": "press",
+          "title": "IMF staff visit discusses Colombia inflation outlook",
+          "article_summary_or_text": "An IMF staff visit discussed Colombia’s inflation outlook and policy options with finance officials in Bogotá.",
+          "outlet": "IMF note",
+          "published_at": "2026-06-01T10:00:00Z",
+          "chips": "colombia,economy"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000023",
+          "kind": "press",
+          "title": "Central bank holds interest rate unchanged",
+          "article_summary_or_text": "Colombia’s central bank held its policy interest rate unchanged after a split board vote, a statement said.",
+          "outlet": "BanRep",
+          "published_at": "2026-06-01T22:00:00Z",
+          "chips": "colombia,economy"
+        }
+      ],
+      "expected": {
+        "decision": "defer",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000022"
+            ]
+          },
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000023"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "defer_or_split_no_merge"
+      ],
+      "rubric_notes": "B-F5/F6: related macro topics same day — do not invent single-event merge; defer. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "defer"
+      }
+    },
+    {
+      "id": "mb-12",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "healer_override",
+      "failure_mode": "P1",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "split_signal: geo-stripped Jaccard weak — suggest split",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000024",
+          "kind": "press",
+          "title": "Bridge collapse on border crossing kills three",
+          "article_summary_or_text": "A bridge collapse on a Colombia–Ecuador border crossing killed three people and closed freight lanes, authorities said.",
+          "outlet": "Reuters",
+          "published_at": "2026-03-15T07:00:00Z",
+          "chips": "colombia,ecuador"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000025",
+          "kind": "press",
+          "title": "Freight halted after border bridge disaster",
+          "article_summary_or_text": "Freight traffic remained halted after the border bridge disaster that killed three, as inspectors assessed the span.",
+          "outlet": "El Comercio",
+          "published_at": "2026-03-15T20:00:00Z",
+          "chips": "colombia,ecuador"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000024",
+              "00000000-0000-4000-8000-000000000025"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "P1: healer suggests split but evidence is one disaster — do not rubber-stamp hint. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-13",
+      "source": "synthetic",
+      "language": "mixed",
+      "stress": "bilingual_members",
+      "failure_mode": "B-F6",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000026",
+          "kind": "press",
+          "title": "U.S. Embassy issues security alert for Cali protests",
+          "article_summary_or_text": "The U.S. Embassy issued a security alert advising U.S. citizens to avoid protest areas in Cali on Friday evening.",
+          "outlet": "US Embassy",
+          "published_at": "2026-04-18T16:00:00Z",
+          "chips": "colombia,security"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000027",
+          "kind": "press",
+          "title": "Autoridades de Cali confirman concentraciones en el centro",
+          "article_summary_or_text": "Las autoridades de Cali confirmaron concentraciones en el centro de la ciudad y pidieron evitar la zona durante la noche.",
+          "outlet": "Alcaldía",
+          "published_at": "2026-04-18T18:00:00Z",
+          "chips": "colombia,security"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000026",
+              "00000000-0000-4000-8000-000000000027"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "P1 mixed EN/ES members — same protest/security event; JSON decision only. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-14",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "merge_path",
+      "failure_mode": "B-F6",
+      "unit_kind": "merge_candidates",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000028",
+          "kind": "press",
+          "title": "Hurricane Elsa strengthens over Caribbean",
+          "article_summary_or_text": "Hurricane Elsa strengthened over the eastern Caribbean with maximum sustained winds near 85 mph, the NHC said.",
+          "outlet": "NHC",
+          "published_at": "2026-08-20T06:00:00Z",
+          "chips": "weather,caribbean"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000029",
+          "kind": "press",
+          "title": "Elsa upgraded as it tracks west",
+          "article_summary_or_text": "Forecasters upgraded Elsa as the storm tracked west, warning islands in its path to prepare for heavy rain.",
+          "outlet": "Reuters",
+          "published_at": "2026-08-20T12:00:00Z",
+          "chips": "weather,caribbean"
+        }
+      ],
+      "expected": {
+        "decision": "merge",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000028",
+              "00000000-0000-4000-8000-000000000029"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "merge_one_cluster"
+      ],
+      "rubric_notes": "True merge_candidates path — same named storm. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "merge"
+      }
+    },
+    {
+      "id": "mb-15",
+      "source": "synthetic",
+      "language": "en",
+      "stress": "happy",
+      "failure_mode": "B-F6",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000030",
+          "kind": "press",
+          "title": "White House announces new tariff comment period",
+          "article_summary_or_text": "The White House announced a public comment period on proposed tariff adjustments affecting industrial goods.",
+          "outlet": "WaPo",
+          "published_at": "2026-09-10T14:00:00Z",
+          "chips": "trade,united states"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000031",
+          "kind": "x",
+          "title": "White House",
+          "article_summary_or_text": "Today we opened a public comment period on proposed tariff adjustments for industrial goods. Details on WhiteHouse.gov.",
+          "outlet": "@WhiteHouse",
+          "published_at": "2026-09-10T14:30:00Z",
+          "chips": "trade,united states"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000030",
+              "00000000-0000-4000-8000-000000000031"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "Press + X same announcement. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-16",
+      "source": "derived_real",
+      "language": "en",
+      "stress": "happy",
+      "failure_mode": "B-F6",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000032",
+          "kind": "press",
+          "title": "Brazil election to reshape trade with US, with tariffs and minerals at stake",
+          "article_summary_or_text": "Two starkly different visions for US-Brazil relations hang in the balance in Brazil’s presidential runoff, with tariffs and minerals at stake.",
+          "outlet": "Reuters",
+          "published_at": "2026-10-09T12:00:00Z",
+          "chips": "brazil,trade,elections"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000033",
+          "kind": "press",
+          "title": "Runoff choice puts US-Brazil trade and minerals policy on the ballot",
+          "article_summary_or_text": "Brazil’s presidential runoff frames a choice over tariffs and critical minerals cooperation with the United States, analysts tracking the race said.",
+          "outlet": "Synthetic companion",
+          "published_at": "2026-10-09T18:00:00Z",
+          "chips": "brazil,trade,elections"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000032",
+              "00000000-0000-4000-8000-000000000033"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "derived_real anchor: reuters-world-americas teaser (sum-19 provenance). Companion synthetic same-event. https://www.reuters.com/world/americas/brazil-election-reshape-trade-with-us-with-tariffs-minerals-stake-2026-10-09/ Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-17",
+      "source": "derived_real",
+      "language": "es",
+      "stress": "happy",
+      "failure_mode": "B-F6",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "none",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000034",
+          "kind": "press",
+          "title": "Gobierno publicó el decreto que oficializa la llegada de Alejandro Ordóñez al Ministerio del Interior",
+          "article_summary_or_text": "El nuevo jefe de la cartera política se posesionaría la próxima semana en el cargo.",
+          "outlet": "Semana",
+          "published_at": "2026-10-01T12:00:00Z",
+          "chips": "colombia,gobierno"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000035",
+          "kind": "press",
+          "title": "Decreto confirma a Ordóñez como ministro del Interior; posesión la próxima semana",
+          "article_summary_or_text": "Un decreto del Gobierno confirma el nombramiento en Interior y apunta la posesión para la próxima semana.",
+          "outlet": "Synthetic companion",
+          "published_at": "2026-10-01T15:00:00Z",
+          "chips": "colombia,gobierno"
+        }
+      ],
+      "expected": {
+        "decision": "confirm",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000034",
+              "00000000-0000-4000-8000-000000000035"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "confirm_one_cluster"
+      ],
+      "rubric_notes": "derived_real anchor: semana-politica teaser (sum-20). Companion synthetic. Do not invent decree number. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "confirm"
+      }
+    },
+    {
+      "id": "mb-18",
+      "source": "derived_real",
+      "language": "en",
+      "stress": "same_geo_unrelated",
+      "failure_mode": "B-F2",
+      "unit_kind": "proposed_cluster",
+      "healer_hints": "split_signal: weak overlap",
+      "members": [
+        {
+          "story_id": "00000000-0000-4000-8000-000000000036",
+          "kind": "press",
+          "title": "Mexico comes alive with color and tradition for Day of the Dead",
+          "article_summary_or_text": "Bright orange marigolds, glowing candles, and painted faces fill Mexico's streets during the Day of the Dead celebrations.",
+          "outlet": "Reuters",
+          "published_at": "2026-11-01T12:00:00Z",
+          "chips": "mexico,culture"
+        },
+        {
+          "story_id": "00000000-0000-4000-8000-000000000037",
+          "kind": "press",
+          "title": "Mexico central bank flags sticky services inflation",
+          "article_summary_or_text": "Mexico’s central bank flagged sticky services inflation in its latest policy discussion summary, separate from holiday coverage.",
+          "outlet": "Synthetic companion",
+          "published_at": "2026-11-01T18:00:00Z",
+          "chips": "mexico,culture"
+        }
+      ],
+      "expected": {
+        "decision": "split",
+        "clusters": [
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000036"
+            ]
+          },
+          {
+            "member_story_ids": [
+              "00000000-0000-4000-8000-000000000037"
+            ]
+          }
+        ]
+      },
+      "code_checks": [
+        "valid_json",
+        "decision_enum",
+        "ids_subset",
+        "split_ge_2"
+      ],
+      "rubric_notes": "derived_real anchor: Day of the Dead teaser (sum-21) + synthetic unrelated Mexico macro — B-F2 same-geo trap. proposed_cluster → split. Arbiter: locked 3 Nov 2026 (Felipe).",
+      "arbiter": {
+        "status": "locked",
+        "by": "Felipe",
+        "date": "2026-11-03",
+        "decision": "split"
+      }
+    }
+  ]
 }

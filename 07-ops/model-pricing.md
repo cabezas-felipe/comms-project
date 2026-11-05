@@ -7,6 +7,13 @@ Canonical rates for Tempo `estimated_cost_usd` / live `costUsd` and cost reviews
 | [`model-pricing.json`](./model-pricing.json) | **SoT** — rates by bare `model_id` (no `anthropic:` prefix) |
 | [`../06-engineering/apps/api/src/ai/pricing/model-prices.json`](../06-engineering/apps/api/src/ai/pricing/model-prices.json) | **Runtime copy** for the API deploy root (must match SoT) |
 
+## Inventory rule (D-094)
+
+Catalog = **intentional to-be prototype SKUs only** (not every vendor option).
+Current rows: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `text-embedding-3-small`.
+Add a SKU only when a stage locks it (e.g. metastory boundary/writer); remove when retired.
+As-is residue (`TEMPO_TRANSLATION_MODEL` / legacy 4.x delta·cluster defaults) is **out of catalog** — mock, cut over to a catalogued id, or retire.
+
 ## Rules
 
 - Compute cost at **call / run write** time: tokens × rates in the then-current table. Do not rewrite historical rows when rates change.

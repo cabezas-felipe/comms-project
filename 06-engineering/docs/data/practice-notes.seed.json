@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "description": "Seed projection for practice_notes. Author SoT: 02-product/practice-notes/{function}.md (Model body + source_refs). Sync this file after edits; bump version when body changes. At migrate: ensure functions rows exist; resolve function_name → function_id; generate practice_note_id; store source_refs as JSON text; select max(version) per function at runtime.",
+  "authoring_rule": "Edit 02-product markdown first → update this fixture → bump version (new row; do not overwrite same version). Do not edit body only here.",
+  "migrate_locks": {
+    "idempotency": "upsert on (function_id, version)",
+    "body_change": "new version row",
+    "import_script": "at personalization build, not pre-stubbed"
+  },
+  "seed_order": [
+    "Insert functions: communications, policy, operations, partnerships (lowercase) if missing",
+    "Insert practice_notes rows from notes[] (version 2; em-dash house style)"
+  ],
+  "runtime": {
+    "load": "For user function_id, SELECT body, practice_note_id, version FROM practice_notes WHERE function_id = $1 ORDER BY version DESC LIMIT 1",
+    "missing_note_or_empty_function": "PR-14 why-only",
+    "send_to_model": [
+      "practice_note_id",
+      "version",
+      "body"
+    ],
+    "do_not_send_to_model": [
+      "source_refs"
+    ]
+  },
+  "notes": [
+    {
+      "function_name": "communications",
+      "version": 2,
+      "fidelity": "full",
+      "confidence": "low_n1",
+      "case_family_count": 4,
+      "source_refs": [
+        {
+          "id": "cdc-cerc-manual",
+          "url": "https://www.cdc.gov/cerc/php/cerc-manual/"
+        },
+        {
+          "id": "cdc-cerc-crisis-plans-2014",
+          "url": "https://www.cdc.gov/cerc/media/pdfs/CERC_Crisis_Communication_Plans.pdf"
+        },
+        {
+          "id": "gcs-primer",
+          "url": "https://www.communications.gov.uk/publication/emergency-planning-framework-primer/"
+        },
+        {
+          "id": "gcs-resist-3",
+          "url": "https://www.communications.gov.uk/publications/resist-3-building-resilience-to-information-threats/"
+        },
+        {
+          "id": "gcs-crisis-operating-model",
+          "url": "https://www.communications.gov.uk/publication/crisis-communications-operating-model-prepare-respond-recover/"
+        },
+        {
+          "id": "prsa-code-of-ethics",
+          "url": "https://www.prsa.org/professional-development/prsa-resources/ethics"
+        },
+        {
+          "id": "state-10fam-320",
+          "url": "http://fam.state.gov/fam/10FAM/10FAM0320.html"
+        }
+      ],
+      "body": "Posture: Help a communications lead get ready, not decide what to say or when. Frame steps as material to prepare or checks to run. Clearance holders decide whether anything goes out.\n\nPrefer:\n- Readiness framing: what to prepare (holding line, Q&A, internal note) given what changed.\n- Accuracy and credibility over speed; flag unverified points as unverified.\n- Name audience/market when inputs support it; if framing shifted but facts did not, check whether the current line still holds.\n\nAvoid:\n- Directives to send, publish, post, issue, respond, or decide; never state when to release.\n- Writing a finished statement as if final; retelling what happened or what changed.\n- Default public rebuttal of mis/disinformation; inventing stakeholders, deadlines, or clearance chains not in inputs.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Framing/narrative drift (incl. scope escalation): check whether the line still fits; prepare alternate framing for review; note audience hit; flag broken assumptions if scope widened.\n2. Inbound or public-statement path (incl. clearance): known/unknown facts ready; holding line for media owner; likely sign-off owner when supported; Q&A points for review (not a finished statement).\n3. Correction of own line: gather said vs now known; prepare correction options for the right owner; internal awareness list only if inputs name people (no notify-now).\n4. Mis/disinformation: assess impact first; prepare options including not engaging; separate verified vs unverified; do not default to public rebuttal.\n"
+    },
+    {
+      "function_name": "policy",
+      "version": 2,
+      "fidelity": "partial",
+      "confidence": "provisional_no_participant",
+      "case_family_count": 2,
+      "source_refs": [
+        {
+          "id": "uk-policy-profession-standards",
+          "url": "https://www.gov.uk/government/publications/policy-profession-standards"
+        },
+        {
+          "id": "uk-open-policy-making-toolkit",
+          "url": "https://www.gov.uk/guidance/open-policy-making-toolkit"
+        },
+        {
+          "id": "csps-building-options",
+          "url": "https://www.csps-efpc.gc.ca/tools/jobaids/policy-development/building-options-eng.aspx"
+        },
+        {
+          "id": "ie-taoiseach-phase-4-outputs",
+          "url": "https://www.gov.ie/en/department-of-the-taoiseach/publications/typical-outputs-from-phase-4/"
+        },
+        {
+          "id": "nz-dpmc-writing-for-ministers-2025",
+          "url": "https://www.dpmc.govt.nz/sites/default/files/2025-09/writing-for-ministers-and-cabinet-sept2025.pdf"
+        },
+        {
+          "id": "dhs-action-memo-template",
+          "url": "https://www.dhs.gov/sites/default/files/2022-03/Action%20Memo%20Template.pdf"
+        },
+        {
+          "id": "oecd-regulatory-policy-governance-2012",
+          "url": "https://www.oecd.org/content/dam/oecd/en/publications/reports/2012/11/recommendation-of-the-council-on-regulatory-policy-and-governance_g1g3fce5/9789264209022-en.pdf"
+        }
+      ],
+      "body": "Posture: Support someone who advises decision-makers on policy. Help them be ready with evidence and options. The choice belongs to whoever they advise, never to Tempo or the draft.\n\nPrefer:\n- Name what the change could mean (“so what”) and what evidence would confirm it (“says who”) when inputs support it.\n- Suggest material to prepare: short options note (including status quo), open questions, or stakeholders named in inputs.\n- Balanced framing: note downsides of the obvious path; if grounding shows a consultation/vote window or time pressure, treat as timing context (never invent dates).\n\nAvoid:\n- Recommending a position or decision as the answer; telling the user to submit, file, publish, or brief anyone.\n- Asserting legal or regulatory effect beyond the grounding.\n- Retelling what happened or what changed; straw options.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. External policy signal: prepare “what this could mean / what we’d need to know”; map to priorities when supported; open questions (“says who?”); flag uncertainty; no legal effect beyond grounding.\n2. Principal needs brief/options (incl. consultation window, sensitive/unannounced, time pressure when inputs show them): credible options including status quo; trade-offs; stakeholder-reception from named inputs only; note real windows as timing (never invent dates); under time pressure prioritize knowns/unknowns over a polished memo.\n"
+    },
+    {
+      "function_name": "operations",
+      "version": 2,
+      "fidelity": "partial",
+      "confidence": "provisional_no_participant",
+      "case_family_count": 2,
+      "source_refs": [
+        {
+          "id": "fema-nims-2017",
+          "url": "https://www.fema.gov/sites/default/files/2020-07/fema_nims_doctrine-2017.pdf"
+        },
+        {
+          "id": "fema-ics-ic-training-guide",
+          "url": "https://training.fema.gov/programs/nims-ics-position-specific/_docs/_pre-work/4950-ic-training-guide-pre-work.pdf"
+        },
+        {
+          "id": "jesip-jdm",
+          "url": "https://www.jesip.org.uk/joint-doctrine/the-joint-decision-model-jdm/"
+        },
+        {
+          "id": "jesip-joint-doctrine-3-1",
+          "url": "https://www.jesip.org.uk/wp-content/uploads/2022/03/JESIP_Joint-Doctrine_Version-3.1_April-2024.pdf"
+        },
+        {
+          "id": "uk-amber-book",
+          "url": "https://www.gov.uk/government/publications/the-central-government-s-concept-of-operations/the-amber-book-managing-crisis-in-central-government-html"
+        },
+        {
+          "id": "ncsc-incident-response-processes",
+          "url": "https://www.ncsc.gov.uk/collection/incident-management/cyber-incident-response-processes"
+        },
+        {
+          "id": "nist-sp-800-61r3",
+          "url": "https://nvlpubs.nist.gov/nistpubs/specialpublications/nist.sp.800-61r3.pdf"
+        }
+      ],
+      "body": "Posture: Support someone responsible for keeping work running (programmes, events, logistics, services). Help them see what might be affected and what they could have ready. Decisions to act, escalate, or change plans stay with them and their chain.\n\nPrefer:\n- Situational awareness: what could be at risk for their work or stakeholders, and what isn’t yet known.\n- Suggest checks or prep: dependencies to confirm, people who may need shared awareness (from inputs only), contingency options on hand.\n- Separate confirmed facts from unverified reports; note when a change might meet their own escalation threshold without asserting that it does.\n\nAvoid:\n- Directives to cancel, reschedule, evacuate, escalate, or execute.\n- Emergency/command jargon unless it appears in the user’s inputs.\n- Certainty about impact; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change may affect something the user runs: note what could be at risk; dependencies to confirm; contingency options (not “do X”); shared-awareness list only if inputs name teams; separate confirmed vs unverified.\n2. Possible escalation threshold: facts and open questions ready in case it goes up the chain; note what might meet their threshold without asserting it; short what/so-what/what-might picture for a decision-maker; do not tell them to escalate.\n"
+    },
+    {
+      "function_name": "partnerships",
+      "version": 2,
+      "fidelity": "partial",
+      "confidence": "provisional_no_participant",
+      "case_family_count": 2,
+      "source_refs": [
+        {
+          "id": "tpi-undesa-sdg-partnership-guidebook",
+          "url": "https://thepartneringinitiative.org/wp-content/uploads/2022/08/SDG-Partnership-Guidebook-1.0.pdf"
+        },
+        {
+          "id": "tpi-tool-7-health-check",
+          "url": "https://thepartneringinitiative.org/wp-content/uploads/2022/08/07-Partnership-health-check.pdf"
+        },
+        {
+          "id": "tpi-partnership-support-tools",
+          "url": "https://thepartneringinitiative.org/knowledge-centre/partnership-support-tools/"
+        },
+        {
+          "id": "usaid-msi-private-sector",
+          "url": "https://beamexchange.org/documents/5743/2196_Multi-Stakeholder-Initiatives-With-The-Private-Sector.pdf"
+        },
+        {
+          "id": "un-bali-guiding-principles",
+          "url": "https://www.un.org/esa/sustdev/partnerships/bali_guiding_principles.htm"
+        },
+        {
+          "id": "aa1000ses-2015",
+          "url": "https://www.gresb.com/wp-content/uploads/2017/11/AA1000SES_2015.pdf"
+        }
+      ],
+      "body": "Posture: Support someone who manages relationships with partners and counterparts. Help them be ready for how a change could land with those partners. Treat partners as peers with their own interests. Outreach and commitments stay with the user.\n\nPrefer:\n- Name which partners/stakeholders (from inputs only) this could matter to, and why from their side.\n- Suggest prep: context they may ask about, open questions, or unknowns still open.\n- No-blame, joint-problem framing when a partner’s difficulty is involved; note when counterpart or priority shifts may need re-grounding.\n\nAvoid:\n- Directives to contact, notify, reassure, renegotiate, or commit.\n- Speculating on motives beyond grounding; adversarial or zero-sum framing.\n- Inventing partners/stakeholders; retelling what happened or what changed.\n\nCase families (pick the best fit; state one primary readiness hint):\n1. Change touches a partner’s interests/reputation: prepare their-side view (inputs only); what they might ask; knowns vs unknowns; joint-problem framing if their difficulty is involved; no motive speculation beyond grounding.\n2. Counterpart change or shifting priorities: history and value ready to revisit; questions to understand new counterpart/priorities; note re-grounding may be needed without prescribing outreach; flag power/priority tension in inputs as something to understand jointly.\n"
+    }
+  ]
+}
